@@ -7,9 +7,7 @@ use asap_aware_mapping::pass::{
     OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels,
 };
 use asap_aware_mapping::replacement::default_strategies_with_evidence;
-use asap_aware_mapping::{
-    search_workload_with_targets, Horizon, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
-};
+use asap_aware_mapping::{search_workload_with_targets, Horizon, LifecycleInput};
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
@@ -43,7 +41,7 @@ fn batch(sql: &str) -> BatchEntry {
 /// The planning clock and default capabilities, no horizon: the least a
 /// caller can supply.
 fn lifecycle() -> LifecycleInput {
-    LifecycleInput::new(NOW_MS, SummaryMaintenanceLifecycleCapabilities::default())
+    LifecycleInput::new(NOW_MS)
 }
 
 fn lineitem_catalog() -> SqlCatalog {
@@ -163,6 +161,49 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
             plan.entry_index
         );
     }
+}
+
+/// Runtime capabilities are deployment inputs alongside the cost and
+/// accuracy models, while LifecycleInput carries only the planning clock.
+#[tokio::test]
+async fn deployment_inputs_control_lifecycle_capabilities() {
+    let workload = sql_workload(
+        vec![batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem")],
+        None,
+    );
+    let catalog = lineitem_catalog();
+    let models = PlanningModels::builtin().with_capabilities(
+        asap_aware_mapping::SummaryMaintenanceLifecycleCapabilities {
+            supports_ephemeral: true,
+            supports_prepared: false,
+            supports_shared: false,
+            supports_continuously_maintained: false,
+        },
+    );
+
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Sql { catalog: &catalog },
+        models,
+        lifecycle(),
+    ))
+    .await
+    .expect("workload remains plannable with restricted capabilities");
+
+    assert!(output
+        .plans
+        .iter()
+        .flat_map(|plan| &plan.plan.deployments)
+        .all(
+            |deployment| deployment.alternatives.iter().all(|alternative| {
+                !matches!(
+                    alternative.summary_maintenance_lifecycle,
+                    asap_types::post_asap::SummaryMaintenanceLifecycle::Prepared { .. }
+                        | asap_types::post_asap::SummaryMaintenanceLifecycle::Shared { .. }
+                        | asap_types::post_asap::SummaryMaintenanceLifecycle::ContinuouslyMaintained
+                ) || alternative.rejection.is_some()
+            })
+        ));
 }
 
 /// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks
@@ -338,10 +379,7 @@ fn rejects_disagreeing_planning_clocks() {
             histograms: None,
         },
         PlanningModels::builtin(),
-        LifecycleInput::new(
-            NOW_MS + 1,
-            SummaryMaintenanceLifecycleCapabilities::default(),
-        ),
+        LifecycleInput::new(NOW_MS + 1),
     );
 
     assert!(matches!(

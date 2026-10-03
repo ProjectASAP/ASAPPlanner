@@ -70,7 +70,7 @@ impl OptimizationPass for MajorPass {
             demand,
             lifecycle.now_ms,
             lifecycle.horizon,
-            lifecycle.capabilities,
+            models.capabilities,
             models.cost,
         )
         .map_err(OptimizeError::LifecycleSelection)?;
@@ -132,7 +132,7 @@ impl OptimizationPass for MajorPass {
                     },
                     lifecycle.now_ms,
                     lifecycle.horizon,
-                    lifecycle.capabilities,
+                    models.capabilities,
                     models.cost,
                 )
                 .map_err(|source| OptimizeError::LifecycleAssembly {
@@ -171,7 +171,7 @@ impl OptimizationPass for MajorPass {
                 },
                 lifecycle.now_ms,
                 lifecycle.horizon,
-                lifecycle.capabilities,
+                models.capabilities,
                 models.cost,
             )
             .map_err(|source| OptimizeError::LifecycleAssembly {

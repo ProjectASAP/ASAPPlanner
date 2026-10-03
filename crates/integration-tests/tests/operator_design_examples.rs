@@ -261,8 +261,7 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
     use asap_aware_mapping::cost_model::{Cost, DefaultCostModel};
     use asap_aware_mapping::pass::PlanningModels;
     use asap_aware_mapping::{
-        CostModel, CostRate, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
-        SummaryMaintenanceLifecycleCostInputs,
+        CostModel, CostRate, LifecycleInput, SummaryMaintenanceLifecycleCostInputs,
     };
     use asap_physical_operators::{
         physical_planner::{compile, InputContract},
@@ -336,7 +335,7 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin().with_cost(&Costs),
-        LifecycleInput::new(0, SummaryMaintenanceLifecycleCapabilities::default()),
+        LifecycleInput::new(0),
     ))
     .await
     .unwrap();
