@@ -13,7 +13,7 @@ use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan};
-use crate::replacement::{default_strategies_with_evidence, search_workload_with_targets};
+use crate::replacement::{default_strategies_with_models, search_workload_with_targets};
 use crate::summary_maintenance_lifecycle::{
     global_selection_with_summary_maintenance_lifecycles, plan_assembled_dag, shared_state_cost,
     summary_states, WorkloadDemand,
@@ -33,7 +33,8 @@ impl OptimizationPass for MajorPass {
     fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
         let workload = input.workload;
         let models = input.models;
-        let strategies = default_strategies_with_evidence(models.cost, models.evidence);
+        let strategies =
+            default_strategies_with_models(models.cost, models.accuracy, models.evidence);
 
         // `Id` is the entry's position in `QueryWorkload::entries()`, so the
         // search result carries the workload binding the lifecycle stage and

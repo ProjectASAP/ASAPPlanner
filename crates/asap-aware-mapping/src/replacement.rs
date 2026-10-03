@@ -6429,17 +6429,28 @@ pub fn default_strategies_with_evidence<'a>(
     cost_model: &'a dyn CostModel,
     evidence: &'a dyn AccuracyEvidenceProvider,
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
+    default_strategies_with_models(cost_model, &DEFAULT_ACCURACY_MODEL, evidence)
+}
+
+/// Default planning strategies using the deployment's cost, accuracy, and
+/// typed evidence models. Pass 1 must use the same accuracy algebra as final
+/// root validation or it can discard candidates the deployment can certify.
+pub fn default_strategies_with_models<'a>(
+    cost_model: &'a dyn CostModel,
+    accuracy_model: &'a dyn AccuracyModel,
+    evidence: &'a dyn AccuracyEvidenceProvider,
+) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
         Box::new(ASAPStrategies::new_with_planning_inputs_and_evidence(
             cost_model,
-            &DEFAULT_ACCURACY_MODEL,
+            accuracy_model,
             &DEFAULT_ALLOCATOR,
             evidence,
         )),
         Box::new(
             HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
                 cost_model,
-                &DEFAULT_ACCURACY_MODEL,
+                accuracy_model,
                 &DEFAULT_ALLOCATOR,
                 evidence,
             ),
