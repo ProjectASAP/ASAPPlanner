@@ -150,7 +150,7 @@ fn scalar_root_producers_are_discovered_once() {
 
 /// Example 1 rate lowering reaches the exact accumulator choice without a cost model.
 #[test]
-fn promql_lowering_reaches_phase_free_local_candidates() {
+fn promql_lowering_reaches_local_candidates_without_execution_timing() {
     use asap_types::workload::{
         AccuracyRequirement, BatchEntry, PlanningWorkload, Query, QueryLanguage, QueryRequirements,
         QueryWorkload,
