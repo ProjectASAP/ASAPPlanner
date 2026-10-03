@@ -10,25 +10,25 @@ first; use the [extension guide](extend-asap-aware-mapping.md) when changing one
 
 ### `TargetSubDAG`
 
-A pre-ASAP `QueryExpr` node that a strategy may replace.
+A pre-ASAP `OperatorNode` that a strategy may replace.
 
 ```rust
 pub struct TargetSubDAG<'a> {
-    pub root: &'a Rc<QueryExpr>,
+    pub root: &'a Rc<OperatorNode>,
     pub consumer_count: usize,
 }
 ```
 
-`root` is the actual `Rc<QueryExpr>` from the workload.
+`root` is the actual `Rc<OperatorNode>` from the workload.
 
-`consumer_count` counts structural references, not runtime executions. It is the number of places in the workload DAG that point to this exact `Rc<QueryExpr>` node.
+`consumer_count` counts structural references, not runtime executions. It is the number of places in the workload DAG that point to this exact `Rc<OperatorNode>` node.
 
 For example, consider two top-level queries:
 
 - `sum by (service) (rate(m[5m]))`
 - `avg by (service) (rate(m[5m]))`
 
-After `share_common_sub_dags` merges their identical `rate(m[5m])` sub-DAGs, both query DAGs point to the same `Rc`. That node's `consumer_count` is `2`, regardless of how often either query executes.
+After `share_common_sub_dags` merges their identical `rate(m[5m])` sub-DAGs, both query trees point to the same `Rc`. That node's `consumer_count` is `2`, regardless of how often either query executes.
 
 Use:
 
@@ -54,19 +54,24 @@ when the caller already knows the real number of consumers.
 
 The actual object that substitutes the target.
 
-There are currently three forms:
+There are currently two forms:
 
 ```rust
 pub enum Replacement {
-    Summary(Rc<SummaryNode>),
-    Rewrite(Rc<QueryExpr>),
+    SubDAG(Rc<OperatorNode>),
     ExactComposition(ExactComposition),
 }
 ```
 
-Use `Replacement::Summary` when the alternative is a constructed post-ASAP summary plan.
+Use `Replacement::SubDAG` for a replacement sub-DAG. It is one of:
 
-Use `Replacement::Rewrite` when the alternative is still a logical pre-ASAP `QueryExpr`.
+- a constructed post-ASAP summary plan: the sub-DAG contains an `ASAPOp`
+  (`SummaryAgg`, `SummaryEstimate`, ...);
+- a logical rewrite: only `NonASAPOp` nodes and no guarantee yet.
+
+`is_logical_rewrite(&node)` tells the two apart. A kept pre-ASAP sub-DAG
+(`retain_exact`) has no ASAP operator but carries an exact guarantee, so it
+counts as a bound decision, not a rewrite.
 
 Use `Replacement::ExactComposition` when an exact operation refers to a child
 target whose realization must remain undecided. Selection coordinates the
@@ -77,10 +82,10 @@ Examples:
 
 ```text
 Quantile(...)
-    -> KLL SummaryNode
+    -> SummaryEstimate(SummaryAgg(KLL))
 ```
 
-is a `Summary`; KLL (Karnin–Lang–Liberty) is a quantile-sketch algorithm.
+is a summary `Subtree`; KLL (Karnin–Lang–Liberty) is a quantile-sketch algorithm.
 
 ```text
 compute independently
@@ -88,7 +93,7 @@ compute independently
 reuse an already shared logical sub-DAG
 ```
 
-is represented as a `Rewrite`.
+is represented as two logical-rewrite `Subtree`s.
 
 ---
 
@@ -157,7 +162,7 @@ aggregation must compute without committing to a physical summary algorithm.
 A realization may be an approximate sketch, an exact mergeable
 accumulator, or a pass-through that keeps the original operation instead of
 building a summary. `realizations_for_intent` enumerates these concrete
-realizations; `SketchAlgorithmStrategy::replacements()` constructs each one as
+realizations; `ASAPStrategies::replacements()` constructs each one as
 a `ReplacementSubDAG`. It returns all
 candidates in preferred order without selecting a winner. At workload scale,
 `search_workload`/`search_workload_with` preserve all supported legal alternatives
@@ -170,8 +175,8 @@ This guide uses the Cascades/Volcano terminology:
   realization. For example, a quantile `AggIntent` may have KLL and DDSketch
   `Realization` values.
 - A **transformation rule** maps a logical operation to another logical
-  operation. In this crate, that kind of candidate is represented by
-  `Replacement::Rewrite`.
+  operation. In this crate, that kind of candidate is a logical-rewrite
+  `Replacement::SubDAG`.
 - A **replacement candidate** packages either kind of result as a
   `ReplacementSubDAG` for search. `CandidateLogicalASAPDAGs` stores and ranks these candidates.
 - **Physical commitment and placement** happen downstream. An `Realization`
@@ -183,7 +188,7 @@ The concrete flow is:
 ```text
 AggIntent
   -> realizations_for_intent(): enumerate Realization values
-  -> SketchAlgorithmStrategy: construct ReplacementSubDAG candidates
+  -> ASAPStrategies: construct ReplacementSubDAG candidates
   -> CandidateLogicalASAPDAGs: store and rank candidates
   -> downstream deployment: select and place a final choice
 ```
@@ -206,7 +211,7 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
 | `rank_candidates` | Order valid sketch algorithms | No |
 | `size_params` | Convert an accuracy target into sketch parameters | Yes |
 | `realize_extension` | Map a custom intent to a realization | Yes |
-| `readout_extension` | Query a custom extension summary | Panics until paired with a custom realization |
+| `evaluation_extension` | Query a custom extension summary | Panics until paired with a custom realization |
 | `cse_recompute_cost` | Estimate independent recomputation | Yes |
 | `cse_shared_maintenance_cost` | Estimate shared maintenance | Yes |
 | `cse_share_decision` | Choose sharing or recomputation | Yes |
@@ -247,10 +252,10 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
   fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Realization;
   ```
 
-- **`readout_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; readout defines how it is queried. Override both for the same `ext_kind`. The default readout panics to prevent a silent wrong answer.
+- **`evaluation_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; evaluation defines how it is queried. Override both for the same `ext_kind`. The default evaluation panics to prevent a silent wrong answer.
 
   ```rust
-  fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchStatistic;
+  fn evaluation_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchStatistic;
   ```
 
 - **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's sub-DAG independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
@@ -297,14 +302,14 @@ A custom cost model does not necessarily need to override every hook. The curren
 // One TargetSubDAGCandidates per distinct TargetSubDAG in the whole workload —
 // never a flat list of fully assembled plans.
 pub struct TargetSubDAGCandidates {
-    pub target: Rc<QueryExpr>,
+    pub target: Rc<OperatorNode>,
     pub consumer_count: usize,
     pub candidates: Vec<ReplacementSubDAG>,  // accepted alternatives, unranked
     pub rejected: Vec<RejectedCandidate>,    // failed accuracy checks
 }
 
 pub struct RankedTargetSubDAGCandidates<'a> {
-    pub target: &'a Rc<QueryExpr>,
+    pub target: &'a Rc<OperatorNode>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,  // same candidates, ranked
     pub costs: Vec<f64>,                         // costs[i] <-> candidates[i]
@@ -313,7 +318,7 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 
 `search_workload(roots)` runs the shared-sub-DAG pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubDAGStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
-`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubDAGStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and a mixed candidate set is ordered by each candidate's `CostModel::estimate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
+`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubDAGStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `ASAPStrategies` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
 `search_workload_with_targets` checks explicit per-root targets, while retaining
 direct DDSketch ratios with missing domain evidence and no root guarantee for
@@ -329,7 +334,7 @@ Sketches separate their query category from the concrete algorithm and its param
 
 | Level | Type | Example |
 | --- | --- | --- |
-| **family** | `SummaryFamilyType` | `Sketch`, `Sample`, `Wavelet`, `StatModel`, `ExactAggregate` |
+| **family** | `FieldDataType` (non-`Plain` variants) | `Sketch`, `Sample`, `Wavelet`, `StatModel`, `ExactAggregate` |
 | **category** | `SketchCategory` | `Quantile`, `Cardinality`, `Frequency`, `TopK` |
 | **algorithm** | `SketchAlgorithm` | `Kll` / `DDSketch` (both quantile); `Hll` (HyperLogLog) / `Theta` / `Kmv` (K-Minimum Values), all cardinality |
 | **committed choice** | `SketchKind` | one validated category + algorithm + parameter combination |
@@ -340,7 +345,7 @@ to the selected algorithm and classifies the pair into its category. The public
 `.category()`, `.algorithm()`, and `.params()` accessors expose the committed
 values without permitting an invalid combination.
 
-Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`.
+Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `ASAPStrategies::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
 
 `Sample`, `Wavelet`, and `StatModel` each use a flat `(Kind, Params)` pair. `Sketch` needs the additional algorithm level because multiple algorithms can serve the same purpose—for example, KLL and DDSketch both answer quantile queries.
 
@@ -378,15 +383,15 @@ The crate provides no default `Matcher` implementation because the answer depend
 
 Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
 
-- `ExplanationKind::SketchApproximation` — the set contains a `Replacement::Summary` that realizes `SummaryFamilyType::Sketch(..)`, not just an exact/pass-through candidate.
-- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubDAGStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the set's `target`).
+- `ExplanationKind::SketchApproximation` — the set contains a summary `Replacement::SubDAG` that realizes `FieldDataType::Sketch(..)`, not just an exact/pass-through candidate.
+- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubDAGStrategy`'s "build once and share" candidate (the `Replacement::SubDAG` whose `Rc` is the set's `target`).
 
 - `ExplanationKind::ExactComposition` — the candidate set contains an exact operation
   composed with a child target whose realization remains a coordinated choice.
 
 Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
 
-`ReplacementExplanation` carries both `node_hash` and `target`. A downstream consumer first compares `node_hash` with an exported `DAGNode::hash` to narrow the search, then compares the exact target expression with the node's in-process source expression. This preserves the hash's role as a fast filter while making the final association collision-safe; `location` remains human-readable presentation text rather than a machine identifier.
+`ReplacementExplanation` carries both `node_hash` and `target`. A downstream consumer first compares `node_hash` with an exported `DAGNode::hash` to narrow the search, then compares the exact `target` node with the exported node's in-process `DAGNode::source_node`. This preserves the hash's role as a fast filter while making the final association collision-safe; `location` remains human-readable presentation text rather than a machine identifier.
 
 ### Why there is no `ExplanationRule` trait
 
@@ -394,6 +399,6 @@ Explanations are derived from candidates already present in `CandidateLogicalASA
 
 ### How it derives `location` text
 
-`CandidateLogicalASAPDAGs`/`TargetSubDAGCandidates` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
+`CandidateLogicalASAPDAGs`/`TargetSubDAGCandidates` track `Rc<OperatorNode>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
 
 ---
