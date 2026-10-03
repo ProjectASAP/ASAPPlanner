@@ -17,7 +17,7 @@ Why this exists alongside index.html:
 This does not add anything index.html doesn't already do — it shares
 viewer.js and node-style.js with it verbatim (see viewer.js's header
 comment) and only differs in packaging: one query's worth of exported
-`QueryExpr` detail *is* its plan (see the side panel on node click), and
+`OperatorNode` detail *is* its plan (see the side panel on node click), and
 shared-hash highlighting *is* what this repo has for CSE today — both a
 hash-based proxy, not real CSE output; see README.md's "Shared-sub-DAG
 highlighting is a proxy" section. Structured cost/benefit annotations
@@ -72,7 +72,7 @@ def _compact(value: object) -> str:
     if not isinstance(value, dict):
         return str(value)
 
-    # Common serde enum/newtype shapes in QueryExpr detail.
+    # Common serde enum/newtype shapes in OperatorNode detail.
     if set(value) == {"Column"}:
         return f"col[{_compact(value['Column'])}]"
     if set(value) == {"Table"} and isinstance(value["Table"], dict):
@@ -269,23 +269,6 @@ def load_workload(paths: list[Path]) -> dict:
     for path in paths:
         data = json.loads(path.read_text())
         incoming = data.get("queries", [])
-        if not incoming and isinstance(data.get("dag"), dict) and isinstance(data.get("deployments"), list):
-            incoming = [{
-                "name": path.stem or "Summary maintenance plan",
-                "dag": data["dag"],
-                "post_dag": data["dag"],
-                "lifecycle_plan": True,
-                "lifecycle_summary": {
-                    "selected_raw_recompute": data.get("selected_raw_recompute", False),
-                    "summary_total_cost": data.get("summary_total_cost"),
-                    "raw_recompute_total_cost": data.get("raw_recompute_total_cost"),
-                    "horizon_seconds": data.get("horizon_seconds"),
-                    "evaluation_rate_per_second": data.get("evaluation_rate_per_second"),
-                    "update_rate_per_second": data.get("update_rate_per_second"),
-                    "expected_reads": data.get("expected_reads"),
-                    "deployment_count": len(data["deployments"]),
-                },
-            }]
         for q in incoming:
             name = q["name"]
             if name in seen_names:

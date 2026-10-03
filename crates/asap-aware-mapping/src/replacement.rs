@@ -56,9 +56,7 @@
 //! does not establish a compatible workload plan or physical deployability.
 //! For Planner-owned logical selection, call [`CandidateLogicalASAPDAGs::global_selection`]
 //! once and [`GlobalSelection::assemble_selected_dag`] for each wanted query
-//! root. Alternatively, use the summary-maintenance-lifecycle-aware helpers
-//! when Planner should also compare maintenance against raw recomputation.
-//! Physical binding, deployment, and execution remain downstream.
+//! root. Physical binding, deployment, and execution remain downstream.
 //!
 //! Internally, [`realize_child`] and [`realize_one`] may take a preferred local
 //! realization while constructing or costing a candidate. That local operation
@@ -77,7 +75,7 @@
 //!   binds (single intent, no `HAVING`), every entry becomes its own bound
 //!   candidate.
 //! - [`SharedSubDAGStrategy`] wraps
-//!   `asap_types::pre_asap::cse::share_common_sub_dags`'s sharing decision.
+//!   `asap_types::ir::cse::share_common_sub_dags`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
 //!   `share_common_sub_dags` already collapsed two or more workload
 //!   locations onto the same `Rc<OperatorNode>` — [`discover_targets`] below
@@ -144,7 +142,7 @@
 //! 1. **Per-target candidates, not flat plans.** [`TargetSubDAGCandidates`]
 //!    stores the alternatives for one distinct [`TargetSubDAG`] (identified by
 //!    its own `Rc<OperatorNode>` pointer identity — the same currency
-//!    [`asap_types::pre_asap::cse::share_common_sub_dags`] already
+//!    [`asap_types::ir::cse::share_common_sub_dags`] already
 //!    established across the workload) holding every
 //!    [`ReplacementSubDAG`] alternative discovered for it. [`CandidateLogicalASAPDAGs`] is
 //!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
@@ -175,7 +173,7 @@
 //! line above stands for: every `TargetSubDAG` this pass discovers is one
 //! iteration of that loop. It walks every workload root's whole DAG (the
 //! same **relational-skeleton** operator-child scope
-//! `asap_types::pre_asap::cse::share_common_sub_dags` itself uses — see
+//! `asap_types::ir::cse::share_common_sub_dags` itself uses — see
 //! that module's "Algorithm" section), discovering one `TargetSubDAG` per
 //! distinct `Rc` and a *real* `consumer_count`: how many operator-child
 //! positions anywhere in the workload reference that exact `Rc`, not just
@@ -353,7 +351,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
-use asap_types::ir::timing::validate_default;
+use asap_types::ir::timing::validate_maintained;
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
@@ -381,8 +379,8 @@ use crate::accuracy::{
     DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
 };
 use crate::cost_model::{
-    raw_recompute_cost_rate, Cost, CostModel, CseCandidate, DefaultCostModel,
-    ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
+    raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, ShareDecision,
 };
 use crate::exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
 use crate::grouping::HydraGroupingStrategy;
@@ -1401,10 +1399,11 @@ impl<'a> ASAPStrategies<'a> {
         fn place(node: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
             retime_rate_finalize(node, ExecutionTiming::IngestionTime, true)
         }
+        // Legal only if the candidate stays executable with its states maintained.
         let timed = |node: &Rc<OperatorNode>| {
-            asap_types::ir::timing::apply_lifecycle_timings(
+            asap_types::ir::timing::apply_materialization_timings(
                 node,
-                &asap_types::ir::timing::LifecycleAssignment::default_maintained(),
+                &asap_types::ir::timing::MaterializationAssignment::all_ingestion_time(),
                 &mut asap_types::ir::timing::TimingMemo::new(),
             )
             .ok()
@@ -1766,7 +1765,7 @@ impl ReplacementStrategy for ASAPStrategies<'_> {
     /// the logical root does not expose, so each is a finalized query result
     /// for the identity-carrying root. Placement variants (for example,
     /// fixed-window or query-time Rate aggregation) are not listed here: the
-    /// lifecycle assigns timing and the physical compiler reads it.
+    /// materialization assigns timing and the physical compiler reads it.
     fn propose_for_root(&self, root: &Rc<OperatorNode>, target: &AccuracyTarget) -> Proposals {
         let Ok(typed) = asap_types::ir::schema_support::with_promql_series_identity(root) else {
             return Proposals::default();
@@ -1976,7 +1975,7 @@ fn exact_topk_over_temporal_values(
         )
         .with_guarantee(guarantee),
     );
-    validate_default(&node, ExecutionTiming::QueryTime)?;
+    validate_maintained(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
@@ -1995,7 +1994,7 @@ fn realize_temporal_average(
         return Ok(None);
     };
     operator.checked_finite_division = true;
-    validate_default(&node, ExecutionTiming::QueryTime)?;
+    validate_maintained(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
@@ -2343,7 +2342,7 @@ pub fn finalize_query_candidate(
 
 /// The read boundary's placement is fixed here, where the candidate's
 /// semantics decide it (a fresh query-time summary over this evaluation's
-/// finalized values vs. finalized values feeding maintenance); the lifecycle
+/// finalized values vs. finalized values feeding maintenance); the materialization
 /// timing pass honors it.
 fn finalize_exact_accumulator(
     node: Rc<OperatorNode>,
@@ -2751,7 +2750,7 @@ fn finish_weighted_topk(
         )
         .with_guarantee(guarantee),
     );
-    validate_default(&result, ExecutionTiming::QueryTime)?;
+    validate_maintained(&result, ExecutionTiming::QueryTime)?;
     Ok(result)
 }
 
@@ -3132,7 +3131,7 @@ fn construct_summary_agg(
     } else if snapshot_weighted {
         // Each evaluation's finalized rates feed a fresh summary; rate snapshots
         // must never accumulate across evaluations. Query time is only the
-        // initial layout; a retained summary's lifecycle moves it to ingestion.
+        // initial layout; a maintained summary's materialization moves it to ingestion.
         finalize_query_candidate(bound_child, &input.child)?
     } else {
         let child =
@@ -4207,7 +4206,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
 }
 
 /// DAG candidates assembled from an unpriced search space.
-/// This is an internal planning stage: callers must still validate lifecycle
+/// This is an internal planning stage: callers must still validate materialization
 /// requirements and compile supported physical operators before deployment.
 /// The caller supplies a finite expansion budget; exceeding it is an error,
 /// never a silently truncated inventory presented as exhaustive.
@@ -4390,50 +4389,6 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
             }
         }
         Ok(inventory)
-    }
-}
-
-/// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
-#[derive(Default, Clone)]
-pub(crate) struct CandidateCostOverrides {
-    costs: HashMap<(*const OperatorNode, *const ReplacementSubDAG), Cost>,
-    raw_costs: HashMap<*const OperatorNode, Cost>,
-    /// Targets for which the caller requested an atomic raw-vs-summary
-    /// decision. Other memo groups continue through ordinary CSE selection.
-    finalized_targets: HashSet<*const OperatorNode>,
-}
-
-impl CandidateCostOverrides {
-    pub(crate) fn finalize_target(&mut self, target: &Rc<OperatorNode>) {
-        self.finalized_targets.insert(Rc::as_ptr(target));
-    }
-
-    fn finalizes(&self, target: &Rc<OperatorNode>) -> bool {
-        self.finalized_targets.contains(&Rc::as_ptr(target))
-    }
-
-    pub(crate) fn insert(
-        &mut self,
-        target: &Rc<OperatorNode>,
-        candidate: &ReplacementSubDAG,
-        cost: Cost,
-    ) {
-        self.costs
-            .insert((Rc::as_ptr(target), candidate as *const _), cost);
-    }
-
-    fn get(&self, target: &Rc<OperatorNode>, candidate: &ReplacementSubDAG) -> Option<Cost> {
-        self.costs
-            .get(&(Rc::as_ptr(target), candidate as *const _))
-            .copied()
-    }
-
-    pub(crate) fn insert_raw(&mut self, target: &Rc<OperatorNode>, cost: Cost) {
-        self.raw_costs.insert(Rc::as_ptr(target), cost);
-    }
-
-    fn raw(&self, target: &Rc<OperatorNode>) -> Option<Cost> {
-        self.raw_costs.get(&Rc::as_ptr(target)).copied()
     }
 }
 
@@ -4851,54 +4806,6 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
             .map(|rate| UpdateRate(rate.0));
         self.recurrence_profiles(&recurrences, update_rate)
     }
-
-    /// Associate every discovered target with the normalized workload entries
-    /// whose roots can reach it.
-    pub(crate) fn workload_entries_by_target(
-        &self,
-        workload: &QueryWorkload,
-        root_workload_entries: &[usize],
-    ) -> Result<HashMap<*const OperatorNode, Vec<usize>>, RecurrenceError> {
-        let entry_count = workload.entries().count();
-        if root_workload_entries.len() != self.roots.len() {
-            return Err(RecurrenceError::RootCountMismatch {
-                expected: self.roots.len(),
-                got: root_workload_entries.len(),
-            });
-        }
-        let mut bindings: HashMap<*const OperatorNode, HashSet<usize>> = HashMap::new();
-        for ((_, root), &entry_index) in self.roots.iter().zip(root_workload_entries) {
-            if entry_index >= entry_count {
-                return Err(RecurrenceError::InvalidWorkloadEntry {
-                    index: entry_index,
-                    entry_count,
-                });
-            }
-            let mut seen = HashSet::new();
-            let mut queue = VecDeque::from([Rc::as_ptr(root)]);
-            while let Some(ptr) = queue.pop_front() {
-                if !seen.insert(ptr) {
-                    continue;
-                }
-                bindings.entry(ptr).or_default().insert(entry_index);
-                if let Some(group) = self.groups.get(&ptr) {
-                    queue.extend(
-                        direct_child_counts(&group.target)
-                            .into_iter()
-                            .map(|(child, _)| child),
-                    );
-                }
-            }
-        }
-        Ok(bindings
-            .into_iter()
-            .map(|(ptr, entries)| {
-                let mut entries: Vec<_> = entries.into_iter().collect();
-                entries.sort_unstable();
-                (ptr, entries)
-            })
-            .collect())
-    }
 }
 
 /// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
@@ -5314,7 +5221,7 @@ impl<'a> GlobalSelection<'a> {
             return Ok(Rc::clone(node));
         }
         // A selected summary that realizes its inner aggregate, instead of
-        // hiding it in `KeepPreAsap`, is kept; lifecycle assignment decides
+        // hiding it in `KeepPreAsap`, is kept; materialization assignment decides
         // whether it runs in precompute or at query time.
         let selected_composed_summary = self
             .groups
@@ -5458,7 +5365,7 @@ impl<'a> GlobalSelection<'a> {
         let node = Rc::new(
             OperatorNode::with_schema(operator, target.schema.clone()).with_guarantee(guarantee),
         );
-        validate_default(&node, ExecutionTiming::QueryTime)?;
+        validate_maintained(&node, ExecutionTiming::QueryTime)?;
         Ok(node)
     }
 
@@ -5579,7 +5486,7 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
                 )
                 .with_guarantee(node.guarantee.clone())
             });
-            match validate_default(&rebuilt, ExecutionTiming::IngestionTime) {
+            match validate_maintained(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -5761,7 +5668,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// Uncertified DDSketch ratios remain in [`CandidateLogicalASAPDAGs`] for downstream
     /// inspection but are not chosen automatically by this selector.
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
-        self.global_selection_impl(cost_model, None, None, None)
+        self.global_selection_impl(cost_model, None, None)
             .expect("structural global selection cannot produce a recurrence error")
     }
 
@@ -5775,17 +5682,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
         profiles: &RecurrenceProfileMap,
         horizon: Option<Horizon>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        self.global_selection_impl(cost_model, Some(profiles), horizon, None)
-    }
-
-    pub(crate) fn global_selection_with_candidate_costs(
-        &self,
-        cost_model: &dyn CostModel,
-        profiles: &RecurrenceProfileMap,
-        horizon: Option<Horizon>,
-        costs: &CandidateCostOverrides,
-    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        self.global_selection_impl(cost_model, Some(profiles), horizon, Some(costs))
+        self.global_selection_impl(cost_model, Some(profiles), horizon)
     }
 
     fn global_selection_impl(
@@ -5793,7 +5690,6 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
         cost_model: &dyn CostModel,
         profiles: Option<&RecurrenceProfileMap>,
         horizon: Option<Horizon>,
-        candidate_costs: Option<&CandidateCostOverrides>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
         let dag = reference_dag(self);
         let topo = topological_order(&self.order, &dag);
@@ -5854,30 +5750,8 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                 }
             }
 
-            let lifecycle_choice = candidate_costs
-                .filter(|costs| costs.finalizes(&group.target))
-                .map(|costs| {
-                    let summary = group
-                        .candidates
-                        .iter()
-                        .filter(|candidate| !is_composition_candidate(candidate))
-                        .filter(|candidate| is_automatically_selectable(candidate, cost_model))
-                        .filter_map(|candidate| {
-                            costs
-                                .get(&group.target, candidate)
-                                .map(|cost| (candidate, cost))
-                        })
-                        .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0));
-                    match (summary, costs.raw(&group.target)) {
-                        (Some((_, summary_cost)), Some(raw)) if raw.0 <= summary_cost.0 => None,
-                        (Some((candidate, _)), _) => Some(candidate),
-                        (None, _) => None,
-                    }
-                });
-
             let complete_plan_choice = (!forced.is_some()
                 && composed.is_none()
-                && lifecycle_choice.is_none()
                 && cost_model.candidate_cost_covers_complete_plan())
             .then(|| {
                 let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
@@ -5917,8 +5791,6 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
             } else if let Some(option) = composed {
                 composition_decision = Some(option.decision);
                 Some(option.candidate)
-            } else if let Some(choice) = lifecycle_choice {
-                choice
             } else if cost_model.candidate_cost_covers_complete_plan() {
                 complete_plan_choice
             } else if effective >= 2 && cse_candidate_pair(group).is_some() {
@@ -7027,7 +6899,7 @@ mod tests {
     use super::*;
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
-    use crate::test_support::{agg, agg_per_entity, lower_promql, metric_scan, timed};
+    use crate::test_support::{agg, agg_per_entity, lower_promql, maintained, metric_scan, timed};
     use asap_types::ir::operator_properties::{Reduction as ReductionTy, Source};
     use asap_types::ir::TimeRangeKind;
     use asap_types::pre_asap::agg_intent::{
@@ -7081,9 +6953,9 @@ mod tests {
     }
 
     // Grouped Sum over Rate evaluations stays a summary state in the inventory,
-    // so lifecycle assignment can place it in precompute or at query time.
+    // so materialization assignment can place it in precompute or at query time.
     #[test]
-    fn grouped_rate_sum_inventory_keeps_sum_state_for_lifecycle_placement() {
+    fn grouped_rate_sum_inventory_keeps_sum_state_for_materialization_placement() {
         let root = lower_promql("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact);
         let inventory = search_workload(vec![(0usize, root)])
             .enumerate_candidate_dags(4096)
@@ -10200,8 +10072,8 @@ mod tests {
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
         // Timing is not stored during realization: time the candidate under
-        // the default lifecycle assignment to read the maintenance boundary.
-        let root = timed(&realize(&outer).unwrap());
+        // a maintained materialization assignment to read the maintenance boundary.
+        let root = maintained(&realize(&outer).unwrap());
 
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
             panic!("expected estimate root, got {:?}", root.operator);

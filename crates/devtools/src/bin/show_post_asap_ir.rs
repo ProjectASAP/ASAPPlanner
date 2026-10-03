@@ -176,9 +176,9 @@ mod tests {
             candidates[0].guarantee.is_none(),
             "missing evidence must not claim a certified ratio bound"
         );
-        let timed = asap_types::ir::timing::apply_lifecycle_timings(
+        let timed = asap_types::ir::timing::apply_materialization_timings(
             &candidates[0],
-            &asap_types::ir::timing::LifecycleAssignment::default_maintained(),
+            &asap_types::ir::timing::MaterializationAssignment::all_query_time(),
             &mut asap_types::ir::timing::TimingMemo::new(),
         )
         .expect("the demo candidate has a legal default timing");

@@ -8,7 +8,7 @@ Given a logical query plan, the mapping layer explores alternative plans that ma
 
 Candidate search takes canonical **Pre-ASAP query roots** and produces
 `CandidateLogicalASAPDAGs`, a compact set of **candidate Post-ASAP DAGs**. Ranking, selection,
-and summary-maintenance lifecycle decisions are subsequent operations over it;
+and DAG assembly are subsequent operations over it;
 see [input, output, and workflows](input-output-workflow.md).
 
 For example, a percentile query might be answered by:
@@ -44,7 +44,7 @@ budgets; deployment belongs to a later stage.
 - **Replacement Sub-DAG**: A candidate post-ASAP sub-DAG to replace a target sub-DAG. For example, a quantile aggregation may have KLL, DDSketch, and exact aggregation as alternatives.
 - **ReplacementStrategy**: A rule to recognize a target Sub-DAG and produces one or more valid replacement Sub-DAGs.
 - **Candidate Plan**: A complete post-ASAP plan formed by choosing compatible replacement alternatives across the plan.
-- **Maintained population**: A multiset of qualifying records retained across evaluations and updated as members enter, change, leave or expire; multiple readouts can share this state.
+- **Maintained population**: A multiset of qualifying records retained across evaluations and updated as members enter, change, leave or expire; multiple evaluations can share this state.
 - **Cost Model**: A model used to compare valid candidate plans according to criteria such as storage, update cost, query latency, and accuracy.
 
 The distinction between **ReplacementStrategy** and **Candidate Plan** is important. A ReplacementStrategy generates alternatives at a decision point, while a candidate plan is a complete plan that combines choices across all relevant decision points.
@@ -75,7 +75,6 @@ CandidateLogicalASAPDAGs: compact candidate Post-ASAP DAGs
         |
         +--> inspect / rank
         +--> select and assemble logical DAGs
-        +--> select and assemble with summary-maintenance lifecycle decisions
 ```
 
 ---
@@ -104,9 +103,6 @@ The design is split into focused documents:
 - [ASAPPlanner planner-runtime contract](planner-runtime-contract.md)
   separates planner-owned search and selection from downstream physical
   implementation, deployment, and execution.
-- [Query workloads, data workloads, and summary lifecycle maintenance](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md) separates
-  query-workload properties from data-workload properties and defines ephemeral, prepared,
-  shared, and continuously maintained summary-state alternatives.
 - [Explainability](../../develop_docs/replacement-explanations.md) describes how the planner reports available replacements
   using the same candidate space it optimizes.
 

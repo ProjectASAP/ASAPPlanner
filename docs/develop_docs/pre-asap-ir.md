@@ -2,7 +2,15 @@
 
 This is the detailed node reference. Start with the [Pre-ASAP IR concept](../design_docs/concepts/pre-asap-ir.md) for purpose and the compact catalog.
 
-The goal of the pre-ASAP IR is represent operations from different query languages in a single representation, and make it easier to analyze how/where ASAP primitives can be used.
+ASAPPlanner has **one operator IR before and after ASAP optimization**, defined in
+`crates/types/src/ir/`. "Pre-ASAP" is not a separate type: it is this IR as a front end
+emits it, before any ASAP operator has been introduced. This document covers what every
+plan shares — the node, the schema, scalar expressions, how front ends produce the DAG, and
+the catalog of ordinary (`NonASAPOp`) operators. The ASAP operators, execution timing and
+the exported wire form are described in the [Post-ASAP IR](../design_docs/concepts/post-asap-ir.md)
+document; the two do not repeat each other.
+
+The goal of the pre-ASAP form is to represent operations from different query languages in a single representation, and make it easier to analyze how/where ASAP primitives can be used.
 Only operations that are semantically relevant to answering the query and selecting an ASAP primitive need to become first-class nodes here.
 
 ## Design principles
@@ -13,7 +21,135 @@ Only operations that are semantically relevant to answering the query and select
 
 > Notes: **SQL and PromQL use different schema models**. SQL typically uses a closed schema, where tables, columns, and types are predefined, while PromQL uses an open (schemaless) schema, where metrics and labels can evolve without a fixed table schema. Closed schemas provide stronger structure and validation; open schemas provide greater flexibility and makes it easier to evolve or ingest diverse data, but can require more care around naming conventions, label cardinality, and query consistency.
 
-The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of important enum types below.
+## The node
+
+A plan is a DAG of `Rc<OperatorNode>` (`crates/types/src/ir/node.rs`). Nodes are immutable
+and shared through `Rc`: a structurally identical sub-DAG referenced from several parents is
+one node, and that pointer identity is what CSE, target discovery and plan assembly key on.
+
+```rust
+pub struct OperatorNode {
+    pub operator: Operator,                   // NonASAP(NonASAPOp) | ASAP(ASAPOp)
+    pub result_kind: OperatorResultKind,      // Relation | InstantVector | RangeVector | State | Scalar
+    pub schema: Schema,                       // output schema, derived at construction
+    pub guarantee: Option<ResultGuarantee>,   // None until accuracy assessment establishes one
+    pub timing: Option<ExecutionTiming>,      // None until a materialization assignment is applied
+}
+```
+
+- `operator` is the operation. A front-end DAG contains only `Operator::NonASAP` nodes;
+  `OperatorNode::expect_non_asap()` relies on that.
+- `result_kind` is the output category, derived from the operator and its inputs. Matching
+  column schemas do not make categories interchangeable (a range vector is not an instant
+  vector).
+- `schema` is derived by `OperatorNode::new(operator)`; it fails when the schema cannot be
+  derived (a column reference out of range, a reserved ASAP operator). ASAP planning may
+  retain a more specific schema through `OperatorNode::with_schema`.
+- `guarantee` is `None` until accuracy assessment establishes one; `None` never means exact.
+- `timing` is `None` in every front-end DAG and every candidate. It is written by
+  `ir::timing::apply_materialization_timings` (see the Post-ASAP IR document); export rejects an
+  untimed node.
+
+`OperatorNode::children()` returns the operator's inputs in field order followed by the
+operator nodes its scalar expressions read (see "Scalar expressions"). Every DAG traversal —
+`map_children`, `reachable`, `contains_asap`, CSE, export — follows that same list.
+`OperatorNode::validate_structure()` checks every operator's input contract, scalar typing
+against the owning operator's input schema, and that each retained schema agrees with the
+derived one.
+
+## Schema
+
+One `Schema` type (`crates/types/src/pre_asap/schema.rs`) describes every edge, whether it
+carries rows or summary state:
+
+```rust
+pub struct Schema {
+    pub fields: Vec<Field>,            // positional; every ColumnId indexes into this
+    pub time_index: Option<ColumnId>,  // the time axis, if any (PromQL leaves always have one)
+    pub unique_keys: Vec<Vec<ColumnId>>,
+    pub closed: bool,                  // true: these are all the columns; false: open (schemaless) superset
+}
+
+pub struct Field {
+    pub name: String,
+    pub dtype: FieldDataType,          // Plain(DataType) | ExactAggregate(..) | Sketch(..) | Sample(..) | Wavelet(..) | StatModel(..)
+    pub nullable: bool,
+    pub table: Option<String>,         // SQL table/alias qualifier; None for PromQL labels
+}
+```
+
+A pre-ASAP field is always `FieldDataType::Plain(DataType)`. The other variants carry summary
+state and only appear below an ASAP operator; a scalar expression that reads such a field is a
+typing error (`ScalarExpr::scalar_type`), because state must be read out before a value can use
+it. Column references are positional `ColumnId`s (indexes into the input schema), never names.
+
+`Schema::has_unique_key()` is the legality gate CSE uses: a non-ASAP producer is only shared
+across consumers when its row identity is provable.
+
+## Scalar expressions
+
+Value computation lives in `ScalarExpr` (`crates/types/src/ir/scalar.rs`), owned **by value**
+by an operator field: `Scan.predicates`, `Filter.pred`, `Join.pred`, `Project.cols[i].expr`,
+`Aggregate.having`, `Sort.keys[i].expr`, `SQLWindowFunc.args`/`order_by`, `PromqlRelabel.value`,
+`Values.rows`, and `QueryRoot::Scalar` and `PromqlVectorFromScalar`. A scalar expression never
+produces a table and is never a node of the DAG; it is evaluated against the input schema of
+the operator that owns it.
+
+Variants: `Column(ColumnId)`, `Literal(ScalarValue)`, `Negative` (unary minus), `Compare`,
+`BoolAnd` / `BoolOr` (flat conjunction/disjunction), `Not`, `IsNull` / `IsNotNull`, `Cast`
+(with `try_cast`), `InList`, `FunctionCall { name, args }`, `Arithmetic`, `Case`,
+`CurrentTimestamp` (SQL `NOW()`), `EvalTimestamp` (PromQL `time()`), and four
+**plan-reading** variants that reference an operator node:
+
+| Variant | Meaning |
+|---|---|
+| `PromqlScalarFromVector(Rc<OperatorNode>)` | PromQL `scalar(v)`: the single sample of an instant vector, NaN otherwise |
+| `ScalarSubquery(Rc<OperatorNode>)` | Uncorrelated SQL scalar subquery: one column; zero rows is NULL, more than one row is an error |
+| `Exists { subquery, negated }` | SQL `[NOT] EXISTS (subquery)` |
+| `InSubquery { expr, subquery, negated }` | SQL `expr [NOT] IN (subquery)` over a one-column relation |
+
+These are the **only** operator references inside a scalar tree. `ScalarExpr::operator_refs()`
+lists them, `NonASAPOp::children()` appends them after the operator's own inputs, and
+canonicalization lowers the three SQL subquery forms to joins (see below), so a canonical SQL
+DAG contains none of them. `PromqlScalarFromVector` survives canonicalization: its referenced
+vector is a real plan dependency, exported as a `ScalarRef` edge.
+
+`Compare`, `Arithmetic` and `Negative` carry an `ExprSemantics` (`Sql` or `Promql`): both
+languages use `Float64`, so the result type alone does not preserve NaN, ordering or error
+rules, and the executing engine needs to know which language's rules apply.
+
+Wrapper types: `Predicate(ScalarExpr)`, `ProjectItem { alias, expr }`,
+`SortKey { expr, ascending, nulls_first }`.
+
+## How a front end produces the DAG
+
+A front end never constructs `OperatorNode`s directly. It builds a name-based tree in
+`crates/frontend-common` — `UnresolvedOp` / `UnresolvedScalar`, a mirror of `NonASAPOp` /
+`ScalarExpr` in which every column reference is a `ColumnRef` and a PromQL `Scan` has no schema
+yet — and calls `asap_frontend_common::resolve_root`, which does three things in order:
+
+1. **Resolution** — a bottom-up walk that binds every `ColumnRef` to a positional `ColumnId`
+   against the derived schema of the already-resolved child. A schemaless (PromQL) leaf gets
+   its binding schema from `SchemaResolver`, built from the names the query references.
+   `Join` / `SetOp` sides and the operators referenced from scalar positions are each bound as
+   a root in their own scope; a `BinaryOp` side additionally inherits the label names its
+   enclosing scope references.
+2. **Schema derivation** — each `OperatorNode::new` derives the node's output schema and
+   result kind from the operator and its children.
+3. **Canonicalization** — `asap_types::ir::canonicalize::canonicalize` erases structural
+   differences between semantically identical queries: it promotes an additive
+   `Limit { Sort { Aggregate } }` ranking to the `AggIntent::TopK` heavy-hitter shape, and
+   lowers `EXISTS` / `NOT EXISTS` / `IN (subquery)` predicates to `Join { Semi | Anti }` and a
+   scalar subquery to a `Join { Cross }` plus column reference. The pass is idempotent and
+   keeps the pointer identity of every untouched sub-DAG.
+
+The result is `Rc<OperatorNode>`. `lower_promql_workload`, `lower_sql` / `lower_sql_dialect` /
+`lower_sql_batch` and `lower_metricsql` all return it.
+
+Workload search then runs structural CSE (`asap_types::ir::cse::share_common_sub_dags`) once
+across every root: bottom-up hash-consing where the structural hash is only a filter and the
+typed `PartialEq` decides sharing, following scalar references like any other input, and
+gated by `Schema::has_unique_key()` for non-ASAP producers.
 
 ## Fields and column references
 
@@ -47,33 +183,37 @@ to one source language.
 - [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via a reduction and aggregate intents.
 
 **[Time-related nodes](#time-related-nodes)**
-- [`TimeRange`](#timerange) — a range-vector lookback over the time axis (PromQL `[5m]`).
+- [`TimeRange`](#timerange) — temporal selection over a time-series input (PromQL instant lookback or `[5m]` range selector).
 - [`TimeShift`](#timeshift) — shifts *when* a selector is evaluated (PromQL `offset`/`@`).
 - [`PromqlSubquery`](#promqlsubquery) — re-evaluates an instant-vector expression over a range at a given step.
 
 **[Relational nodes](#relational-nodes)** — common to both SQL and PromQL
 - [`Scan`](#scan) — identifies the logical data source.
+- [`Values`](#values) — SQL `VALUES` rows, or the one empty row of a `SELECT` without `FROM`.
 - [`Filter`](#filter) — restricts rows using a predicate.
 - [`Project`](#project) — column projection (SQL `SELECT` list).
-- [`BinaryOp`](#binaryop) — arithmetic / comparison / boolean composition of two inputs.
+- [`BinaryOp`](#binaryop) — arithmetic / comparison / set composition of two inputs.
 - [`Sort`](#sort) — generic (non-heavy-hitter) order-by, optionally per-group.
-- [`Limit`](#limit) — caps the row count, with an offset.
+- [`Limit`](#limit) — caps the row count, with an offset, optionally per-group.
 - [`Dedup`](#dedup) — row-level deduplication.
 - [`Join`](#join) — logical join of two inputs.
 - [`SetOp`](#setop) — SQL's typed set operations (`UNION`/`INTERSECT`/`EXCEPT`).
 - [`Concat`](#concat) — exact, untyped `UNION ALL` of union-compatible branches.
 
-**[PromQL-specific nodes](#promql-specific-nodes)**
-- [`PromqlScalarBridge`](#promqlscalarbridge) — a scalar sub-expression at an operator-DAG position.
-- [`EvalTimestamp`](#evaltimestamp) — the query evaluation time as a scalar (PromQL `time()`).
+**[Scalar-position nodes](#scalar-position-nodes)**
+- `QueryRoot::Scalar` — a standalone scalar expression, without an operator node.
 - [`PromqlVectorFromScalar`](#promqlvectorfromscalar) — promotes a scalar to a label-less instant vector.
-- [`PromqlScalarFromVector`](#promqlscalarfromvector) — collapses a single-series vector to a scalar.
+
+**[PromQL-specific nodes](#promql-specific-nodes)**
 - [`PromqlRelabel`](#promqlrelabel) — per-series label rewrite (PromQL `label_replace`/`label_join`).
 - [`PromqlInfoEnrich`](#promqlinfoenrich) — left-join label enrichment from an info metric.
 - [`PromqlSeriesSample`](#promqlseriessample) — keeps a subset of whole series, not a reduction.
 
 **[SQL-specific nodes](#sql-specific-nodes)**
 - [`SQLWindowFunc`](#sqlwindowfunc) — SQL analytic window function (`OVER (...)`).
+
+PromQL `time()` and `scalar(v)` are scalar expressions (`ScalarExpr::EvalTimestamp`,
+`ScalarExpr::PromqlScalarFromVector`), not nodes.
 
 ## Aggregation-related nodes
 
@@ -109,7 +249,7 @@ list of aggregate intents (`measures`).
   value is still recomputed by the agg intent, e.g. `Rate`), for a computation with no
   `by(...)` clause to attach to. `PerEntity` is different from `by` for all columns, because in PromQL, it is schemaless and you don't know all columns beforehand.
    E.g. PromQL `rate(http_requests_total[5m])`, which has one rate value
-  per input series:
+   per input series:
 
   ```text
   Aggregate(
@@ -117,7 +257,7 @@ list of aggregate intents (`measures`).
       measures = [Rate],
       output_names = [],
       having = None,
-      child = TimeRange(range = 5m, child = Scan("http_requests_total"))
+      child = TimeRange(range = 5m, kind = Range, child = Scan("http_requests_total"))
   )
   ```
 
@@ -224,7 +364,7 @@ Example for `filters`:
   `count(CASE WHEN p THEN x END)` (`p`, plus `x IS NOT NULL` when `x` is nullable), and from
   `count(expr)` over any other nullable `expr` (`expr IS NOT NULL`), because canonical `Count`
   counts rows and never consults its argument. A filtered measure has no summary binding yet:
-  `asap-aware-mapping` keeps such an `Aggregate` as `KeepPreAsap`, and canonicalization does
+  `asap-aware-mapping` retains such an `Aggregate` as an ordinary exact sub-DAG, and canonicalization does
   not promote a filtered count ranking to a heavy-hitter `TopK`.
 
 Example for `having`:
@@ -248,8 +388,8 @@ Example for `having`:
 
 **Rules/Invariants**: A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
    then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
-   the node it actually applies to, not behind an opaque wrapper, once pre-ASAP IR translates
-   to post-ASAP IR with summary binding. The upper nodes (closer to the root) in the AST/DAG can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
+   the node it actually applies to, not behind an opaque wrapper, once summary binding reads it.
+   The upper nodes (closer to the root) in the AST/DAG can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
 
    For example, `SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip HAVING COUNT(*) > 10`
    pins `cnt > 10` to the lowest node that can express it, `Aggregate.having`:
@@ -282,7 +422,7 @@ Example for `having`:
    Both are valid at once, and neither is derived from the other: `having` is the canonical
    spot a summary-aware pass reads to decide whether `Aggregate` can bind to a summary, while
    the outer `Filter` is what a plain logical evaluator runs without knowing `having` exists. The duplication is forward-looking groundwork for
-   once HAVING-aware summary binding (pre-ASAP-IR to post-ASAP-IR translation) lands.
+   once HAVING-aware summary binding lands.
 
   Neither direction of that push-down is enforced yet: the SQL front end doesn't populate
   `having` from a real `HAVING` clause (#201), and canonicalization doesn't fold an existing
@@ -294,14 +434,21 @@ Example for `having`:
 
 ### TimeRange
 
-Represents a range of time. Kept different from `Filter` to treat time as an explicit concern.
+Temporal selection over a time-series input. Kept different from `Filter` to treat time as an
+explicit concern. `kind` records which samples a PromQL selector reads:
+
+- `TimeRangeKind::Instant` — an instant selector: `range` is the lookback horizon and the
+  latest eligible sample per series is selected (the planner injects the declared
+  `data_ingestion_interval` around a bare selector).
+- `TimeRangeKind::Range` — a range selector (`m[5m]`): every sample in the window.
 
 ```promql
 rate(http_requests_total[5m])
 ```
 
 **Fields:**
-- `range` — how far back to look (the PromQL `[5m]` duration).
+- `range` — how far back to look (the PromQL `[5m]` duration, or the instant lookback).
+- `kind` — `Instant` or `Range`.
 - `child` — the input the range applies to.
 
 ### TimeShift
@@ -350,9 +497,19 @@ the same logical data domain.
 **Fields:**
 - `source` — the logical data source (a table name or PromQL metric selector).
 - `predicates` — row-level filters pushed all the way down to this scan (Rules/Invariants
-  rule 1); enforced structurally at lowering time — a `Filter` directly over a `Scan` never
-  survives.
-- `schema` — the binding schema every positional column reference in the DAG resolves against.
+  rule 1): PromQL label matchers and pushed-down `WHERE` conjuncts.
+- `schema` — the binding schema every positional column reference in the tree resolves against.
+  A catalog-backed SQL leaf carries its catalog schema; a PromQL leaf carries the usage-derived
+  schema `SchemaResolver` built from the labels the query references.
+
+### Values
+
+SQL `VALUES` rows, or the one empty row of a `SELECT` without `FROM`
+(`SELECT 1 + 1`). Row expressions have no input-column scope.
+
+**Fields:**
+- `rows` — one `Vec<ScalarExpr>` per row.
+- `schema` — the output schema of the rows.
 
 ### Filter
 
@@ -386,6 +543,10 @@ that's neither a base scan column nor an aggregate output:
 SELECT * FROM (SELECT srcip, bytes_in + bytes_out AS total FROM packets) t WHERE total > 500
 ```
 
+A `Filter` whose predicate contains `EXISTS` / `NOT EXISTS` / `IN (subquery)` does not
+survive canonicalization: the conjunct becomes a `Join { Semi | Anti }` under the remaining
+predicate.
+
 **Fields:**
 - `pred` — the row-level predicate to apply.
 - `child` — the input being filtered.
@@ -406,18 +567,21 @@ SELECT srcip, dstip FROM packets
 
 ### BinaryOp
 
-Arithmetic / comparison / boolean composition. PromQL binary operators between two vectors,
-a vector and a scalar, or two scalars.
+Arithmetic / comparison / set composition of two operands. PromQL binary operators between two vectors,
+two vectors. Mixed vector/scalar arithmetic uses `Project`; non-bool comparison uses `Filter`. Standalone scalar expressions are `QueryRoot::Scalar`.
 
 ```promql
 up > 1
 ```
 
 **Fields:**
-- `op` — the arithmetic/comparison/boolean operator.
+- `operator` — a `BinaryOperator { kind, vector_match, checked_relative_division, checked_finite_division }`:
+  - `kind` — `BinaryOpKind::Arithmetic(..)`, `Compare(..)` or `Set(..)` (PromQL `and`/`or`/`unless`).
+  - `vector_match` — PromQL vector-matching modifiers (`on`/`ignoring`, `group_left`/`group_right`); `None` outside PromQL and the only supported value today.
+  - `checked_relative_division` / `checked_finite_division` — typed division guards set by summary planning, never by a front end (see [physical-plan integration](../design_docs/architecture/physical-plan-integration.md#conditional-temporal-average-lowering)).
+- `return_bool` — the PromQL `bool` modifier: a comparison returns `0`/`1` instead of filtering. Valid only for comparison operators.
 - `lhs` — the left operand.
 - `rhs` — the right operand.
-- `vector_match` — PromQL vector-matching modifiers (`on`/`ignoring`, `group_left`/`group_right`); `None` outside PromQL.
 
 ### Sort
 
@@ -429,7 +593,7 @@ sort_desc(up)
 ```
 
 **Fields:**
-- `keys` — the ordering columns/expressions and direction.
+- `keys` — the ordering expressions and direction (`SortKey`).
 - `partition_by` — grouping keys that make the ordering per-group instead of global; empty = a single global order.
 - `child` — the input being ordered.
 
@@ -443,8 +607,9 @@ topk(3, up)
 ```
 
 **Fields:**
-- `n` — the maximum number of rows to keep.
+- `n` — the maximum number of rows to keep; `None` is offset-only.
 - `offset` — how many leading rows to skip first.
+- `partition_by` — applies the limit per group (PromQL `topk by (..)`); empty = global.
 - `child` — the input being capped.
 
 ### Dedup
@@ -463,14 +628,16 @@ SELECT DISTINCT srcip, dstip FROM packets
 
 ### Join
 
-Logical join; the physical strategy (hash/merge/broadcast) is picked in the post-ASAP IR. SQL `JOIN`.
+Logical join; the physical strategy (hash/merge/broadcast) is picked downstream of the planner. SQL `JOIN`,
+and the shape canonicalization lowers subqueries to.
 
 ```sql
 SELECT u.prefix FROM bgp_updates u JOIN bgp_rib_state r ON u.prefix = r.prefix
 ```
 
 **Fields:**
-- `kind` — the join type (inner/left/right/full/semi/anti).
+- `kind` — the join type (`Inner`/`Left`/`Right`/`Full`/`Cross`/`Semi`/`Anti`). A semi/anti join
+  outputs the left input's columns alone, but its predicate resolves against `left ++ right`.
 - `pred` — the join condition.
 - `left` — the left input.
 - `right` — the right input.
@@ -496,7 +663,7 @@ SELECT srcip FROM packets UNION ALL SELECT dstip FROM packets
 never dedup. Used when a single `Aggregate` can't express the shape — the canonical case is
 PromQL `histogram_quantiles` (one branch per φ, each its own `HistogramQuantile` reduction
 relabeled with its `le` value) — and SQL `ROLLUP`/`CUBE`/`GROUPING SETS` (one branch per
-grouping level).
+grouping level). The output schema is the first child's.
 
 ```promql
 histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0.9)
@@ -504,39 +671,32 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 
 **Fields:**
 - `children` — the union-compatible branches to concatenate; must be non-empty.
+- `discriminator_unique_key` — an optional caller-proven compound unique key
+  `(discriminator, inner_key)` over the output; nothing verifies the claim.
 
-## PromQL-specific nodes
+## Scalar-position nodes
 
-### PromqlScalarBridge
+### Scalar query roots
 
-A scalar sub-expression (issue #220: in practice always `Literal(ScalarValue::Float64(_))` —
-a PromQL number literal, or a folded constant scalar expression) sitting at an **operator-DAG
-position** — a `BinaryOp` operand for `<vector> op <scalar>` thresholds and unit conversions,
-a `PromqlVectorFromScalar` child, or a whole query's root. This wrapper is what marks the
-position; it no longer duplicates `Literal`'s value the way the old `PromqlScalar(f64)` variant
-did.
+`QueryRoot` distinguishes an operator result from an owned `ScalarExpr`. It is
+an API root discriminator, not an operator. `2`, `time()`, and
+`scalar(sum(up)) + 1` therefore introduce no constant-wrapper nodes.
 
-```promql
-up > 1
-```
+Use `lower_promql_query_workload` for mixed scalar/vector workloads. The
+operator-only convenience API rejects standalone scalar roots. `ParsedWorkload`
+retains each scalar's workload index; `PlanOutput::roots()` returns all results
+in workload order. Scalar plan reads remain exact and retain their operator
+references; summary selection currently operates on operator roots.
 
-**Fields:** a single unnamed child `QueryExpr` — the wrapped scalar sub-expression.
-
-### EvalTimestamp
-
-The query **evaluation timestamp** as Unix seconds — PromQL `time()` — and the implicit
-input of the no-argument calendar functions (`hour()`, `day_of_week()`, ...). It is the
-instant or range-step at which the expression is evaluated, not inherently the current
-wall-clock time. The Prometheus instant-query HTTP API separately defaults an omitted
-`time` request parameter to the server's current time.
-
-```promql
-time()
-```
+`up * 2` projects the sample expression while retaining time and full series
+identity, removing the metric name. `up > 0` and `0 < up` filter the vector and
+retain its sample and name. `up > bool 0` projects a zero-or-one `Case`.
+Open label schemas acquire a full runtime series-identity field before this
+lowering. The runtime must populate that field with all labels.
 
 ### PromqlVectorFromScalar
 
-The scalar→instant-vector bridge — PromQL `vector(s)`. Promotes a scalar-typed child to a
+The scalar→instant-vector bridge — PromQL `vector(s)`. Promotes a scalar expression to a
 single label-less series carrying that value at every step, e.g. for dead-man's-switch
 patterns (`up or vector(0)`).
 
@@ -544,18 +704,9 @@ patterns (`up or vector(0)`).
 vector(1)
 ```
 
-**Fields:** a single unnamed child `QueryExpr` — the scalar-typed expression being promoted to a vector.
+**Fields:** a single unnamed `ScalarExpr` — the scalar being promoted to a vector.
 
-### PromqlScalarFromVector
-
-The instant-vector→scalar bridge — PromQL `scalar(v)`. Collapses a single-element vector to
-its value (NaN at runtime if the input isn't exactly one series).
-
-```promql
-scalar(up)
-```
-
-**Fields:** a single unnamed child `QueryExpr` — the single-series vector being collapsed to a scalar.
+## PromQL-specific nodes
 
 ### PromqlRelabel
 
@@ -616,5 +767,6 @@ SELECT srcip, LAG(time) OVER (PARTITION BY srcip ORDER BY time) FROM packets
 - `args` — the function's operand expressions; empty for rank-only functions.
 - `partition_by` — grouping keys the window is computed within.
 - `order_by` — the ordering the window function reads.
+- `frame` — the optional window frame.
 - `output_name` — the name of the new output column.
 - `child` — the input the window function is computed over.

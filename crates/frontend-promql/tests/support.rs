@@ -69,18 +69,18 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
     }
 }
 
-/// Time `root` under the default (every summary maintained) lifecycle
-/// assignment and export the post-ASAP DAG — the wire-6 export needs every
-/// node timed first.
+/// Time `root` under the default materialization assignment (every summary
+/// at query time) and export the physical DAG — export needs every node
+/// timed first.
 #[allow(dead_code)]
 pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::export::PhysicalASAPDAG {
-    use asap_types::ir::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
-    let timed = apply_lifecycle_timings(
+    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    let timed = apply_materialization_timings(
         root,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_query_time(),
         &mut TimingMemo::new(),
     )
-    .expect("default lifecycle timings");
+    .expect("default materialization timings");
     asap_types::ir::export::compile_physical_asap_dag(&timed).expect("post-ASAP DAG export")
 }
 

@@ -7,9 +7,7 @@ use asap_aware_mapping::pass::{
     OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels,
 };
 use asap_aware_mapping::replacement::default_strategies_with_evidence;
-use asap_aware_mapping::{
-    search_workload_with_targets, Horizon, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
-};
+use asap_aware_mapping::search_workload_with_targets;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
@@ -38,12 +36,6 @@ fn batch(sql: &str) -> BatchEntry {
         execute_at: None,
         time_selection: TimeSelection::default(),
     }
-}
-
-/// The planning clock and default capabilities, no horizon: the least a
-/// caller can supply.
-fn lifecycle() -> LifecycleInput {
-    LifecycleInput::new(NOW_MS, SummaryMaintenanceLifecycleCapabilities::default())
 }
 
 fn lineitem_catalog() -> SqlCatalog {
@@ -89,7 +81,6 @@ async fn plans_every_query_in_entry_order() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
-        lifecycle(),
     );
 
     let output = e2e_plan(input).await.expect("workload plans");
@@ -97,13 +88,10 @@ async fn plans_every_query_in_entry_order() {
     assert_eq!(output.entry_indices(), vec![0, 1]);
 }
 
-/// With the built-in cost model no lifecycle cost is ever known, and
-/// lifecycle-aware selection then finalizes every summary target as raw
-/// recompute: the cost-only selection picks a sketch for the same workload.
-/// This pins that behavior so the facade's output is not mistaken for a
-/// decision; it is a defect of `DefaultCostModel`, not addressed here.
+/// The facade selects what workload-wide cost selection selects over the
+/// same search space: here a summary for both approximate queries.
 #[tokio::test]
-async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recompute() {
+async fn facade_plans_match_cost_only_selection() {
     let workload = sql_workload(
         vec![
             batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem"),
@@ -118,7 +106,6 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         models,
-        lifecycle(),
     ))
     .await
     .expect("workload plans");
@@ -153,21 +140,17 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
             "entry {}: cost-only selection was expected to pick a summary",
             plan.entry_index
         );
-        assert!(
-            !plan.plan.root.contains_asap()
-                && plan.plan.selected_raw_recompute
-                && plan.plan.deployments.is_empty()
-                && plan.plan.summary_total_cost.is_none()
-                && plan.plan.raw_recompute_total_cost.is_none(),
-            "entry {}: the built-in model priced a lifecycle",
+        assert_eq!(
+            plan.root, cost_only,
+            "entry {}: the facade selected a different DAG",
             plan.entry_index
         );
     }
 }
 
 /// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks
-/// `query_batch` alone, so driving the frontend through it would drop exactly
-/// the entries whose recurrence the lifecycle stage reads.
+/// `query_batch` alone, so driving the frontend through it would drop the
+/// repeating entries.
 #[tokio::test]
 async fn lowers_repeating_sql_entries_too() {
     let workload = sql_workload(
@@ -187,7 +170,6 @@ async fn lowers_repeating_sql_entries_too() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
-        lifecycle(),
     );
 
     let output = e2e_plan(input).await.expect("workload plans");
@@ -229,7 +211,6 @@ async fn runs_a_caller_supplied_pass_instead_of_the_shipped_one() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
-        lifecycle(),
     )
     .with_pass(&pass);
 
@@ -270,7 +251,6 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
-        lifecycle(),
     )
     .with_pass(&pass);
 
@@ -302,7 +282,6 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
             histograms: None,
         },
         PlanningModels::builtin(),
-        lifecycle(),
     );
 
     let err = e2e_plan(input).await.unwrap_err();
@@ -312,48 +291,9 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
     ));
 }
 
-/// Two planning clocks would let the DAG be built for one instant and priced
-/// for another; the input check refuses that before lowering.
-#[test]
-fn rejects_disagreeing_planning_clocks() {
-    let workload = PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: Some(vec![batch("up")]),
-            repeating_queries: None,
-        },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::ContinuouslyIngesting,
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(15_000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-    };
-    let input = UserInput::new(
-        &workload,
-        FrontendInput::Promql {
-            now_ms: NOW_MS,
-            histograms: None,
-        },
-        PlanningModels::builtin(),
-        LifecycleInput::new(
-            NOW_MS + 1,
-            SummaryMaintenanceLifecycleCapabilities::default(),
-        ),
-    );
-
-    assert!(matches!(
-        input.validate(),
-        Err(UserInputError::PlanningTimeMismatch { .. })
-    ));
-}
-
-/// The maintenance decisions ride inside each plan, and the DAG is still
-/// there — inside the plan's `root`, not alongside it.
+/// A repeating PromQL query yields one plan carrying its selected DAG root.
 #[tokio::test]
-async fn lifecycle_decisions_ride_inside_each_plan() {
+async fn each_plan_carries_its_selected_root() {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -382,59 +322,13 @@ async fn lifecycle_decisions_ride_inside_each_plan() {
             histograms: None,
         },
         PlanningModels::builtin(),
-        lifecycle().with_horizon(Horizon(3_600.0)),
     );
 
     let output = e2e_plan(input).await.expect("workload plans");
     assert_eq!(output.plans.len(), 1);
     assert_eq!(output.plans[0].entry_index, 0);
-    let _: &Rc<_> = &output.plans[0].plan.root;
+    let _: &Rc<_> = &output.plans[0].root;
     assert_eq!(output.operator_roots().len(), 1);
-}
-
-/// Each root's lifecycle is planned against the entries that read it: a
-/// query polled every minute and an unrelated one polled every ten minutes
-/// each see only their own reads over the hour, not the workload's 66.
-#[tokio::test]
-async fn each_plan_counts_only_its_own_entries_reads() {
-    let repeating = |query: &str, interval_ms: u32| RepeatingEntry {
-        query: Query(query.into()),
-        demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
-        requirements: approximate(),
-        predictability: Predictability::Unknown,
-        time_selection: TimeSelection::default(),
-    };
-    let workload = PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: None,
-            repeating_queries: Some(vec![
-                repeating("count_over_time(up[5m])", 60_000),
-                repeating("sum_over_time(latency[5m])", 600_000),
-            ]),
-        },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::ContinuouslyIngesting,
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(15_000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-    };
-    let input = UserInput::new(
-        &workload,
-        FrontendInput::Promql {
-            now_ms: NOW_MS,
-            histograms: None,
-        },
-        PlanningModels::builtin(),
-        lifecycle().with_horizon(Horizon(3_600.0)),
-    );
-
-    let output = e2e_plan(input).await.expect("workload plans");
-    let reads: Vec<_> = output.plans.iter().map(|p| p.plan.expected_reads).collect();
-    assert_eq!(reads, vec![Some(60.0), Some(6.0)]);
 }
 
 /// Scalar-only and mixed workloads preserve entry bindings without wrapper nodes.
@@ -465,7 +359,6 @@ async fn scalar_roots_survive_planning_in_workload_order() {
                 histograms: None,
             },
             PlanningModels::builtin(),
-            lifecycle(),
         ))
         .await
         .unwrap();

@@ -51,7 +51,9 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
 use std::time::Duration;
 
 use asap_types::ir::operator_properties::{GroupKeys, Reduction, Source};
-use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+use asap_types::ir::timing::{
+    apply_materialization_timings, MaterializationAssignment, TimingMemo,
+};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
@@ -173,18 +175,28 @@ pub(crate) fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<Operato
     .unwrap()
 }
 
-/// `root` timed under the default (every summary maintained) lifecycle
+/// `root` timed under the default (every summary at query time)
 /// assignment — the shape export and the post-ASAP validators consume.
 pub(crate) fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_lifecycle_timings(
+    apply_materialization_timings(
         root,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_query_time(),
         &mut TimingMemo::new(),
     )
-    .expect("default lifecycle timings apply")
+    .expect("default materialization timings apply")
 }
 
-/// Time `root` under the default lifecycle assignment (which runs every
+/// `root` timed with every summary maintained at ingestion time.
+pub(crate) fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    apply_materialization_timings(
+        root,
+        &MaterializationAssignment::all_ingestion_time(),
+        &mut TimingMemo::new(),
+    )
+    .expect("maintained materialization timings apply")
+}
+
+/// Time `root` under the default materialization assignment (which runs every
 /// data-state / population-contract check) and export it as a physical ASAP DAG.
 pub(crate) fn time_and_export(
     root: &Rc<OperatorNode>,
@@ -192,9 +204,9 @@ pub(crate) fn time_and_export(
     asap_types::ir::export::PhysicalASAPDAG,
     asap_types::post_asap::execution_data_state::ExecutionDataStateError,
 > {
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         root,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_query_time(),
         &mut TimingMemo::new(),
     )?;
     asap_types::ir::export::compile_physical_asap_dag(&timed)

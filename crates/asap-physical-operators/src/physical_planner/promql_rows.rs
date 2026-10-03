@@ -88,9 +88,10 @@ pub fn compile_current_series_evaluation(
     use planner_types::post_asap::{
         maintained_population::PopulationStatistic, Field as SummaryField,
     };
-    let selected = planner_types::ir::apply_lifecycle_timings(
+    // This compiler emits maintained precompute: every summary at ingestion time.
+    let selected = planner_types::ir::apply_materialization_timings(
         selected,
-        &planner_types::ir::LifecycleAssignment::default_maintained(),
+        &planner_types::ir::MaterializationAssignment::all_ingestion_time(),
         &mut planner_types::ir::TimingMemo::new(),
     )
     .map_err(|e| invalid(e.to_string()))?;
@@ -201,9 +202,10 @@ pub fn compile_rate_ranking(
         }
         node.children().into_iter().find_map(frontier)
     }
-    let selected = planner_types::ir::apply_lifecycle_timings(
+    // This compiler emits maintained precompute: every summary at ingestion time.
+    let selected = planner_types::ir::apply_materialization_timings(
         selected,
-        &planner_types::ir::LifecycleAssignment::default_maintained(),
+        &planner_types::ir::MaterializationAssignment::all_ingestion_time(),
         &mut planner_types::ir::TimingMemo::new(),
     )
     .map_err(|e| invalid(e.to_string()))?;
@@ -239,7 +241,7 @@ pub fn compile_rate_ranking(
     Ok((source, program))
 }
 
-/// Compile a lifecycle-timed DAG whose heap or grouped Sum over per-series
+/// Compile a materialization-timed DAG whose heap or grouped Sum over per-series
 /// Rate evaluations runs at ingestion time: fresh aggregate state per closed
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(

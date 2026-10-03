@@ -12,7 +12,7 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::ir::export::NonASAPOpKind as ValueOperation;
 use planner_types::ir::export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
 use planner_types::ir::Predicate;
-use planner_types::ir::ScalarExpr as QueryExpr;
+use planner_types::ir::ScalarExpr;
 use planner_types::{
     post_asap::{Field, FieldDataType},
     pre_asap::{CompareOpKind, DataType, JoinKind},
@@ -78,11 +78,11 @@ fn keys(rows: &[Vec<Value>]) -> Vec<Vec<Vec<u8>>> {
         .collect()
 }
 fn eq_predicate() -> Predicate {
-    Predicate(QueryExpr::Compare {
+    Predicate(ScalarExpr::Compare {
         semantics: planner_types::ir::ExprSemantics::Sql,
-        left: Box::new(QueryExpr::Column(0)),
+        left: Box::new(ScalarExpr::Column(0)),
         op: CompareOpKind::Eq,
-        right: Box::new(QueryExpr::Column(1)),
+        right: Box::new(ScalarExpr::Column(1)),
     })
 }
 fn join(left: Vec<Value>, right: Vec<Value>, kind: JoinKind, keyed: bool) -> Vec<Vec<Value>> {
@@ -340,7 +340,7 @@ fn aggregate_empty_and_all_null_follow_asap_contract() {
 fn projection_rejects_expression_bound_to_another_schema() {
     let original = schema(&[("a", DataType::Int64, false), ("b", DataType::Int64, false)]);
     let current = schema(&[("a", DataType::Int64, false)]);
-    let expr = CompiledExpression::compile(&QueryExpr::Column(1), &original).unwrap();
+    let expr = CompiledExpression::compile(&ScalarExpr::Column(1), &original).unwrap();
     assert!(Operator::project(current, vec![("b".into(), Expression::planner(expr))]).is_err());
 }
 
@@ -417,11 +417,11 @@ fn planner_comparisons_handle_nan_without_execution_errors() {
         CompareOpKind::Gt,
         CompareOpKind::Ge,
     ] {
-        let expression = QueryExpr::Compare {
+        let expression = ScalarExpr::Compare {
             semantics: planner_types::ir::ExprSemantics::Sql,
-            left: Box::new(QueryExpr::Column(0)),
+            left: Box::new(ScalarExpr::Column(0)),
             op: op.clone(),
-            right: Box::new(QueryExpr::Column(1)),
+            right: Box::new(ScalarExpr::Column(1)),
         };
         let compiled = CompiledExpression::compile(&expression, &input).unwrap();
         for row in [
@@ -485,11 +485,11 @@ fn mixed_numeric_comparisons_preserve_large_integer_precision() {
         ("a", DataType::Int64, false),
         ("b", DataType::Float64, false),
     ]);
-    let expr = QueryExpr::Compare {
+    let expr = ScalarExpr::Compare {
         semantics: planner_types::ir::ExprSemantics::Sql,
-        left: Box::new(QueryExpr::Column(0)),
+        left: Box::new(ScalarExpr::Column(0)),
         op: CompareOpKind::Gt,
-        right: Box::new(QueryExpr::Column(1)),
+        right: Box::new(ScalarExpr::Column(1)),
     };
     let compiled = CompiledExpression::compile(&expr, &input).unwrap();
     for (a, b, expected) in [
@@ -510,11 +510,11 @@ fn boolean_truth_tables_agree_between_expression_paths() {
     for and in [true, false] {
         for a in [None, Some(false), Some(true)] {
             for b in [None, Some(false), Some(true)] {
-                let parts = vec![QueryExpr::Column(0), QueryExpr::Column(1)];
+                let parts = vec![ScalarExpr::Column(0), ScalarExpr::Column(1)];
                 let planner = if and {
-                    QueryExpr::BoolAnd(parts)
+                    ScalarExpr::BoolAnd(parts)
                 } else {
-                    QueryExpr::BoolOr(parts)
+                    ScalarExpr::BoolOr(parts)
                 };
                 let native = if and {
                     Expression::And(

@@ -1,20 +1,17 @@
-// Logical QueryExpr/SummaryExpr kinds exported by
+// Operator kinds (`Operator::kind_name`) exported by
 // crates/types/src/dag_export.rs. Categories describe the visible logical DAG
 // shape. They do not model hidden physical inputs: for example,
 // PromqlInfoEnrich is a one-child enrichment here even if physical costing
 // later accounts for an auxiliary source scan.
 const KIND_CATEGORY_JSON = `{
   "Scan": "data",
-  "PromqlScalarBridge": "data",
-  "EvalTimestamp": "data",
-  "CurrentTimestamp": "data",
+  "Values": "data",
   "Filter": "filter",
   "PromqlSeriesSample": "sample",
   "Project": "derive",
   "PromqlRelabel": "derive",
   "PromqlInfoEnrich": "derive",
   "PromqlVectorFromScalar": "derive",
-  "PromqlScalarFromVector": "derive",
   "BinaryOp": "derive",
   "Aggregate": "aggregate",
   "TimeRange": "window",
@@ -22,21 +19,21 @@ const KIND_CATEGORY_JSON = `{
   "TimeShift": "window",
   "SQLWindowFunc": "window",
   "Join": "join",
-  "RelationalJoin": "join",
   "Dedup": "set",
   "SetOp": "set",
   "Concat": "combine",
   "Sort": "sort",
   "Limit": "sort",
-  "KeepPreAsap": "summary",
   "SummaryAgg": "summary",
   "SummaryJoin": "summary",
   "SummarySubtract": "summary",
-  "SummaryBinaryOp": "summary",
-  "ValueOperation": "summary",
   "SummaryDelete": "summary",
   "SummaryEstimate": "summary",
-  "SummaryMerge": "summary"
+  "SummaryMerge": "summary",
+  "FinalizeExactAccumulator": "summary",
+  "MaintainPopulation": "summary",
+  "EvaluatePopulation": "summary",
+  "Extension": "summary"
 }`;
 const KIND_CATEGORY = Object.freeze(JSON.parse(KIND_CATEGORY_JSON));
 
@@ -44,7 +41,7 @@ const KIND_CATEGORY = Object.freeze(JSON.parse(KIND_CATEGORY_JSON));
 const CATEGORIES = {
   data: {
     label: 'Data',
-    description: 'Scan, PromqlScalarBridge, EvalTimestamp, CurrentTimestamp — leaves that introduce a value',
+    description: 'Scan and Values — data sources',
     light: { bg: '#eef5fd', border: '#0369a1' },
     dark: { bg: '#0c2438', border: '#38bdf8' },
   },
@@ -62,7 +59,7 @@ const CATEGORIES = {
   },
   derive: {
     label: 'Derive',
-    description: 'Project, PromqlRelabel, PromqlInfoEnrich, PromqlVectorFromScalar, PromqlScalarFromVector, BinaryOp — transforms or enriches columns on otherwise-unchanged rows',
+    description: 'Project, PromqlRelabel, PromqlInfoEnrich, PromqlVectorFromScalar, BinaryOp — transforms or enriches columns on otherwise-unchanged rows',
     light: { bg: '#f5f0fd', border: '#6d28d9' },
     dark: { bg: '#241a3d', border: '#a78bfa' },
   },
@@ -102,10 +99,10 @@ const CATEGORIES = {
     light: { bg: '#eef4fd', border: '#1d4ed8' },
     dark: { bg: '#12233d', border: '#60a5fa' },
   },
-  // Post-ASAP nodes use a neutral palette; KeepPreAsap has a muted override.
+  // ASAP operators use a neutral palette.
   summary: {
     label: 'Summary',
-    description: 'KeepPreAsap, SummaryBinaryOp, ValueOperation, SummaryAgg, SummaryJoin, SummarySubtract, SummaryDelete, SummaryEstimate, SummaryMerge — post-ASAP materialized structures',
+    description: 'SummaryAgg, SummaryEstimate, FinalizeExactAccumulator, MaintainPopulation, EvaluatePopulation, SummaryJoin, SummarySubtract, SummaryDelete, SummaryMerge, Extension — summary state and its evaluations',
     light: { bg: '#f1f2f4', border: '#4b5563' },
     dark: { bg: '#20242b', border: '#9ca3af' },
   },

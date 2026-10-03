@@ -2,7 +2,7 @@
 //!
 //! Same operator payloads as the logical export, plus the execution timing
 //! (data state) of every node and edge. The input must already be timed
-//! ([`super::timing::apply_lifecycle_timings`]); export reads each node's
+//! ([`super::timing::apply_materialization_timings`]); export reads each node's
 //! timing and does not re-run data-state validation.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -336,7 +336,7 @@ pub fn compile_physical_asap_dag(
 }
 
 /// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`super::timing::apply_lifecycle_timings`]); the data-state
+/// timing (see [`super::timing::apply_materialization_timings`]); the data-state
 /// rules were checked by that pass and are not re-run here.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
