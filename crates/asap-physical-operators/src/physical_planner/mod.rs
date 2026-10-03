@@ -39,8 +39,9 @@ pub mod promql_values;
 
 mod candidates;
 pub use candidates::{
-    compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-    frontier_from_timing, select_candidate, CandidateCost, CandidateSelection, PhysicalASAPDAG,
+    compile_candidate, compile_candidates, compile_materialization_candidates, cut_candidate,
+    enumerate_frontiers, frontier_from_timing, select_candidate, CandidateCost, CandidateSelection,
+    PhysicalASAPDAG,
 };
 
 mod compiled;
@@ -399,7 +400,11 @@ fn compile_internal(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                let Some(NonASAPOp::Scan { schema, .. }) = child.non_asap() else {
+                let source = match child.non_asap() {
+                    Some(NonASAPOp::TimeShift { child, .. }) => child,
+                    _ => child,
+                };
+                let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
                 if !schema.closed || update.item.is_some() {

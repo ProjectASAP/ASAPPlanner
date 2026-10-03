@@ -179,6 +179,7 @@ pub mod summary_maintenance_lifecycle;
 #[cfg(test)]
 mod test_support;
 pub mod topk_reuse;
+pub mod window_composition;
 
 pub use accuracy::reconciliation::AccuracyReconciliationStrategy;
 pub use accuracy::{
