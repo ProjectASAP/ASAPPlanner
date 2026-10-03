@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
+use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
@@ -100,7 +101,7 @@ pub struct OperatorNode {
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
     #[serde(default)]
-    pub observation_extent: Option<super::observation_extent::ObservationExtent>,
+    pub coverage: Option<SummaryCoverage>,
 }
 
 impl OperatorNode {
@@ -123,7 +124,7 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
-            observation_extent: None,
+            coverage: None,
         }
     }
 
@@ -145,29 +146,23 @@ impl OperatorNode {
     }
 
     /// Attach caller-established observation coverage; unknown coverage remains None.
-    pub fn with_observation_extent(
+    pub fn with_coverage(
         mut self,
-        coverage: super::observation_extent::ObservationExtent,
+        coverage: SummaryCoverage,
     ) -> Result<Self, SchemaDerivationError> {
-        coverage
-            .validate()
-            .map_err(|error| SchemaDerivationError::InvalidScalarSignature(error.to_string()))?;
+        coverage.validate()?;
         if self.result_kind != OperatorResultKind::State {
-            return Err(SchemaDerivationError::InvalidScalarSignature(
-                "summary coverage requires state output".into(),
-            ));
+            return Err(CoverageError::NotState.into());
         }
         if let Some(ASAPOp::SummaryAgg {
             input, reduction, ..
         }) = self.asap()
         {
-            if *input != coverage.input || *reduction != coverage.grouping {
-                return Err(SchemaDerivationError::InvalidScalarSignature(
-                    "coverage input/grouping disagrees with summary producer".into(),
-                ));
+            if *input != coverage.input || *reduction != coverage.reduction {
+                return Err(CoverageError::ProducerMismatch.into());
             }
         }
-        self.observation_extent = Some(coverage);
+        self.coverage = Some(coverage);
         Ok(self)
     }
 
@@ -320,10 +315,8 @@ impl OperatorNode {
                     "invalid time or identity column in schema".into(),
                 ));
             }
-            if let Some(coverage) = &node.observation_extent {
-                (*node.as_ref())
-                    .clone()
-                    .with_observation_extent(coverage.clone())?;
+            if let Some(coverage) = &node.coverage {
+                (*node.as_ref()).clone().with_coverage(coverage.clone())?;
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {

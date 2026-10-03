@@ -20,4 +20,4 @@ pub mod canonicalize;
 pub mod cse;
 pub mod flat;
 /// Semantic observation coverage, separate from field layout and physical timing.
-pub mod observation_extent;
+pub mod summary_coverage;
