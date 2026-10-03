@@ -9,6 +9,8 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use super::physical_export::*;
+pub use super::wire::NonASAPOpKind;
 use super::wire::{grouping_compatibility, input_edges, payload_of};
 pub use super::wire::{
     EdgeRole, GroupingEdgeCompatibility, LogicalASAPNodeId, LogicalASAPOperatorPayload,

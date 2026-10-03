@@ -18,6 +18,8 @@ pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 pub mod canonicalize;
 pub mod cse;
 pub mod export;
+/// Physical ASAP DAG transport: the logical payloads plus execution timing.
+pub mod physical_export;
 /// Execution timing for physical plans: a lifecycle assignment expanded onto every node.
 pub mod timing;
 pub use timing::{
