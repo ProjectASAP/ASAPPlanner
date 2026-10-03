@@ -274,6 +274,7 @@ fn frequency_dictionary_enforces_memory_budget() {
         (Reduction::Count, true),
         (Reduction::FrequencyL2(0), false),
         (Reduction::FrequencyEntropy(0), false),
+        (Reduction::Cardinality(vec![0]), false),
     ] {
         let run = context(12_000);
         let inputs = sources.execute(&[0], run.clone()).unwrap();
