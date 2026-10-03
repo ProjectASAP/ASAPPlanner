@@ -1,7 +1,7 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use super::*;
-use asap_types::post_asap::GroupingStrategy;
-use asap_types::pre_asap::AggIntent;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::GroupingStrategy;
 
 pub mod cardinality;
 pub mod cms;

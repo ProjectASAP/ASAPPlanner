@@ -8,11 +8,11 @@ use asap_aware_mapping::replacement::{default_strategies, search_workload_with_t
 use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, ProbabilityExpr,
-    ResultGuarantee, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
+use asap_types::ir::properties::{
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
 };
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, post_asap_dag};
 

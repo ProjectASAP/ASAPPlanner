@@ -21,11 +21,12 @@ use asap_physical_operators::{
     values::{Batch, Value},
     AggregateCore, KeyByLabelValues, Statistic,
 };
-use asap_types::post_asap::{
+use asap_types::ir::operator::Reduction;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{
     EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
     SummaryUpdate,
 };
-use asap_types::pre_asap::{expr_ir::ColumnRef, Reduction};
 use asap_types::types::AccuracyTarget;
 use futures::{executor::block_on, StreamExt};
 
@@ -319,7 +320,7 @@ fn check(
         Reduction::PerEntity => vec![],
     };
     let stored_only = matches!(family, FieldDataType::Sketch(kind, _)
-        if kind.algorithm() == &asap_types::post_asap::SketchAlgorithm::Cms);
+        if kind.algorithm() == &asap_types::ir::schema::SketchAlgorithm::Cms);
     if stored_only || asap_physical_operators::capability::validate_native_family(family).is_err() {
         // Families without a native state (e.g. UnivMon), or with native
         // stored state only (plain CMS), are outside precompute execution;
@@ -511,10 +512,8 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
 // estimate each item's exact total; invalid weight contracts do not compile.
 #[test]
 fn raw_sample_heaps_resolve_items_from_labels() {
-    use asap_types::post_asap::{
-        GroupingStrategy::PerSubpopulationInstance, NonNegativeWeightProof, SketchKind,
-        SketchParams, WeightDomain,
-    };
+    use asap_types::ir::schema::GroupingStrategy::PerSubpopulationInstance;
+    use asap_types::ir::schema::{NonNegativeWeightProof, SketchKind, SketchParams, WeightDomain};
     let heap = |algorithm, params| {
         FieldDataType::Sketch(SketchKind::new(algorithm, params), PerSubpopulationInstance)
     };
@@ -595,9 +594,9 @@ fn raw_sample_heaps_resolve_items_from_labels() {
 // `without` grouping over raw samples drops the listed labels and `__name__`.
 #[test]
 fn raw_sample_without_grouping_drops_labels_and_name() {
-    use asap_types::pre_asap::GroupKeys;
+    use asap_types::ir::operator::GroupKeys;
     let family =
-        FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::post_asap::ExactParams::Sum);
+        FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::ir::schema::ExactParams::Sum);
     let (mut dag, source, root) =
         grouped_raw_summary(family, SummaryUpdate::column(ColumnRef::SampleValue));
     let service = dag

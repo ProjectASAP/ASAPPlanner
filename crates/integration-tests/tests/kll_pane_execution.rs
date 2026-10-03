@@ -9,11 +9,9 @@ use asap_physical_operators::{
     values::{Batch, SchemaRef, Value},
     AggregateCore, Error,
 };
-use asap_types::{
-    post_asap::{
-        Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
-    },
-    pre_asap::DataType,
+use asap_types::ir::schema::{
+    DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams,
+    SketchStatistic,
 };
 use futures::{executor::block_on, StreamExt};
 use std::{
@@ -165,15 +163,15 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
         vec![6, 7, 8],
     )
     .unwrap();
-    let layout = asap_types::post_asap::PaneLayout {
+    let layout = asap_types::physical::PaneLayout {
         pane_width_ms: 60_000,
         pane_origin_ms: Some(0),
     };
     assert!(
-        asap_types::post_asap::validate_pane_coverage(
+        asap_types::physical::validate_pane_coverage(
             &layout,
             Some(330_000),
-            &asap_types::post_asap::WindowEdgeCoverage::PaneAligned
+            &asap_types::physical::WindowEdgeCoverage::PaneAligned
         )
         .is_err(),
         "moving window edges require residual computation"
@@ -181,10 +179,10 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
     for offset in [0, 1] {
         let restored = restore(schema.clone(), &panes[offset..offset + 5]);
         let evaluation_time_ms = (5 + offset as i64) * 60_000;
-        asap_types::post_asap::validate_pane_coverage(
+        asap_types::physical::validate_pane_coverage(
             &layout,
             Some(evaluation_time_ms),
-            &asap_types::post_asap::WindowEdgeCoverage::PaneAligned,
+            &asap_types::physical::WindowEdgeCoverage::PaneAligned,
         )
         .unwrap();
         let inputs: BTreeMap<_, _> = (0..5)

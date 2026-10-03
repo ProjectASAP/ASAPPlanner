@@ -23,7 +23,7 @@
 //! which is the same narrowing sidra's own catalog file makes.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/tpch_deequ_queries.sql");

@@ -2,11 +2,12 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{
     apply_materialization_timings, export::compile_physical_asap_dag, MaterializationAssignment,
     NonASAPOp, OperatorNode, ScalarExpr, TimingMemo,
 };
-use asap_types::pre_asap::{AggIntent, DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn catalog() -> SqlCatalog {

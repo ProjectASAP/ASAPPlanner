@@ -1,17 +1,18 @@
 //! The examples in docs/design_docs/proposals/asap-primitive-schema.md, built as real
 //! SummaryAgg -> SummaryMerge plans. Every input has the same schema
 //! `(job: Utf8, state: KLL{k=200})`; only coverage differs.
-use asap_types::ir::summary_coverage::{CoverageError, CoverageRegion, SummaryCoverage};
+use asap_types::ir::operator::{Reduction, Source};
+use asap_types::ir::properties::summary_coverage::{
+    CoverageError, CoverageRegion, SummaryCoverage,
+};
+use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::schema::{
+    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
+};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
     SchemaDerivationError,
-};
-use asap_types::post_asap::{
-    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
-};
-use asap_types::pre_asap::{
-    ColumnRef, CompareOpKind, DataType, Field, FieldDataType, Reduction, ScalarValue, Schema,
-    Source,
 };
 use std::rc::Rc;
 

@@ -1,26 +1,20 @@
 //! `asap-types` — shared vocabulary for the whole workspace.
 //!
-//! - [`ir`] — the unified operator IR: one operator language before and
-//!   after ASAP optimization ([`ir::OperatorNode`]), plus its passes
-//!   (canonicalize, CSE, timing) and the wire export ([`ir::export`]).
-//! - [`pre_asap`] — the shared field vocabulary the IR's operators are
-//!   built from (grouping keys, reductions, sources, aggregation intents,
-//!   scalar literal / operator kinds, [`pre_asap::Schema`]).
-//! - [`post_asap`] — summary-state types (families, kinds, parameters,
-//!   grouping strategy), accuracy guarantees, and the execution-timing
-//!   vocabulary. No execution logic lives in this workspace (issue #190).
-//!   [`post_asap::query_time`] holds pure posterior error-bound math
-//!   (issue #239) a future sketch runtime's evaluation path can call; see its
-//!   docs for why it is unwired today.
-//! - [`types`] / [`workload`] / [`parsed_workload`] / [`dag_export`] /
-//!   [`cost`] / [`resources`] — workload, batch, export and cost types.
+//! - [`ir`] — the unified operator IR (#511): one operator DAG before and
+//!   after ASAP optimization ([`ir::OperatorNode`]), arranged by #511 section
+//!   ([`ir::operator`], [`ir::scalar`], [`ir::schema`], [`ir::properties`]),
+//!   plus its passes (canonicalize, CSE, timing) and the wire export
+//!   ([`ir::export`]). No execution logic lives in this crate (issue #190).
+//! - [`workload`] — planner inputs (#509): query and data workloads, the
+//!   lowered [`workload::parsed_workload`], and [`workload::resources`].
+//! - [`physical`] — #509 Stage 2 decision data: exact-operator schema helpers
+//!   and window-summary pane primitives.
+//! - [`types`] / [`dag_export`] / [`cost`] — accuracy targets, the generic
+//!   DAG export, and cost annotations.
 pub mod cost;
 pub mod dag_export;
 pub mod ir;
-pub mod parsed_workload;
-pub mod post_asap;
-pub mod pre_asap;
-pub mod resources;
+pub mod physical;
 pub mod serde_f64;
 pub mod types;
 pub mod workload;

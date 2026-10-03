@@ -16,7 +16,7 @@
 //! take/return [`SketchAlgorithm`]/[`SketchParams`]) — `asap_sketch` also has
 //! sibling families for sampling-based, wavelet-transform, and fitted
 //! statistical-model summaries
-//! ([`asap_types::post_asap::SamplingKind`]/…/[`asap_types::post_asap::StatModelKind`]),
+//! ([`asap_types::ir::schema::SamplingKind`]/…/[`asap_types::ir::schema::StatModelKind`]),
 //! each with its own `(Kind, Params)` pair, deliberately *not* folded into
 //! this trait: no core `AggIntent` picks one of those families today (only
 //! [`CostModel::realize_extension`] can, for a deployment-specific
@@ -49,12 +49,12 @@
 use std::rc::Rc;
 
 use crate::exact_composition::ExactOperation;
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchStatistic,
 };
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::expr_ir::ColumnRef;
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 
 use crate::exact_composition::{ExactComposition, OperationPlacement};
 use crate::recurrence::{
@@ -556,7 +556,7 @@ pub trait CostModel {
             .find(|dtype| !matches!(dtype, FieldDataType::Plain(_)))
             .cloned()
             .unwrap_or(FieldDataType::Plain(
-                asap_types::pre_asap::DataType::Float64,
+                asap_types::ir::schema::DataType::Float64,
             ));
         default_cse_shared_maintenance_cost(&family)
     }
@@ -806,7 +806,7 @@ pub trait CostModel {
 
 fn sketch_state(
     node: &OperatorNode,
-) -> Option<(&asap_types::post_asap::SketchKind, &GroupingStrategy)> {
+) -> Option<(&asap_types::ir::schema::SketchKind, &GroupingStrategy)> {
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
             sketch_state(summary_input)
@@ -979,7 +979,7 @@ impl CostModel for DefaultCostModel {
 mod tests {
     use super::*;
     use crate::replacement::summary_candidates;
-    use asap_types::pre_asap::agg_intent::default_cardinality;
+    use asap_types::ir::operator::agg_intent::default_cardinality;
 
     #[test]
     fn default_cost_model_preserves_static_order() {
@@ -1101,7 +1101,7 @@ mod tests {
 
     #[test]
     fn custom_cost_model_can_override_sizing_independently_of_ranking() {
-        use asap_types::pre_asap::agg_intent::default_quantile;
+        use asap_types::ir::operator::agg_intent::default_quantile;
 
         let intent = default_quantile(0.99);
         assert_eq!(
@@ -1183,7 +1183,7 @@ mod tests {
         assert_eq!(
             DefaultCostModel.value_operation_support_evidence(
                 &ExactOperation::Aggregate {
-                    reduction: asap_types::ir::operator_properties::Reduction::by(vec![]),
+                    reduction: asap_types::ir::operator::operator_properties::Reduction::by(vec![]),
                     measures: vec![AggIntent::Max { col: None }],
                     output_names: vec![],
                     filters: vec![],
@@ -1209,12 +1209,12 @@ mod tests {
 
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
 
-    use asap_types::ir::operator_properties::Source;
-    use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr};
-    use asap_types::post_asap::{
+    use asap_types::ir::operator::operator_properties::Source;
+    use asap_types::ir::schema::DataType;
+    use asap_types::ir::schema::{
         ExactKind, ExactParams, Field, GroupingStrategy, Schema, SketchKind,
     };
-    use asap_types::pre_asap::schema::DataType;
+    use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr};
 
     fn scan() -> Rc<OperatorNode> {
         OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
@@ -1239,10 +1239,10 @@ mod tests {
                 asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                     child: scan(),
                     family: family.clone(),
-                    input: asap_types::post_asap::SummaryUpdate::column(
-                        asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
+                    input: asap_types::ir::schema::SummaryUpdate::column(
+                        asap_types::ir::scalar::ColumnRef::Named("value".into()),
                     ),
-                    reduction: asap_types::ir::operator_properties::Reduction::by(vec![]),
+                    reduction: asap_types::ir::operator::operator_properties::Reduction::by(vec![]),
                     grouping: GroupingStrategy::default(),
                     filter: None,
                 }),
@@ -1273,8 +1273,8 @@ mod tests {
     /// identity-blind recursive walk) would count it.
     #[test]
     fn default_recompute_cost_does_not_double_count_an_internally_shared_descendant() {
-        use asap_types::ir::operator_properties::JoinKind;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::ir::operator::operator_properties::JoinKind;
+        use asap_types::ir::scalar::ScalarValue;
 
         let true_pred = || Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true)));
         let shared_leaf = scan();
@@ -1348,8 +1348,8 @@ mod tests {
         let candidate = CseCandidate {
             sub_dag: &scan(),
             bound_summary: &summary_node(FieldDataType::StatModel(
-                asap_types::post_asap::StatModelKind::Parametric,
-                asap_types::post_asap::StatModelParams::Parametric {
+                asap_types::ir::schema::StatModelKind::Parametric,
+                asap_types::ir::schema::StatModelParams::Parametric {
                     family: "gaussian_mixture".into(),
                 },
             )),
@@ -1388,8 +1388,8 @@ mod tests {
         let candidate = CseCandidate {
             sub_dag: &scan(),
             bound_summary: &summary_node(FieldDataType::StatModel(
-                asap_types::post_asap::StatModelKind::Parametric,
-                asap_types::post_asap::StatModelParams::Parametric {
+                asap_types::ir::schema::StatModelKind::Parametric,
+                asap_types::ir::schema::StatModelParams::Parametric {
                     family: "gaussian_mixture".into(),
                 },
             )),
@@ -1426,7 +1426,7 @@ mod tests {
         let candidate = ReplacementSubDAG {
             strategy: "TestStrategy",
             replacement: Replacement::SubDAG(summary_node(FieldDataType::Plain(
-                asap_types::pre_asap::DataType::Float64,
+                asap_types::ir::schema::DataType::Float64,
             ))),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "whatever".into(),
@@ -1459,8 +1459,8 @@ mod tests {
         let pricey = ReplacementSubDAG {
             strategy: "TestStrategy",
             replacement: Replacement::SubDAG(summary_node(FieldDataType::StatModel(
-                asap_types::post_asap::StatModelKind::Parametric,
-                asap_types::post_asap::StatModelParams::Parametric {
+                asap_types::ir::schema::StatModelKind::Parametric,
+                asap_types::ir::schema::StatModelParams::Parametric {
                     family: "gaussian_mixture".into(),
                 },
             ))),

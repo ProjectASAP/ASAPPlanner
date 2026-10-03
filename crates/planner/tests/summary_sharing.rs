@@ -17,14 +17,14 @@ use asap_aware_mapping::{
 use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
-use asap_types::post_asap::{
+use asap_types::ir::operator::agg_intent::default_quantile;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
-    SketchStatistic,
 };
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchKind, SketchParams};
-use asap_types::pre_asap::agg_intent::default_quantile;
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::AggIntent;
+use asap_types::ir::schema::SketchStatistic;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchKind, SketchParams};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataWorkload, DurationMs, Evidence, LatencyRequirement,

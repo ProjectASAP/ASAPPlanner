@@ -36,14 +36,14 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::asap::ASAPOp;
-use super::node::{Operator, OperatorNode};
-use super::non_asap::NonASAPOp;
-use crate::ir::operator_properties::BinaryOpKind;
-use crate::post_asap::execution_data_state::{
+use crate::ir::operator::asap::ASAPOp;
+use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::non_asap::NonASAPOp;
+use crate::ir::operator::operator_properties::BinaryOpKind;
+use crate::ir::properties::execution::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
-use crate::pre_asap::schema::{DataType, FieldDataType, Schema};
+use crate::ir::schema::{DataType, FieldDataType, Schema};
 
 /// The per-state materialization choice: for each `SummaryAgg` node (by
 /// identity), whether its state is maintained at ingestion time or computed
@@ -130,7 +130,7 @@ fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode
                 .schema
                 .fields
                 .iter()
-                .any(|f| f.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY)
+                .any(|f| f.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
                 && per_series_rows(lhs).is_none_or(|rows| per_series_rows(rhs) != Some(rows)) =>
         {
             true
@@ -505,7 +505,7 @@ fn validate_non_asap(
         } => {
             let is_div = matches!(
                 operator.kind,
-                BinaryOpKind::Arithmetic(crate::pre_asap::ArithmeticOpKind::Div)
+                BinaryOpKind::Arithmetic(crate::ir::scalar::ArithmeticOpKind::Div)
             );
             if (operator.checked_relative_division && operator.checked_finite_division)
                 || ((operator.checked_relative_division || operator.checked_finite_division)
@@ -520,8 +520,7 @@ fn validate_non_asap(
                             && (matches!(
                                 field.dtype,
                                 FieldDataType::Plain(DataType::Float64 | DataType::Timestamp)
-                            ) || (field.name
-                                == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                            ) || (field.name == crate::ir::schema::PROMQL_SERIES_IDENTITY
                                 && field.dtype == FieldDataType::Plain(DataType::Utf8)))
                     })
                 };
@@ -539,14 +538,14 @@ fn validate_non_asap(
                         .schema
                         .fields
                         .iter()
-                        .filter(|f| f.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY)
+                        .filter(|f| f.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
                         .count()
                         > 1
                     || (node
                         .schema
                         .fields
                         .iter()
-                        .any(|f| f.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY)
+                        .any(|f| f.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
                         && per_series_rows(lhs)
                             .is_none_or(|rows| per_series_rows(rhs) != Some(rows)))
                     || !plain_float_or_ts(&node.schema)
@@ -656,13 +655,13 @@ pub fn split_shared_by_phase(
 
 /// Maintenance arithmetic needs the same per-series population on both sides.
 fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
-    use crate::post_asap::ExactKind;
+    use crate::ir::schema::ExactKind;
     match &node.operator {
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match &child.operator {
             Operator::ASAP(ASAPOp::SummaryAgg {
                 child,
                 family: FieldDataType::ExactAggregate(ExactKind::Sum | ExactKind::Count, _),
-                reduction: crate::pre_asap::Reduction::PerEntity,
+                reduction: crate::ir::operator::Reduction::PerEntity,
                 filter: None,
                 ..
             }) => Some(child),
@@ -679,15 +678,15 @@ fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::non_asap::NonASAPOp;
-    use crate::ir::operator_properties::{Reduction, Source};
-    use crate::post_asap::sketch::{
+    use crate::ir::operator::agg_intent::AggIntent;
+    use crate::ir::operator::non_asap::NonASAPOp;
+    use crate::ir::operator::operator_properties::{Reduction, Source};
+    use crate::ir::scalar::ColumnRef;
+    use crate::ir::schema::state_type::{
         ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
         SketchStatistic, SummaryUpdate,
     };
-    use crate::pre_asap::agg_intent::AggIntent;
-    use crate::pre_asap::expr_ir::ColumnRef;
-    use crate::pre_asap::schema::Field;
+    use crate::ir::schema::Field;
 
     fn scan_with(fields: Vec<Field>) -> Rc<OperatorNode> {
         OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Scan {

@@ -2,7 +2,7 @@ use super::*;
 /// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SummaryEvaluation {
-    Sketch(planner_types::post_asap::SketchStatistic),
+    Sketch(planner_types::ir::schema::SketchStatistic),
     Exact(crate::summary_kernels::exact::ExactEvaluation),
 }
 
@@ -111,8 +111,8 @@ impl Operator {
             && matches!(
                 family,
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::post_asap::ExactKind::Rate
-                        | planner_types::post_asap::ExactKind::Increase,
+                    planner_types::ir::schema::ExactKind::Rate
+                        | planner_types::ir::schema::ExactKind::Increase,
                     _
                 )
             )
@@ -185,7 +185,7 @@ impl Operator {
         let mut fields = input.fields.clone();
         let result_type = if matches!(
             fields[state].dtype,
-            SummaryFamilyType::ExactAggregate(planner_types::post_asap::ExactKind::Count, _)
+            SummaryFamilyType::ExactAggregate(planner_types::ir::schema::ExactKind::Count, _)
         ) || integral_count(family, &query)
         {
             DataType::Int64
@@ -198,8 +198,8 @@ impl Operator {
             && matches!(
                 fields[state].dtype,
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::post_asap::ExactKind::Min
-                        | planner_types::post_asap::ExactKind::Max,
+                    planner_types::ir::schema::ExactKind::Min
+                        | planner_types::ir::schema::ExactKind::Max,
                     _
                 )
             );
@@ -216,10 +216,10 @@ impl Operator {
 /// non-integral total rather than rounding it.
 fn integral_count(family: &SummaryFamilyType, query: &SummaryEvaluation) -> bool {
     matches!(family, SummaryFamilyType::Sketch(kind, _)
-        if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::Cms)
+        if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::Cms)
         && matches!(
             query,
-            SummaryEvaluation::Sketch(planner_types::post_asap::SketchStatistic::PointCount {
+            SummaryEvaluation::Sketch(planner_types::ir::schema::SketchStatistic::PointCount {
                 value: None,
                 ..
             })
@@ -411,8 +411,8 @@ async fn build_summary(
     let ordered_time = matches!(
         family,
         SummaryFamilyType::ExactAggregate(
-            planner_types::post_asap::ExactKind::Rate
-                | planner_types::post_asap::ExactKind::Increase,
+            planner_types::ir::schema::ExactKind::Rate
+                | planner_types::ir::schema::ExactKind::Increase,
             _
         )
     );

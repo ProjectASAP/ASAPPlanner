@@ -2,13 +2,16 @@
 use asap_types::ir::export::{
     compile_physical_asap_dag, PhysicalASAPDAGDocument, PhysicalASAPDAGValidationError,
 };
-use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
+use asap_types::ir::operator::{Reduction, Source};
+use asap_types::ir::properties::summary_coverage::{CoverageRegion, SummaryCoverage};
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
     OperatorNode, TimingMemo,
 };
-use asap_types::post_asap::{ExactKind, ExactParams, ExecutionTiming, SummaryUpdate};
-use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Reduction, Schema, Source};
 use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.

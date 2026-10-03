@@ -1,10 +1,9 @@
 //! Coverage composition preserves gaps and rejects duplicate observations.
-use asap_types::{
-    ir::operator_properties::Reduction,
-    ir::summary_coverage::*,
-    post_asap::SummaryUpdate,
-    pre_asap::{ColumnRef, Source},
-};
+use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::operator::Source;
+use asap_types::ir::properties::summary_coverage::*;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::SummaryUpdate;
 fn table(name: &str) -> Source {
     Source::Table {
         table_ref: name.into(),
@@ -88,11 +87,10 @@ fn overlap_and_identity_fail_closed() {
 /// Coverage is logical state metadata, and input rewrites invalidate its proof.
 #[test]
 fn node_coverage_is_required_checked_and_cleared_by_rewrites() {
-    use asap_types::{
-        ir::{ASAPOp, NonASAPOp, Operator, OperatorNode},
-        post_asap::{SketchAlgorithm, SketchKind, SketchParams},
-        pre_asap::{DataType, Field, FieldDataType, Schema},
+    use asap_types::ir::schema::{
+        DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams,
     };
+    use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
     let raw = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: table("flows"),
         predicates: vec![],

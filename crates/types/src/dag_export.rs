@@ -62,10 +62,10 @@ use serde::Serialize;
 
 use crate::cost::CostAnnotation;
 use crate::ir::cse::{structural_hash, HashCache};
-use crate::ir::operator_properties::Source;
+use crate::ir::operator::operator_properties::Source;
+use crate::ir::properties::{AccuracyError, ResultGuarantee};
+use crate::ir::schema::FieldDataType;
 use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
-use crate::post_asap::{AccuracyError, ResultGuarantee};
-use crate::pre_asap::schema::FieldDataType;
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
 /// (predicates, aggregate funcs, schema, sort keys, …) — everything except
@@ -1062,15 +1062,17 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::ir::operator_properties::{GroupKeys, JoinKind, Reduction};
-    use crate::ir::Predicate;
-    use crate::post_asap::{
-        BoundExpr, CompositionOperator, ErrorMetric, GroupingStrategy, GuaranteeSource,
-        ProbabilityExpr, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
+    use crate::ir::operator::agg_intent::AggIntent;
+    use crate::ir::operator::operator_properties::{GroupKeys, JoinKind, Reduction};
+    use crate::ir::properties::{
+        BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     };
-    use crate::pre_asap::agg_intent::AggIntent;
-    use crate::pre_asap::expr_ir::{ColumnRef, ScalarValue};
-    use crate::pre_asap::schema::{DataType, Field, Schema};
+    use crate::ir::scalar::{ColumnRef, ScalarValue};
+    use crate::ir::schema::{DataType, Field, Schema};
+    use crate::ir::schema::{
+        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
+    };
+    use crate::ir::Predicate;
 
     use crate::types::AccuracyTarget;
 
@@ -1728,7 +1730,7 @@ mod tests {
         );
         let root =
             OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::SQLWindowFunc {
-                func: crate::ir::operator_properties::WindowFuncKind::RowNumber,
+                func: crate::ir::operator::operator_properties::WindowFuncKind::RowNumber,
                 args: vec![],
                 partition_by: GroupKeys::none(),
                 order_by: vec![],

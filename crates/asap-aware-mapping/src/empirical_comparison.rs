@@ -1,7 +1,7 @@
 //! Query-matched, fixed-snapshot offline recommendations. Observed error is an
 //! explicit acceptance criterion, never a replacement for formal guarantees.
 
-use asap_types::post_asap::{SketchAlgorithm, SketchParams};
+use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
 
 use crate::empirical_cost::{
@@ -596,8 +596,8 @@ mod tests {
             valid_until_unix_seconds: 200,
             provenance: row.provenance.clone(),
             metrics: ExactResourceMeasurements {
-                resources: asap_types::resources::MeasuredResources {
-                    cpu: asap_types::resources::MeasuredCpu {
+                resources: asap_types::workload::resources::MeasuredResources {
+                    cpu: asap_types::workload::resources::MeasuredCpu {
                         build_cpu_ns: m(1.0),
                         update_cpu_ns: m(5.0),
                         prepare_cpu_ns: m(1000.0),
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn optional_exact_dimensions_cannot_hide_invalid_measurements() {
         let selectors: [fn(
-            &mut asap_types::resources::MeasuredResources,
+            &mut asap_types::workload::resources::MeasuredResources,
         ) -> &mut Option<Measurement>; 4] = [
             |r| &mut r.cpu.merge_cpu_ns,
             |r| &mut r.serialized_bytes,

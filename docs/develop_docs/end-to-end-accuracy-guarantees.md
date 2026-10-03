@@ -40,7 +40,7 @@ The main implementation locations are:
 
 | Concern | Location |
 | --- | --- |
-| Guarantee and error vocabulary | `asap_types::post_asap::guarantee` |
+| Guarantee and error vocabulary | `asap_types::ir::properties::guarantee` |
 | Accuracy model and built-in propagation | `asap_aware_mapping::accuracy` |
 | Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
 | Parameter sizing hooks | `asap_aware_mapping::cost_model` |

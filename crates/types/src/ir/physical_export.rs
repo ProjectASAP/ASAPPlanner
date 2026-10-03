@@ -2,7 +2,7 @@
 //!
 //! Same operator payloads as the logical export, plus the execution timing
 //! (data state) of every node and edge. The input must already be timed
-//! ([`super::timing::apply_materialization_timings`]); export reads each node's
+//! ([`crate::ir::properties::timing::apply_materialization_timings`]); export reads each node's
 //! timing and does not re-run data-state validation.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -11,16 +11,16 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::asap::ASAPOp;
-use super::node::{Operator, OperatorNode};
-use super::timing::data_state;
-use super::wire::{grouping_compatibility, input_edges, payload_of};
-use super::wire::{EdgeRole, GroupingEdgeCompatibility, LogicalASAPOperatorPayload};
-use crate::post_asap::execution_data_state::{
+use crate::ir::operator::asap::ASAPOp;
+use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::properties::execution::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
-use crate::post_asap::guarantee::ResultGuarantee;
-use crate::pre_asap::schema::{FieldDataType, Schema};
+use crate::ir::properties::guarantee::ResultGuarantee;
+use crate::ir::properties::timing::data_state;
+use crate::ir::schema::{FieldDataType, Schema};
+use crate::ir::wire::{grouping_compatibility, input_edges, payload_of};
+use crate::ir::wire::{EdgeRole, GroupingEdgeCompatibility, LogicalASAPOperatorPayload};
 
 pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 8;
 
@@ -37,7 +37,7 @@ pub enum WindowEdgeCompatibility {
 }
 
 /// Node ids are shared with the logical export, since payloads embed them.
-pub type PhysicalASAPNodeId = super::wire::LogicalASAPNodeId;
+pub type PhysicalASAPNodeId = crate::ir::wire::LogicalASAPNodeId;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,7 +50,7 @@ pub struct PhysicalASAPDAGNode {
     pub output_schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     #[serde(default)]
-    pub coverage: Option<super::summary_coverage::SummaryCoverage>,
+    pub coverage: Option<crate::ir::properties::summary_coverage::SummaryCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -315,7 +315,7 @@ impl PhysicalASAPNodeIdentityMap {
         self.nodes_by_id
             .iter()
             .position(|candidate| Rc::ptr_eq(candidate, node))
-            .map(|id| super::wire::LogicalASAPNodeId(id as u32))
+            .map(|id| crate::ir::wire::LogicalASAPNodeId(id as u32))
     }
 
     pub fn operator_node(&self, id: PhysicalASAPNodeId) -> Option<&Rc<OperatorNode>> {
@@ -336,7 +336,7 @@ pub fn compile_physical_asap_dag(
 }
 
 /// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`super::timing::apply_materialization_timings`]); the data-state
+/// timing (see [`crate::ir::properties::timing::apply_materialization_timings`]); the data-state
 /// rules were checked by that pass and are not re-run here.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
@@ -413,7 +413,7 @@ impl Exporter {
                 }
             }
         }
-        let id = super::wire::LogicalASAPNodeId(self.nodes.len() as u32);
+        let id = crate::ir::wire::LogicalASAPNodeId(self.nodes.len() as u32);
         let payload = {
             let ids = &self.ids;
             let mut id_of = |n: &Rc<OperatorNode>| ids[&Rc::as_ptr(n)];

@@ -29,9 +29,9 @@ use asap_aware_mapping::{PlanningModels, Realization};
 use asap_types::ir::export::{
     compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPDAGDocument,
 };
+use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::post_asap::SketchAlgorithm;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,

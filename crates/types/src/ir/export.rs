@@ -9,16 +9,18 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use super::physical_export::*;
-pub use super::wire::NonASAPOpKind;
-use super::wire::{grouping_compatibility, input_edges, payload_of};
-pub use super::wire::{
+pub use crate::ir::physical_export::*;
+use crate::ir::properties::guarantee::ResultGuarantee;
+use crate::ir::schema::{FieldDataType, Schema};
+pub use crate::ir::wire::NonASAPOpKind;
+use crate::ir::wire::{grouping_compatibility, input_edges, payload_of};
+pub use crate::ir::wire::{
     EdgeRole, GroupingEdgeCompatibility, LogicalASAPNodeId, LogicalASAPOperatorPayload,
     WirePredicate, WireProjectItem, WireScalarExpr, WireSortKey,
 };
-use super::{ASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, SchemaDerivationError};
-use crate::post_asap::guarantee::ResultGuarantee;
-use crate::pre_asap::{FieldDataType, Schema};
+use crate::ir::{
+    ASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, SchemaDerivationError,
+};
 
 /// Independent envelope version: this replaces the older phase-assigned format.
 pub const LOGICAL_ASAP_DAG_WIRE_VERSION: u32 = 1;
@@ -32,7 +34,7 @@ pub struct LogicalASAPDAGNode {
     pub output_schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     #[serde(default)]
-    pub coverage: Option<super::summary_coverage::SummaryCoverage>,
+    pub coverage: Option<crate::ir::properties::summary_coverage::SummaryCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,7 +188,10 @@ impl LogicalASAPDAG {
                             .ok_or(LogicalASAPDAGValidationError::InvalidCoverage(node.id))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let merged = super::summary_coverage::SummaryCoverage::merge_disjoint(&coverage)
+                let merged =
+                    crate::ir::properties::summary_coverage::SummaryCoverage::merge_disjoint(
+                        &coverage,
+                    )
                     .map_err(|_| LogicalASAPDAGValidationError::InvalidCoverage(node.id))?;
                 if node.coverage.as_ref() != Some(&merged) {
                     return Err(LogicalASAPDAGValidationError::InvalidCoverage(node.id));

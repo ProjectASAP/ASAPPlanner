@@ -3,8 +3,8 @@ use std::rc::Rc;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use asap_frontend_common::UnresolvedScalar as Unresolved;
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::ExprSemantics;
-use asap_types::pre_asap::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 
 use crate::error::SqlError as LoweringError;
 
@@ -62,7 +62,7 @@ impl SqlLowerer<'_> {
                 };
                 Ok(Unresolved::Cast {
                     expr: Box::new(Unresolved::Literal(text)),
-                    to: asap_types::pre_asap::schema::DataType::Date,
+                    to: asap_types::ir::schema::DataType::Date,
                     try_cast: false,
                 })
             }
@@ -303,7 +303,7 @@ pub(super) fn split_disjuncts(expr: &Expr) -> Vec<&Expr> {
 mod tests {
     use super::*;
     use crate::sql::SqlCatalog;
-    use asap_types::pre_asap::schema::DataType;
+    use asap_types::ir::schema::DataType;
     use datafusion::common::ScalarValue as DfScalarValue;
 
     // Typed Arrow dates normalize to the same typed form as SQL date casts.
