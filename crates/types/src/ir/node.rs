@@ -112,7 +112,7 @@ impl OperatorNode {
         let schema = operator.output_schema()?;
         let mut node = Self::with_schema(operator, schema);
         if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
-            node.observation_extent = Some(op.merged_extent()?);
+            node.coverage = Some(op.merged_coverage()?);
         }
         Ok(node)
     }
@@ -165,7 +165,10 @@ impl OperatorNode {
 
     /// Summary nodes whose state can be composed must declare coverage.
     pub fn requires_coverage(&self) -> bool {
-        matches!(self.asap(), Some(ASAPOp::SummaryAgg { .. }))
+        matches!(
+            self.asap(),
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryMerge { .. })
+        )
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -327,10 +330,8 @@ impl OperatorNode {
                 None => {}
             }
             if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
-                if node.observation_extent.as_ref() != Some(&op.merged_extent()?) {
-                    return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "retained merge coverage disagrees with input union".into(),
-                    ));
+                if node.coverage.as_ref() != Some(&op.merged_coverage()?) {
+                    return Err(CoverageError::MergeOutputMismatch.into());
                 }
             }
             node.operator.validate_inputs()?;
