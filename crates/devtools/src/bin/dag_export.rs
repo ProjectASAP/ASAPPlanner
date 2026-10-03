@@ -152,7 +152,7 @@ struct ComparisonScopeEvidence {
     time_scope: String,
     lookback_ms: Option<u64>,
     as_of_ms: Option<u64>,
-    sources: Vec<asap_aware_mapping::physical_operator_statistics::SourceCoverage>,
+    sources: Vec<asap_aware_mapping::physical_operator_statistics::ScanSelection>,
     #[serde(default = "CacheProfile::no_cache")]
     cache_profile: CacheProfile,
 }
@@ -1700,7 +1700,7 @@ mod tests {
         ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator,
     };
     use asap_aware_mapping::physical_operator_statistics::{
-        EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
+        EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
     };
     use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
     use asap_devtools::PromqlError;
@@ -2178,7 +2178,7 @@ mod tests {
             time_scope: "longitudinal".into(),
             lookback_ms: Some(10_000),
             as_of_ms: Some(1_000),
-            sources: vec![SourceCoverage {
+            sources: vec![ScanSelection {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
@@ -2261,7 +2261,7 @@ mod tests {
                 id: "summary-read".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(coverage),
+                scan_selection: Some(coverage),
                 output_buffer_bytes: 2_400,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,

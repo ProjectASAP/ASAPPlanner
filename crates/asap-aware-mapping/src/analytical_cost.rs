@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::physical_operator_statistics::{
     validate_comparison_scopes, ComparisonScope, EdgeStatistics, OperatorStatistics,
-    OperatorStatisticsProvider, PromqlEdgeStatistics, PromqlValueKind, SourceCoverage,
+    OperatorStatisticsProvider, PromqlEdgeStatistics, PromqlValueKind, ScanSelection,
 };
 
 /// Version of the analytical formulas applied to evidenced physical plans.
@@ -383,9 +383,9 @@ pub struct PhysicalDAGNode {
     pub operator: PhysicalOperator,
     pub children: Vec<String>,
     /// Exact comparison-scope coverage consumed by a scan. Non-scan nodes
-    /// leave this empty. Reusing `SourceCoverage` prevents a physical plan
+    /// leave this empty. Reusing `ScanSelection` prevents a physical plan
     /// from naming a source independently of its snapshot and predicates.
-    pub source_coverage: Option<SourceCoverage>,
+    pub scan_selection: Option<ScanSelection>,
     /// Maximum transient edge buffer, distinct from logical `output_bytes`.
     pub output_buffer_bytes: u64,
     /// State that remains live after this node finishes (zero for ordinary
@@ -573,9 +573,10 @@ pub fn estimate_physical_dag_with_cache(
         let node_statistics = &resolved_statistics[id];
         match node.operator {
             PhysicalOperator::Scan => {
-                let coverage = node.source_coverage.as_ref().ok_or_else(|| {
-                    AnalyticalCostError::MissingScanSourceCoverage(node.id.clone())
-                })?;
+                let coverage = node
+                    .scan_selection
+                    .as_ref()
+                    .ok_or_else(|| AnalyticalCostError::MissingScanSelection(node.id.clone()))?;
                 if !scope.sources.contains(coverage) {
                     return Err(AnalyticalCostError::ScanOutsideComparisonScope(
                         node.id.clone(),
@@ -585,9 +586,9 @@ pub fn estimate_physical_dag_with_cache(
                     consumed_sources.push(coverage);
                 }
             }
-            _ if node.source_coverage.is_some() => {
+            _ if node.scan_selection.is_some() => {
                 return Err(AnalyticalCostError::InvalidPhysicalDAG(
-                    "only scan nodes may declare source coverage",
+                    "only scan nodes may declare scan selection",
                 ));
             }
             _ => {}
@@ -2199,9 +2200,9 @@ pub enum AnalyticalCostError {
     UnsupportedSummaryOperation(&'static str),
     #[error("required comparison-scope field {0} is missing")]
     MissingComparisonScope(&'static str),
-    #[error("scan node {0} does not declare source coverage")]
-    MissingScanSourceCoverage(String),
-    #[error("scan node {0} reads source coverage outside the comparison scope")]
+    #[error("scan node {0} does not declare scan selection")]
+    MissingScanSelection(String),
+    #[error("scan node {0} reads scan selection outside the comparison scope")]
     ScanOutsideComparisonScope(String),
     #[error("raw and candidate comparison scopes differ in {0}")]
     ComparisonScopeMismatch(&'static str),
@@ -2234,7 +2235,7 @@ mod tests {
     use crate::physical_operator_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, ComparisonScope, EdgeStatistics,
         OperatorStatistics, PartitionStatistics, PromqlBinaryEdgeStatistics, PromqlEdgeStatistics,
-        PromqlUnaryEdgeStatistics, PromqlValueKind, SourceCoverage, UnaryEdgeStatistics,
+        PromqlUnaryEdgeStatistics, PromqlValueKind, ScanSelection, UnaryEdgeStatistics,
     };
 
     /// Analytical estimates reuse the shared dimensions while preserving exact
@@ -2475,7 +2476,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(comparison_scope().sources[0].clone()),
+                scan_selection: Some(comparison_scope().sources[0].clone()),
                 output_buffer_bytes: 8,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -2484,7 +2485,7 @@ mod tests {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 8,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -2814,7 +2815,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(coverage),
+                scan_selection: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -2823,7 +2824,7 @@ mod tests {
                 id: "left".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -2832,7 +2833,7 @@ mod tests {
                 id: "right".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -2841,7 +2842,7 @@ mod tests {
                 id: "root".into(),
                 operator: PhysicalOperator::Concat,
                 children: vec!["left".into(), "right".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 8,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -2905,7 +2906,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(coverage),
+                scan_selection: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::Once,
@@ -2914,7 +2915,7 @@ mod tests {
                 id: "state".into(),
                 operator: aggregate_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 16,
                 retained_bytes: 32,
                 execution: ExecutionMultiplicity::Once,
@@ -2926,7 +2927,7 @@ mod tests {
                     offset: 0,
                 },
                 children: vec!["state".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 16,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -2987,7 +2988,7 @@ mod tests {
                 lookback: Some(DurationMs(300_000)),
                 as_of: Some(TimestampMs(1_000)),
             },
-            sources: vec![SourceCoverage {
+            sources: vec![ScanSelection {
                 source: Source::Table {
                     table_ref: "metrics".into(),
                 },
@@ -3059,7 +3060,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(coverage),
+                scan_selection: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -3068,7 +3069,7 @@ mod tests {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -3134,7 +3135,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(coverage),
+                scan_selection: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -3143,7 +3144,7 @@ mod tests {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -3197,7 +3198,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(coverage),
+                scan_selection: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -3206,7 +3207,7 @@ mod tests {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 0,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -3245,7 +3246,7 @@ mod tests {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
-            source_coverage: Some(SourceCoverage {
+            scan_selection: Some(ScanSelection {
                 source: asap_types::pre_asap::query_expr::Source::Table {
                     table_ref: "other_metrics".into(),
                 },
@@ -3283,7 +3284,7 @@ mod tests {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
-            source_coverage: None,
+            scan_selection: None,
             output_buffer_bytes: 10,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
@@ -3302,9 +3303,7 @@ mod tests {
 
         assert_eq!(
             estimate_physical_dag(&nodes, "scan", &comparison_scope(), &provided),
-            Err(AnalyticalCostError::MissingScanSourceCoverage(
-                "scan".into()
-            ))
+            Err(AnalyticalCostError::MissingScanSelection("scan".into()))
         );
     }
 
@@ -3312,7 +3311,7 @@ mod tests {
     fn physical_dag_rejects_an_unconsumed_scope_source() {
         let mut scope = comparison_scope();
         let coverage = scope.sources[0].clone();
-        scope.sources.push(SourceCoverage {
+        scope.sources.push(ScanSelection {
             source: asap_types::pre_asap::query_expr::Source::Table {
                 table_ref: "auxiliary".into(),
             },
@@ -3324,7 +3323,7 @@ mod tests {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
-            source_coverage: Some(coverage),
+            scan_selection: Some(coverage),
             output_buffer_bytes: 10,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
@@ -3357,7 +3356,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(coverage),
+                scan_selection: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -3366,7 +3365,7 @@ mod tests {
                 id: "aggregate".into(),
                 operator: aggregate_operator(),
                 children: vec!["scan".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 16,
                 retained_bytes: 32,
                 execution: ExecutionMultiplicity::Once,
@@ -3411,7 +3410,7 @@ mod tests {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
-            source_coverage: Some(coverage),
+            scan_selection: Some(coverage),
             output_buffer_bytes: 10,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
@@ -3642,7 +3641,7 @@ mod tests {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
-                source_coverage: Some(comparison_scope().sources[0].clone()),
+                scan_selection: Some(comparison_scope().sources[0].clone()),
                 output_buffer_bytes: 0,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,

@@ -9,7 +9,7 @@ use crate::analytical_cost::{
     PromqlSeriesSampleKind, PromqlVectorCardinality,
 };
 use crate::physical_operator_statistics::{
-    ComparisonScope, EdgeStatistics, OperatorStatistics, SourceCoverage,
+    ComparisonScope, EdgeStatistics, OperatorStatistics, ScanSelection,
 };
 
 pub struct PhysicalNodeRequest<'a> {
@@ -18,7 +18,7 @@ pub struct PhysicalNodeRequest<'a> {
     pub occurrence: usize,
     pub synthetic: bool,
     pub children: &'a [String],
-    pub source_coverage: Option<&'a SourceCoverage>,
+    pub scan_selection: Option<&'a ScanSelection>,
 }
 
 pub trait PhysicalNodeEvidenceProvider {
@@ -78,7 +78,7 @@ pub fn lower_query_physical_dag(
             occurrence: usize,
             synthetic: bool,
             children: &[String],
-            source_coverage: Option<&SourceCoverage>,
+            scan_selection: Option<&ScanSelection>,
         ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
             let evidence = self.provider.evidence(PhysicalNodeRequest {
                 logical_node: query,
@@ -86,7 +86,7 @@ pub fn lower_query_physical_dag(
                 occurrence,
                 synthetic,
                 children,
-                source_coverage,
+                scan_selection,
             })?;
             if evidence.physical_id.is_empty() {
                 return Err(AnalyticalCostError::InvalidPhysicalDAG(
@@ -101,14 +101,14 @@ pub fn lower_query_physical_dag(
             evidence: PhysicalNodeEvidence,
             operator: PhysicalOperator,
             children: Vec<String>,
-            source_coverage: Option<SourceCoverage>,
+            scan_selection: Option<ScanSelection>,
         ) -> Result<String, AnalyticalCostError> {
             let id = evidence.physical_id.clone();
             let node = PhysicalDAGNode {
                 id: id.clone(),
                 operator,
                 children,
-                source_coverage,
+                scan_selection,
                 output_buffer_bytes: evidence.output_buffer_bytes,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -837,7 +837,7 @@ fn validate_source_consumption(
     let consumed = nodes
         .iter()
         .filter(|node| matches!(node.operator, PhysicalOperator::Scan))
-        .filter_map(|node| node.source_coverage.as_ref())
+        .filter_map(|node| node.scan_selection.as_ref())
         .collect::<Vec<_>>();
     for coverage in &consumed {
         if !scope.sources.contains(coverage) {
@@ -959,7 +959,7 @@ fn bind_scan_coverage(
     source: &asap_types::pre_asap::Source,
     predicates: &[asap_types::pre_asap::Predicate],
     scope: &ComparisonScope,
-) -> Result<SourceCoverage, AnalyticalCostError> {
+) -> Result<ScanSelection, AnalyticalCostError> {
     let mut matches = scope.sources.iter().filter(|coverage| {
         coverage.source == *source
             && coverage.predicates == predicates
@@ -971,7 +971,7 @@ fn bind_scan_coverage(
         .ok_or_else(|| AnalyticalCostError::ScanOutsideComparisonScope(node_id.into()))?;
     if matches.any(|candidate| candidate != &coverage) {
         return Err(AnalyticalCostError::InvalidPhysicalDAG(
-            "scan source coverage is ambiguous",
+            "scan selection is ambiguous",
         ));
     }
     Ok(coverage)
@@ -981,7 +981,7 @@ fn bind_info_coverage(
     node_id: &str,
     selector: &[asap_types::pre_asap::InfoMatcher],
     scope: &ComparisonScope,
-) -> Result<SourceCoverage, AnalyticalCostError> {
+) -> Result<ScanSelection, AnalyticalCostError> {
     use asap_types::pre_asap::{CompareOpKind, Source};
 
     let mut metric: Option<&str> = None;
@@ -1009,7 +1009,7 @@ fn bind_info_coverage(
         .ok_or_else(|| AnalyticalCostError::ScanOutsideComparisonScope(node_id.into()))?;
     if matches.next().is_some() {
         return Err(AnalyticalCostError::InvalidPhysicalDAG(
-            "info source coverage is ambiguous",
+            "info scan selection is ambiguous",
         ));
     }
     Ok(coverage)
@@ -1383,7 +1383,7 @@ mod tests {
         }
     }
 
-    fn scope(sources: Vec<SourceCoverage>) -> ComparisonScope {
+    fn scope(sources: Vec<ScanSelection>) -> ComparisonScope {
         ComparisonScope {
             data_arrival: DataArrival::AtRest,
             planning_time: TimestampMs(1_000),
@@ -1404,8 +1404,8 @@ mod tests {
     fn coverage(
         source: asap_types::pre_asap::Source,
         predicates: Vec<asap_types::pre_asap::Predicate>,
-    ) -> SourceCoverage {
-        SourceCoverage {
+    ) -> ScanSelection {
+        ScanSelection {
             source,
             source_snapshot_id: "snapshot-1".into(),
             predicates,
@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn info_source_coverage_includes_symbolic_selector_matchers() {
+    fn info_scan_selection_includes_symbolic_selector_matchers() {
         use asap_types::pre_asap::{CompareOpKind, InfoMatcher, Source};
 
         let selector = vec![InfoMatcher {
@@ -1422,7 +1422,7 @@ mod tests {
             op: CompareOpKind::Eq,
             value: "prod".into(),
         }];
-        let info_coverage = SourceCoverage {
+        let info_coverage = ScanSelection {
             source: Source::TimeSeries {
                 metric: "target_info".into(),
             },
@@ -1611,10 +1611,7 @@ mod tests {
         ));
         let physical_scan = &dag.nodes[0];
         assert_eq!(physical_scan.id, "query-2-scan");
-        assert_eq!(
-            physical_scan.source_coverage,
-            Some(scope.sources[0].clone())
-        );
+        assert_eq!(physical_scan.scan_selection, Some(scope.sources[0].clone()));
         assert_eq!(physical_scan.output_buffer_bytes, 1_024);
         assert_ne!(
             physical_scan.output_buffer_bytes,
@@ -1661,13 +1658,13 @@ mod tests {
             left: Rc::clone(&shared),
             right: Rc::clone(&shared),
         });
-        let source_coverage = coverage(
+        let scan_selection = coverage(
             Source::Table {
                 table_ref: "dimensions".into(),
             },
             vec![],
         );
-        let independent_scope = scope(vec![source_coverage.clone()]);
+        let independent_scope = scope(vec![scan_selection.clone()]);
         let scan_statistics = scan_stats(edge(100, 800), 800);
         let join_statistics = OperatorStatistics::HashJoin {
             edges: BinaryEdgeStatistics {
@@ -1703,7 +1700,7 @@ mod tests {
                 statistics,
             })
         };
-        let shared_scope = scope(vec![source_coverage]);
+        let shared_scope = scope(vec![scan_selection]);
         let no_cache = crate::analytical_cost::CacheProfile::no_cache();
         let shared_dag = lower_query_physical_dag(&root, &shared_scope, &shared_provider).unwrap();
         assert_eq!(shared_dag.nodes.len(), 2);
@@ -1860,13 +1857,13 @@ mod tests {
             child: limit,
         });
 
-        let source_coverage = coverage(
+        let scan_selection = coverage(
             Source::Table {
                 table_ref: "events".into(),
             },
             vec![],
         );
-        let scope = scope(vec![source_coverage]);
+        let scope = scope(vec![scan_selection]);
         let scan_statistics = scan_stats(edge(1_000, 8_000), 8_000);
         let dedup_statistics = OperatorStatistics::HashDeduplicate {
             edges: unary_edges(edge(800, 3_200), edge(500, 2_000)),
@@ -2032,7 +2029,7 @@ mod tests {
         assert_eq!(
             duplicate_scope.validate(),
             Err(AnalyticalCostError::MissingComparisonScope(
-                "duplicate source coverage"
+                "duplicate scan selection"
             ))
         );
 
@@ -2142,7 +2139,7 @@ mod tests {
         assert_eq!(
             lower_query_physical_dag(&root, &ambiguous_scope, &scripted(&conflicting)),
             Err(AnalyticalCostError::InvalidPhysicalDAG(
-                "scan source coverage is ambiguous"
+                "scan selection is ambiguous"
             ))
         );
 
