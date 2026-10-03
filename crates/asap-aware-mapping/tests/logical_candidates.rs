@@ -239,7 +239,7 @@ fn topk_keeps_both_specialized_heap_choices() {
 /// A workload candidate replaces only chosen targets, declares whole-source
 /// coverage on the summary, and keeps unchosen plans identical.
 #[test]
-fn composed_candidate_replaces_chosen_target_with_summary_readout() {
+fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
     use asap_aware_mapping::logical_candidates::compose_logical_candidate;
     use asap_types::ir::ASAPOp;
     let producer = aggregate(AggIntent::Cardinality {
@@ -257,7 +257,7 @@ fn composed_candidate_replaces_chosen_target_with_summary_readout() {
         panic!("operator root expected")
     };
     let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
-        panic!("summary readout expected")
+        panic!("summary evaluation expected")
     };
     let coverage = summary_input.coverage.as_ref().unwrap();
     assert_eq!(
