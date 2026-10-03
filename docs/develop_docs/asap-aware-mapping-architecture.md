@@ -60,9 +60,12 @@ Terminology used in the diagram:
   realizes an operation as a concrete ASAP realization; **post-ASAP** means
   the resulting realization form.
 - A **DAG** (directed acyclic graph) represents query operators whose sub-DAGs
-  may be shared. **CSE** (common subexpression elimination) finds equivalent
-  sub-DAGs and represents legal reuse by making them the same shared node.
-  Rust's `Rc<T>` (reference-counted pointer) records that shared node identity.
+  may be shared. **Sub-DAG sharing** means multiple consumers reference one
+  operator and its upstream dependencies. **Common sub-DAG sharing** is the
+  CSE (common subexpression elimination) step that finds eligible, structurally
+  identical sub-DAGs and makes them one shared instance. Rust's `Rc<T>`
+  (reference-counted pointer) records that identity. Physical planning chooses
+  how to execute or materialize the common computation.
 - A **target** is one replaceable site. A **candidate** is one valid alternative
   for it. `Replacement::Summary` is a constructed post-ASAP summary—maintained state
   such as an exact accumulator or an approximate sketch—while
