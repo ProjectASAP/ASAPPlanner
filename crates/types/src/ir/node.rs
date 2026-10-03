@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
+use super::operator_properties::Reduction;
 use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
+use crate::post_asap::SummaryUpdate;
 use crate::pre_asap::schema::Schema;
 
 /// The output category of an operator, derived from the operation and its
@@ -161,6 +163,18 @@ impl OperatorNode {
         }
         self.coverage = Some(coverage);
         Ok(self)
+    }
+
+    /// What a summary state is updated with and how it is grouped: the
+    /// `SummaryAgg` fields, or those shared by a `SummaryMerge`'s inputs.
+    pub fn summary_update(&self) -> Option<(&SummaryUpdate, &Reduction)> {
+        match self.asap()? {
+            ASAPOp::SummaryAgg {
+                input, reduction, ..
+            } => Some((input, reduction)),
+            ASAPOp::SummaryMerge { children } => children.first()?.summary_update(),
+            _ => None,
+        }
     }
 
     /// Summary nodes whose state can be composed must declare coverage.
