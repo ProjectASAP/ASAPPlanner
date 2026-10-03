@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
+use super::operator_properties::Reduction;
 use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
+use crate::post_asap::SummaryUpdate;
 use crate::pre_asap::schema::Schema;
 
 /// The output category of an operator, derived from the operation and its
@@ -106,7 +108,11 @@ impl OperatorNode {
     /// ASAP operator, ...).
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
-        Ok(Self::with_schema(operator, schema))
+        let mut node = Self::with_schema(operator, schema);
+        if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
+            node.coverage = Some(op.merged_coverage()?);
+        }
+        Ok(node)
     }
 
     /// Build a node with caller-supplied output names and qualifiers. For
@@ -155,9 +161,24 @@ impl OperatorNode {
         Ok(self)
     }
 
+    /// What a summary state is updated with and how it is grouped: the
+    /// `SummaryAgg` fields, or those shared by a `SummaryMerge`'s inputs.
+    pub fn summary_update(&self) -> Option<(&SummaryUpdate, &Reduction)> {
+        match self.asap()? {
+            ASAPOp::SummaryAgg {
+                input, reduction, ..
+            } => Some((input, reduction)),
+            ASAPOp::SummaryMerge { children } => children.first()?.summary_update(),
+            _ => None,
+        }
+    }
+
     /// Summary nodes whose state can be composed must declare coverage.
     pub fn requires_coverage(&self) -> bool {
-        matches!(self.asap(), Some(ASAPOp::SummaryAgg { .. }))
+        matches!(
+            self.asap(),
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryMerge { .. })
+        )
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -315,6 +336,11 @@ impl OperatorNode {
                 }
                 None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
                 None => {}
+            }
+            if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
+                if node.coverage.as_ref() != Some(&op.merged_coverage()?) {
+                    return Err(CoverageError::MergeOutputMismatch.into());
+                }
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {

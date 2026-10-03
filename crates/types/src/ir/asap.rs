@@ -6,6 +6,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
+use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::operator_properties::Reduction;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
@@ -39,9 +40,7 @@ pub enum ASAPOp {
     },
     /// Read an exact accumulator's state as its finalized value: the
     /// maintenance-to-read boundary before query-time operators.
-    FinalizeExactAccumulator {
-        child: Rc<OperatorNode>,
-    },
+    FinalizeExactAccumulator { child: Rc<OperatorNode> },
     /// Maintain the full declared population, including membership changes.
     MaintainPopulation {
         child: Rc<OperatorNode>,
@@ -52,10 +51,9 @@ pub enum ASAPOp {
         child: Rc<OperatorNode>,
         evaluation: PopulationStatistic,
     },
-    // ── Reserved: migrated but unimplemented (§1.3 of the proposal) ──
-    SummaryMerge {
-        children: Vec<Rc<OperatorNode>>,
-    },
+    /// Merge compatible partial states for the same grouping and family.
+    SummaryMerge { children: Vec<Rc<OperatorNode>> },
+    // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
         left: Rc<OperatorNode>,
         right: Rc<OperatorNode>,
@@ -186,11 +184,7 @@ impl ASAPOp {
         use ASAPOp::*;
         matches!(
             self,
-            SummaryMerge { .. }
-                | SummarySubtract { .. }
-                | SummaryDelete { .. }
-                | SummaryJoin { .. }
-                | Extension { .. }
+            SummarySubtract { .. } | SummaryDelete { .. } | SummaryJoin { .. } | Extension { .. }
         )
     }
 
@@ -202,8 +196,30 @@ impl ASAPOp {
     pub fn produced_state(&self) -> Option<&FieldDataType> {
         match self {
             ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryJoin { family, .. } => Some(family),
+            ASAPOp::SummaryMerge { children } => children.first().and_then(|child| {
+                child
+                    .schema
+                    .fields
+                    .iter()
+                    .find(|field| !field.is_plain())
+                    .map(|field| &field.dtype)
+            }),
             _ => None,
         }
+    }
+
+    /// Derive the merged node's coverage; unknown or overlapping inputs fail closed.
+    pub fn merged_coverage(&self) -> Result<SummaryCoverage, SchemaDerivationError> {
+        let ASAPOp::SummaryMerge { children } = self else {
+            return Err(SchemaDerivationError::InvalidScalarSignature(
+                "coverage merge requires SummaryMerge".into(),
+            ));
+        };
+        let inputs = children
+            .iter()
+            .map(|child| child.coverage.clone().ok_or(CoverageError::UnknownInput))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SummaryCoverage::merge_disjoint(&inputs)?)
     }
 
     /// Output schema derived from the operator and its children. Summary
@@ -405,8 +421,11 @@ impl ASAPOp {
                     .output_schema()?
                 }
             }
-            SummaryMerge { .. }
-            | SummarySubtract { .. }
+            SummaryMerge { children } => {
+                self.validate_inputs()?;
+                children[0].schema.clone()
+            }
+            SummarySubtract { .. }
             | SummaryDelete { .. }
             | SummaryJoin { .. }
             | Extension { .. } => return Err(Self::unimplemented()),
@@ -444,6 +463,46 @@ impl ASAPOp {
             }
         };
         match self {
+            SummaryMerge { children } => {
+                let Some(first) = children.first() else {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "summary merge requires at least one state input".into(),
+                    ));
+                };
+                // Matching state parameters and grouping positions are necessary;
+                // matching names alone cannot prove two states compatible.
+                if first
+                    .schema
+                    .fields
+                    .iter()
+                    .filter(|field| !field.is_plain())
+                    .count()
+                    != 1
+                {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "summary merge requires exactly one state column".into(),
+                    ));
+                }
+                for child in children {
+                    needs_state(child, "SummaryMerge")?;
+                    if child.schema != first.schema {
+                        return Err(SchemaDerivationError::InvalidScalarSignature(
+                            "summary merge inputs must have identical state and grouping schemas"
+                                .into(),
+                        ));
+                    }
+                }
+                // Coverage records only time and population; what each state
+                // summarizes and how it is grouped come from the producers.
+                let update = first.summary_update();
+                if update.is_none() || children.iter().any(|c| c.summary_update() != update) {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "summary merge inputs must share update expression and reduction".into(),
+                    ));
+                }
+                self.merged_coverage()?;
+                Ok(())
+            }
             SummaryEstimate {
                 summary_input,
                 query,
