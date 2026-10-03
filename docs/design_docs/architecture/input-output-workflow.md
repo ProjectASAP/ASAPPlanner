@@ -18,7 +18,7 @@ Post-ASAP alternatives for the workload.
 | `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | No implicit default. Set `None` when unavailable for non-PromQL workloads; PromQL requires `Some(DataWorkload)` with a nonzero ingestion interval. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; `now_ms` and, when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering; `now_ms` is required for PromQL lowering |
 | Planning models | Candidate cost/ranking and accuracy composition/checking | Used by the relevant APIs; built-in `DefaultCostModel` and `DefaultAccuracyModel` are available |
-| External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization or lifecycle decision depends on them; absence is not proof |
+| External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization depends on them; absence is not proof |
 
 Frontend lowering and candidate search are stages within this workflow, not
 additional end-to-end inputs. See [Inputs](#inputs) for the nested workload
@@ -30,13 +30,14 @@ fields and [frontend dependencies](#frontend-specific-dependencies).
 |---|---|---|
 | `CandidateLogicalASAPDAGs<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The ASAPPlanner output |
 
-[Ranking](#ranked-view), [selection and
-DAG assembly](#selection-and-dag-assembly), and
-[summary-maintenance lifecycle](#summary-maintenance-lifecycle-aware-helper) APIs operate on this `CandidateLogicalASAPDAGs`.
+[Ranking](#ranked-view) and [selection and
+DAG assembly](#selection-and-dag-assembly) APIs operate on this `CandidateLogicalASAPDAGs`.
 These are alternative uses of the candidate space, not mandatory sequential
-stages. `CandidateLogicalASAPDAGs` itself has no selected summary-maintenance lifecycle, and
-its candidates do not choose precompute versus query-time placement: a chosen
-lifecycle assignment sets each node's execution timing.
+stages. Its candidates do not choose ingestion-time versus query-time
+placement: a `MaterializationAssignment` sets each node's execution timing.
+Stage 2 materialization (#509) will decide per sub-DAG whether to materialize
+and whether at ingestion or query time; until then every summary runs at query
+time.
 
 The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
 produce a deployed executable plan; downstream systems bind physical operators,
@@ -58,7 +59,7 @@ PlanningWorkload + frontend dependencies + planning models/evidence
 
 Suppose a dashboard evaluates `count_over_time(up[5m])` once a minute, and
 `up` receives a sample every 15 seconds. This diagram traces the concrete
-inputs and the three possible uses of the same candidate space:
+inputs and the two possible uses of the same candidate space:
 
 ```mermaid
 flowchart TD
@@ -72,10 +73,6 @@ flowchart TD
     I["cost_sorted: inspect choices"]
     G["global_selection + assemble_selected_dag(root)"]
     L["One selected Post-ASAP DAG; the exact pre-ASAP sub-DAG if no optimization is selected"]
-    X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
-    H["Summary-maintenance-lifecycle-aware selection"]
-    HM["Assemble one selected DAG and decide summary maintenance"]
-    O["SummaryMaintenanceLifecyclePlan: assembled DAG root + maintenance/recompute decision"]
     B["Backend: bind physical operators, deploy, and execute"]
     Q --> F
     D --> F
@@ -83,16 +80,13 @@ flowchart TD
     F --> R --> S --> P
     P --> I
     P --> G --> L --> B
-    P --> H
-    X --> H --> HM --> O --> B
 ```
 
 “Predictable” says the query is known in advance; it is independent of its
 one-minute recurrence. The `CandidateLogicalASAPDAGs` may contain an exact count-summary
-realization, but it is not a deployed query. Without the extra lifecycle
-inputs, the caller can still inspect candidates or obtain a logical DAG; it
-cannot conclude that maintaining a summary is cheaper than recomputing raw
-results.
+realization, but it is not a deployed query. The caller can inspect candidates
+or obtain a logical DAG; deciding whether maintaining a summary is cheaper than
+recomputing raw results belongs to Stage 2 materialization (#509).
 
 For contrast, a one-time SQL query needs a catalog but need not supply data
 arrival evidence merely to inspect logical alternatives:
@@ -110,8 +104,7 @@ flowchart LR
 ```
 
 In this SQL example, `data_workload` can be `None` if the chosen lowering and
-search rules do not consume it. The lifecycle helper is not needed merely to
-inspect the `CandidateLogicalASAPDAGs`.
+search rules do not consume it.
 
 ---
 
@@ -175,9 +168,9 @@ struct BatchEntry {
 |---|---:|---|---|
 | `query` | Yes | Raw query text in `QueryWorkload.language`. | `count(up)` determines the expression to lower and plan. |
 | `requirements` | Yes | Accuracy and response-latency requirements. Defaults mean exact accuracy and unspecified latency. | An explicit ε target permits approximate candidates; the exact default does not. |
-| `predictability` | Yes as a field; `Unknown` is allowed | Whether the query is ad hoc, known in advance, or unknown. `known_at` records when a predictable query became known. | A report known at 10:00 and scheduled for 11:00 may use a `Prepared` summary before execution. `AdHoc` or `Unknown` does not establish that eligibility. |
+| `predictability` | Yes as a field; `Unknown` is allowed | Whether the query is ad hoc, known in advance, or unknown. `known_at` records when a predictable query became known. | A report known at 10:00 and scheduled for 11:00 could have its summary prepared before execution. `AdHoc` or `Unknown` does not establish that eligibility. |
 | `invocations` | Yes, nonzero | Number of executions in this finite batch. | Ten executions can amortize one summary build differently from one execution. |
-| `execute_at` | Optional | Known execution time. | The `Prepared` case above also needs an execution time; without it Planner cannot establish a preparation window. |
+| `execute_at` | Optional | Known execution time. | The prepared case above also needs an execution time; without it no preparation window can be established. |
 | `time_selection` | Yes | Whether the query follows current data or a historical interval, its lookback, and any fixed upper bound. | A moving five-minute window can require deletion/window support that a fixed historical interval does not. |
 
 ##### `repeating_queries: Option<Vec<RepeatingEntry>>`
@@ -197,7 +190,7 @@ struct RepeatingEntry {
 | `query` | Yes | Raw query text in `QueryWorkload.language`. | `rate(up[5m])` determines the expression to lower and plan. |
 | `demand` | Yes | A nonzero fixed interval, fixed interval with evaluation phase, nonempty explicit schedule, or evidence-backed estimated rate. | A query every minute produces more expected reads over a horizon than one every hour. |
 | `requirements` | Yes | Accuracy and response-latency requirements. | An exact dashboard query cannot use an approximate summary solely because it is cheaper. |
-| `predictability` | Yes as a field; `Unknown` is allowed | Records whether future executions are known in advance; independent of recurrence. | Current lifecycle code does not use this field for repeating entries; set `Unknown` if no predictability claim is available. |
+| `predictability` | Yes as a field; `Unknown` is allowed | Records whether future executions are known in advance; independent of recurrence. | Current planner code does not use this field for repeating entries; set `Unknown` if no predictability claim is available. |
 | `time_selection` | Yes | Event-time scope, optional lookback, and optional fixed `as_of` time. | A live five-minute lookback differs from a fixed historical range when checking maintenance capabilities. |
 
 ##### Shared entry fields
@@ -216,7 +209,7 @@ fields expand as follows:
 
 Frontend lowering produces one Pre-ASAP `Rc<OperatorNode>` root for each normalized
 query entry. The caller must retain each root's association with its workload
-entry for later recurrence and lifecycle planning.
+entry for later recurrence and materialization planning.
 
 #### `data_workload: Option<DataWorkload>`
 
@@ -285,8 +278,8 @@ latter cannot be fabricated by one.
 | Accuracy model | Target-aware search takes an `AccuracyModel`; `DefaultAccuracyModel` is available. Default strategies also use it for candidate construction. | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
 | Cost model | Candidate strategies and `cost_sorted`/`global_selection` use a `CostModel`; `DefaultCostModel` is available. | Ranks or selects candidates. The built-in model is not a measured deployment cost for every physical implementation. |
 | Accuracy/domain evidence | `AccuracyEvidenceProvider`; default strategies use `NoAccuracyEvidence` when no provider is supplied. | Input ranges, nonempty populations, Top-K intervals, and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
-| Measured cost evidence | Supplied through a deployment-specific cost model or physical-evidence provider when cost-based physical/lifecycle comparison is needed. | CPU, memory, and I/O estimates must be comparable before claiming a summary beats raw recomputation. |
-| Runtime/lifecycle capabilities | Passed to lifecycle APIs or checked by deployment-specific providers; `SummaryMaintenanceLifecycleCapabilities::default()` enables all four lifecycle shapes, so it is not proof of actual backend support. | Prevents choosing a maintenance/window operation the intended executor cannot implement. |
+| Measured cost evidence | Supplied through a deployment-specific cost model or physical-evidence provider when cost-based physical comparison is needed. | CPU, memory, and I/O estimates must be comparable before claiming a summary beats raw recomputation. |
+| Runtime capabilities | Checked by deployment-specific providers. | Prevents choosing a maintenance/window operation the intended executor cannot implement. |
 
 For example, the query `quantile_over_time(0.9, data[5m]) /
 quantile_over_time(0.5, data[5m])` does not tell Planner whether the windows
@@ -304,9 +297,6 @@ ratio above, search retains a candidate without a proven root guarantee when
 domain evidence is missing; automatic `global_selection` does not choose it.
 See the [candidate-search reference](../../develop_docs/library-api.md#generate-and-rank-candidates)
 for this backend-selection path.
-
-Additional inputs for a Planner-owned maintenance decision are listed with the
-[summary-maintenance-lifecycle-aware helper](#summary-maintenance-lifecycle-aware-helper).
 
 ---
 
@@ -375,8 +365,7 @@ Then choose the operation matching the caller's responsibility:
 | Purpose | Operation | Result |
 |---|---|---|
 | Inspect candidates or let the backend choose | [Ranked view](#ranked-view), if ranking is useful | Per-target candidate lists and costs |
-| Ask Planner to choose logical computations; backend owns summary maintenance | [Selection and DAG assembly](#selection-and-dag-assembly) | One selected Post-ASAP DAG root per query |
-| Ask Planner to also decide summary maintenance versus raw recomputation | [Summary-maintenance-lifecycle-aware helper](#summary-maintenance-lifecycle-aware-helper) | One plan containing a DAG root and maintenance decisions per query |
+| Ask Planner to choose logical computations | [Selection and DAG assembly](#selection-and-dag-assembly) | One selected Post-ASAP DAG root per query |
 
 ### Ranked view
 
@@ -435,67 +424,8 @@ with some nodes now ASAP operators) and carries no execution timing yet; the
 [API reference](../../develop_docs/library-api.md#api-definition-and-example)
 describes the function signatures and return handling.
 
-This path selects how to compute the query, not how to maintain summary state.
-
-### Summary-maintenance-lifecycle-aware helper
-
-This workflow performs both candidate selection and DAG assembly, incorporating
-summary-maintenance lifecycle costs. Use it when ASAPPlanner owns the decision
-to maintain summaries versus recompute raw data. It is not needed for candidate
-inspection or when the downstream backend owns that decision.
-
-Starting from an existing `CandidateLogicalASAPDAGs`, call these two public helpers in order;
-there is no need to run the ordinary selection/assembly workflow first:
-
-1. `global_selection_with_summary_maintenance_lifecycles` uses the workload
-   binding, lifecycle capabilities, and comparable costs to choose compatible
-   candidates across target sub-DAGs. It returns `GlobalSelection`, not a DAG or a
-   deployment plan.
-2. For each wanted query root, `assemble_selected_dag_with_summary_maintenance_lifecycles`
-   takes that selection and root, constructs a Post-ASAP DAG, compares the
-   selected summary's maintenance cost with raw recomputation, and returns
-   `Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>`.
-   When a summary does not beat a
-   known raw cost, or a required comparable cost is unavailable, the result
-   retains the exact pre-ASAP root (`retain_exact`) and no summary deployments.
-
-As in ordinary selection, one selection call serves the workload and assembly
-is per root. The second helper calls `assemble_selected_dag` internally; callers
-do not need a separate assembly call. Neither helper creates a materialized view
-or deploys runtime state.
-The output is a selected logical DAG with lifecycle decisions, not an executable
-deployment plan. Any claim of optimization is relative to the supplied cost
-model, evidence, and available candidates.
-See the [library guide's lifecycle and capabilities section](../../develop_docs/library-api.md#lifecycle-and-capabilities)
-for an API example and the capability contract.
-
-Across the two calls, the caller supplies these parameters:
-
-| Helper parameter | Source | Required |
-|---|---|---:|
-| `CandidateLogicalASAPDAGs` | Canonical ASAPPlanner output; passed to selection | Yes |
-| `GlobalSelection` and one root | Selection result and a root in that `CandidateLogicalASAPDAGs`; passed to DAG assembly | Yes for each assembled root |
-| Workload binding | `QueryWorkload` plus the workload-entry indices associated with each root | Yes |
-| Planning time (`now_ms`) | Caller clock in Unix milliseconds | Yes |
-| Planning horizon | Caller policy | Conditional: required for finite totals over recurring demand |
-| Data arrival and update rate | `DataWorkload` evidence | Conditional: required to cost continuous maintenance |
-| Lifecycle capabilities | Deployment/runtime provider | Yes for checking deployable lifecycle alternatives |
-| Summary and raw cost information | Cost model and physical-evidence provider | Yes for a cost-based maintenance-versus-recompute decision |
-
-Recurrence and time selection are already fields of the bound `QueryWorkload`;
-they are not duplicated as separate top-level inputs. Similarly, data arrival
-and update rate are read from the optional `DataWorkload`. Missing required
-facts remain unknown rather than being treated as zero.
-
-The per-query output, `SummaryMaintenanceLifecyclePlan`, **contains** the
-Post-ASAP DAG rather than being a parallel representation. It records:
-
-* the assembled Post-ASAP DAG root (`Rc<OperatorNode>`, with execution timing written);
-* lifecycle choices for summary state;
-* planning horizon and expected reads/updates;
-* selected window implementation and guarantees;
-* comparable summary and raw-recomputation costs; and
-* whether raw recomputation was selected.
+This path selects how to compute the query, not whether summary state is
+materialized.
 
 ---
 

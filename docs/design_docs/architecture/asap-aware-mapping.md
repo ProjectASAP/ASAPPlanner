@@ -8,7 +8,7 @@ Given a logical query plan, the mapping layer explores alternative plans that ma
 
 Candidate search takes canonical **Pre-ASAP query roots** and produces
 `CandidateLogicalASAPDAGs`, a compact set of **candidate Post-ASAP DAGs**. Ranking, selection,
-and summary-maintenance lifecycle decisions are subsequent operations over it;
+and DAG assembly are subsequent operations over it;
 see [input, output, and workflows](input-output-workflow.md).
 
 For example, a percentile query might be answered by:
@@ -75,7 +75,6 @@ CandidateLogicalASAPDAGs: compact candidate Post-ASAP DAGs
         |
         +--> inspect / rank
         +--> select and assemble logical DAGs
-        +--> select and assemble with summary-maintenance lifecycle decisions
 ```
 
 ---
@@ -104,9 +103,6 @@ The design is split into focused documents:
 - [ASAPPlanner planner-runtime contract](planner-runtime-contract.md)
   separates planner-owned search and selection from downstream physical
   implementation, deployment, and execution.
-- [Query workloads, data workloads, and summary lifecycle maintenance](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md) separates
-  query-workload properties from data-workload properties and defines ephemeral, prepared,
-  shared, and continuously maintained summary-state alternatives.
 - [Explainability](../../develop_docs/replacement-explanations.md) describes how the planner reports available replacements
   using the same candidate space it optimizes.
 
