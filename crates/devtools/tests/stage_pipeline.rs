@@ -1,11 +1,10 @@
-//! `stage_pipeline` writes a valid viewer document for #509 Example 1: the
-//! language-specific frontends' DAG and the logical ASAP-aware optimization
-//! candidates.
+//! `stage_pipeline` writes a valid four-stage viewer document for #509 Example 1.
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
 use asap_types::ir::flat::FlatDag;
+use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
 use asap_types::ir::QueryRoot;
 use serde_json::Value;
 
@@ -47,9 +46,11 @@ fn validated_dag(value: &Value, queries: usize) {
     }
 }
 
-/// Every DAG is a well-formed flat DAG with one root per query; ids are unique;
-/// only the frontends and logical ASAP-aware optimization are present; the
-/// committed fixture is current.
+/// Every logical DAG is a well-formed flat DAG and every physical DAG validates;
+/// each has one root per query; ids are unique;
+/// Stage 2 maps the composed logical candidates one-to-one with no cost;
+/// Stage 3 accounts for every Stage 2 candidate once and costs exactly the
+/// valid ones; the committed fixture is current.
 #[test]
 fn example1_document_is_valid_and_committed_fixture_is_current() {
     let document = generate(&[]);
@@ -63,8 +64,6 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
     assert_eq!(document["format"], "asap-stage-pipeline/v1");
     let queries = document["workload"]["queries"].as_array().unwrap().len();
     assert_eq!(queries, 2);
-    assert!(document.get("physical_asap_optimization").is_none());
-    assert!(document.get("plan_selection").is_none());
     validated_dag(&document["language_specific_frontends"]["dag"], queries);
 
     let logical = &document["logical_asap_optimization"];
@@ -72,10 +71,48 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
     assert_eq!(logical["capped"], false);
     assert_eq!(logical["combinations"], candidates.len());
     let mut ids = HashSet::new();
+    let mut composed = HashSet::new();
     for candidate in candidates {
-        assert!(ids.insert(candidate["id"].as_str().unwrap()));
-        validated_dag(&candidate["dag"], queries);
+        let id = candidate["id"].as_str().unwrap();
+        assert!(ids.insert(id));
+        if candidate.get("dag").is_some() {
+            composed.insert(id);
+            validated_dag(&candidate["dag"], queries);
+        }
     }
+
+    let physical = document["stage2_physical_asap"]["candidates"]
+        .as_array()
+        .unwrap();
+    let sources: HashSet<_> = physical
+        .iter()
+        .map(|p| p["from_logical"].as_str().unwrap())
+        .collect();
+    assert_eq!(physical.len(), composed.len());
+    assert_eq!(sources, composed);
+    for candidate in physical {
+        assert!(candidate.get("cost").is_none(), "Stage 2 has no cost");
+        let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
+        assert_eq!(dag.roots.len(), queries);
+        PhysicalASAPDAGDocument::new(dag).validate().unwrap();
+    }
+
+    let stage3 = &document["stage3_selection"];
+    let costs = stage3["costs"].as_object().unwrap();
+    let selected = stage3["selected"].as_str().unwrap();
+    let mut accounted = HashSet::from([selected]);
+    for rejection in stage3["rejected"].as_array().unwrap() {
+        let id = rejection["id"].as_str().unwrap();
+        assert!(accounted.insert(id), "{id} accounted for once");
+        assert!(!rejection["reason"].as_str().unwrap().is_empty());
+        assert_eq!(
+            rejection["valid"].as_bool().unwrap(),
+            costs.contains_key(id)
+        );
+    }
+    assert!(costs.contains_key(selected));
+    let all: HashSet<_> = physical.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    assert_eq!(accounted, all);
 }
 
 /// The Cartesian product is cut at `--max-candidates` and says so.
