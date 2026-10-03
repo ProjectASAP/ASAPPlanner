@@ -161,7 +161,7 @@ pub struct SummaryAggregateEvidence {
     /// Index into `ComparisonScope.sources` when this state bootstraps directly
     /// from storage. `None` means its input is an already-materialized child
     /// edge and therefore has no additional source read.
-    pub source_coverage_index: Option<usize>,
+    pub scan_selection_index: Option<usize>,
     /// Provider-owned identity of the physical bootstrap read. Equal source
     /// coverage alone does not prove two independent builds share I/O.
     pub bootstrap_read_identity: String,

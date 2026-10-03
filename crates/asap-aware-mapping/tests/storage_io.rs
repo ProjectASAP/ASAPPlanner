@@ -3,7 +3,7 @@ use asap_aware_mapping::analytical_cost::{
     PhysicalOperator,
 };
 use asap_aware_mapping::physical_operator_statistics::{
-    ComparisonScope, EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
+    ComparisonScope, EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
 };
 use asap_types::pre_asap::query_expr::Source;
 use asap_types::workload::{
@@ -12,7 +12,7 @@ use asap_types::workload::{
 use std::collections::HashMap;
 
 fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
-    let coverage = SourceCoverage {
+    let coverage = ScanSelection {
         source: Source::Table {
             table_ref: "events".into(),
         },
@@ -49,7 +49,7 @@ fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
-            source_coverage: Some(coverage),
+            scan_selection: Some(coverage),
             output_buffer_bytes: 0,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
@@ -58,7 +58,7 @@ fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
             id: "left".into(),
             operator: PhysicalOperator::PassThrough,
             children: vec!["scan".into()],
-            source_coverage: None,
+            scan_selection: None,
             output_buffer_bytes: 0,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
@@ -67,7 +67,7 @@ fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
             id: "right".into(),
             operator: PhysicalOperator::PassThrough,
             children: vec!["scan".into()],
-            source_coverage: None,
+            scan_selection: None,
             output_buffer_bytes: 0,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
@@ -76,7 +76,7 @@ fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
             id: "root".into(),
             operator: PhysicalOperator::Concat,
             children: vec!["left".into(), "right".into()],
-            source_coverage: None,
+            scan_selection: None,
             output_buffer_bytes: 0,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
@@ -353,7 +353,7 @@ fn storage_node_identity_statistics_and_calibration_provenance_are_bound() {
         .get_mut("scan")
         .unwrap()
         .node
-        .source_coverage
+        .scan_selection
         .as_mut()
         .unwrap()
         .source_snapshot_id = "another-source".into();

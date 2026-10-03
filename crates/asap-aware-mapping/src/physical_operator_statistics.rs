@@ -26,12 +26,12 @@ pub struct ComparisonScope {
     pub horizon: DurationMs,
     pub recurrence: QueryRecurrence,
     pub time_selection: TimeSelection,
-    pub sources: Vec<SourceCoverage>,
+    pub sources: Vec<ScanSelection>,
 }
 
 /// Exact source selection covered by a physical plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SourceCoverage {
+pub struct ScanSelection {
     pub source: Source,
     /// Provider-owned stable identifier for the physical source contents,
     /// such as a catalog snapshot, table version, or object generation.
@@ -53,7 +53,7 @@ impl ComparisonScope {
         query: &QueryWorkloadEntry,
         planning_time: TimestampMs,
         horizon: DurationMs,
-        sources: Vec<SourceCoverage>,
+        sources: Vec<ScanSelection>,
     ) -> Result<Self, AnalyticalCostError> {
         let scope = Self {
             data_arrival: data.arrival,
@@ -87,7 +87,7 @@ impl ComparisonScope {
             .any(|(index, source)| self.sources[..index].contains(source))
         {
             return Err(AnalyticalCostError::MissingComparisonScope(
-                "duplicate source coverage",
+                "duplicate scan selection",
             ));
         }
         if self

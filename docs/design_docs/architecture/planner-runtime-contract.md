@@ -73,7 +73,7 @@ and rollback are not an end-to-end Planner protocol.
 2. A physical-plan provider maps those candidates to executor-feasible complete
    alternatives. Unsupported candidates are omitted or explicitly rejected.
 3. The provider binds a stable alternative identity and complete evidence:
-   source coverage, input/output edges, operation counts, update and bootstrap
+   scan selection, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
 4. ASAPPlanner keeps constructible candidates with missing evidence visible
    in `CandidateLogicalASAPDAGs` but does not certify unknown accuracy. The

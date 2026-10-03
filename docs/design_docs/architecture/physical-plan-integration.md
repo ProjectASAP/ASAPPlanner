@@ -75,7 +75,7 @@ lose post-ASAP summary implementations, while aligning it directly with
 Physical lowering is complete only when it recursively lowers the entire
 selected candidate DAG. It must:
 
-1. preserve the semantics and source coverage of the logical candidate;
+1. preserve the semantics and scan selection of the logical candidate;
 2. select an explicit physical algorithm for every logical operation;
 3. carry algorithm configuration on the physical operator rather than in a
    generic statistics record;
