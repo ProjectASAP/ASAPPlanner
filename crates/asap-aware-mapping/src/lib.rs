@@ -215,3 +215,9 @@ pub mod maintained_population;
 /// Local candidate generation over the unified IR. No execution timing is
 /// assigned: that is a Stage 2 materialization decision.
 pub mod logical_candidates;
+
+/// #509 Stage 2 MVP: physical operator implementation, all at query time.
+pub mod physical_candidates;
+
+/// #509 Stage 3 MVP: accuracy check, analytical pricing, cheapest valid plan.
+pub mod plan_selection;
