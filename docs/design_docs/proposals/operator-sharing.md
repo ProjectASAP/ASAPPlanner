@@ -324,13 +324,6 @@ A `Project`, for example, has one representation whether its input is an ordinar
 aggregate or a summary estimate. This proposal removes the representation boundary;
 it does not introduce rules for sharing computations across queries.
 
-**Sub-DAG sharing** means multiple consumers reference the same operator node
-and its upstream dependencies. **Common sub-DAG sharing** is the CSE step that
-finds eligible, structurally identical sub-DAGs and replaces separate copies
-with one shared instance. Physical planning determines how that common
-computation is executed or materialized; consumers requiring different
-execution phases may need separate instances.
-
 ## 2. Node properties and why they differ
 
 Both operation categories use the `OperatorNode` declared in the §1.1 overview.
