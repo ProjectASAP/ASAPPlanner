@@ -56,9 +56,7 @@
 //! does not establish a compatible workload plan or physical deployability.
 //! For Planner-owned logical selection, call [`CandidateLogicalASAPDAGs::global_selection`]
 //! once and [`GlobalSelection::assemble_selected_dag`] for each wanted query
-//! root. Alternatively, use the summary-maintenance-lifecycle-aware helpers
-//! when Planner should also compare maintenance against raw recomputation.
-//! Physical binding, deployment, and execution remain downstream.
+//! root. Physical binding, deployment, and execution remain downstream.
 //!
 //! Internally, [`realize_child`] and [`realize_one`] may take a preferred local
 //! realization while constructing or costing a candidate. That local operation
@@ -380,8 +378,8 @@ use crate::accuracy::{
     DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
 };
 use crate::cost_model::{
-    raw_recompute_cost_rate, Cost, CostModel, CseCandidate, DefaultCostModel,
-    ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
+    raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, ShareDecision,
 };
 use crate::exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
 use crate::grouping::HydraGroupingStrategy;
@@ -4370,50 +4368,6 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
     }
 }
 
-/// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
-#[derive(Default, Clone)]
-pub(crate) struct CandidateCostOverrides {
-    costs: HashMap<(*const OperatorNode, *const ReplacementSubDAG), Cost>,
-    raw_costs: HashMap<*const OperatorNode, Cost>,
-    /// Targets for which the caller requested an atomic raw-vs-summary
-    /// decision. Other memo groups continue through ordinary CSE selection.
-    finalized_targets: HashSet<*const OperatorNode>,
-}
-
-impl CandidateCostOverrides {
-    pub(crate) fn finalize_target(&mut self, target: &Rc<OperatorNode>) {
-        self.finalized_targets.insert(Rc::as_ptr(target));
-    }
-
-    fn finalizes(&self, target: &Rc<OperatorNode>) -> bool {
-        self.finalized_targets.contains(&Rc::as_ptr(target))
-    }
-
-    pub(crate) fn insert(
-        &mut self,
-        target: &Rc<OperatorNode>,
-        candidate: &ReplacementSubDAG,
-        cost: Cost,
-    ) {
-        self.costs
-            .insert((Rc::as_ptr(target), candidate as *const _), cost);
-    }
-
-    fn get(&self, target: &Rc<OperatorNode>, candidate: &ReplacementSubDAG) -> Option<Cost> {
-        self.costs
-            .get(&(Rc::as_ptr(target), candidate as *const _))
-            .copied()
-    }
-
-    pub(crate) fn insert_raw(&mut self, target: &Rc<OperatorNode>, cost: Cost) {
-        self.raw_costs.insert(Rc::as_ptr(target), cost);
-    }
-
-    fn raw(&self, target: &Rc<OperatorNode>) -> Option<Cost> {
-        self.raw_costs.get(&Rc::as_ptr(target)).copied()
-    }
-}
-
 impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// One candidate set per discovered target sub-DAG, in discovery order.
     pub fn target_subdag_candidates(&self) -> impl Iterator<Item = &TargetSubDAGCandidates> {
@@ -4827,54 +4781,6 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
             .and_then(|data| data.ingestion_rate.value_at(now_ms))
             .map(|rate| UpdateRate(rate.0));
         self.recurrence_profiles(&recurrences, update_rate)
-    }
-
-    /// Associate every discovered target with the normalized workload entries
-    /// whose roots can reach it.
-    pub(crate) fn workload_entries_by_target(
-        &self,
-        workload: &QueryWorkload,
-        root_workload_entries: &[usize],
-    ) -> Result<HashMap<*const OperatorNode, Vec<usize>>, RecurrenceError> {
-        let entry_count = workload.entries().count();
-        if root_workload_entries.len() != self.roots.len() {
-            return Err(RecurrenceError::RootCountMismatch {
-                expected: self.roots.len(),
-                got: root_workload_entries.len(),
-            });
-        }
-        let mut bindings: HashMap<*const OperatorNode, HashSet<usize>> = HashMap::new();
-        for ((_, root), &entry_index) in self.roots.iter().zip(root_workload_entries) {
-            if entry_index >= entry_count {
-                return Err(RecurrenceError::InvalidWorkloadEntry {
-                    index: entry_index,
-                    entry_count,
-                });
-            }
-            let mut seen = HashSet::new();
-            let mut queue = VecDeque::from([Rc::as_ptr(root)]);
-            while let Some(ptr) = queue.pop_front() {
-                if !seen.insert(ptr) {
-                    continue;
-                }
-                bindings.entry(ptr).or_default().insert(entry_index);
-                if let Some(group) = self.groups.get(&ptr) {
-                    queue.extend(
-                        direct_child_counts(&group.target)
-                            .into_iter()
-                            .map(|(child, _)| child),
-                    );
-                }
-            }
-        }
-        Ok(bindings
-            .into_iter()
-            .map(|(ptr, entries)| {
-                let mut entries: Vec<_> = entries.into_iter().collect();
-                entries.sort_unstable();
-                (ptr, entries)
-            })
-            .collect())
     }
 }
 
@@ -5736,7 +5642,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// Uncertified DDSketch ratios remain in [`CandidateLogicalASAPDAGs`] for downstream
     /// inspection but are not chosen automatically by this selector.
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
-        self.global_selection_impl(cost_model, None, None, None)
+        self.global_selection_impl(cost_model, None, None)
             .expect("structural global selection cannot produce a recurrence error")
     }
 
@@ -5750,17 +5656,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
         profiles: &RecurrenceProfileMap,
         horizon: Option<Horizon>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        self.global_selection_impl(cost_model, Some(profiles), horizon, None)
-    }
-
-    pub(crate) fn global_selection_with_candidate_costs(
-        &self,
-        cost_model: &dyn CostModel,
-        profiles: &RecurrenceProfileMap,
-        horizon: Option<Horizon>,
-        costs: &CandidateCostOverrides,
-    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        self.global_selection_impl(cost_model, Some(profiles), horizon, Some(costs))
+        self.global_selection_impl(cost_model, Some(profiles), horizon)
     }
 
     fn global_selection_impl(
@@ -5768,7 +5664,6 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
         cost_model: &dyn CostModel,
         profiles: Option<&RecurrenceProfileMap>,
         horizon: Option<Horizon>,
-        candidate_costs: Option<&CandidateCostOverrides>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
         let dag = reference_dag(self);
         let topo = topological_order(&self.order, &dag);
@@ -5829,30 +5724,8 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                 }
             }
 
-            let lifecycle_choice = candidate_costs
-                .filter(|costs| costs.finalizes(&group.target))
-                .map(|costs| {
-                    let summary = group
-                        .candidates
-                        .iter()
-                        .filter(|candidate| !is_composition_candidate(candidate))
-                        .filter(|candidate| is_automatically_selectable(candidate, cost_model))
-                        .filter_map(|candidate| {
-                            costs
-                                .get(&group.target, candidate)
-                                .map(|cost| (candidate, cost))
-                        })
-                        .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0));
-                    match (summary, costs.raw(&group.target)) {
-                        (Some((_, summary_cost)), Some(raw)) if raw.0 <= summary_cost.0 => None,
-                        (Some((candidate, _)), _) => Some(candidate),
-                        (None, _) => None,
-                    }
-                });
-
             let complete_plan_choice = (!forced.is_some()
                 && composed.is_none()
-                && lifecycle_choice.is_none()
                 && cost_model.candidate_cost_covers_complete_plan())
             .then(|| {
                 let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
@@ -5892,8 +5765,6 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
             } else if let Some(option) = composed {
                 composition_decision = Some(option.decision);
                 Some(option.candidate)
-            } else if let Some(choice) = lifecycle_choice {
-                choice
             } else if cost_model.candidate_cost_covers_complete_plan() {
                 complete_plan_choice
             } else if effective >= 2 && cse_candidate_pair(group).is_some() {

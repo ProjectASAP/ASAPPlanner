@@ -2164,8 +2164,6 @@ pub enum AnalyticalCostError {
     UnsupportedDataArrival(DataArrival),
     #[error("ingestion rate must be finite and non-negative, got {0}")]
     InvalidIngestionRate(f64),
-    #[error("summary lifecycle, maintenance mode, and evaluation schedule are inconsistent")]
-    IncompatibleLifecycleGuarantee,
     #[error("bootstrap row and byte evidence must either both be zero or both be non-zero")]
     InconsistentBootstrapEvidence,
     #[error("required summary operation cost {0} must be finite and positive, got {1}")]
@@ -2196,7 +2194,7 @@ pub enum AnalyticalCostError {
     UnsupportedQueryOperator,
     #[error("inconsistent operator statistics: {0}")]
     InconsistentOperatorStatistics(&'static str),
-    #[error("summary operation {0} has no lifecycle-aware cost formula")]
+    #[error("summary operation {0} has no cost formula")]
     UnsupportedSummaryOperation(&'static str),
     #[error("required comparison-scope field {0} is missing")]
     MissingComparisonScope(&'static str),

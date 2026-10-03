@@ -1,5 +1,5 @@
 //! Structurally identical summary producers chosen by different queries are
-//! shared after Pass 1: one `Rc<OperatorNode>` across their plans, costed once.
+//! shared after Pass 1: one `Rc<OperatorNode>` across their plans.
 
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, OperatorNode};
@@ -8,16 +8,11 @@ use std::rc::Rc;
 use asap_aware_mapping::accuracy::{
     AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
 };
-use asap_aware_mapping::cost_model::Cost;
-use asap_aware_mapping::pass::{PlanOutput, PlanningModels};
+use asap_aware_mapping::pass::{PlanOutput, PlanningModels, QueryPlan};
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_aware_mapping::{
-    global_selection_with_summary_maintenance_lifecycles, search_workload_with_targets,
-    ASAPStrategies, ReplacementStrategy, WorkloadDemand,
-};
-use asap_aware_mapping::{
-    CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
+    search_workload_with_targets, ASAPStrategies, CostModel, DefaultCostModel, Replacement,
+    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
@@ -26,7 +21,7 @@ use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
     SketchStatistic,
 };
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
+use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchKind, SketchParams};
 use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::AggIntent;
@@ -38,16 +33,18 @@ use asap_types::workload::{
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
-const HORIZON_S: f64 = 3_600.0;
 
-/// A state costs `build` once however often it is read; raw recomputation
-/// costs `raw_per_read` per read.
-struct FixedCosts {
-    build: f64,
-    raw_per_read: f64,
-}
+/// Stand-in for the workload-level amortization Stage 2 materialization will
+/// price: a sketch candidate costs `preference(kind)` per sketch state, any
+/// other candidate more than every sketch. Ranking is otherwise built-in.
+struct PreferSketch(fn(&SketchKind) -> f64);
 
-impl CostModel for FixedCosts {
+impl CostModel for PreferSketch {
+    // Selection takes the cheapest candidate by `estimate_cost`.
+    fn candidate_cost_covers_complete_plan(&self) -> bool {
+        true
+    }
+
     fn rank_candidates(
         &self,
         intent: &AggIntent,
@@ -56,41 +53,42 @@ impl CostModel for FixedCosts {
         DefaultCostModel.rank_candidates(intent, candidates)
     }
 
-    fn summary_maintenance_lifecycle_cost_inputs(
-        &self,
-        _summary: &OperatorNode,
-    ) -> SummaryMaintenanceLifecycleCostInputs {
-        SummaryMaintenanceLifecycleCostInputs {
-            build_cost: Some(Cost(self.build)),
-            maintenance_cost_per_update: Some(Cost::ZERO),
-            summary_read_cost: Some(Cost::ZERO),
-            retention_cost_rate: Some(CostRate(0.0)),
-            retirement_cost: Some(Cost::ZERO),
+    fn estimate_cost(&self, candidate: &ReplacementSubDAG, _: &TargetSubDAG<'_>) -> f64 {
+        let Replacement::SubDAG(root) = &candidate.replacement else {
+            return 1e9;
+        };
+        let kinds: Vec<_> = OperatorNode::reachable(root)
+            .into_iter()
+            .filter_map(|node| match &node.operator {
+                asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) => Some(kind.clone()),
+                _ => None,
+            })
+            .collect();
+        if kinds.is_empty() {
+            1e9
+        } else {
+            kinds.iter().map(self.0).sum()
         }
-    }
-
-    fn summary_maintenance_capabilities(
-        &self,
-        _summary: &OperatorNode,
-    ) -> SummaryMaintenanceCapabilities {
-        SummaryMaintenanceCapabilities {
-            incremental_update: true,
-            merge: true,
-            delete: true,
-        }
-    }
-
-    fn raw_query_recompute_cost(&self, _target: &OperatorNode) -> Option<Cost> {
-        Some(Cost(self.raw_per_read))
     }
 }
 
-/// Summaries are far cheaper than raw recomputation, so every query selects
-/// one independently and only sharing is under test.
-const CHEAP_SUMMARY: FixedCosts = FixedCosts {
-    build: 1.0,
-    raw_per_read: 1_000.0,
-};
+/// Prefers the largest KLL, i.e. one sized for the strictest consumer.
+const PREFER_LARGE_KLL: PreferSketch = PreferSketch(|kind| match kind.params() {
+    SketchParams::Kll { k } => 1.0 / f64::from(*k),
+    _ => 1.0,
+});
+
+/// Prefers UnivMon, which can serve every frequency moment from one state.
+const PREFER_UNIVMON: PreferSketch = PreferSketch(|kind| {
+    if kind.algorithm() == &SketchAlgorithm::UnivMon {
+        0.0
+    } else {
+        1.0
+    }
+});
 
 fn requirements(epsilon: f64) -> QueryRequirements {
     QueryRequirements {
@@ -108,11 +106,6 @@ fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
         predictability: Predictability::Unknown,
         time_selection: TimeSelection::default(),
     }
-}
-
-fn lifecycle() -> LifecycleInput {
-    LifecycleInput::new(NOW_MS, SummaryMaintenanceLifecycleCapabilities::default())
-        .with_horizon(Horizon(HORIZON_S))
 }
 
 fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
@@ -142,7 +135,11 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
     }
 }
 
-async fn plan_promql(queries: &[(&str, f64)], costs: &FixedCosts) -> PlanOutput {
+async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
+    plan_promql_with(queries, &DefaultCostModel).await
+}
+
+async fn plan_promql_with(queries: &[(&str, f64)], cost: &dyn CostModel) -> PlanOutput {
     let workload = promql_workload(queries);
     let input = UserInput::new(
         &workload,
@@ -150,13 +147,12 @@ async fn plan_promql(queries: &[(&str, f64)], costs: &FixedCosts) -> PlanOutput 
             now_ms: NOW_MS,
             histograms: None,
         },
-        PlanningModels::builtin().with_cost(costs),
-        lifecycle(),
+        PlanningModels::builtin().with_cost(cost),
     );
     e2e_plan(input).await.expect("workload plans")
 }
 
-async fn plan_sql(queries: &[&str], costs: &FixedCosts) -> PlanOutput {
+async fn plan_sql(queries: &[&str]) -> PlanOutput {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
@@ -178,25 +174,33 @@ async fn plan_sql(queries: &[&str], costs: &FixedCosts) -> PlanOutput {
     let input = UserInput::new(
         &workload,
         FrontendInput::Sql { catalog: &catalog },
-        PlanningModels::builtin().with_cost(costs),
-        lifecycle(),
+        PlanningModels::builtin(),
     );
     e2e_plan(input).await.expect("workload plans")
 }
 
-/// Every summary state each plan deploys.
+/// Every summary state (`SummaryAgg`) each plan reaches, in traversal order.
+fn plan_states(plan: &QueryPlan) -> Vec<Rc<OperatorNode>> {
+    OperatorNode::reachable(&plan.root)
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.operator,
+                asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
+        .collect()
+}
+
+/// Every summary state each plan reaches; each plan selects at least one.
 fn states(output: &PlanOutput) -> Vec<Vec<Rc<OperatorNode>>> {
     output
         .plans
         .iter()
         .map(|plan| {
-            assert!(!plan.plan.selected_raw_recompute, "{:?}", plan.plan.root);
-            assert!(!plan.plan.deployments.is_empty());
-            plan.plan
-                .deployments
-                .iter()
-                .map(|deployment| Rc::clone(&deployment.summary))
-                .collect()
+            let states = plan_states(plan);
+            assert!(!states.is_empty(), "{:?}", plan.root);
+            states
         })
         .collect()
 }
@@ -210,12 +214,12 @@ fn same_states(states: &[Vec<Rc<OperatorNode>>]) -> bool {
             .all(|(left, right)| Rc::ptr_eq(left, right))
 }
 
-/// The deployments a consumer would run, deduplicated by pointer.
+/// The summary states a consumer would run, deduplicated by pointer.
 fn unique_deployments(output: &PlanOutput) -> usize {
     let mut seen: Vec<*const OperatorNode> = Vec::new();
     for plan in &output.plans {
-        for deployment in &plan.plan.deployments {
-            let ptr = Rc::as_ptr(&deployment.summary);
+        for state in plan_states(plan) {
+            let ptr = Rc::as_ptr(&state);
             if !seen.contains(&ptr) {
                 seen.push(ptr);
             }
@@ -225,39 +229,18 @@ fn unique_deployments(output: &PlanOutput) -> usize {
 }
 
 /// p50 and p99 over the same window and accuracy read one KLL: the
-/// equal-params subset of summary capability. Both plans hold the same `Rc`
-/// with the same lifecycle, so a consumer maintains it once.
+/// equal-params subset of summary capability. Both plans hold the same `Rc`,
+/// so a consumer maintains it once.
 #[tokio::test]
 async fn quantiles_with_equal_params_share_one_producer() {
-    let output = plan_promql(
-        &[
-            ("quantile_over_time(0.5, lat[5m])", 0.01),
-            ("quantile_over_time(0.99, lat[5m])", 0.01),
-        ],
-        &CHEAP_SUMMARY,
-    )
+    let output = plan_promql(&[
+        ("quantile_over_time(0.5, lat[5m])", 0.01),
+        ("quantile_over_time(0.99, lat[5m])", 0.01),
+    ])
     .await;
     assert!(same_states(&states(&output)));
-    assert!(!Rc::ptr_eq(
-        &output.plans[0].plan.root,
-        &output.plans[1].plan.root
-    ));
+    assert!(!Rc::ptr_eq(&output.plans[0].root, &output.plans[1].root));
     assert_eq!(unique_deployments(&output), 1);
-    let lifecycles: Vec<_> = output
-        .plans
-        .iter()
-        .map(|plan| {
-            plan.plan.deployments[0]
-                .summary_maintenance_lifecycle_guarantee
-                .clone()
-        })
-        .collect();
-    assert_eq!(lifecycles[0], lifecycles[1]);
-    assert!(lifecycles[0].is_some());
-    // Each plan is planned against both queries' reads.
-    for plan in &output.plans {
-        assert_eq!(plan.plan.expected_reads, Some(12.0));
-    }
 }
 
 /// A different window or label selector is a different producer, even when
@@ -282,27 +265,27 @@ async fn different_producers_are_not_shared() {
             ("quantile_over_time(0.99, lat{job=\"b\"}[5m])", 0.01),
         ],
     ] {
-        let output = plan_promql(&queries, &CHEAP_SUMMARY).await;
+        let output = plan_promql(&queries).await;
         assert!(!same_states(&states(&output)), "{queries:?}");
         assert_eq!(unique_deployments(&output), 2, "{queries:?}");
         for (plan, (_, epsilon)) in output.plans.iter().zip(queries) {
-            assert_eq!(plan.plan.expected_reads, Some(6.0), "{queries:?}");
             assert_eq!(kll_k(plan), kll_k_for(epsilon), "{queries:?}");
         }
     }
 }
 
 /// The KLL `k` of the one state a plan deploys.
-fn kll_k(plan: &asap_aware_mapping::pass::QueryLifecyclePlan) -> u32 {
-    let [deployment] = plan.plan.deployments.as_slice() else {
-        panic!("one state: {:?}", plan.plan.deployments.len());
+fn kll_k(plan: &QueryPlan) -> u32 {
+    let states = plan_states(plan);
+    let [deployment] = states.as_slice() else {
+        panic!("one state: {:?}", states.len());
     };
     let asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
         family: FieldDataType::Sketch(kind, _),
         ..
-    }) = &deployment.summary.operator
+    }) = &deployment.operator
     else {
-        panic!("sketch state: {:?}", deployment.summary.operator);
+        panic!("sketch state: {:?}", deployment.operator);
     };
     let SketchParams::Kll { k } = kind.params() else {
         panic!("KLL state: {kind:?}");
@@ -324,19 +307,20 @@ fn kll_k_for(epsilon: f64) -> u32 {
 }
 
 /// p50 at ε=0.01 and p99 at ε=0.001 over the same input share one KLL sized
-/// for the strictest consumer; each reader's guarantee meets its own target.
+/// for the strictest consumer when the cost model prefers that candidate; each
+/// reader's guarantee meets its own target.
 #[tokio::test]
 async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
     let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
     let p99 = ("quantile_over_time(0.99, lat[5m])", 0.001);
     assert!(kll_k_for(0.001) > kll_k_for(0.01));
 
-    let output = plan_promql(&[p50, p99], &CHEAP_SUMMARY).await;
+    let output = plan_promql_with(&[p50, p99], &PREFER_LARGE_KLL).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
     for (plan, (_, epsilon)) in output.plans.iter().zip([p50, p99]) {
         assert_eq!(kll_k(plan), kll_k_for(0.001));
-        let guarantee = plan.plan.root.guarantee.as_ref().expect("certified");
+        let guarantee = plan.root.guarantee.as_ref().expect("certified");
         assert!(
             guarantee.bound.evaluate().unwrap() <= epsilon,
             "{guarantee:?}"
@@ -344,7 +328,7 @@ async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
     }
 
     // Alone, the looser query keeps its own, smaller KLL.
-    let alone = plan_promql(&[p50], &CHEAP_SUMMARY).await;
+    let alone = plan_promql_with(&[p50], &PREFER_LARGE_KLL).await;
     assert_eq!(kll_k(&alone.plans[0]), kll_k_for(0.01));
 }
 
@@ -352,11 +336,7 @@ async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
 /// quantile, so p50 and p99 over one selector share it.
 #[tokio::test]
 async fn cross_series_p50_and_p99_share_one_producer() {
-    let output = plan_promql(
-        &[("quantile(0.5, lat)", 0.01), ("quantile(0.99, lat)", 0.01)],
-        &CHEAP_SUMMARY,
-    )
-    .await;
+    let output = plan_promql(&[("quantile(0.5, lat)", 0.01), ("quantile(0.99, lat)", 0.01)]).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
 }
@@ -366,7 +346,7 @@ async fn cross_series_p50_and_p99_share_one_producer() {
 #[tokio::test]
 async fn identical_ungrouped_queries_share_their_producers() {
     let query = ("sum(rate(x[5m]))", 0.01);
-    let output = plan_promql(&[query, query], &CHEAP_SUMMARY).await;
+    let output = plan_promql(&[query, query]).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 2);
 }
@@ -377,7 +357,7 @@ async fn identical_ungrouped_queries_share_their_producers() {
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
-    let output = plan_sql(&[query, query], &CHEAP_SUMMARY).await;
+    let output = plan_sql(&[query, query]).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
 }
@@ -391,15 +371,14 @@ async fn sql_p50_and_p99_share_one_producer() {
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
     let p99 =
         "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem WHERE l_orderkey > 10";
-    let output = plan_sql(&[p50, p99], &CHEAP_SUMMARY).await;
+    let output = plan_sql(&[p50, p99]).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
     let names: Vec<_> = output
         .plans
         .iter()
         .map(|plan| {
-            plan.plan
-                .root
+            plan.root
                 .schema
                 .fields
                 .iter()
@@ -425,30 +404,10 @@ async fn sql_p50_and_p99_share_one_producer() {
             "SELECT approx_percentile_cont(l_orderkey, 0.99) FROM lineitem WHERE l_orderkey > 10",
         ],
     ] {
-        let output = plan_sql(&queries, &CHEAP_SUMMARY).await;
+        let output = plan_sql(&queries).await;
         assert!(!same_states(&states(&output)), "{queries:?}");
         assert_eq!(unique_deployments(&output), 2, "{queries:?}");
     }
-}
-
-/// A state costs 100 and recomputing a query costs 60 over its six reads:
-/// alone, the query recomputes raw. Shared by p50 and p99, the state costs 50
-/// per query, so both keep it.
-#[tokio::test]
-async fn shared_amortization_alone_can_beat_raw_recompute() {
-    let costs = FixedCosts {
-        build: 100.0,
-        raw_per_read: 10.0,
-    };
-    let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
-    let p99 = ("quantile_over_time(0.99, lat[5m])", 0.01);
-
-    let alone = plan_promql(&[p50], &costs).await;
-    assert!(alone.plans[0].plan.selected_raw_recompute);
-
-    let output = plan_promql(&[p50, p99], &costs).await;
-    assert!(same_states(&states(&output)));
-    assert_eq!(unique_deployments(&output), 1);
 }
 
 /// Synthetic evidence certifying UnivMon evaluations; it exercises sharing, never
@@ -489,7 +448,7 @@ impl AccuracyModel for UnivMonEvidence {
 }
 
 /// Distinct count, entropy and L2 over one input, certified by an accuracy
-/// model, read one UnivMon state: #515 sharing is the summary-capability rule
+/// model and selected by a cost model preferring UnivMon, read one UnivMon state: #515 sharing is the summary-capability rule
 /// when the states are identical. `MajorPass` builds candidates with the
 /// built-in accuracy model, so this runs its pipeline with the test model.
 #[test]
@@ -509,25 +468,12 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
         .collect();
     let strategies: Vec<Box<dyn ReplacementStrategy>> =
         vec![Box::new(ASAPStrategies::new_with_planning_inputs(
-            &CHEAP_SUMMARY,
+            &PREFER_UNIVMON,
             &UnivMonEvidence,
             &EqualSplitAllocator,
         ))];
     let space = search_workload_with_targets(roots, &strategies, &UnivMonEvidence);
-    let entry_indices: Vec<usize> = (0..queries.len()).collect();
-    let selection = global_selection_with_summary_maintenance_lifecycles(
-        &space,
-        WorkloadDemand {
-            workload: &workload.query_workload,
-            data_workload: workload.data_workload.as_ref(),
-            entry_indices: &entry_indices,
-        },
-        NOW_MS,
-        Some(Horizon(HORIZON_S)),
-        SummaryMaintenanceLifecycleCapabilities::default(),
-        &CHEAP_SUMMARY,
-    )
-    .expect("selects");
+    let selection = space.global_selection(&PREFER_UNIVMON);
     let assembled = space
         .roots
         .iter()
