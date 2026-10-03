@@ -17,26 +17,10 @@ The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of import
 
 ## Fields and column references
 
-`Schema` owns `Field` metadata: name, type, nullability, and an optional table
-qualifier. A `Field` contains no runtime values. The former schema `Column`
-struct served this same metadata role; it was renamed to `Field`, not retained
-as a second data container.
-
-`ColumnRef` is an unresolved logical reference (`Named`, `Qualified`,
-`SampleValue`, or `Wildcard`). Resolution binds a reference to `ColumnId`, a
-`usize` position within a particular schema. `QueryExpr::Column(ColumnId)`
-reads that column; the same position indexes `Schema::fields` for type checking
-and a runtime row for its value. Group keys, unique keys, and `time_index` also
-use these column positions. They are not stable identities across projections
-or joins, so the positional reference remains `ColumnId`, not `FieldId`.
-
-The native runtime names shared ownership `SchemaRef = Arc<Schema>` and stores
-`Batch { schema: SchemaRef, rows: Vec<Vec<Value>> }`. `Schema` is the same metadata
-model during planning and execution; the `Ref` suffix only distinguishes ownership.
-It has no physical `Column`/array container. A column reference expresses what
-to read independently of whether an executor stores its data as rows or arrays.
-For example, resolving `t.bytes` to `ColumnId = 1` obtains its type from
-`schema.fields[1]`; native execution reads `row[1]`.
+`Schema` holds `Field` metadata (name, type, nullability, qualifier) and no
+values; an unresolved `ColumnRef` resolves to a positional `ColumnId` within one
+schema. The design, including how the same position selects a runtime value, is
+in [Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#21-consideration-1-the-schema-is-the-edge-between-two-nodes).
 
 ## Node index
 
