@@ -3822,7 +3822,7 @@ fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
     }
 }
 
-fn column_ref(column: &Field) -> ColumnRef {
+pub(crate) fn column_ref(column: &Field) -> ColumnRef {
     match &column.table {
         Some(t) => ColumnRef::Qualified {
             table: t.clone(),
@@ -3840,7 +3840,7 @@ fn column_ref(column: &Field) -> ColumnRef {
 /// A tuple leg outside the child schema is an error rather than
 /// [`summarised_column`]'s sample-value fallback: a leg has no sample-value
 /// reading, and silently dropping one would under-count.
-fn summarised_input(
+pub(crate) fn summarised_input(
     intent: &AggIntent,
     child_schema: &Schema,
 ) -> Result<SummaryInputExpr, RealizationError> {
