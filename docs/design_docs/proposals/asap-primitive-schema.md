@@ -1,20 +1,6 @@
 # Schema and Physical Data for ASAP Primitives
 
-> Status: the edge schema and `FieldDataType` are implemented (operator sharing,
-> #511). `SummaryCoverage` is implemented in `ir::summary_coverage` (#567).
-> `SummaryMerge` coverage derivation lands in #560, and logical export/CSE of
-> coverage in #537. Checking declared population against filters is open
-> ([#570](https://github.com/ProjectASAP/ASAPPlanner/issues/570)).
-> Audience: planner designers and architects.
-> Companions: [Operator sharing](operator-sharing.md) (unified operator node),
-> [Decoupling operators from scalar expressions](decoupling_op_and_expr.md),
-> [ASAPPlanner layering](planner-layering.md) Pass 2 (window composition),
-> [Physical planning and deployment](../physical-planning-and-deployment.md).
-
-This document is the single source of truth for how an edge of the operator DAG
-is typed, how a field carries an ASAP primitive (summary or exact-accumulator
-state), what metadata says which data that state summarizes, and how such a field
-is carried as data at runtime.
+This document is the single source of truth for the schema, and column design for ASAP Primitives. This is used in the logical stage (LogicalASAPDAG), and physical stage (PhysicalASAPDAG). 
 
 ## 1. Goal and problem
 
@@ -451,16 +437,3 @@ pub trait AggregateCore {
 Coverage composition is tested in `crates/types/tests/summary_coverage.rs`. The
 documented examples are built as real `Scan → SummaryAgg → SummaryMerge` plans in
 `crates/types/tests/summary_coverage_examples.rs` (#560).
-
-## 6. Not covered
-
-- **Query containment:** checking that coverage contains a requested window or
-  population (Example 4). That is a later Stage 1 check that uses this data.
-- **Population check:** comparing declared population with filters
-  ([#570](https://github.com/ProjectASAP/ASAPPlanner/issues/570)).
-- **Richer predicates:** predicates beyond non-null equality conjunctions, and
-  idempotent set-union families.
-- **Runtime concerns:** state encoding, storage, retention, scheduling, kernel
-  accuracy and performance.
-- **Persisted semantic identity:** the stored-definition format and any tenant or
-  dataset binding belong to the deployment.
