@@ -235,3 +235,41 @@ fn topk_keeps_both_specialized_heap_choices() {
         ]
     );
 }
+
+/// A workload candidate replaces only chosen targets, declares whole-source
+/// coverage on the summary, and keeps unchosen plans identical.
+#[test]
+fn composed_candidate_replaces_chosen_target_with_summary_readout() {
+    use asap_aware_mapping::logical_candidates::compose_logical_candidate;
+    use asap_types::ir::ASAPOp;
+    let producer = aggregate(AggIntent::Cardinality {
+        cols: vec![0],
+        accuracy: approximate(),
+    });
+    let inventory =
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(producer.clone()))])
+            .unwrap();
+    let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
+    assert!(matches!(&exact[0].1, QueryRoot::Operator(node) if Rc::ptr_eq(node, &producer)));
+
+    let hll = compose_logical_candidate(&inventory, &[1]).unwrap();
+    let QueryRoot::Operator(estimate) = &hll[0].1 else {
+        panic!("operator root expected")
+    };
+    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
+        panic!("summary readout expected")
+    };
+    let coverage = summary_input.coverage.as_ref().unwrap();
+    assert_eq!(
+        coverage.source,
+        Source::Table {
+            table_ref: "flows".into()
+        }
+    );
+    assert!(coverage.regions[0].time_ms.is_none() && coverage.regions[0].population.is_empty());
+    asap_types::ir::export::compile_logical_asap_workload(&[hll[0].1.clone()])
+        .unwrap()
+        .validate()
+        .unwrap();
+    assert!(compose_logical_candidate(&inventory, &[99]).is_err());
+}
