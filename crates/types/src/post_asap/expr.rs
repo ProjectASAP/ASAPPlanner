@@ -283,3 +283,21 @@ pub struct BinaryOperator {
     /// re-parsing PromQL.
     pub vector_match: Option<VectorMatch>,
 }
+
+impl BinaryOperator {
+    pub fn from_logical(operator: &crate::ir::BinaryOperator, return_bool: bool) -> Self {
+        use crate::pre_asap::BinaryOpKind as L;
+        Self {
+            kind: match &operator.kind {
+                L::Arithmetic(op) => BinaryOpKind::Arithmetic(op.clone()),
+                L::Compare(op) if return_bool => BinaryOpKind::CompareBool(op.clone()),
+                L::Compare(op) => BinaryOpKind::Compare(op.clone()),
+                L::CompareBool(op) => BinaryOpKind::CompareBool(op.clone()),
+                L::Set(op) => BinaryOpKind::Set(op.clone()),
+            },
+            vector_match: operator.vector_match.clone(),
+            checked_relative_division: operator.checked_relative_division,
+            checked_finite_division: operator.checked_finite_division,
+        }
+    }
+}
