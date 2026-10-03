@@ -12,7 +12,7 @@ is a target contract, not a statement that its examples execute today.
 | Window composition | Mergeable state IR/native merge exists; physical pane compatibility and reuse cost helpers exist. | Automatic logical sliding/tumbling/EH alternatives over differing windows, boundary coverage and error proofs are absent. A merge kernel alone does not implement Examples 1/3. |
 | Physical materialization | Ephemeral/prepared/shared/continuously maintained lifecycle alternatives, costing, capabilities and latency checks exist. | Incremental query-time pane retention, historical backfill and the complete Example 4 matrix need executable implementations and explicit state/input contracts. |
 | Whole-workload selection | One unified selected DAG; shared states are interned and costed across their consumers. | `replacement.rs` documents its selection as non-exhaustive over interacting choices. The proposal's cheapest complete candidate guarantee and 54/156 inventories need a complete workload search/selection path. |
-| Deployment inputs and execution | `PlanningModels` bundles cost, accuracy, evidence and capabilities; native typed UnivMon supports one build with three readouts. | At #557 native exact frequency L2/entropy fallback is absent. End-to-end SQL Example 2 is not established by the native UnivMon fixture. |
+| Deployment inputs and execution | `PlanningModels` bundles cost, accuracy, evidence and capabilities; native typed UnivMon supports one build with three readouts. | At #557 native exact distinct/L2/entropy fallback is absent; the follow-ups supply those native bindings. End-to-end SQL Example 2 is not established by the native UnivMon fixture. |
 | Subtract/delete, parallelism, partitioning and resource planning | Some runtime memory/cancellation limits and maintenance capability flags exist. | These remain proposal TODOs; capability flags do not supply missing IR operators or a physical resource search. |
 
 ## Follow-up sequence
@@ -61,3 +61,16 @@ product in Example 2 remains a gap because SQL overflow is observable.
 accuracy propagation and candidate retention; `integration-tests/tests/sql_frequency_l2.rs`
 executes both SQL and the rewrite through raw connectors and wire compilation.
 This step does not supply an L2 accuracy certificate or all sharing partitions.
+
+## Exact distinct follow-up acceptance
+
+The native binding executes `AggIntent::Cardinality` over one typed identity or
+an ordered tuple, supports grouping, skips tuples containing NULL and returns
+an Int64 zero for empty input. Typed key encoding preserves large integers,
+normalizes signed zero and NaN payloads, and retains tuple boundaries. Dictionary
+workspace is reserved and released under the normal execution limits. An empty
+intent column list retains the existing sample-value convention.
+
+`integration-tests/tests/sql_cardinality.rs` lowers `COUNT(DISTINCT src_ip)` and
+executes its exact path through raw scan predicates and native wire binding.
+Filtered aggregate measures remain outside native binding's existing scope.

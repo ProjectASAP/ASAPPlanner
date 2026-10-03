@@ -861,3 +861,90 @@ fn sql_sqrt_executes_numeric_and_null_arguments() {
         matches!(compiled.evaluate(&[Value::Float64(-1.0)]).unwrap(), Value::Float64(v) if v.is_nan())
     );
 }
+
+// Exact distinct binding preserves typed tuples, skips NULLs and returns zero on empty input.
+#[test]
+fn exact_cardinality_binds_and_executes_typed_tuples() {
+    use asap_physical_operators::physical_planner::compile_node;
+    use planner_types::{
+        post_asap::ExecutionDataState,
+        pre_asap::{AggIntent, GroupKeys, Reduction as PlanReduction},
+        types::AccuracyTarget,
+    };
+    let input = schema(&[
+        ("key", DataType::Int64, true),
+        ("tag", DataType::Utf8, true),
+    ]);
+    for (cols, expected) in [(vec![0], 2), (vec![0, 1], 3)] {
+        let node = PostAsapDAGNode {
+            id: PostAsapNodeId(1),
+            payload: PostAsapOperatorPayload::Relational {
+                operator: ValueOperation::Aggregate {
+                    reduction: PlanReduction::Reduce(GroupKeys::none()),
+                    measures: vec![AggIntent::Cardinality {
+                        cols,
+                        accuracy: AccuracyTarget::Exact,
+                    }],
+                    output_names: vec!["distinct".into()],
+                    filters: vec![],
+                    having: None,
+                },
+            },
+            output_state: ExecutionDataState::QUERY_ROWS,
+            output_schema: (*schema(&[("distinct", DataType::Int64, false)])).clone(),
+            guarantee: None,
+        };
+        let operator =
+            compile_node(&node, std::slice::from_ref(&input)).expect("exact distinct intent binds");
+        let rows = vec![
+            vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("a".into())],
+            vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("a".into())],
+            vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("b".into())],
+            vec![Value::Int64(9_007_199_254_740_993), Value::Utf8("a".into())],
+            vec![Value::Null, Value::Utf8("c".into())],
+        ];
+        let result = unary(input.clone(), vec![rows], operator.clone());
+        assert!(matches!(result[0][0], Value::Int64(v) if v == expected));
+        for rows in [vec![], vec![vec![Value::Null, Value::Null]]] {
+            let result = unary(input.clone(), vec![rows], operator.clone());
+            assert!(matches!(result[0][0], Value::Int64(0)));
+        }
+    }
+}
+
+// Distinct uses grouped equality: signed zero and NaN payloads each form one identity.
+#[test]
+fn exact_cardinality_grouping_normalizes_float_identities() {
+    let input = schema(&[
+        ("group", DataType::Int64, false),
+        ("key", DataType::Float64, true),
+    ]);
+    let operator = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![("distinct".into(), Reduction::Cardinality(vec![1]))],
+    )
+    .unwrap();
+    let result = unary(
+        input,
+        vec![vec![
+            vec![Value::Int64(1), Value::Float64(0.0)],
+            vec![Value::Int64(1), Value::Float64(-0.0)],
+            vec![Value::Int64(1), Value::Float64(f64::NAN)],
+            vec![
+                Value::Int64(1),
+                Value::Float64(f64::from_bits(f64::NAN.to_bits() + 1)),
+            ],
+            vec![Value::Int64(2), Value::Null],
+        ]],
+        operator,
+    );
+    assert!(matches!(
+        result[0].as_slice(),
+        [Value::Int64(1), Value::Int64(2)]
+    ));
+    assert!(matches!(
+        result[1].as_slice(),
+        [Value::Int64(2), Value::Int64(0)]
+    ));
+}

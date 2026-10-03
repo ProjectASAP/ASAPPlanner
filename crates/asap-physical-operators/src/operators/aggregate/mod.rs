@@ -13,6 +13,17 @@ impl Operator {
         for (name, reduction) in &measures {
             let (t, n) = match reduction {
                 Reduction::Count => (DataType::Int64, false),
+                Reduction::Cardinality(columns) => {
+                    if columns.is_empty() {
+                        return Err(invalid(
+                            "distinct aggregate requires at least one identity column",
+                        ));
+                    }
+                    for column in columns {
+                        plain(&input, *column)?;
+                    }
+                    (DataType::Int64, false)
+                }
                 Reduction::Sum(i) | Reduction::Avg(i) => {
                     let (t, _) = plain(&input, *i)?;
                     if !matches!(t, DataType::Int64 | DataType::Float64) {
@@ -134,6 +145,8 @@ impl Operator {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Reduction {
     Count,
+    /// Exact distinct tuple count; a tuple with any NULL component is skipped.
+    Cardinality(Vec<usize>),
     Sum(usize),
     Avg(usize),
     Min(usize),
@@ -265,6 +278,27 @@ async fn reduce_one(
             ))
         }
         Reduction::Sum(i) | Reduction::Avg(i) | Reduction::Min(i) | Reduction::Max(i) => *i,
+        Reduction::Cardinality(columns) => {
+            let mut workspace = Workspace::new(context)?;
+            let mut identities = std::collections::BTreeSet::new();
+            for row in rows {
+                work.checkpoint().await?;
+                if columns
+                    .iter()
+                    .any(|column| matches!(row[*column], Value::Null))
+                {
+                    continue;
+                }
+                let key = group_key(row, columns)?;
+                if !identities.contains(&key) {
+                    workspace.grow(key_bytes(&key))?;
+                    identities.insert(key);
+                }
+            }
+            return Ok(Value::Int64(
+                i64::try_from(identities.len()).map_err(|_| invalid("distinct count overflow"))?,
+            ));
+        }
         Reduction::FrequencyL2(column) | Reduction::FrequencyEntropy(column) => {
             let mut workspace = Workspace::new(context)?;
             let mut counts = BTreeMap::<Vec<u8>, u64>::new();

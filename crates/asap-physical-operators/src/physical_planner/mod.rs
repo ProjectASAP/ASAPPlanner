@@ -826,6 +826,13 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                         };
                         let m = match m {
                             AggIntent::Count { .. } => Reduction::Count,
+                            AggIntent::Cardinality { cols, .. } => {
+                                Reduction::Cardinality(if cols.is_empty() {
+                                    vec![column(None)?]
+                                } else {
+                                    cols.clone()
+                                })
+                            }
                             AggIntent::Sum { col } => Reduction::Sum(column(*col)?),
                             AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
                             AggIntent::FrequencyL2 { col, .. } => {
