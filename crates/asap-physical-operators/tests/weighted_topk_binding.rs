@@ -761,10 +761,10 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
 /// rest at query time. The phases are assigned on the exported DAG because
 /// the candidate pins its finalize boundary to query time.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
-    use planner_types::ir::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
-    let timed = apply_lifecycle_timings(
+    use planner_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    let timed = apply_materialization_timings(
         candidate,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_query_time(),
         &mut TimingMemo::new(),
     )
     .unwrap();
@@ -804,7 +804,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
 // A maintained heap over finalized per-series Rate is the fixed-window
 // placement: materialization timing, not a separate candidate, puts it in precompute.
 #[test]
-fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
+fn maintained_rate_heap_compiles_fixed_window_precompute() {
     use asap_physical_operators::physical_planner::{
         compile_candidate, promql_rows::with_series_identity,
     };

@@ -331,15 +331,17 @@ mod tests {
     use crate::test_support::lower_promql;
     use asap_types::ir::cse::share_common_sub_dags;
     use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
-    use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+    use asap_types::ir::timing::{
+        apply_materialization_timings, MaterializationAssignment, TimingMemo,
+    };
 
-    /// Time `root` under the default lifecycle assignment (which runs the
+    /// Time `root` under the default materialization assignment (which runs the
     /// data-state / population-contract validation) and export it.
     fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
         root.validate_structure().map_err(|e| e.to_string())?;
-        let timed = apply_lifecycle_timings(
+        let timed = apply_materialization_timings(
             root,
-            &LifecycleAssignment::default_maintained(),
+            &MaterializationAssignment::all_query_time(),
             &mut TimingMemo::new(),
         )
         .map_err(|e| format!("{e:?}"))?;
@@ -465,7 +467,7 @@ mod tests {
         assert_eq!(p.grouping, ["instance"]);
         assert_eq!(p.matchers[0].operation, CurrentSeriesMatch::Regex);
     }
-    // Population timing is a lifecycle choice: a retained or rebuilt
+    // Population timing is a materialization choice: a retained or rebuilt
     // population both validate, while its evaluation must stay at query time.
     #[test]
     fn population_timing_is_not_structural() {

@@ -19,7 +19,10 @@ use asap_aware_mapping::{
     ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::post_asap::{post_asap_dag, timed};
+use asap_integration_tests::post_asap::{
+    maintained, maintained_post_asap_dag, post_asap_dag, timed,
+};
+use asap_types::ir::physical_export::{ PhysicalASAPOperatorPayload};
 use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
@@ -1061,8 +1064,9 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();
-    // Stored timings are gone: time the plan and read the timed copy.
-    let timed_plan = timed(&plan);
+    // Stored timings are gone: time the plan with its outer summary
+    // maintained and read the timed copy.
+    let timed_plan = maintained(&plan);
     let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = timed_plan.asap() else {
         panic!("expected selected quantile summary");
     };
@@ -1121,7 +1125,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
             .assemble_selected_dag(&search.roots[0].1)
             .unwrap()
             .unwrap();
-        let dag = post_asap_dag(&plan);
+        let dag = maintained_post_asap_dag(&plan);
         let node = dag
             .nodes
             .iter()

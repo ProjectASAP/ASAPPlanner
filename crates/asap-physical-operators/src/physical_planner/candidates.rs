@@ -1,7 +1,7 @@
 //! Compile maintenance-selected frontiers without deployment-specific DAG rewrites.
 use super::*;
 
-/// One computation realization; lifecycle/window/revision requirements accompany
+/// One computation realization; materialization/window/revision requirements accompany
 /// it during optimization and deployment. Stored outputs have no storage identity.
 /// Deserialization validates the producer/reader boundary.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -86,7 +86,7 @@ pub fn cut_candidate(
     })
 }
 
-/// Materialization frontier implied by lifecycle-assigned timing: ingestion-time
+/// Materialization frontier implied by materialization-assigned timing: ingestion-time
 /// nodes read by a query-time node, plus the root when it is ingestion-timed.
 /// `cut_candidate` of one [`compile`] result with this frontier realizes the
 /// assignment, so different assignments are different cuts of one lowering.
@@ -125,7 +125,7 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
 
 /// Enumerate bounded, reachable materialization frontiers above explicit inputs.
 /// Each frontier is an antichain: storing an output and its ancestor together
-/// would leave the ancestor unused by query execution. Lifecycle eligibility
+/// would leave the ancestor unused by query execution. Materialization eligibility
 /// and deployment feasibility are evaluated separately before cost selection.
 /// Exceeding the search budget returns an error, never a partial inventory.
 pub fn enumerate_frontiers(
@@ -370,9 +370,9 @@ mod tests {
             .assemble_selected_dag(&space.roots[0].1)
             .unwrap()
             .unwrap();
-        let selected = planner_types::ir::apply_lifecycle_timings(
+        let selected = planner_types::ir::apply_materialization_timings(
             &selected,
-            &Default::default(),
+            &planner_types::ir::MaterializationAssignment::all_ingestion_time(),
             &mut Default::default(),
         )
         .unwrap();
@@ -438,8 +438,8 @@ mod tests {
         )])
     }
 
-    /// Cutting one compilation by a retained-state timing and by the all
-    /// query-time timing (what ContinuouslyMaintained and Ephemeral assign)
+    /// Cutting one compilation by a maintained-state timing and by the all
+    /// query-time timing
     /// lowers each Planner node once and matches `compile_candidate`.
     #[test]
     fn timing_cuts_share_one_lowering() {

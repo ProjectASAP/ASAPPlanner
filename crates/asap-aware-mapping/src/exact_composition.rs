@@ -67,7 +67,7 @@ use std::rc::Rc;
 
 use asap_types::ir::aggregate_schema::aggregate_output_schema;
 use asap_types::ir::operator_properties::Reduction;
-use asap_types::ir::timing::{planned_data_state, validate_default};
+use asap_types::ir::timing::{planned_data_state, validate_maintained};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate};
 use asap_types::post_asap::execution_data_state::lift_plain;
 use asap_types::post_asap::{
@@ -202,7 +202,7 @@ impl ExactComposition {
 
     /// Build the composed, data_state-validated node over `child`. Every edge of
     /// the result (including everything beneath `child`) is checked by
-    /// `asap_types::ir::timing::validate_default`; an illegal
+    /// `asap_types::ir::timing::validate_maintained`; an illegal
     /// placement is a typed [`RealizationError::ExecutionDataState`], never deferred to a
     /// runtime.
     pub fn compose(&self, child: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
@@ -261,7 +261,7 @@ impl ExactComposition {
             OperatorNode::with_schema(Operator::NonASAP(self.op.clone().into_op(child)), schema)
                 .with_guarantee(guarantee),
         );
-        validate_default(&node, self.placement.data_state().timing)?;
+        validate_maintained(&node, self.placement.data_state().timing)?;
         Ok(node)
     }
 
@@ -660,7 +660,7 @@ mod tests {
             Operator::NonASAP(NonASAPOp::Aggregate { .. })
         ));
         // Timing is no longer stored by composition: under the default
-        // lifecycle assignment the composed read-time operation runs at
+        // materialization assignment the composed read-time operation runs at
         // query time.
         assert_eq!(timed(&composed).timing, Some(ExecutionTiming::QueryTime));
         assert!(composed
@@ -701,7 +701,7 @@ mod tests {
             composed.operator,
             Operator::NonASAP(NonASAPOp::Aggregate { .. })
         ));
-        validate_default(&composed, ExecutionTiming::IngestionTime).unwrap();
+        validate_maintained(&composed, ExecutionTiming::IngestionTime).unwrap();
         assert_eq!(
             planned_data_state(&composed, ExecutionTiming::IngestionTime).timing,
             ExecutionTiming::IngestionTime
