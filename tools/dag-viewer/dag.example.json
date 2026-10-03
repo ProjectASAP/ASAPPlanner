@@ -210,7 +210,7 @@
         {
           "decision_id": 0,
           "target_pre_id": 1,
-          "strategy": "SketchAlgorithmStrategy",
+          "strategy": "ASAPStrategies",
           "rationale": "count realizes as a Cms sketch",
           "rank": 0,
           "cost": 1.14001088,
@@ -363,108 +363,7 @@
             "kind": "Summary",
             "dag": {
               "nodes": [
-                {
-                  "id": 0,
-                  "kind": "KeepPreAsap",
-                  "label": "KeepPreAsap(Scan)",
-                  "detail": {
-                    "pre_asap_sub_dag": {
-                      "nodes": [
-                        {
-                          "children": [],
-                          "detail": {
-                            "predicates": [],
-                            "schema": {
-                              "closed": true,
-                              "columns": [
-                                {
-                                  "dtype": "timestamp",
-                                  "name": "ts",
-                                  "nullable": false,
-                                  "table": "metrics"
-                                },
-                                {
-                                  "dtype": "utf8",
-                                  "name": "service",
-                                  "nullable": false,
-                                  "table": "metrics"
-                                },
-                                {
-                                  "dtype": "utf8",
-                                  "name": "region",
-                                  "nullable": false,
-                                  "table": "metrics"
-                                },
-                                {
-                                  "dtype": "float64",
-                                  "name": "latency",
-                                  "nullable": false,
-                                  "table": "metrics"
-                                },
-                                {
-                                  "dtype": "int64",
-                                  "name": "bytes",
-                                  "nullable": false,
-                                  "table": "metrics"
-                                }
-                              ],
-                              "time_index": 0,
-                              "unique_keys": []
-                            },
-                            "source": {
-                              "Table": {
-                                "table_ref": "metrics"
-                              }
-                            }
-                          },
-                          "hash": 2606922452740434172,
-                          "id": 0,
-                          "kind": "Scan",
-                          "label": "Scan(metrics)",
-                          "schema": {
-                            "closed": true,
-                            "columns": [
-                              {
-                                "dtype": "timestamp",
-                                "name": "ts",
-                                "nullable": false,
-                                "table": "metrics"
-                              },
-                              {
-                                "dtype": "utf8",
-                                "name": "service",
-                                "nullable": false,
-                                "table": "metrics"
-                              },
-                              {
-                                "dtype": "utf8",
-                                "name": "region",
-                                "nullable": false,
-                                "table": "metrics"
-                              },
-                              {
-                                "dtype": "float64",
-                                "name": "latency",
-                                "nullable": false,
-                                "table": "metrics"
-                              },
-                              {
-                                "dtype": "int64",
-                                "name": "bytes",
-                                "nullable": false,
-                                "table": "metrics"
-                              }
-                            ],
-                            "time_index": 0,
-                            "unique_keys": []
-                          }
-                        }
-                      ],
-                      "root": 0
-                    }
-                  },
-                  "children": []
-                },
+                {"id": 0, "kind": "Scan", "label": "Scan(metrics)", "detail": {"predicates": [], "schema": {"closed": true, "columns": [{"dtype": "timestamp", "name": "ts", "nullable": false, "table": "metrics"}, {"dtype": "utf8", "name": "service", "nullable": false, "table": "metrics"}, {"dtype": "utf8", "name": "region", "nullable": false, "table": "metrics"}, {"dtype": "float64", "name": "latency", "nullable": false, "table": "metrics"}, {"dtype": "int64", "name": "bytes", "nullable": false, "table": "metrics"}], "time_index": 0, "unique_keys": []}, "source": {"Table": {"table_ref": "metrics"}}}, "children": []},
                 {
                   "id": 1,
                   "kind": "SummaryAgg",
@@ -657,7 +556,7 @@
             "hash": 2606922452740434172,
             "decision": {
               "id": 0,
-              "strategy": "SketchAlgorithmStrategy",
+              "strategy": "ASAPStrategies",
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 1.14001088,
@@ -763,7 +662,7 @@
             "workload_node_id": 1,
             "decision": {
               "id": 0,
-              "strategy": "SketchAlgorithmStrategy",
+              "strategy": "ASAPStrategies",
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 1.14001088,
@@ -862,7 +761,7 @@
             "workload_node_id": 2,
             "decision": {
               "id": 0,
-              "strategy": "SketchAlgorithmStrategy",
+              "strategy": "ASAPStrategies",
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 1.14001088,
