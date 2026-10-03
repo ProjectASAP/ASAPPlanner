@@ -8,10 +8,14 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema;
+use planner_types::ir::export::NonASAPOpKind as ValueOperation;
+use planner_types::ir::export::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
 use planner_types::{
     post_asap::*,
-    pre_asap::{ColumnRef, DataType, ProjectItem, QueryExpr},
+    pre_asap::{ColumnRef, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -20,9 +24,9 @@ use std::{collections::BTreeMap, sync::Arc};
 #[test]
 fn post_asap_summary_projection_survives_recovery() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = Arc::new(Schema {
-        closed: true,
+    let schema = Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![
             Field {
                 table: None,
@@ -39,9 +43,9 @@ fn post_asap_summary_projection_survives_recovery() {
         ],
         time_index: None,
     });
-    let output = Schema {
-        closed: true,
+    let output = planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![
             schema.fields[1].clone(),
             Field {
@@ -51,24 +55,26 @@ fn post_asap_summary_projection_survives_recovery() {
         ],
         time_index: None,
     };
-    let dag = PostAsapDAG {
+    let dag = PhysicalASAPDAG {
         nodes: vec![
-            PostAsapDAGNode {
-                id: PostAsapNodeId(0),
-                payload: PostAsapOperatorPayload::SummaryMerge,
+            PhysicalASAPDAGNode {
+                coverage: None,
+                id: planner_types::ir::export::LogicalASAPNodeId(0),
+                payload: PhysicalASAPOperatorPayload::SummaryMerge,
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 guarantee: None,
             },
-            PostAsapDAGNode {
-                id: PostAsapNodeId(1),
-                payload: PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Project {
+            PhysicalASAPDAGNode {
+                coverage: None,
+                id: planner_types::ir::export::LogicalASAPNodeId(1),
+                payload: PhysicalASAPOperatorPayload::Relational {
+                    operator: ValueOperation::Project {
                         cols: vec![1, 0]
                             .into_iter()
-                            .map(|index| ProjectItem {
+                            .map(|index| planner_types::ir::export::WireProjectItem {
                                 alias: None,
-                                expr: QueryExpr::Column(index),
+                                expr: planner_types::ir::export::WireScalarExpr::Column(index),
                             })
                             .collect(),
                         qualifier: None,
@@ -79,16 +85,16 @@ fn post_asap_summary_projection_survives_recovery() {
                 guarantee: None,
             },
         ],
-        edges: vec![PostAsapDAGEdge {
-            producer: PostAsapNodeId(0),
-            consumer: PostAsapNodeId(1),
+        edges: vec![PhysicalASAPDAGEdge {
+            producer: planner_types::ir::export::LogicalASAPNodeId(0),
+            consumer: planner_types::ir::export::LogicalASAPNodeId(1),
             role: EdgeRole::Input,
             intermediate_schema: (*schema).clone(),
             data_state: ExecutionDataState::INGESTION_SUMMARY,
             grouping: GroupingEdgeCompatibility::NotApplicable,
             window: WindowEdgeCompatibility::NotApplicable,
         }],
-        root: PostAsapNodeId(1),
+        roots: vec![planner_types::ir::export::LogicalASAPNodeId(1)],
     };
     let program = compile(
         &dag,

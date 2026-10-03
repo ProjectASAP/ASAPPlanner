@@ -57,7 +57,7 @@ pub enum PaneCoverageError {
     },
 }
 
-/// Validate that a pane-only readout covers a query exactly. A mismatched
+/// Validate that a pane-only evaluation covers a query exactly. A mismatched
 /// phase is sound only when the physical plan explicitly supplies an exact
 /// residual for the partial edge panes.
 pub fn validate_pane_coverage(
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_only_readout_rejects_source_and_query_phase_mismatch() {
+    fn pane_only_evaluation_rejects_source_and_query_phase_mismatch() {
         let layout = PaneLayout {
             pane_width_ms: 60_000,
             pane_origin_ms: Some(26_000),

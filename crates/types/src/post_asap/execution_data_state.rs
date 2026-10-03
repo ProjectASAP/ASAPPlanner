@@ -816,6 +816,8 @@ pub enum ExactOperationSchemaError {
     NonPlainInput,
     #[error("schema derivation failed: {0}")]
     Schema(#[from] QueryExprError),
+    #[error("schema derivation failed: {0}")]
+    Derivation(#[from] crate::ir::SchemaDerivationError),
 }
 
 #[cfg(test)]

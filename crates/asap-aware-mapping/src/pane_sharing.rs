@@ -1,6 +1,6 @@
 //! Costed reuse of compatible physical pane producers. The executor supplies
 //! an equality key covering source, state, phase and evidence. This pass never
-//! changes logical readout windows or assumes compatibility from metric names.
+//! changes logical evaluation windows or assumes compatibility from metric names.
 
 /// A concrete mergeable-pane implementation and its horizon costs.
 #[derive(Debug, Clone)]
@@ -9,9 +9,9 @@ pub struct PaneReuseCandidate<K> {
     pub lookback_ms: u64,
     /// Build, update, residency and retirement for this producer. Candidates
     /// with the same key must use the same unit costs and pane width, making
-    /// the longest-lived producer sufficient for every readout in the group.
+    /// the longest-lived producer sufficient for every evaluation in the group.
     pub producer_cost: f64,
-    /// Readout cost for all consumers of this distinct producer.
+    /// Evaluation cost for all consumers of this distinct producer.
     pub read_cost: f64,
 }
 
@@ -84,7 +84,7 @@ mod tests {
             read_cost: 2.0,
         }
     }
-    // Share source work once while retaining both readout charges and longest history.
+    // Share source work once while retaining both evaluation charges and longest history.
     #[test]
     fn shares_compatible_windows() {
         assert_eq!(

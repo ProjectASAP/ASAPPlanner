@@ -41,7 +41,7 @@
 //!
 //! ## What this is *not* — no runtime sketch exists yet to wire this into
 //!
-//! This issue names two possible integration points: (1) runtime/readout-time
+//! This issue names two possible integration points: (1) runtime/evaluation-time
 //! accuracy reporting from a sketch's *actual* counters, and (2) tighter
 //! plan-time sizing. As of this module landing, **this repository has no
 //! vendored CMS/CountSketch/CU-Sketch runtime and no counter-array data
@@ -52,12 +52,12 @@
 //! planning-time sizing metadata. There is no `A[row][col]` counter matrix
 //! anywhere in the workspace for these functions to be handed at query
 //! time. So integration point (1) — reporting an *actual* query's posterior
-//! error from real counters at readout — has nothing to wire into today.
+//! error from real counters at evaluation — has nothing to wire into today.
 //!
 //! The functions here are deliberately **sketch-object-agnostic**: they take
 //! plain counter slices (`&[u64]` / `&[i64]`) and numeric parameters, not a
 //! concrete sketch type, specifically so that the moment a real CMS/
-//! Count-Sketch/CU-Sketch runtime lands in this workspace, its readout path
+//! Count-Sketch/CU-Sketch runtime lands in this workspace, its evaluation path
 //! can call these functions directly on its real counter arrays with zero
 //! changes needed here. That wiring is out of scope for this module — see
 //! issue #239.
@@ -255,8 +255,8 @@ fn posterior_rank(w: usize, rows: u32, delta: f64) -> Option<usize> {
 /// The `k`-th largest value in `values` (1-indexed: `k=1` is the max).
 /// `select_nth_unstable_by` partitions in O(w) average instead of fully
 /// sorting in O(w log w) — this only ever needs one rank, not a total
-/// order, and both call sites (this module's per-query readout math) are
-/// documented as meant to run on a future runtime's hot readout path.
+/// order, and both call sites (this module's per-query evaluation math) are
+/// documented as meant to run on a future runtime's hot evaluation path.
 fn kth_largest(values: &[u64], k: usize) -> u64 {
     let mut buf: Vec<u64> = values.to_vec();
     let idx = k - 1;

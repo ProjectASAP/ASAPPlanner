@@ -6,10 +6,10 @@
 //! it *one* pass rather than *the* algorithm. `ReplacementStrategy` is
 //! therefore a concept of this pass, not of the optimization interface.
 
+use asap_types::ir::cse::share_common_sub_dags;
 use std::rc::Rc;
 
-use asap_types::post_asap::{share_common_summary_sub_dags, SummaryNode};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan};
@@ -39,10 +39,10 @@ impl OptimizationPass for MajorPass {
         // search result carries the workload binding the lifecycle stage and
         // the output both need. CSE may make two identical queries share one
         // `Rc`, but it never drops or reorders a root, so this stays aligned.
-        let roots: Vec<(usize, Rc<QueryExpr>, Option<AccuracyTarget>)> = workload
+        let roots: Vec<(usize, Rc<OperatorNode>, Option<AccuracyTarget>)> = workload
             .entries()
-            .enumerate()
-            .map(|(index, (entry, expr))| {
+            .zip(workload.operator_indices().iter().copied())
+            .map(|((entry, expr), index)| {
                 (
                     index,
                     Rc::clone(expr),
@@ -57,7 +57,7 @@ impl OptimizationPass for MajorPass {
 
         // One index per root, in `CandidateLogicalASAPDAGs::roots` order — which is the order
         // the roots went in, which is `entries()` order.
-        let entry_indices: Vec<usize> = (0..workload.len()).collect();
+        let entry_indices = workload.operator_indices().to_vec();
         let demand = WorkloadDemand {
             workload: workload.query_workload(),
             data_workload: workload.data_workload(),
@@ -94,8 +94,7 @@ impl OptimizationPass for MajorPass {
                 .ok_or_else(|| self.missing_group(*entry_index))?;
             assembled.push(dag);
         }
-        let interned =
-            share_common_summary_sub_dags(assembled.iter().cloned().enumerate().collect());
+        let interned = share_common_sub_dags(assembled.iter().cloned().enumerate().collect());
         let states: Vec<_> = interned
             .iter()
             .map(|(_, dag)| summary_states(dag))
@@ -105,7 +104,7 @@ impl OptimizationPass for MajorPass {
         // their entries, in every plan that reaches it, so each plan picks
         // the same lifecycle for it. When that union cannot be costed the
         // roots keep their own, unshared DAG and entries.
-        let mut shared_entries: Vec<(Rc<SummaryNode>, Option<Vec<usize>>)> = Vec::new();
+        let mut shared_entries: Vec<(Rc<OperatorNode>, Option<Vec<usize>>)> = Vec::new();
         for (position, (entry_index, root)) in space.roots.iter().enumerate() {
             for state in &states[position] {
                 if shared_entries.iter().any(|(s, _)| Rc::ptr_eq(s, state)) {
@@ -183,7 +182,9 @@ impl OptimizationPass for MajorPass {
                 plan,
             });
         }
-        Ok(PlanOutput::new(plans))
+        let mut output = PlanOutput::new(plans);
+        output.scalar_roots = workload.scalar_roots().to_vec();
+        Ok(output)
     }
 }
 
