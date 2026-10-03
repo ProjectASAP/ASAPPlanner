@@ -121,7 +121,7 @@ pub fn estimate_storage_io(
     profile: &StorageIoProfile,
     evidence_version: &str,
 ) -> Result<StorageEstimate, AnalyticalCostError> {
-    // Also prove source coverage, edge consistency, execution legality and DAG
+    // Also prove scan selection, edge consistency, execution legality and DAG
     // identity before using supplementary deployment evidence.
     estimate_physical_dag(&dag.nodes, &dag.root, scope, dag)?;
     let evaluations = scope.validate()?;
