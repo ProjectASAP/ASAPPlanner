@@ -266,6 +266,7 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
     use crate::summary_kernels::{
         count_min_sketch::CountMinSketchAccumulator, datasketches_kll::DatasketchesKLLAccumulator,
         dd_sketch::DDSketchAccumulator, exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
+        univmon::UnivMonAccumulator,
     };
     use planner_types::post_asap::SketchParams;
     validate_family(family)?;
@@ -303,6 +304,21 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
                 .as_any()
                 .downcast_ref::<HllSketchAccumulator>()
                 .is_some_and(|s| s.inner.precision == u32::from(*precision)),
+            SketchParams::UnivMon {
+                heap_size,
+                sketch_rows,
+                sketch_cols,
+                layers,
+            } => state
+                .as_any()
+                .downcast_ref::<UnivMonAccumulator>()
+                .is_some_and(|s| {
+                    let sketch = s.sketch();
+                    sketch.heap_size == *heap_size as usize
+                        && sketch.sketch_row == *sketch_rows as usize
+                        && sketch.sketch_col == *sketch_cols as usize
+                        && sketch.layer_size == *layers as usize
+                }),
             SketchParams::Cms { width, depth } => state
                 .as_any()
                 .downcast_ref::<CountMinSketchAccumulator>()
