@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::node::OperatorNode;
 use crate::ir::SchemaDerivationError;
 use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use crate::pre_asap::scalar_signature::MapScalarFunction;
+use crate::pre_asap::scalar_type_rules::MapScalarFunction;
 use crate::pre_asap::schema::{ColumnId, DataType, Schema};
 
 /// Which language's numeric and comparison rules an expression follows.
@@ -489,7 +489,7 @@ impl ScalarExpr {
                 (to.clone(), *try_cast || nullable)
             }
             ScalarExpr::FunctionCall { name, args } => {
-                if let Some(arity) = crate::pre_asap::scalar_signature::promql_function_arity(name)
+                if let Some(arity) = crate::pre_asap::scalar_type_rules::promql_function_arity(name)
                 {
                     if args.len() != arity
                         || args

@@ -1,7 +1,7 @@
 //! DataFusion planning adapters. Types come from the canonical signature rules;
 //! physical evaluation deliberately remains the query engine's responsibility.
 use super::types::{arrow_to_dtype, dtype_to_arrow, scalar_value_to_asap};
-use asap_types::pre_asap::scalar_signature::{
+use asap_types::pre_asap::scalar_type_rules::{
     element_access_type, struct_field_type, MapScalarFunction,
 };
 use asap_types::pre_asap::{Field, QueryExpr, Schema};

@@ -69,7 +69,7 @@ pub(super) fn evaluate(
             Value::Null
         ))),
         QueryExpr::FunctionCall { name, args } => {
-            use planner_types::pre_asap::scalar_signature::MapScalarFunction;
+            use planner_types::pre_asap::scalar_type_rules::MapScalarFunction;
             if name.eq_ignore_ascii_case("asap_struct_field") {
                 expr.scalar_type(schema)
                     .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -478,7 +478,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
         QueryExpr::FunctionCall { name, args } => {
             if name != "asap_struct_field"
                 && name != "asap_element_access"
-                && planner_types::pre_asap::scalar_signature::MapScalarFunction::from_name(name)
+                && planner_types::pre_asap::scalar_type_rules::MapScalarFunction::from_name(name)
                     .is_none()
             {
                 return Err(invalid());

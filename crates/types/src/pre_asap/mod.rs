@@ -37,7 +37,7 @@ pub mod cse;
 pub mod expr_ir;
 pub mod query_expr;
 pub mod resolve;
-pub mod scalar_signature;
+pub mod scalar_type_rules;
 pub mod schema;
 pub mod schema_resolver;
 

@@ -52,7 +52,7 @@ fn values_contract_is_checked() {
 }
 /// Scalar typing validates every branch and never assigns placeholder types.
 #[test]
-fn scalar_signatures_fail_closed() {
+fn scalar_type_ruless_fail_closed() {
     for expr in [
         ScalarExpr::Column(99),
         ScalarExpr::FunctionCall {
