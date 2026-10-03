@@ -165,19 +165,19 @@ fn validate_physical_scope_coverage(
         .filter(|node| node.operator == PhysicalOperator::Scan)
     {
         let coverage = node
-            .source_coverage
+            .scan_selection
             .as_ref()
-            .ok_or_else(|| AnalyticalCostError::MissingScanSourceCoverage(node.id.clone()))?;
+            .ok_or_else(|| AnalyticalCostError::MissingScanSelection(node.id.clone()))?;
         let Some(index) = scope.sources.iter().position(|value| value == coverage) else {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                "physical source coverage",
+                "physical scan selection",
             ));
         };
         covered.insert(index);
     }
     if covered.len() != scope.sources.len() {
         return Err(AnalyticalCostError::ComparisonScopeMismatch(
-            "physical source coverage",
+            "physical scan selection",
         ));
     }
     Ok(())
@@ -939,7 +939,7 @@ mod tests {
             query,
             asap_types::workload::TimestampMs(planning_time_ms),
             asap_types::workload::DurationMs(horizon_ms),
-            vec![crate::physical_operator_statistics::SourceCoverage {
+            vec![crate::physical_operator_statistics::ScanSelection {
                 source: Source::TimeSeries {
                     metric: "metrics".into(),
                 },
@@ -1611,7 +1611,7 @@ mod tests {
                 id: "raw-concat".into(),
                 operator: PhysicalOperator::Concat,
                 children: vec!["raw-scan".into(), "raw-scan-2".into()],
-                source_coverage: None,
+                scan_selection: None,
                 output_buffer_bytes: 0,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::Once,
@@ -1693,7 +1693,7 @@ mod tests {
         let mut extra = streaming_scope();
         extra
             .sources
-            .push(crate::physical_operator_statistics::SourceCoverage {
+            .push(crate::physical_operator_statistics::ScanSelection {
                 source: Source::TimeSeries {
                     metric: "unused".into(),
                 },
@@ -1720,7 +1720,7 @@ mod tests {
         let mut info_scope = streaming_scope();
         info_scope
             .sources
-            .push(crate::physical_operator_statistics::SourceCoverage {
+            .push(crate::physical_operator_statistics::ScanSelection {
                 source: Source::TimeSeries {
                     metric: "target_info".into(),
                 },
@@ -2057,7 +2057,7 @@ mod tests {
                 physical_id: "left-state".into(),
                 input: test_edge(),
                 output: test_edge(),
-                source_coverage_index: Some(0),
+                scan_selection_index: Some(0),
                 bootstrap_read_identity: "left-bootstrap".into(),
                 inputs: streaming_inputs(),
                 insert_cpu_ops: streaming_cpu().insert_cpu_ops.unwrap(),
@@ -2084,7 +2084,7 @@ mod tests {
                 physical_id: "right-state".into(),
                 input: test_edge(),
                 output: test_edge(),
-                source_coverage_index: Some(0),
+                scan_selection_index: Some(0),
                 bootstrap_read_identity: "right-bootstrap".into(),
                 inputs: second_inputs,
                 insert_cpu_ops: second_cpu.insert_cpu_ops.unwrap(),
@@ -2150,7 +2150,7 @@ mod tests {
             64.0
         );
 
-        // Equal SourceCoverage does not imply that two independent state
+        // Equal ScanSelection does not imply that two independent state
         // builds share one physical read. Only a provider-owned read identity
         // permits scan de-duplication.
         let mut shared_read = model;
@@ -3264,7 +3264,7 @@ mod tests {
             id: "raw-scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
-            source_coverage: Some(scope.sources[0].clone()),
+            scan_selection: Some(scope.sources[0].clone()),
             output_buffer_bytes: 0,
             retained_bytes: 0,
             execution: ExecutionMultiplicity::Once,
@@ -3415,7 +3415,7 @@ mod tests {
                     physical_id: format!("agg-{node:p}"),
                     input: test_edge(),
                     output: test_edge(),
-                    source_coverage_index: source_root.then_some(0),
+                    scan_selection_index: source_root.then_some(0),
                     bootstrap_read_identity: if source_root {
                         "shared-bootstrap".into()
                     } else {
@@ -3637,7 +3637,7 @@ mod tests {
             &entry,
             asap_types::workload::TimestampMs(0),
             asap_types::workload::DurationMs(5_000),
-            vec![crate::physical_operator_statistics::SourceCoverage {
+            vec![crate::physical_operator_statistics::ScanSelection {
                 source: Source::TimeSeries {
                     metric: "metrics".into(),
                 },

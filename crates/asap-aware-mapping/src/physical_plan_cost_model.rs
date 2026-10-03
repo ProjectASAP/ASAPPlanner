@@ -367,7 +367,7 @@ mod tests {
 
     use crate::analytical_cost::{ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator};
     use crate::physical_operator_statistics::{
-        EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
+        EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
     };
     use crate::replacement::ReplacementStrategy;
 
@@ -438,7 +438,7 @@ mod tests {
                 lookback: Some(DurationMs(10_000)),
                 as_of: Some(TimestampMs(1_000)),
             },
-            sources: vec![SourceCoverage {
+            sources: vec![ScanSelection {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
@@ -506,7 +506,7 @@ mod tests {
                         id: "candidate-scan".into(),
                         operator: PhysicalOperator::Scan,
                         children: vec![],
-                        source_coverage: Some(scope.sources[0].clone()),
+                        scan_selection: Some(scope.sources[0].clone()),
                         output_buffer_bytes: 8,
                         retained_bytes: 0,
                         execution: ExecutionMultiplicity::Once,
@@ -518,7 +518,7 @@ mod tests {
                             accumulator_count: 1,
                         },
                         children: vec!["candidate-scan".into()],
-                        source_coverage: None,
+                        scan_selection: None,
                         output_buffer_bytes: 8,
                         retained_bytes: 8,
                         execution: ExecutionMultiplicity::Once,
@@ -527,7 +527,7 @@ mod tests {
                         id: "candidate-read".into(),
                         operator: PhysicalOperator::PassThrough,
                         children: vec!["candidate-state".into()],
-                        source_coverage: None,
+                        scan_selection: None,
                         output_buffer_bytes: 8,
                         retained_bytes: 0,
                         execution: ExecutionMultiplicity::PerEvaluation,
@@ -1006,7 +1006,7 @@ mod tests {
             ) -> Result<PhysicalDAG, AnalyticalCostError> {
                 let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
                 dag.nodes[0]
-                    .source_coverage
+                    .scan_selection
                     .as_mut()
                     .unwrap()
                     .source_snapshot_id = "other".into();
