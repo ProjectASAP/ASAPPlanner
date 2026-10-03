@@ -89,6 +89,22 @@ zero approximate estimate cannot decide whether SQL returns NULL.
 Frontend tests cover recognition, non-equivalent probability/window/unit
 shapes, candidate retention and accuracy propagation. Native wire execution
 checks filtering, nats, empty population, negative zero and unequal frequencies.
-The original entropy SQL graph remains an alternative, but native SQL window
-binding for that original graph is still a runtime gap at this step. Neither
+The original entropy SQL graph remains an alternative. Its native SQL window
+binding is supplied by the next follow-up below. Neither
 recognition nor the exact path proves UnivMon's probabilistic accuracy bound.
+
+## Native entropy fallback follow-up acceptance
+
+Native binding now implements SQL `LN` and the exact `SUM(column) OVER ()`
+window over a complete, unordered relation with unbounded start/end bounds.
+The window appends its total to every original row, keeps input metadata,
+propagates all-NULL totals, supports recovery and obeys workspace limits.
+Partitioned, ordered and finite frames remain explicitly unsupported. This
+operator executes one SQL relation; it is unrelated to the proposal's missing
+streaming tumbling/sliding/EH summary-window planning.
+
+The entropy acceptance fixture now executes both the original SQL and its
+frequency rewrite, comparing filtering, natural-log units, empty-input NULL
+and unequal frequencies. Raw analytical cost lowering still excludes this
+unordered SUM window; supplying native execution does not provide missing
+cost evidence or extend the analytical adapter's existing ordered-window rule.

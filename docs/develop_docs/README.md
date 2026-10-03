@@ -16,5 +16,6 @@ formats, evidence, and verification workflows.
 - [Physical handoff cost references](physical-handoff-costs.md), [storage operations](storage-operation-costs.md)
 - [Replacement explanations](replacement-explanations.md)
 - [Physical compile coverage for deployment computation](physical-compile-coverage.md)
+- [Planner-layering implementation status and follow-up scopes](planner-layering-status.md)
 
 - [Planner vocabulary migration (#427)](planner-vocabulary-migration.md)
