@@ -1,6 +1,9 @@
 # ASAP Pre/Post-ASAP DAG viewer
 
-The viewer has one visualization mode: **Pre/Post-ASAP**.
+The viewer has two visualization modes, chosen with the header switch:
+**Pre/Post-ASAP** (below) and **Stages** (see "Stages view"). Stages is
+enabled, and opens by default, only when an `asap-stage-pipeline/v1`
+document is loaded.
 
 - Select one query to see that query's complete pre-ASAP and post-ASAP DAGs.
 - Select multiple queries to see two workload-union DAGs: one pre-ASAP union
@@ -25,6 +28,65 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
   benefit annotations" below.
 
 There are no separate Single, Compare, or Union modes.
+
+## Stages view
+
+The Stages view shows one planner run through the stages of
+[planner layering](../../docs/design_docs/proposals/planner-layering.md),
+as three lanes side by side:
+
+1. **Logical**: the stage-0 logical DAG.
+2. **Logical ASAP**: one stage-1 candidate. Pick it with the
+   **Logical ASAP candidates** list above the canvas, which shows each
+   candidate's label.
+3. **Physical ASAP**: one stage-2 candidate. Each node shows its timing
+   (`⏱ ingestion time` or `⏱ query time`; ingestion-time nodes also have a
+   double border) and its cost. The lane header shows the candidate's total
+   cost and unit, its rank, and whether stage 3 selected or rejected it.
+
+The **Physical ASAP candidates by total cost** list ranks every physical
+candidate, cheapest first. It marks the selected candidate, and shows each
+rejected candidate with its reason. A candidate that stage 3 neither
+selects nor rejects is shown as "not selected". Clicking a row shows that
+candidate in lane 3, and shows the logical candidate it implements in
+lane 2. That logical candidate is outlined in the list and in the lane.
+
+Click a node to see its payload, output schema, guarantee and coverage.
+Physical nodes also show their output timing and per-node cost. Click an
+edge to see its intermediate schema, and for physical edges, its data state.
+
+To open the sample document, start the server (see "Interactive query
+editor") and go to
+<http://127.0.0.1:8000/?doc=examples/stage-pipeline.sample.json>. The `doc`
+parameter takes any JSON file path served next to `index.html`. You can also
+load a stage document with the file picker.
+
+The sample, `examples/stage-pipeline.sample.json`, is hand-written. It
+follows #509's Example 1 query Q2,
+`topk by (job) (10, sum_over_time(http_requests_total[1m]))`. It has three
+logical candidates (exact, Count-Min with heap, Hydra) and four physical
+candidates. The costs are illustrative, not planner output.
+
+### Document format
+
+```json
+{
+  "format": "asap-stage-pipeline/v1",
+  "workload": { "queries": [{ "id": "q1", "language": "sql", "text": "..." }] },
+  "stage0_logical": { "dag": "<LogicalASAPDAG>" },
+  "stage1_logical_asap": { "candidates": [{ "id": "L1", "label": "...", "dag": "<LogicalASAPDAG>" }] },
+  "stage2_physical_asap": { "candidates": [{ "id": "P1", "from_logical": "L1", "label": "...",
+        "dag": "<PhysicalASAPDAG>",
+        "cost": { "total": 12.5, "unit": "cpu_ms_per_s", "per_node": { "<node id>": { "cost": 3.2, "detail": "..." } } } }] },
+  "stage3_selection": { "selected": "P1", "rejected": [{ "id": "P2", "reason": "..." }] }
+}
+```
+
+DAGs use the serde JSON of `LogicalASAPDAG` and `PhysicalASAPDAG`. The viewer
+checks the document before it renders it: node and edge references,
+`from_logical`, `per_node` keys, physical `output_state.timing` and
+`data_state`, and the stage-3 ids. If any check fails, it lists the
+problems and does not load the document.
 
 ## Interactive query editor
 
@@ -199,3 +261,7 @@ All of this is additive and optional: an export with none of these fields
 python3 -m unittest discover -s tools/dag-viewer -p test_render.py
 cargo test -p asap-devtools --bin dag_export
 ```
+
+The JavaScript tests, including the Stages validation, lane and ranking
+tests, need `py_mini_racer` (`pip install py-mini-racer`). Without it they
+are skipped.
