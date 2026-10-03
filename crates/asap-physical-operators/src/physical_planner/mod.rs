@@ -798,6 +798,36 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                 *offset as u64,
                 groups(input, partition_by)?,
             ),
+            NonASAPOpKind::SQLWindowFunc {
+                func: planner_types::pre_asap::WindowFuncKind::Sum,
+                args,
+                partition_by,
+                order_by,
+                frame: Some(frame),
+                output_name,
+            } => {
+                use planner_types::pre_asap::{ScalarValue, WindowFrameBound, WindowFrameOffset};
+                let [WireScalarExpr::Column(column)] = args.as_slice() else {
+                    return Err(invalid("SQL window SUM requires one column"));
+                };
+                if partition_by.is_without()
+                    || !partition_by.keys().is_empty()
+                    || !order_by.is_empty()
+                    || !matches!(
+                        frame.start_bound,
+                        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Null))
+                    )
+                    || !matches!(
+                        frame.end_bound,
+                        WindowFrameBound::Following(WindowFrameOffset::Scalar(ScalarValue::Null))
+                    )
+                {
+                    return Err(invalid(
+                        "native SQL window SUM requires the complete unordered relation",
+                    ));
+                }
+                Operator::sql_window_sum(input.clone(), *column, output_name.clone())
+            }
             NonASAPOpKind::Aggregate {
                 reduction,
                 measures,
