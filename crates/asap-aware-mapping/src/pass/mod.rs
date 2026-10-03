@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use asap_types::ir::export::compile_physical_asap_workload;
-use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+use asap_types::ir::timing::{
+    apply_materialization_timings, MaterializationAssignment, TimingMemo,
+};
 use asap_types::ir::OperatorNode;
 use asap_types::parsed_workload::ParsedWorkload;
 use asap_types::post_asap::ExecutionDataStateError;
@@ -217,11 +219,11 @@ impl PlanOutput {
     ) -> Result<asap_types::ir::export::PhysicalASAPDAG, ExecutionDataStateError> {
         // One memo, so a node shared by several roots is timed and exported once.
         let mut memo = TimingMemo::new();
-        let assignment = LifecycleAssignment::default_maintained();
+        let assignment = MaterializationAssignment::all_query_time();
         let timed = self
             .plans
             .iter()
-            .map(|p| apply_lifecycle_timings(&p.root, &assignment, &mut memo))
+            .map(|p| apply_materialization_timings(&p.root, &assignment, &mut memo))
             .collect::<Result<Vec<_>, _>>()?;
         compile_physical_asap_workload(&timed)
     }

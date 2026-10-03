@@ -19,11 +19,11 @@ pub mod cse;
 pub mod export;
 /// Physical ASAP DAG transport: the logical payloads plus execution timing.
 pub mod physical_export;
-/// Execution timing for physical plans: a lifecycle assignment expanded onto every node.
+/// Execution timing for physical plans: a materialization assignment expanded onto every node.
 pub mod timing;
 pub use timing::{
-    apply_lifecycle_timings, data_state, planned_data_state, split_shared_by_phase,
-    validate_default, LifecycleAssignment, TimingMemo,
+    apply_materialization_timings, data_state, planned_data_state, split_shared_by_phase,
+    validate_maintained, MaterializationAssignment, TimingMemo,
 };
 /// Semantic observation coverage, separate from field layout and physical timing.
 pub mod summary_coverage;

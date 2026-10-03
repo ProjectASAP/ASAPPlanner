@@ -1,16 +1,18 @@
-//! Execution timing: written into every node from a lifecycle assignment,
-//! then validated against each operator's kind and its consuming edges.
+//! Execution timing: written into every node from a materialization
+//! assignment, then validated against each operator's kind and its consuming
+//! edges.
 //!
-//! The logical DAG carries no timing. Summary materialization chooses a
-//! lifecycle per summary state; [`LifecycleAssignment`] records that choice
-//! (ingestion-time maintenance or query-time recomputation per `SummaryAgg`)
-//! and [`apply_lifecycle_timings`] expands it into a timing on every node:
+//! The logical DAG carries no timing. Materialization decides per summary
+//! state whether it is maintained at ingestion time or computed at query
+//! time; [`MaterializationAssignment`] records that choice per `SummaryAgg`
+//! and [`apply_materialization_timings`] expands it into a timing on every node:
 //!
 //! - a node of fixed kind takes its kind's timing (`SummaryEstimate` and
 //!   `EvaluatePopulation` run at query time, `MaintainPopulation` at ingestion
 //!   time);
-//! - a `SummaryAgg` takes the assignment's timing (default: ingestion time),
-//!   unless something below it can only exist at query time;
+//! - a `SummaryAgg` takes the assignment's timing (default: query time, until
+//!   Stage 2 materialization (#509) chooses otherwise), unless something below
+//!   it can only exist at query time;
 //! - every other node runs when its consumer runs: everything that feeds a
 //!   maintained state runs at ingestion time, everything above a evaluation at
 //!   query time.
@@ -43,21 +45,29 @@ use crate::post_asap::execution_data_state::{
 };
 use crate::pre_asap::schema::{DataType, FieldDataType, Schema};
 
-/// The per-state lifecycle choice summary materialization made: for each
-/// `SummaryAgg` node (by identity), whether its state is maintained at
-/// ingestion time or recomputed at query time. A state absent from the map
-/// takes the default, ingestion-time maintenance.
+/// The per-state materialization choice: for each `SummaryAgg` node (by
+/// identity), whether its state is maintained at ingestion time or computed
+/// at query time. A state absent from the map takes the assignment's default.
+/// `Default` is [`Self::all_query_time`]: nothing is materialized until Stage 2
+/// materialization (#509) decides otherwise.
 #[derive(Debug, Clone, Default)]
-pub struct LifecycleAssignment {
+pub struct MaterializationAssignment {
     summary_timings: HashMap<*const OperatorNode, ExecutionTiming>,
+    default_timing: ExecutionTiming,
 }
 
-impl LifecycleAssignment {
-    /// The assignment under which every summary state is maintained at
-    /// ingestion time — the timings every plan carried before lifecycles
-    /// became a planning choice.
-    pub fn default_maintained() -> Self {
+impl MaterializationAssignment {
+    /// Every summary state computed at query time.
+    pub fn all_query_time() -> Self {
         Self::default()
+    }
+
+    /// Every summary state maintained at ingestion time.
+    pub fn all_ingestion_time() -> Self {
+        Self {
+            summary_timings: HashMap::new(),
+            default_timing: ExecutionTiming::IngestionTime,
+        }
     }
 
     pub fn set(&mut self, summary: &Rc<OperatorNode>, timing: ExecutionTiming) {
@@ -68,11 +78,11 @@ impl LifecycleAssignment {
         self.summary_timings
             .get(&Rc::as_ptr(summary))
             .copied()
-            .unwrap_or(ExecutionTiming::IngestionTime)
+            .unwrap_or(self.default_timing)
     }
 }
 
-/// Memo of one [`apply_lifecycle_timings`] pass: `input node → timed node`,
+/// Memo of one [`apply_materialization_timings`] pass: `input node → timed node`,
 /// shared by every root of a workload so a node shared by two roots stays
 /// one `Rc`. Re-reaching a node with a different timing is a conflict.
 #[derive(Default)]
@@ -137,9 +147,9 @@ fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode
 /// Write the timings of `assignment` into every node reachable from `root`,
 /// top-down, then validate every edge. Returns the timed copy of `root`;
 /// `memo` carries the sharing across the roots of one workload.
-pub fn apply_lifecycle_timings(
+pub fn apply_materialization_timings(
     root: &Rc<OperatorNode>,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     memo: &mut TimingMemo,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
     let mut forced = HashMap::new();
@@ -159,24 +169,26 @@ pub fn apply_lifecycle_timings(
     Ok(timed)
 }
 
-/// Validate the sub-DAG below `root` under the default (every summary
-/// maintained) assignment, with `root` consumed at `root_timing`. For
-/// planning-time legality checks of a candidate before it is assembled into
-/// a workload DAG; nothing is kept.
-pub fn validate_default(
+/// Validate the sub-DAG below `root` with every summary maintained at
+/// ingestion time ([`MaterializationAssignment::all_ingestion_time`]) and
+/// `root` consumed at `root_timing`. For planning-time legality checks of a
+/// candidate before it is assembled into a workload DAG: a candidate must stay
+/// executable if materialization later maintains its states. Nothing is kept.
+pub fn validate_maintained(
     root: &Rc<OperatorNode>,
     root_timing: ExecutionTiming,
 ) -> Result<(), ExecutionDataStateError> {
-    let assignment = LifecycleAssignment::default_maintained();
+    let assignment = MaterializationAssignment::all_ingestion_time();
     let mut memo = TimingMemo::new();
     let mut forced = HashMap::new();
     let timed = write(root, root_timing, &assignment, &mut memo, &mut forced)?;
     validate(&timed, &mut HashMap::new())
 }
 
-/// The data state `node` produces under the default assignment when its
-/// consumer runs at `consumer` — the planning-time answer to "what does this
-/// candidate's output look like" before any assignment is applied.
+/// The data state `node` produces with every summary maintained at ingestion
+/// time when its consumer runs at `consumer` — the planning-time answer to
+/// "what does this candidate's output look like", consistent with
+/// [`validate_maintained`].
 pub fn planned_data_state(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
@@ -185,7 +197,7 @@ pub fn planned_data_state(
     let timing = own_timing(
         node,
         consumer,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_ingestion_time(),
         &mut forced,
     );
     ExecutionDataState {
@@ -202,7 +214,7 @@ pub fn planned_data_state(
 fn own_timing(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> ExecutionTiming {
     // A placement fixed when the candidate was built (an exact-state read
@@ -229,7 +241,7 @@ fn own_timing(
 fn write(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     memo: &mut TimingMemo,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
@@ -560,7 +572,7 @@ fn validate_non_asap(
 /// one timing stays one `Rc`. Returns the (possibly rewritten) root.
 pub fn split_shared_by_phase(
     root: &Rc<OperatorNode>,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
 ) -> Rc<OperatorNode> {
     // First pass: the set of timings each node is reached with.
     let mut reached: HashMap<*const OperatorNode, Vec<ExecutionTiming>> = HashMap::new();
@@ -568,7 +580,7 @@ pub fn split_shared_by_phase(
     fn collect(
         node: &Rc<OperatorNode>,
         consumer: ExecutionTiming,
-        assignment: &LifecycleAssignment,
+        assignment: &MaterializationAssignment,
         reached: &mut HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
         forced: &mut HashMap<*const OperatorNode, bool>,
     ) {
@@ -598,7 +610,7 @@ pub fn split_shared_by_phase(
     fn rebuild(
         node: &Rc<OperatorNode>,
         consumer: ExecutionTiming,
-        assignment: &LifecycleAssignment,
+        assignment: &MaterializationAssignment,
         reached: &HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
         copies: &mut HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>>,
         forced: &mut HashMap<*const OperatorNode, bool>,
@@ -764,16 +776,50 @@ mod tests {
         )
     }
 
+    /// Apply with every summary maintained, the placement whose edge rules
+    /// these tests exercise.
     fn apply(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
-        apply_lifecycle_timings(
+        apply_materialization_timings(
             root,
-            &LifecycleAssignment::default_maintained(),
+            &MaterializationAssignment::all_ingestion_time(),
             &mut TimingMemo::new(),
         )
     }
 
     fn child(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         Rc::clone(node.children()[0])
+    }
+
+    /// Without a materialization decision, a summary and its input run at
+    /// query time; an explicit per-state choice overrides the default.
+    #[test]
+    fn default_assignment_materializes_nothing() {
+        let summary = agg(scan(), kll());
+        let root = apply_materialization_timings(
+            &summary,
+            &MaterializationAssignment::default(),
+            &mut TimingMemo::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            data_state(&root),
+            Some(ExecutionDataState {
+                timing: ExecutionTiming::QueryTime,
+                primitive: DataPrimitive::SummaryState,
+            })
+        );
+        assert_eq!(
+            data_state(&child(&root)),
+            Some(ExecutionDataState::QUERY_ROWS)
+        );
+        let mut assignment = MaterializationAssignment::all_query_time();
+        assignment.set(&summary, ExecutionTiming::IngestionTime);
+        let root =
+            apply_materialization_timings(&summary, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(
+            data_state(&root),
+            Some(ExecutionDataState::INGESTION_SUMMARY)
+        );
     }
 
     #[test]
@@ -873,7 +919,7 @@ mod tests {
                 second: ExecutionDataState::QUERY_ROWS,
             })
         );
-        let split = split_shared_by_phase(&root, &LifecycleAssignment::default_maintained());
+        let split = split_shared_by_phase(&root, &MaterializationAssignment::all_ingestion_time());
         assert!(apply(&split).is_ok());
     }
 
@@ -896,10 +942,10 @@ mod tests {
         };
         for operand in [1, 2] {
             assert!(matches!(
-                validate_default(&corr_over(operand), ExecutionTiming::QueryTime),
+                validate_maintained(&corr_over(operand), ExecutionTiming::QueryTime),
                 Err(ExecutionDataStateError::NonPlainOperand { .. })
             ));
         }
-        validate_default(&corr_over(3), ExecutionTiming::QueryTime).unwrap();
+        validate_maintained(&corr_over(3), ExecutionTiming::QueryTime).unwrap();
     }
 }

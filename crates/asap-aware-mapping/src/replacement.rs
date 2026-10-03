@@ -351,7 +351,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
-use asap_types::ir::timing::validate_default;
+use asap_types::ir::timing::validate_maintained;
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
@@ -1399,10 +1399,11 @@ impl<'a> ASAPStrategies<'a> {
         fn place(node: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
             retime_rate_finalize(node, ExecutionTiming::IngestionTime, true)
         }
+        // Legal only if the candidate stays executable with its states maintained.
         let timed = |node: &Rc<OperatorNode>| {
-            asap_types::ir::timing::apply_lifecycle_timings(
+            asap_types::ir::timing::apply_materialization_timings(
                 node,
-                &asap_types::ir::timing::LifecycleAssignment::default_maintained(),
+                &asap_types::ir::timing::MaterializationAssignment::all_ingestion_time(),
                 &mut asap_types::ir::timing::TimingMemo::new(),
             )
             .ok()
@@ -1764,7 +1765,7 @@ impl ReplacementStrategy for ASAPStrategies<'_> {
     /// the logical root does not expose, so each is a finalized query result
     /// for the identity-carrying root. Placement variants (for example,
     /// fixed-window or query-time Rate aggregation) are not listed here: the
-    /// lifecycle assigns timing and the physical compiler reads it.
+    /// materialization assigns timing and the physical compiler reads it.
     fn propose_for_root(&self, root: &Rc<OperatorNode>, target: &AccuracyTarget) -> Proposals {
         let Ok(typed) = asap_types::ir::schema_support::with_promql_series_identity(root) else {
             return Proposals::default();
@@ -1974,7 +1975,7 @@ fn exact_topk_over_temporal_values(
         )
         .with_guarantee(guarantee),
     );
-    validate_default(&node, ExecutionTiming::QueryTime)?;
+    validate_maintained(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
@@ -1993,7 +1994,7 @@ fn realize_temporal_average(
         return Ok(None);
     };
     operator.checked_finite_division = true;
-    validate_default(&node, ExecutionTiming::QueryTime)?;
+    validate_maintained(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
@@ -2341,7 +2342,7 @@ pub fn finalize_query_candidate(
 
 /// The read boundary's placement is fixed here, where the candidate's
 /// semantics decide it (a fresh query-time summary over this evaluation's
-/// finalized values vs. finalized values feeding maintenance); the lifecycle
+/// finalized values vs. finalized values feeding maintenance); the materialization
 /// timing pass honors it.
 fn finalize_exact_accumulator(
     node: Rc<OperatorNode>,
@@ -2749,7 +2750,7 @@ fn finish_weighted_topk(
         )
         .with_guarantee(guarantee),
     );
-    validate_default(&result, ExecutionTiming::QueryTime)?;
+    validate_maintained(&result, ExecutionTiming::QueryTime)?;
     Ok(result)
 }
 
@@ -3130,7 +3131,7 @@ fn construct_summary_agg(
     } else if snapshot_weighted {
         // Each evaluation's finalized rates feed a fresh summary; rate snapshots
         // must never accumulate across evaluations. Query time is only the
-        // initial layout; a retained summary's lifecycle moves it to ingestion.
+        // initial layout; a maintained summary's materialization moves it to ingestion.
         finalize_query_candidate(bound_child, &input.child)?
     } else {
         let child =
@@ -4205,7 +4206,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
 }
 
 /// DAG candidates assembled from an unpriced search space.
-/// This is an internal planning stage: callers must still validate lifecycle
+/// This is an internal planning stage: callers must still validate materialization
 /// requirements and compile supported physical operators before deployment.
 /// The caller supplies a finite expansion budget; exceeding it is an error,
 /// never a silently truncated inventory presented as exhaustive.
@@ -5220,7 +5221,7 @@ impl<'a> GlobalSelection<'a> {
             return Ok(Rc::clone(node));
         }
         // A selected summary that realizes its inner aggregate, instead of
-        // hiding it in `KeepPreAsap`, is kept; lifecycle assignment decides
+        // hiding it in `KeepPreAsap`, is kept; materialization assignment decides
         // whether it runs in precompute or at query time.
         let selected_composed_summary = self
             .groups
@@ -5364,7 +5365,7 @@ impl<'a> GlobalSelection<'a> {
         let node = Rc::new(
             OperatorNode::with_schema(operator, target.schema.clone()).with_guarantee(guarantee),
         );
-        validate_default(&node, ExecutionTiming::QueryTime)?;
+        validate_maintained(&node, ExecutionTiming::QueryTime)?;
         Ok(node)
     }
 
@@ -5485,7 +5486,7 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
                 )
                 .with_guarantee(node.guarantee.clone())
             });
-            match validate_default(&rebuilt, ExecutionTiming::IngestionTime) {
+            match validate_maintained(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -6898,7 +6899,7 @@ mod tests {
     use super::*;
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
-    use crate::test_support::{agg, agg_per_entity, lower_promql, metric_scan, timed};
+    use crate::test_support::{agg, agg_per_entity, lower_promql, maintained, metric_scan, timed};
     use asap_types::ir::operator_properties::{Reduction as ReductionTy, Source};
     use asap_types::ir::TimeRangeKind;
     use asap_types::pre_asap::agg_intent::{
@@ -6952,9 +6953,9 @@ mod tests {
     }
 
     // Grouped Sum over Rate evaluations stays a summary state in the inventory,
-    // so lifecycle assignment can place it in precompute or at query time.
+    // so materialization assignment can place it in precompute or at query time.
     #[test]
-    fn grouped_rate_sum_inventory_keeps_sum_state_for_lifecycle_placement() {
+    fn grouped_rate_sum_inventory_keeps_sum_state_for_materialization_placement() {
         let root = lower_promql("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact);
         let inventory = search_workload(vec![(0usize, root)])
             .enumerate_candidate_dags(4096)
@@ -10071,8 +10072,8 @@ mod tests {
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
         // Timing is not stored during realization: time the candidate under
-        // the default lifecycle assignment to read the maintenance boundary.
-        let root = timed(&realize(&outer).unwrap());
+        // a maintained materialization assignment to read the maintenance boundary.
+        let root = maintained(&realize(&outer).unwrap());
 
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
             panic!("expected estimate root, got {:?}", root.operator);
