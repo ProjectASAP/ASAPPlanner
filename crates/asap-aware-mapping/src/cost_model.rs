@@ -888,6 +888,13 @@ pub trait CostModel {
         self.raw_query_recompute_cost(target)
             .map(|per_read| Cost(per_read.0 * expected_reads))
     }
+    /// Response latency for executing the original ordinary query once.
+    /// Separate from amortized workload cost: cheap recomputation can still
+    /// miss a response deadline. `None` means the bound cannot be checked.
+    fn raw_query_response_latency_ms(&self, _target: &OperatorNode) -> Option<f64> {
+        None
+    }
+
     /// Physical feasibility evidence for a complete summary candidate.
     /// `None` defers admission to physical/deployment compilation; `Some(false)`
     /// excludes the candidate without changing its computation or parameters.
