@@ -4,7 +4,7 @@ mod physical_common;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::ASAPOp;
 use asap_types::ir::OperatorNode;
-use physical_common::compile_physical_asap_dag;
+use physical_common::compile_maintained_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
@@ -417,7 +417,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
     let mut checked = BTreeMap::new();
     for (query, accuracy) in queries {
         for candidate in candidates(query, accuracy.clone()) {
-            let dag = compile_physical_asap_dag(&candidate).unwrap();
+            let dag = compile_maintained_physical_asap_dag(&candidate).unwrap();
             for (source, root) in raw_summaries(&dag) {
                 match check(query, &dag, source, root, &rows) {
                     Ok(family) => {
@@ -470,7 +470,7 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     )
     .pop()
     .unwrap();
-    let mut dag = compile_physical_asap_dag(&candidate).unwrap();
+    let mut dag = compile_maintained_physical_asap_dag(&candidate).unwrap();
     let (source, root) = raw_summaries(&dag)[0];
     let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
