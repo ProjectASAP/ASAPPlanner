@@ -16,4 +16,6 @@ pub enum SchemaDerivationError {
     EmptyConcat,
     #[error("invalid per-series sample column: {0}")]
     InvalidSampleColumn(String),
+    #[error("invalid summary coverage: {0}")]
+    Coverage(#[from] super::summary_coverage::CoverageError),
 }
