@@ -1,0 +1,243 @@
+//! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
+use asap_aware_mapping::{
+    logical_candidates::{
+        enumerate_local_logical_candidates, local_realizations_for_intent, LogicalCandidateError,
+    },
+    Realization,
+};
+use asap_types::{
+    ir::operator_properties::{Reduction, Source},
+    ir::{NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr},
+    post_asap::{ExactKind, SketchAlgorithm},
+    pre_asap::{AggIntent, DataType, Field, Schema},
+    types::AccuracyTarget,
+};
+use std::rc::Rc;
+
+fn approximate() -> AccuracyTarget {
+    AccuracyTarget::EpsilonDelta {
+        epsilon: 0.05,
+        delta: 0.01,
+    }
+}
+fn algorithms(choices: &[Realization]) -> Vec<SketchAlgorithm> {
+    choices
+        .iter()
+        .filter_map(|choice| match choice {
+            Realization::Sketch(kind) => Some(kind.algorithm().clone()),
+            _ => None,
+        })
+        .collect()
+}
+fn aggregate(intent: AggIntent) -> Rc<OperatorNode> {
+    let child = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "flows".into(),
+        },
+        predicates: vec![],
+        schema: Schema::lifted(vec![Field::plain("src_ip", DataType::Utf8, false)], None),
+    }))
+    .unwrap();
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
+        child,
+        reduction: Reduction::by(vec![]),
+        measures: vec![intent],
+        output_names: vec![],
+        filters: vec![],
+        having: None,
+    }))
+    .unwrap()
+}
+
+/// Example 2 preserves specialized distinct summaries and the universal alternative.
+#[test]
+fn cardinality_keeps_exact_specialized_and_universal_alternatives() {
+    let choices = local_realizations_for_intent(&AggIntent::Cardinality {
+        cols: vec![0],
+        accuracy: approximate(),
+    })
+    .unwrap();
+    assert!(matches!(choices[0], Realization::PassThrough));
+    assert_eq!(
+        algorithms(&choices),
+        vec![
+            SketchAlgorithm::Hll,
+            SketchAlgorithm::Theta,
+            SketchAlgorithm::Kmv,
+            SketchAlgorithm::UnivMon
+        ]
+    );
+    let tuple = local_realizations_for_intent(&AggIntent::Cardinality {
+        cols: vec![0, 1],
+        accuracy: approximate(),
+    })
+    .unwrap();
+    assert!(!algorithms(&tuple).contains(&SketchAlgorithm::UnivMon));
+}
+
+/// Frequency moments retain exact execution and a universal sketch without certification.
+#[test]
+fn frequency_statistics_keep_universal_choices() {
+    for intent in [
+        AggIntent::FrequencyL2 {
+            col: Some(0),
+            accuracy: approximate(),
+        },
+        AggIntent::FrequencyEntropy {
+            col: Some(0),
+            accuracy: approximate(),
+        },
+    ] {
+        let choices = local_realizations_for_intent(&intent).unwrap();
+        assert!(matches!(choices[0], Realization::PassThrough));
+        assert_eq!(algorithms(&choices), vec![SketchAlgorithm::UnivMon]);
+    }
+}
+
+/// An exact request cannot acquire an approximate sketch merely because one is available.
+#[test]
+fn exact_quantile_stays_exact_and_approximate_keeps_both_families() {
+    let choices = local_realizations_for_intent(&AggIntent::Quantile {
+        col: Some(0),
+        q: 0.99,
+        accuracy: approximate(),
+    })
+    .unwrap();
+    assert_eq!(
+        algorithms(&choices),
+        vec![SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]
+    );
+    let exact = local_realizations_for_intent(&AggIntent::Quantile {
+        col: Some(0),
+        q: 0.99,
+        accuracy: AccuracyTarget::Exact,
+    })
+    .unwrap();
+    assert_eq!(exact, vec![Realization::PassThrough]);
+}
+
+/// Scalar roots expose their producer targets; repeated references retain one target identity.
+#[test]
+fn scalar_root_producers_are_discovered_once() {
+    let producer = aggregate(AggIntent::Cardinality {
+        cols: vec![0],
+        accuracy: approximate(),
+    });
+    let roots = vec![
+        (
+            "scalar",
+            QueryRoot::Scalar(ScalarExpr::ScalarSubquery(producer.clone())),
+        ),
+        ("relation", QueryRoot::Operator(producer.clone())),
+    ];
+    let candidates = enumerate_local_logical_candidates(roots).unwrap();
+    assert_eq!(candidates.roots.len(), 2);
+    for (_, root) in &candidates.roots {
+        asap_types::ir::export::compile_logical_asap_query(root)
+            .unwrap()
+            .validate()
+            .unwrap();
+    }
+    assert_eq!(candidates.targets.len(), 1);
+    assert!(Rc::ptr_eq(&candidates.targets[0].target, &producer));
+    assert!(producer.timing.is_none());
+    assert!(producer.guarantee.is_none());
+    asap_types::ir::export::compile_logical_asap_dag(&producer)
+        .unwrap()
+        .validate()
+        .unwrap();
+}
+
+/// Example 1 rate lowering reaches the exact accumulator choice without a cost model.
+#[test]
+fn promql_lowering_reaches_phase_free_local_candidates() {
+    use asap_types::workload::{
+        AccuracyRequirement, BatchEntry, PlanningWorkload, Query, QueryLanguage, QueryRequirements,
+        QueryWorkload,
+    };
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+                query: Query("sum by (job) (rate(http_requests_total[1m]))".into()),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyRequirement::Explicit(approximate()),
+                    ..Default::default()
+                },
+                predictability: Default::default(),
+                invocations: 1,
+                execute_at: None,
+                time_selection: Default::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(asap_types::workload::DataWorkload {
+            data_ingestion_interval: asap_types::workload::Evidence {
+                value: Some(asap_types::workload::DurationMs(1000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let roots = asap_frontend_promql::unified::lower_promql_query_workload(&workload, 0).unwrap();
+    let candidates =
+        enumerate_local_logical_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    assert!(candidates
+        .targets
+        .iter()
+        .any(|target| target.alternatives.iter().any(|choice| matches!(
+            choice,
+            Realization::ExactAggregate {
+                kind: ExactKind::Rate,
+                ..
+            }
+        ))));
+    assert!(candidates
+        .targets
+        .iter()
+        .all(|target| target.target.timing.is_none()));
+}
+
+/// Physical annotations and invalid probability requirements fail at the stage boundary.
+#[test]
+fn assigned_timing_and_invalid_accuracy_are_rejected() {
+    let mut producer = (*aggregate(AggIntent::Count {
+        accuracy: approximate(),
+    }))
+    .clone();
+    producer.timing = Some(asap_types::post_asap::ExecutionTiming::QueryTime);
+    assert!(matches!(
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(producer)))]),
+        Err(LogicalCandidateError::AssignedTiming)
+    ));
+    for target in [
+        AccuracyTarget::Epsilon(f64::NAN),
+        AccuracyTarget::EpsilonDelta {
+            epsilon: 0.1,
+            delta: 0.0,
+        },
+    ] {
+        assert!(matches!(
+            local_realizations_for_intent(&AggIntent::Count { accuracy: target }),
+            Err(LogicalCandidateError::InvalidAccuracy)
+        ));
+    }
+}
+
+/// Local TopK keeps both declared heap substrates without choosing an implementation.
+#[test]
+fn topk_keeps_both_specialized_heap_choices() {
+    let choices = local_realizations_for_intent(&AggIntent::TopK {
+        k: 10,
+        accuracy: approximate(),
+    })
+    .unwrap();
+    assert!(matches!(choices[0], Realization::PassThrough));
+    assert_eq!(
+        algorithms(&choices),
+        vec![
+            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountSketchWithHeap
+        ]
+    );
+}
