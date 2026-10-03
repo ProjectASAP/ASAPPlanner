@@ -95,6 +95,8 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
+    #[serde(default)]
+    pub summary_coverage: Option<super::summary_coverage::SummaryCoverage>,
 }
 
 impl OperatorNode {
@@ -117,6 +119,7 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
+            summary_coverage: None,
         }
     }
 
@@ -135,6 +138,33 @@ impl OperatorNode {
     pub fn with_timing(mut self, timing: Option<ExecutionTiming>) -> Self {
         self.timing = timing;
         self
+    }
+
+    /// Attach caller-established observation coverage; unknown coverage remains None.
+    pub fn with_summary_coverage(
+        mut self,
+        coverage: super::summary_coverage::SummaryCoverage,
+    ) -> Result<Self, SchemaDerivationError> {
+        coverage
+            .validate()
+            .map_err(|error| SchemaDerivationError::InvalidScalarSignature(error.to_string()))?;
+        if self.result_kind != OperatorResultKind::State {
+            return Err(SchemaDerivationError::InvalidScalarSignature(
+                "summary coverage requires state output".into(),
+            ));
+        }
+        if let Some(ASAPOp::SummaryAgg {
+            input, reduction, ..
+        }) = self.asap()
+        {
+            if *input != coverage.input || *reduction != coverage.grouping {
+                return Err(SchemaDerivationError::InvalidScalarSignature(
+                    "coverage input/grouping disagrees with summary producer".into(),
+                ));
+            }
+        }
+        self.summary_coverage = Some(coverage);
+        Ok(self)
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -285,6 +315,11 @@ impl OperatorNode {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
                     "invalid time or identity column in schema".into(),
                 ));
+            }
+            if let Some(coverage) = &node.summary_coverage {
+                (*node.as_ref())
+                    .clone()
+                    .with_summary_coverage(coverage.clone())?;
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {

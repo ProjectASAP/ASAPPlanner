@@ -15,3 +15,6 @@ pub use node::{Operator, OperatorNode, OperatorResultKind};
 pub use non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
 pub use query::QueryRoot;
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+
+/// Semantic observation coverage, separate from field layout and physical timing.
+pub mod summary_coverage;
