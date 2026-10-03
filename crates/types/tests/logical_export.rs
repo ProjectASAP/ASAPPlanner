@@ -104,8 +104,7 @@ fn merged_summary_preserves_typed_state() {
                     input: SummaryUpdate::column(ColumnRef::Named("value".into())),
                     reduction: Reduction::by(vec![]),
                     regions: vec![asap_types::ir::summary_coverage::CoverageRegion {
-                        start_ms: start,
-                        end_ms: start + 1,
+                        time_ms: Some(start..start + 1),
                         population: Default::default(),
                     }],
                 };
@@ -125,6 +124,19 @@ fn merged_summary_preserves_typed_state() {
     assert!(matches!(
         merged.payload,
         LogicalASAPOperatorPayload::SummaryMerge
+    ));
+    // Transport rejects a summary producer whose required coverage was dropped.
+    let mut stripped = dag.clone();
+    let producer = stripped
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.payload, LogicalASAPOperatorPayload::SummaryAgg { .. }))
+        .unwrap();
+    producer.coverage = None;
+    let id = producer.id;
+    assert!(matches!(
+        stripped.validate(),
+        Err(LogicalASAPDAGValidationError::InvalidCoverage(bad)) if bad == id
     ));
 }
 
