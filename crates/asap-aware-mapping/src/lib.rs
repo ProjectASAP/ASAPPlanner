@@ -211,3 +211,6 @@ pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use topk_reuse::TopKLimitReuseStrategy;
 
 pub mod maintained_population;
+
+/// Phase-free local candidate generation over the unified IR.
+pub mod logical_candidates;
