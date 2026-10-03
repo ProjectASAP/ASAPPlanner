@@ -16,5 +16,9 @@ pub use non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
 pub use query::QueryRoot;
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 
+pub mod canonicalize;
+pub mod cse;
+pub mod export;
 /// Semantic observation coverage, separate from field layout and physical timing.
 pub mod summary_coverage;
+mod wire;
