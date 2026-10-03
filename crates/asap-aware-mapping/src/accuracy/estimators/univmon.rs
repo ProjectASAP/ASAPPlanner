@@ -1,4 +1,4 @@
-//! UnivMon currently certifies only its exact unit-update total readout.
+//! UnivMon currently certifies only its exact unit-update total evaluation.
 use super::*;
 
 pub(super) fn guarantee(query: &SketchStatistic) -> Option<ResultGuarantee> {

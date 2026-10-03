@@ -46,7 +46,7 @@ fn bounded_guarantee(
         metric,
         bound: BoundExpr::Constant { value: bound },
         failure_probability: delta,
-        provenance: vec![GuaranteeSource::SketchReadout {
+        provenance: vec![GuaranteeSource::SketchEvaluation {
             algorithm: format!("{algorithm:?}"),
             contract: contract.into(),
             params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
@@ -169,9 +169,9 @@ impl<'a> EstimatorAccuracy<'a> {
 
     fn hll(&self) -> Option<hll::ClassicHllConfidence> {
         let EstimatorContract::ClassicHll {
-            max_distinct_per_readout,
+            max_distinct_per_evaluation,
         } = self.contract?;
-        hll::ClassicHllConfidence::new(max_distinct_per_readout, self.epsilon)
+        hll::ClassicHllConfidence::new(max_distinct_per_evaluation, self.epsilon)
     }
 
     pub(crate) fn size_params(&self, algorithm: &SketchAlgorithm) -> Option<SketchParams> {

@@ -394,7 +394,7 @@ pub enum RootRecurrence {
 
 // ── Explanation ──────────────────────────────────────────────────────────
 
-/// The full readout [`CostModel::cse_share_decision_with_recurrence`]
+/// The full evaluation [`CostModel::cse_share_decision_with_recurrence`]
 /// returns: which alternative was selected, both compared cost rates
 /// (and, when a [`Horizon`] was supplied, both compared totals), every
 /// input that went into them, their units, and provenance — meant to be
@@ -779,17 +779,20 @@ mod tests {
     // ── decide (structural fallback) ─────────────────────────────────────
 
     use crate::cost_model::CseCandidate;
+    use asap_types::ir::operator_properties::{Reduction, Source};
+    use asap_types::ir::{
+        ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr,
+    };
     use asap_types::post_asap::{
         ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, ResultGuarantee, Schema,
-        SummaryExpr, SummaryNode,
     };
     use asap_types::pre_asap::expr_ir::ColumnRef;
-    use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
     use asap_types::pre_asap::schema::DataType;
+
     use std::rc::Rc;
 
-    fn scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan() -> Rc<OperatorNode> {
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -800,28 +803,34 @@ mod tests {
                 0,
                 vec![],
             ),
-        }
+        }))
+        .unwrap()
     }
 
-    fn summary_node(family: FieldDataType) -> SummaryNode {
-        SummaryNode {
-            expr: SummaryExpr::SummaryAgg {
-                child: Rc::new(SummaryNode {
-                    expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
-                    schema: Schema::lifted(vec![], None),
-                    guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
+    /// A summary of `family` over the kept pre-ASAP scan.
+    fn summary_node(family: FieldDataType) -> Rc<OperatorNode> {
+        let kept = Rc::new(
+            scan()
+                .as_ref()
+                .clone()
+                .with_guarantee(Some(ResultGuarantee::exact("RetainedExact"))),
+        );
+        std::rc::Rc::new(
+            OperatorNode::with_schema(
+                asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                    child: kept,
+                    family: family.clone(),
+                    input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Named(
+                        "value".into(),
+                    )),
+                    reduction: Reduction::by(vec![]),
+                    grouping: GroupingStrategy::default(),
+                    filter: None,
                 }),
-                family: family.clone(),
-                input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Named(
-                    "value".into(),
-                )),
-                reduction: Reduction::by(vec![]),
-                grouping: GroupingStrategy::default(),
-                filter: None,
-            },
-            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
-            guarantee: None,
-        }
+                Schema::lifted(vec![Field::new("state", family, false)], None),
+            )
+            .with_guarantee(None),
+        )
     }
 
     #[test]
@@ -1120,9 +1129,9 @@ mod tests {
     // ── multiple roots sharing a sub-DAG, via CandidateLogicalASAPDAGs ──────────────────
 
     use crate::replacement::search_workload;
+    use asap_types::ir::operator_properties::Reduction as QueryReduction;
     use asap_types::pre_asap::agg_intent::AggIntent;
-    use asap_types::pre_asap::expr_ir::ScalarValue;
-    use asap_types::pre_asap::query_expr::{Predicate, Reduction as QueryReduction};
+    use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
 
     /// Like `scan()`, plus a "job" label column to group by — CSE's
     /// sharing legality gate requires a provable unique key
@@ -1132,8 +1141,8 @@ mod tests {
     /// real one, matching the pattern
     /// `replacement.rs`'s own CSE fixtures already use (`metric_scan`/`agg`
     /// grouped by a label column).
-    fn labeled_scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn labeled_scan() -> Rc<OperatorNode> {
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -1145,18 +1154,20 @@ mod tests {
                 0,
                 vec![],
             ),
-        }
+        }))
+        .unwrap()
     }
 
-    fn sum_agg() -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn sum_agg() -> Rc<OperatorNode> {
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: QueryReduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
             filters: vec![],
             having: None,
-            child: Rc::new(labeled_scan()),
-        }
+            child: labeled_scan(),
+        }))
+        .unwrap()
     }
 
     /// A root wrapping a fresh, independently-built (but structurally
@@ -1167,13 +1178,19 @@ mod tests {
     /// `shared_aggregate_across_two_roots_gets_both_strategies_candidates`'s
     /// own doc) while letting `share_common_sub_dags` unify their
     /// identical `sum_agg()` children onto one shared `Rc`.
-    fn filtered_root(distinguishing_literal: i64) -> QueryExpr {
-        QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(
-                distinguishing_literal,
-            )))),
-            child: Rc::new(sum_agg()),
-        }
+    fn filtered_root(distinguishing_literal: i64) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(1)),
+                op: CompareOpKind::Gt,
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(
+                    distinguishing_literal,
+                ))),
+                semantics: ExprSemantics::Sql,
+            }),
+            child: sum_agg(),
+        }))
+        .unwrap()
     }
 
     /// Three workload roots share one underlying `sum_agg()` sub-DAG: two
@@ -1185,10 +1202,10 @@ mod tests {
     /// roots sharing a sub-DAG" acceptance criteria.
     #[test]
     fn recurrence_profiles_aggregates_mixed_intervals_across_roots_sharing_a_subdag() {
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![
-            ("root_a", Rc::new(filtered_root(1))),
-            ("root_b", Rc::new(filtered_root(2))),
-            ("root_c", Rc::new(filtered_root(3))),
+        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![
+            ("root_a", filtered_root(1)),
+            ("root_b", filtered_root(2)),
+            ("root_c", filtered_root(3)),
         ];
         let space = search_workload(roots);
 
@@ -1206,7 +1223,7 @@ mod tests {
         );
         let shared_group = space
             .target_subdag_candidates()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .expect("the shared sum_agg() is a discovered target");
         assert_eq!(shared_group.consumer_count, 3, "shared by all 3 roots");
 
@@ -1250,14 +1267,11 @@ mod tests {
 
     #[test]
     fn plan_selection_uses_recurrence_profiles_for_cse_choices() {
-        let roots = vec![
-            ("a", Rc::new(filtered_root(1))),
-            ("b", Rc::new(filtered_root(2))),
-        ];
+        let roots = vec![("a", filtered_root(1)), ("b", filtered_root(2))];
         let space = search_workload(roots);
         let shared = space
             .target_subdag_candidates()
-            .find(|group| matches!(group.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|group| matches!(group.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .expect("the aggregate is shared by both roots");
         let update_rate = Some(UpdateRate(10.0));
 
@@ -1315,8 +1329,8 @@ mod tests {
 
     #[test]
     fn recurrence_profiles_rejects_an_invalid_evaluation_rate() {
-        let root = Rc::new(scan());
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
+        let root = scan();
+        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space
             .recurrence_profiles(&[RootRecurrence::Repeating(EvaluationRate(f64::NAN))], None)
@@ -1329,8 +1343,8 @@ mod tests {
     /// signature promises a `Result`.
     #[test]
     fn recurrence_profiles_reports_a_root_count_mismatch_as_an_error_not_a_panic() {
-        let root = Rc::new(scan());
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
+        let root = scan();
+        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space.recurrence_profiles(&[], None).unwrap_err();
         assert_eq!(
@@ -1344,8 +1358,8 @@ mod tests {
 
     #[test]
     fn recurrence_profiles_rejects_an_invalid_update_rate() {
-        let root = Rc::new(scan());
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
+        let root = scan();
+        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space
             .recurrence_profiles(
@@ -1373,23 +1387,25 @@ mod tests {
     /// `consumer_count`.
     #[test]
     fn recurrence_profiles_does_not_stamp_update_rate_on_a_site_unreachable_from_any_root() {
-        let avg_root = QueryExpr::Aggregate {
-            reduction: QueryReduction::by(vec![]),
-            measures: vec![AggIntent::Avg { col: None }],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: Rc::new(scan()),
-        };
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("q", Rc::new(avg_root))];
+        let avg_root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: QueryReduction::by(vec![]),
+                measures: vec![AggIntent::Avg { col: None }],
+                output_names: vec![],
+                filters: vec![],
+                having: None,
+                child: scan(),
+            }))
+            .unwrap();
+        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("q", avg_root)];
         let space = search_workload(roots);
 
         let count_group = space
             .target_subdag_candidates()
             .find(|g| {
                 matches!(
-                    g.target.as_ref(),
-                    QueryExpr::Aggregate { measures, .. }
+                    g.target.non_asap(),
+                    Some(NonASAPOp::Aggregate { measures, .. })
                         if measures.iter().any(|m| matches!(m, AggIntent::Count { .. }))
                 )
             })
@@ -1428,19 +1444,26 @@ mod tests {
     /// reachability-set walk would (wrongly) collapse it to.
     #[test]
     fn recurrence_profiles_credits_a_direct_repeated_reference_by_its_multiplicity() {
-        let root = QueryExpr::BinaryOp {
-            op: asap_types::pre_asap::query_expr::BinaryOpKind::Compare(
-                asap_types::pre_asap::expr_ir::CompareOpKind::Eq,
-            ),
-            lhs: Rc::new(sum_agg()),
-            rhs: Rc::new(sum_agg()),
-            vector_match: None,
-        };
-        let space = search_workload(vec![("q", Rc::new(root))]);
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                    kind: asap_types::ir::operator_properties::BinaryOpKind::Compare(
+                        CompareOpKind::Eq,
+                    ),
+                    vector_match: None,
+                },
+                return_bool: false,
+                lhs: sum_agg(),
+                rhs: sum_agg(),
+            }))
+            .unwrap();
+        let space = search_workload(vec![("q", root)]);
 
         let shared_group = space
             .target_subdag_candidates()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .expect("sum_agg() should merge onto one shared Rc, referenced twice from BinaryOp");
         assert_eq!(
             shared_group.consumer_count, 2,
@@ -1463,7 +1486,7 @@ mod tests {
 
         let scan_group = space
             .target_subdag_candidates()
-            .find(|group| matches!(group.target.as_ref(), QueryExpr::Scan { .. }))
+            .find(|group| matches!(group.target.non_asap(), Some(NonASAPOp::Scan { .. })))
             .expect("the shared aggregate has a scan descendant");
         assert_eq!(
             profiles

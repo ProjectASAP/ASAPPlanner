@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(g.approximate_layer_count(), 1);
         assert!(g.provenance.iter().any(|source| matches!(
             source,
-            GuaranteeSource::SketchReadout { contract, .. }
+            GuaranteeSource::SketchEvaluation { contract, .. }
                 if contract == "apache_datasketches_kll_empirical_99_a9b42755072b"
         )));
     }

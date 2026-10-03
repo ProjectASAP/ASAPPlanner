@@ -3,10 +3,11 @@
 //
 // Lowers a batch of ad-hoc SQL/PromQL queries to pre-ASAP IR, then runs the
 // `asap-aware-mapping` pre-ASAP → post-ASAP binding pass and prints the
-// resulting **post-ASAP IR** (the sketch-bound IR: `SummaryExpr`/`SummaryNode`
-// — the concrete `SummaryKind`/`SummaryParams` committed per aggregate, or
-// `KeepPreAsap` for whatever the pass left untouched). See `show_pre_asap_ir`
-// for the sketch-agnostic IR one layer upstream.
+// resulting **post-ASAP IR** (the sketch-bound IR: an `OperatorNode` DAG in
+// which `ASAPOp` operators — the concrete summary family/params committed per
+// aggregate — replace the bound aggregates, while whatever the pass left
+// untouched stays a plain `NonASAPOp` sub-DAG carrying an exact guarantee).
+// See `show_pre_asap_ir` for the sketch-agnostic IR one layer upstream.
 //
 // File format: one query per line, prefixed with "sql>" or "promql>".
 // Blank lines and lines starting with '#' are ignored.
@@ -20,12 +21,12 @@
 // `metrics(ts, service, region, latency, bytes)` catalog — the same table
 // used in cross_language.rs and topk_ir.rs.
 
-use asap_aware_mapping::replacement::keep_pre_asap;
+use asap_aware_mapping::replacement::retain_exact;
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
@@ -33,18 +34,17 @@ use std::rc::Rc;
 
 const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 
-/// `SketchAlgorithmStrategy::replacements` returns every candidate. This
+/// `ASAPStrategies::replacements` returns every candidate. This
 /// debug tool prints all of them so callers can inspect the planner's choices.
 /// If the strategy has none, preserve the single pre-ASAP fallback output.
-fn bind_all(expr: &QueryExpr) -> Result<Vec<Rc<asap_types::post_asap::SummaryNode>>, String> {
-    let root = Rc::new(expr.clone());
-    let target = TargetSubDAG::new(&root);
-    let candidates = SketchAlgorithmStrategy::default_cost_model()
+fn bind_all(root: &Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
+    let target = TargetSubDAG::new(root);
+    let candidates = ASAPStrategies::default_cost_model()
         .replacements(&target)
         .into_iter()
         .filter_map(|candidate| match candidate {
             ReplacementSubDAG {
-                replacement: Replacement::Summary(node),
+                replacement: Replacement::SubDAG(node),
                 ..
             } => Some(node),
             _ => None,
@@ -52,7 +52,7 @@ fn bind_all(expr: &QueryExpr) -> Result<Vec<Rc<asap_types::post_asap::SummaryNod
         .collect::<Vec<_>>();
 
     if candidates.is_empty() {
-        Ok(vec![keep_pre_asap(&root).map_err(|e| e.to_string())?])
+        Ok(vec![retain_exact(root).map_err(|e| e.to_string())?])
     } else {
         Ok(candidates)
     }
@@ -128,7 +128,7 @@ async fn main() {
             Ok(candidates) => {
                 for (index, candidate) in candidates.iter().enumerate() {
                     println!("--- candidate {} ---", index + 1);
-                    println!("{:#?}", candidate.expr);
+                    println!("{:#?}", candidate.operator);
                 }
             }
             Err(e) => println!("ERR: {e}"),
@@ -149,9 +149,8 @@ mod tests {
             1_000,
         )
         .expect("query lowers to pre-ASAP IR");
-        let root = Rc::new(expr.clone());
-        let expected = SketchAlgorithmStrategy::default_cost_model()
-            .replacements(&TargetSubDAG::new(&root))
+        let expected = ASAPStrategies::default_cost_model()
+            .replacements(&TargetSubDAG::new(&expr))
             .len();
 
         assert!(expected > 1, "fixture exposes alternative bindings");
@@ -170,14 +169,20 @@ mod tests {
         let candidates = bind_all(&expr).expect("binding succeeds");
         assert_eq!(candidates.len(), 1);
         assert!(matches!(
-            candidates[0].expr,
-            asap_types::post_asap::SummaryExpr::BinaryOp { .. }
+            candidates[0].non_asap(),
+            Some(asap_types::ir::NonASAPOp::BinaryOp { .. })
         ));
         assert!(
             candidates[0].guarantee.is_none(),
             "missing evidence must not claim a certified ratio bound"
         );
-        asap_types::post_asap::compile_post_asap_dag(&candidates[0])
+        let timed = asap_types::ir::timing::apply_lifecycle_timings(
+            &candidates[0],
+            &asap_types::ir::timing::LifecycleAssignment::default_maintained(),
+            &mut asap_types::ir::timing::TimingMemo::new(),
+        )
+        .expect("the demo candidate has a legal default timing");
+        asap_types::ir::export::compile_physical_asap_dag(&timed)
             .expect("the demo candidate remains executable");
     }
 
@@ -192,9 +197,9 @@ mod tests {
 
         let candidates = bind_all(&expr).expect("binding succeeds");
         assert_eq!(candidates.len(), 1);
-        assert!(matches!(
-            candidates[0].expr,
-            asap_types::post_asap::SummaryExpr::KeepPreAsap(_)
-        ));
+        assert!(
+            !candidates[0].contains_asap(),
+            "the whole query is kept pre-ASAP (no summary bound anywhere)"
+        );
     }
 }
