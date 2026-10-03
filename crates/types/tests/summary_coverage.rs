@@ -1,16 +1,14 @@
 //! Coverage composition preserves gaps and rejects duplicate observations.
 use asap_types::{
-    ir::observation_extent::*, ir::operator_properties::Reduction, post_asap::SummaryUpdate,
+    ir::operator_properties::Reduction, ir::summary_coverage::*, post_asap::SummaryUpdate,
     pre_asap::ColumnRef,
 };
-fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> ObservationExtent {
-    ObservationExtent {
+fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> SummaryCoverage {
+    SummaryCoverage {
         source: "flows".into(),
-        revision: "snapshot-1".into(),
         input: SummaryUpdate::column(ColumnRef::Named("latency".into())),
-        grouping: Reduction::by(vec![0]),
-        multiplicity: ObservationMultiplicity::OncePerObservation,
-        regions: vec![ExtentRegion {
+        reduction: Reduction::by(vec![0]),
+        regions: vec![CoverageRegion {
             start_ms: start,
             end_ms: end,
             population: population
@@ -24,29 +22,29 @@ fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> ObservationExt
 #[test]
 fn time_union_preserves_gaps() {
     let merged =
-        ObservationExtent::merge_disjoint(&[coverage(0, 1, &[]), coverage(1, 2, &[])]).unwrap();
+        SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), coverage(1, 2, &[])]).unwrap();
     assert_eq!(merged.regions[0].end_ms, 2);
     assert_eq!(merged.regions.len(), 1);
     let gapped =
-        ObservationExtent::merge_disjoint(&[coverage(0, 1, &[]), coverage(2, 3, &[])]).unwrap();
+        SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), coverage(2, 3, &[])]).unwrap();
     assert_eq!(gapped.regions.len(), 2);
 }
 /// Population partitions can overlap in time without sharing observations.
 #[test]
 fn population_and_joint_union() {
-    let merged = ObservationExtent::merge_disjoint(&[
+    let merged = SummaryCoverage::merge_disjoint(&[
         coverage(0, 2, &[("region", "us")]),
         coverage(0, 2, &[("region", "eu")]),
     ])
     .unwrap();
     assert_eq!(merged.regions.len(), 2);
-    let joint = ObservationExtent::merge_disjoint(&[
+    let joint = SummaryCoverage::merge_disjoint(&[
         coverage(0, 1, &[("region", "us")]),
         coverage(1, 2, &[("region", "eu")]),
     ])
     .unwrap();
     assert_eq!(joint.regions.len(), 2);
-    let decoded: ObservationExtent =
+    let decoded: SummaryCoverage =
         serde_json::from_str(&serde_json::to_string(&joint).unwrap()).unwrap();
     assert_eq!(decoded, joint);
 }
@@ -54,25 +52,25 @@ fn population_and_joint_union() {
 #[test]
 fn overlap_and_identity_fail_closed() {
     assert_eq!(
-        ObservationExtent::merge_disjoint(&[coverage(0, 2, &[]), coverage(1, 3, &[])]),
-        Err(ExtentError::PossibleOverlap)
+        SummaryCoverage::merge_disjoint(&[coverage(0, 2, &[]), coverage(1, 3, &[])]),
+        Err(CoverageError::PossibleOverlap)
     );
     assert_eq!(
-        ObservationExtent::merge_disjoint(&[
+        SummaryCoverage::merge_disjoint(&[
             coverage(0, 2, &[("region", "us")]),
             coverage(0, 2, &[("tier", "premium")])
         ]),
-        Err(ExtentError::PossibleOverlap)
+        Err(CoverageError::PossibleOverlap)
     );
     let mut other = coverage(1, 2, &[]);
-    other.revision = "snapshot-2".into();
+    other.source = "other-flows".into();
     assert_eq!(
-        ObservationExtent::merge_disjoint(&[coverage(0, 1, &[]), other]),
-        Err(ExtentError::IncompatibleInput)
+        SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), other]),
+        Err(CoverageError::IncompatibleInput)
     );
     assert_eq!(
         coverage(2, 1, &[]).validate(),
-        Err(ExtentError::InvalidInterval)
+        Err(CoverageError::InvalidInterval)
     );
 }
 
@@ -94,11 +92,8 @@ fn node_coverage_is_checked_and_rewrites_clear_it() {
     }))
     .unwrap();
     let mut declared = coverage(0, 1, &[]);
-    declared.grouping = Reduction::by(vec![]);
-    assert!((*raw)
-        .clone()
-        .with_observation_extent(declared.clone())
-        .is_err());
+    declared.reduction = Reduction::by(vec![]);
+    assert!((*raw).clone().with_coverage(declared.clone()).is_err());
     let state = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: raw,
         family: FieldDataType::Sketch(
@@ -106,16 +101,16 @@ fn node_coverage_is_checked_and_rewrites_clear_it() {
             Default::default(),
         ),
         input: declared.input.clone(),
-        reduction: declared.grouping.clone(),
+        reduction: declared.reduction.clone(),
         grouping: Default::default(),
         filter: None,
     }))
     .unwrap();
-    let state = state.with_observation_extent(declared.clone()).unwrap();
-    assert!(state.observation_extent.is_some());
+    let state = state.with_coverage(declared.clone()).unwrap();
+    assert!(state.coverage.is_some());
     let mut bad = declared;
     bad.input = SummaryUpdate::column(ColumnRef::Named("other".into()));
-    assert!(state.clone().with_observation_extent(bad).is_err());
+    assert!(state.clone().with_coverage(bad).is_err());
     let rebuilt = state.map_children(Clone::clone).unwrap();
-    assert!(rebuilt.observation_extent.is_none());
+    assert!(rebuilt.coverage.is_none());
 }

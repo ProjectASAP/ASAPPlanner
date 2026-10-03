@@ -47,7 +47,7 @@ pub enum WindowEdgeCoverage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PaneExtentError {
+pub enum PaneCoverageError {
     ZeroPaneWidth,
     UnknownPaneOrigin,
     UnknownEvaluationPhase,
@@ -64,9 +64,9 @@ pub fn validate_pane_coverage(
     layout: &PaneLayout,
     evaluation_time_ms: Option<i64>,
     edge_coverage: &WindowEdgeCoverage,
-) -> Result<(), PaneExtentError> {
+) -> Result<(), PaneCoverageError> {
     if layout.pane_width_ms == 0 {
-        return Err(PaneExtentError::ZeroPaneWidth);
+        return Err(PaneCoverageError::ZeroPaneWidth);
     }
     if matches!(
         edge_coverage,
@@ -76,15 +76,15 @@ pub fn validate_pane_coverage(
     }
     let origin = layout
         .pane_origin_ms
-        .ok_or(PaneExtentError::UnknownPaneOrigin)?;
-    let evaluation = evaluation_time_ms.ok_or(PaneExtentError::UnknownEvaluationPhase)?;
+        .ok_or(PaneCoverageError::UnknownPaneOrigin)?;
+    let evaluation = evaluation_time_ms.ok_or(PaneCoverageError::UnknownEvaluationPhase)?;
     let width = layout.pane_width_ms as i64;
     let pane_phase_ms = origin.rem_euclid(width) as u64;
     let query_phase_ms = evaluation.rem_euclid(width) as u64;
     if pane_phase_ms == query_phase_ms {
         Ok(())
     } else {
-        Err(PaneExtentError::PhaseMismatch {
+        Err(PaneCoverageError::PhaseMismatch {
             pane_phase_ms,
             query_phase_ms,
         })
@@ -98,9 +98,9 @@ pub fn validate_pane_coverage(
 pub fn plan_pane_phase(
     demand: &RepeatedDemand,
     pane_width_ms: u64,
-) -> Result<PaneLayout, PaneExtentError> {
+) -> Result<PaneLayout, PaneCoverageError> {
     if pane_width_ms == 0 {
-        return Err(PaneExtentError::ZeroPaneWidth);
+        return Err(PaneCoverageError::ZeroPaneWidth);
     }
     let phase = match demand {
         RepeatedDemand::FixedIntervalAt {
@@ -154,7 +154,7 @@ mod tests {
         };
         assert_eq!(
             validate_pane_coverage(&layout, Some(56_000), &WindowEdgeCoverage::PaneAligned),
-            Err(PaneExtentError::PhaseMismatch {
+            Err(PaneCoverageError::PhaseMismatch {
                 pane_phase_ms: 26_000,
                 query_phase_ms: 56_000,
             })

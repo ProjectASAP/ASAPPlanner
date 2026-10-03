@@ -17,4 +17,4 @@ pub use query::QueryRoot;
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 
 /// Semantic observation coverage, separate from field layout and physical timing.
-pub mod observation_extent;
+pub mod summary_coverage;
