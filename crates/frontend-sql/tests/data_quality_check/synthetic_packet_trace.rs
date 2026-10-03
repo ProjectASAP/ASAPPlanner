@@ -19,9 +19,12 @@
 //! Schema: `packets(srcip, dstip, srcport, dstport, proto, time, pkt_len)`;
 //! flow / 5-tuple = `(srcip, dstip, srcport, dstport, proto)`.
 
+use std::rc::Rc;
+
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::pre_asap::{AggIntent, GroupKeys};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/synthetic_packet_trace_queries.sql");
@@ -67,110 +70,61 @@ fn queries() -> Vec<String> {
 
 // ── DAG helpers ──────────────────────────────────────────────────────────────
 
-/// Every `AggIntent` in the DAG, root-to-leaf.
-fn intents(e: &QueryExpr) -> Vec<AggIntent> {
-    let mut out = Vec::new();
-    fn go(e: &QueryExpr, out: &mut Vec<AggIntent>) {
-        match e {
-            QueryExpr::Aggregate {
-                measures, child, ..
-            } => {
-                out.extend(measures.iter().cloned());
-                go(child, out);
-            }
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::TimeShift { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::Dedup { child, .. }
-            | QueryExpr::SQLWindowFunc { child, .. }
-            | QueryExpr::Project { child, .. }
-            | QueryExpr::PromqlRelabel { child, .. }
-            | QueryExpr::PromqlSeriesSample { child, .. }
-            | QueryExpr::PromqlInfoEnrich { child, .. } => go(child, out),
-            QueryExpr::BinaryOp { lhs, rhs, .. }
-            | QueryExpr::Join {
-                left: lhs,
-                right: rhs,
-                ..
-            }
-            | QueryExpr::SetOp {
-                left: lhs,
-                right: rhs,
-                ..
-            } => {
-                go(lhs, out);
-                go(rhs, out);
-            }
-            QueryExpr::Concat { children, .. } => children.iter().for_each(|c| go(c, out)),
-            QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
-                go(inner, out)
-            }
-            QueryExpr::Scan { .. }
-            | QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::EvalTimestamp
-            | QueryExpr::CurrentTimestamp => {}
-            // Scalar expression variants (issue #205): `AggIntent` only ever
-            // lives in `Aggregate.measures`, never nested inside a scalar
-            // expression DAG, so there's nothing to recurse into here.
-            QueryExpr::Column(_)
-            | QueryExpr::Literal(_)
-            | QueryExpr::Compare { .. }
-            | QueryExpr::BoolAnd(_)
-            | QueryExpr::BoolOr(_)
-            | QueryExpr::Not(_)
-            | QueryExpr::IsNull(_)
-            | QueryExpr::IsNotNull(_)
-            | QueryExpr::Cast { .. }
-            | QueryExpr::InList { .. }
-            | QueryExpr::FunctionCall { .. }
-            | QueryExpr::Arithmetic { .. }
-            | QueryExpr::Case { .. } => {}
-        }
-    }
-    go(e, &mut out);
-    out
+/// The operator of a front-end node: a front-end DAG never holds an ASAP node.
+fn op(node: &OperatorNode) -> &NonASAPOp {
+    node.expect_non_asap()
+}
+
+/// Every `AggIntent` in the DAG, root-to-leaf (every reachable node —
+/// `AggIntent` only ever lives in `Aggregate.measures`).
+fn intents(e: &Rc<OperatorNode>) -> Vec<AggIntent> {
+    OperatorNode::reachable(e)
+        .iter()
+        .filter_map(|node| match op(node) {
+            NonASAPOp::Aggregate { measures, .. } => Some(measures.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 /// The first `Aggregate`'s `(by, measures)` along the single-child spine. SQL
 /// never lowers to `Reduction::PerEntity` (it has no per-series concept), so
 /// `expect_reduce()` here is a safe, load-bearing assumption for these tests.
-fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
-    match qe {
-        QueryExpr::Aggregate {
+fn first_aggregate(node: &OperatorNode) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
+    match op(node) {
+        NonASAPOp::Aggregate {
             reduction,
             measures,
             ..
         } => Some((reduction.expect_reduce(), measures)),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::SQLWindowFunc { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => first_aggregate(child),
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Dedup { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::SQLWindowFunc { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => first_aggregate(child),
         _ => None,
     }
 }
 
 /// Whether a `SQLWindowFunc` (analytic `OVER (…)`) node appears anywhere.
-fn has_window_func(qe: &QueryExpr) -> bool {
-    match qe {
-        QueryExpr::SQLWindowFunc { .. } => true,
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => has_window_func(child),
+fn has_window_func(node: &OperatorNode) -> bool {
+    match op(node) {
+        NonASAPOp::SQLWindowFunc { .. } => true,
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Aggregate { child, .. }
+        | NonASAPOp::Dedup { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => has_window_func(child),
         _ => false,
     }
 }
 
-async fn lower(q: &str) -> QueryExpr {
+async fn lower(q: &str) -> Rc<OperatorNode> {
     lower_sql(q, &catalog(), AccuracyTarget::Exact)
         .await
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))

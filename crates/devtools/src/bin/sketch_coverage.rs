@@ -15,7 +15,7 @@
 //
 // `--epsilon <f64>` (default 0.01) sets the `AccuracyTarget` every query in
 // every corpus lowers with. Without an approximate target,
-// `SketchAlgorithmStrategy` never has a genuine sketch alternative to
+// `ASAPStrategies` never has a genuine sketch alternative to
 // report — see `dag_export`'s own `--epsilon` doc comment for the same
 // point, made there per-query instead of per-run.
 //
@@ -28,11 +28,12 @@
 use asap_aware_mapping::{explain_replacements, ExplanationKind};
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_types::ir::OperatorNode;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 /// Line-based `#`/`--` comment stripping, then split on `;` — the shape every
 /// SQL corpus test in this repo already uses (copied from `variant_coverage`
@@ -157,7 +158,7 @@ fn root_label(id: &str) -> String {
 /// reachable from.
 fn analyze_corpus(
     name: &'static str,
-    roots: Vec<(String, QueryExpr)>,
+    roots: Vec<(String, Rc<OperatorNode>)>,
     failed: usize,
 ) -> CorpusCoverage {
     let lowered = roots.len();

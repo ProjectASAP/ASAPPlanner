@@ -1,21 +1,23 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
 //! the deployment supplies only raw rows at the ingestion frontier.
+mod common;
 use asap_physical_operators::{
     operators::Operator,
     physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
+use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema;
-use planner_types::{post_asap::*, pre_asap::QueryExpr, types::AccuracyTarget, workload::*};
+use planner_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::{post_asap::*, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
-fn lower(query: &str) -> QueryExpr {
+fn lower(query: &str) -> Rc<planner_types::ir::OperatorNode> {
     lower_with(query, AccuracyTarget::Exact)
 }
 
-fn lower_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
+fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -46,54 +48,56 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
 }
 
 /// The first exact summary candidate, as Planner selection would hand it over.
-fn exact_dag(query: &str) -> PostAsapDAG {
-    use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
+fn exact_dag(query: &str) -> PhysicalASAPDAG {
     let expression = lower(query);
-    let root = Rc::new(promql_rows::with_series_identity(&expression).unwrap_or(expression));
-    asap_aware_mapping::SketchAlgorithmStrategy::new(&asap_aware_mapping::DefaultCostModel)
-        .replacements(&TargetSubDAG::new(&root))
-        .into_iter()
-        .find_map(|candidate| match candidate.replacement {
-            Replacement::Summary(node) => {
-                let dag = compile_post_asap_dag(&node).ok()?;
-                dag.nodes
-                    .iter()
-                    .all(|n| !matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg { family, .. } if !matches!(family, FieldDataType::ExactAggregate(..))))
-                    .then_some(dag)
-            }
-            _ => None,
-        })
+    let root = promql_rows::with_series_identity(&expression).unwrap_or(expression);
+    let space = asap_aware_mapping::search_workload(vec![("q", root)]);
+    let selected = space
+        .global_selection(&asap_aware_mapping::DefaultCostModel)
+        .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
+        .unwrap();
+    compile_physical_asap_dag(&selected).unwrap()
 }
 
-fn population_dag(query: &str) -> PostAsapDAG {
-    let root = Rc::new(promql_rows::with_series_identity(&lower(query)).unwrap());
+fn population_dag(query: &str) -> PhysicalASAPDAG {
+    let root = promql_rows::with_series_identity(&lower(query)).unwrap();
     let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
         std::slice::from_ref(&root),
     )
     .candidate(&root)
     .unwrap();
-    compile_post_asap_dag(&selected).unwrap()
+    compile_physical_asap_dag(&selected).unwrap()
 }
 
 /// Raw scan nodes are the frontier; everything above them is compiled.
-fn raw_inputs(dag: &PostAsapDAG) -> Vec<(u64, Arc<Schema>, String)> {
+fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(u64, Arc<Schema>, String)> {
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {
-            PostAsapOperatorPayload::Fallback {
-                expression: QueryExpr::TimeRange { child, .. },
-            } => match child.as_ref() {
-                QueryExpr::Scan {
-                    source: planner_types::pre_asap::Source::TimeSeries { metric },
-                    ..
-                } => Some((
-                    u64::from(node.id.0),
-                    Arc::new(node.output_schema.clone()),
-                    metric.clone(),
-                )),
-                _ => None,
-            },
+            PhysicalASAPOperatorPayload::Relational {
+                operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. },
+            } => {
+                let mut id = node.id;
+                loop {
+                    let n = dag.nodes.iter().find(|n| n.id == id)?;
+                    if let PhysicalASAPOperatorPayload::Relational {
+                        operator:
+                            planner_types::ir::export::NonASAPOpKind::Scan {
+                                source: planner_types::pre_asap::Source::TimeSeries { metric },
+                                ..
+                            },
+                    } = &n.payload
+                    {
+                        return Some((
+                            u64::from(node.id.0),
+                            Arc::new(node.output_schema.clone()),
+                            metric.clone(),
+                        ));
+                    }
+                    id = dag.edges.iter().find(|e| e.consumer == id)?.producer;
+                }
+            }
             _ => None,
         })
         .collect()
@@ -104,7 +108,7 @@ type Sample = (&'static str, &'static str, &'static str, i64, f64);
 /// Compile, round-trip, bind raw `(metric, job, instance, ts, value)` samples,
 /// and return the root's batches.
 fn execute(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     samples: &[Sample],
     end: i64,
 ) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
@@ -114,7 +118,7 @@ fn execute(
 /// [`execute`], supplying samples of each instance in `relabel` under its
 /// `(__name__, instance)` instead.
 fn execute_relabeled(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     samples: &[Sample],
     end: i64,
     relabel: &BTreeMap<&str, (&str, &str)>,
@@ -126,7 +130,7 @@ fn execute_relabeled(
             .iter()
             .map(|(id, schema, _)| (*id, InputContract::bounded(schema.clone())))
             .collect(),
-        &[u64::from(dag.root.0)],
+        &[u64::from(dag.roots[0].0)],
     )
     .map_err(|e| e.to_string())?;
     let program: CompiledPhysicalDAG =
@@ -195,7 +199,11 @@ fn execute_relabeled(
 }
 
 /// [`execute`], returning `(job, value)` rows of the root.
-fn run(dag: &PostAsapDAG, samples: &[Sample], end: i64) -> Result<BTreeMap<String, f64>, String> {
+fn run(
+    dag: &PhysicalASAPDAG,
+    samples: &[Sample],
+    end: i64,
+) -> Result<BTreeMap<String, f64>, String> {
     let mut rows = BTreeMap::new();
     for batch in execute(dag, samples, end)? {
         let job = batch.schema().fields.iter().position(|f| f.name == "job");
@@ -250,7 +258,7 @@ fn population_aggregates_match_current_series_reference() {
     }
 }
 
-// A global readout of an empty population is an empty vector, as in PromQL.
+// A global evaluation of an empty population is an empty vector, as in PromQL.
 #[test]
 fn global_population_aggregate_of_no_members_is_empty() {
     // Latest values are [1, 2, 5, 7] at 60s; every member has expired by 1000s.
@@ -313,40 +321,7 @@ fn grouped_vector_arithmetic_matches_labels() {
 // then roll up per job: api has 2 + 1 + 1 samples in 5m, db has 1.
 #[test]
 fn exact_count_finalizes_to_declared_float_value() {
-    let mut dag = exact_dag("sum by (job) (count_over_time(m[5m]))");
-    let finalize = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::FinalizeExactAccumulator
-                }
-            )
-        })
-        .unwrap()
-        .clone();
-    let root = dag.nodes.iter().find(|n| n.id == dag.root).unwrap().clone();
-    let mut edge = dag
-        .edges
-        .iter()
-        .find(|e| e.producer == finalize.id)
-        .unwrap()
-        .clone();
-    // Read the rolled-up exact state the same way the query path does.
-    let mut read = finalize.clone();
-    read.id = PostAsapNodeId(root.id.0 + 1);
-    read.output_schema = root.output_schema.clone();
-    read.output_schema.fields.last_mut().unwrap().dtype =
-        FieldDataType::Plain(planner_types::pre_asap::DataType::Float64);
-    edge.producer = root.id;
-    edge.consumer = read.id;
-    edge.intermediate_schema = root.output_schema.clone();
-    edge.data_state = root.output_state;
-    dag.root = read.id;
-    dag.nodes.push(read);
-    dag.edges.push(edge);
+    let dag = exact_dag("sum by (job) (count_over_time(m[5m]))");
     assert_eq!(
         run(&dag, SAMPLES, 60_000).unwrap(),
         reference(&[("api", 4.), ("db", 1.)])
@@ -354,10 +329,22 @@ fn exact_count_finalizes_to_declared_float_value() {
 }
 
 /// `dag` with its Binary operator replaced by `kind`.
-fn with_kind(mut dag: PostAsapDAG, kind: planner_types::pre_asap::BinaryOpKind) -> PostAsapDAG {
+fn with_kind(
+    mut dag: PhysicalASAPDAG,
+    kind: planner_types::pre_asap::BinaryOpKind,
+    bool_result: bool,
+) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
-        if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
+        if let PhysicalASAPOperatorPayload::Relational {
+            operator:
+                planner_types::ir::export::NonASAPOpKind::BinaryOp {
+                    operator,
+                    return_bool,
+                },
+        } = &mut node.payload
+        {
             operator.kind = kind.clone();
+            *return_bool = bool_result;
         }
     }
     dag
@@ -367,30 +354,30 @@ fn with_kind(mut dag: PostAsapDAG, kind: planner_types::pre_asap::BinaryOpKind) 
 // holds, with their value, on either side of the literal; `bool` yields 1 or 0.
 #[test]
 fn grouped_comparisons_filter_or_return_bool() {
-    use planner_types::pre_asap::{BinaryOpKind::*, CompareOpKind::Gt};
-    // sum_over_time over 5m per job: api = 14, db = 5.
-    let right = exact_dag("sum by (job) (sum_over_time(m[5m])) * 10");
-    let left = exact_dag("10 - sum by (job) (sum_over_time(m[5m]))");
-    for (dag, expected) in [
+    for (query, expected) in [
         (
-            with_kind(right.clone(), Compare(Gt)),
+            "sum by(job)(sum_over_time(m[5m])) > 10",
             reference(&[("api", 14.)]),
         ),
         (
-            with_kind(right, CompareBool(Gt)),
+            "sum by(job)(sum_over_time(m[5m])) > bool 10",
             reference(&[("api", 1.), ("db", 0.)]),
         ),
-        (with_kind(left, Compare(Gt)), reference(&[("db", 5.)])),
+        (
+            "10 > sum by(job)(sum_over_time(m[5m]))",
+            reference(&[("db", 5.)]),
+        ),
     ] {
-        assert_eq!(run(&dag, SAMPLES, 60_000).unwrap(), expected);
+        assert_eq!(run(&exact_dag(query), SAMPLES, 60_000).unwrap(), expected);
     }
 }
 
-// A `bool` comparison Binary over per-series readouts matches one-to-one and
+// A `bool` comparison Binary over per-series evaluations matches one-to-one and
 // drops the metric name; a filter keeps the surviving left value.
 #[test]
 fn per_series_comparisons_filter_or_return_bool() {
     use planner_types::pre_asap::{BinaryOpKind::*, CompareOpKind::*};
+
     let samples = counter("a", "api", 10., 10.)
         .chain(counter("a", "db", 10., 10.))
         .chain(counter("b", "api", 5., 5.))
@@ -399,18 +386,23 @@ fn per_series_comparisons_filter_or_return_bool() {
     // rate: a{api} = a{db} = 50/300, b{api} = 25/300, b{db} = 100/300.
     let dag = exact_dag("rate(a[5m]) / rate(b[5m])");
     assert_eq!(
-        run_series(&with_kind(dag.clone(), Compare(Gt)), &samples, 300_000).unwrap(),
+        run_series(
+            &with_kind(dag.clone(), Compare(Gt), false),
+            &samples,
+            300_000
+        )
+        .unwrap(),
         series(&[("api", "x", 50. / 300.)])
     );
     assert_eq!(
-        run_series(&with_kind(dag, CompareBool(Lt)), &samples, 300_000).unwrap(),
+        run_series(&with_kind(dag, Compare(Lt), true), &samples, 300_000).unwrap(),
         series(&[("api", "x", 0.), ("db", "x", 1.)])
     );
 }
 
 /// [`execute`], returning per-series `(identity, value)` rows of the root,
 /// with NaN-aware formatting for comparison.
-fn run_series(dag: &PostAsapDAG, samples: &[Sample], end: i64) -> Result<String, String> {
+fn run_series(dag: &PhysicalASAPDAG, samples: &[Sample], end: i64) -> Result<String, String> {
     let mut rows = BTreeMap::new();
     for batch in execute(dag, samples, end)? {
         let schema = batch.schema();
@@ -509,13 +501,13 @@ fn per_series_rate_ratio_matches_prometheus() {
 // A literal operand applies to every stored per-series value, on either side,
 // and drops the metric name.
 #[test]
-fn per_series_scalar_arithmetic_applies_to_stored_readouts() {
+fn per_series_scalar_arithmetic_applies_to_stored_evaluations() {
     let samples = counter("m", "api", 10., 10.).collect::<Vec<_>>();
     // rate = 40 * 1.25 / 300 = 1/6.
     for (query, expected) in [
         ("rate(m[5m]) * 2", 50. / 300. * 2.),
         ("1 - rate(m[5m])", 1. - 50. / 300.),
-        // The stored sum readout keeps `__name__`; the arithmetic drops it.
+        // The stored sum evaluation keeps `__name__`; the arithmetic drops it.
         ("sum_over_time(m[5m]) * 2", 150. * 2.),
     ] {
         assert_eq!(
@@ -545,12 +537,19 @@ fn per_series_scalar_arithmetic_rejects_label_sets_equal_without_the_name() {
 }
 
 fn with_vector_match(
-    mut dag: PostAsapDAG,
+    mut dag: PhysicalASAPDAG,
     kind: planner_types::pre_asap::VectorMatchKind,
     labels: &[&str],
-) -> PostAsapDAG {
+) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
-        if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
+        if let PhysicalASAPOperatorPayload::Relational {
+            operator:
+                planner_types::ir::export::NonASAPOpKind::BinaryOp {
+                    operator,
+                    return_bool: _,
+                },
+        } = &mut node.payload
+        {
             operator.vector_match = Some(planner_types::pre_asap::VectorMatch {
                 kind: kind.clone(),
                 labels: labels.iter().map(|l| l.to_string()).collect(),
@@ -621,44 +620,43 @@ fn population_sums_and_averages_are_compensated() {
     }
 }
 
-// A bare count over stored Count-Min state compiles to a Planner readout that
+// A bare count over stored Count-Min state compiles to a Planner evaluation that
 // returns the sketch's total update weight, including colliding items.
 #[test]
-fn stored_count_min_bare_count_compiles_to_a_readout() {
+fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
     use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
-    let root = Rc::new(lower_with("count(up)", AccuracyTarget::Epsilon(0.02)));
-    let dag =
-        asap_aware_mapping::SketchAlgorithmStrategy::new(&asap_aware_mapping::DefaultCostModel)
-            .replacements(&TargetSubDAG::new(&root))
-            .into_iter()
-            .find_map(|candidate| match candidate.replacement {
-                Replacement::Summary(node) => {
-                    let dag = compile_post_asap_dag(&node).ok()?;
-                    let bare_count = dag.nodes.iter().any(|n| {
-                        matches!(
-                            &n.payload,
-                            PostAsapOperatorPayload::SummaryEstimate {
-                                query: SketchStatistic::PointCount { value: None, .. }
-                            }
-                        )
-                    });
-                    let count_min = dag.nodes.iter().any(|n| {
-                        matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg {
+    let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
+    let dag = asap_aware_mapping::ASAPStrategies::new(&asap_aware_mapping::DefaultCostModel)
+        .replacements(&TargetSubDAG::new(&root))
+        .into_iter()
+        .find_map(|candidate| match candidate.replacement {
+            Replacement::SubDAG(node) => {
+                let dag = compile_physical_asap_dag(&node).ok()?;
+                let bare_count = dag.nodes.iter().any(|n| {
+                    matches!(
+                        &n.payload,
+                        PhysicalASAPOperatorPayload::SummaryEstimate {
+                            query: SketchStatistic::PointCount { value: None, .. }
+                        }
+                    )
+                });
+                let count_min = dag.nodes.iter().any(|n| {
+                    matches!(&n.payload, PhysicalASAPOperatorPayload::SummaryAgg {
                         family: FieldDataType::Sketch(kind, _), ..
                     } if kind.algorithm() == &SketchAlgorithm::Cms)
-                    });
-                    (bare_count && count_min).then_some(dag)
-                }
-                _ => None,
-            })
-            .expect("Planner lists a Count-Min candidate for count(up)");
+                });
+                (bare_count && count_min).then_some(dag)
+            }
+            _ => None,
+        })
+        .expect("Planner lists a Count-Min candidate for count(up)");
     let state = dag
         .nodes
         .iter()
-        .find(|n| matches!(n.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .find(|n| matches!(n.payload, PhysicalASAPOperatorPayload::SummaryAgg { .. }))
         .unwrap();
-    let PostAsapOperatorPayload::SummaryAgg {
+    let PhysicalASAPOperatorPayload::SummaryAgg {
         family: FieldDataType::Sketch(kind, _),
         ..
     } = &state.payload
@@ -675,7 +673,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
             u64::from(state.id.0),
             InputContract::bounded(schema.clone()),
         )]),
-        &[u64::from(dag.root.0)],
+        &[u64::from(dag.roots[0].0)],
     )
     .unwrap();
     let program: CompiledPhysicalDAG =

@@ -1,27 +1,34 @@
 //! A retained PromQL sub-DAG (`Fallback`) compiles from its typed expression.
 //! The deployment supplies only its selector's raw series; expected values are
 //! hand-computed with Prometheus semantics.
+mod common;
 use asap_physical_operators::{
     operators::Operator,
     physical_planner::{compile, promql_fallback, promql_rows, CompiledPhysicalDAG, InputContract},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
+use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::export::PhysicalASAPDAG;
 use planner_types::{
-    post_asap::{execution_data_state::lift_plain, *},
-    pre_asap::QueryExpr,
-    types::AccuracyTarget,
-    workload::*,
+    post_asap::execution_data_state::lift_plain, types::AccuracyTarget, workload::*,
 };
 use std::{collections::BTreeMap, rc::Rc};
 
 /// Bare selectors look back one ingestion interval: 60s.
-fn parse(query: &str) -> QueryExpr {
+fn parse(query: &str) -> Rc<planner_types::ir::OperatorNode> {
     parse_with(query, AccuracyTarget::Exact)
 }
 
-fn parse_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
+fn parse_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::OperatorNode> {
+    match parse_root(query, accuracy) {
+        planner_types::ir::QueryRoot::Operator(node) => node,
+        _ => panic!("expected operator query"),
+    }
+}
+
+fn parse_root(query: &str, accuracy: AccuracyTarget) -> planner_types::ir::QueryRoot {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -46,24 +53,18 @@ fn parse_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
             ..Default::default()
         }),
     };
-    asap_frontend_promql::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_query_workload(&workload, 0)
         .unwrap()
         .remove(0)
 }
 
-fn lower(query: &str) -> QueryExpr {
+fn lower(query: &str) -> Rc<planner_types::ir::OperatorNode> {
     promql_rows::with_series_identity(&parse(query)).unwrap()
 }
 
 /// The whole query retained as one pre-ASAP node.
-fn fallback_dag(expression: QueryExpr) -> PostAsapDAG {
-    let schema = lift_plain(&expression.output_schema().unwrap());
-    compile_post_asap_dag(&Rc::new(SummaryNode {
-        expr: SummaryExpr::KeepPreAsap(Rc::new(expression)),
-        schema,
-        guarantee: None,
-    }))
-    .unwrap()
+fn fallback_dag(expression: Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
+    compile_physical_asap_dag(&expression).unwrap()
 }
 
 /// `(labels, seconds, value)`. `labels` is `k=v,...`, or a bare `job` value.
@@ -82,13 +83,14 @@ fn labels(spec: &str) -> BTreeMap<String, String> {
 }
 
 /// The metric a selector reads.
-fn metric(selector: &QueryExpr) -> String {
-    match selector {
-        QueryExpr::Scan {
+fn metric(selector: &planner_types::ir::OperatorNode) -> String {
+    match selector.expect_non_asap() {
+        planner_types::ir::NonASAPOp::Scan {
             source: planner_types::pre_asap::Source::TimeSeries { metric },
             ..
         } => metric.clone(),
-        QueryExpr::TimeRange { child, .. } | QueryExpr::TimeShift { child, .. } => metric(child),
+        planner_types::ir::NonASAPOp::TimeRange { child, .. }
+        | planner_types::ir::NonASAPOp::TimeShift { child, .. } => metric(child),
         other => panic!("not a selector: {other:?}"),
     }
 }
@@ -99,8 +101,11 @@ fn compile_query(query: &str) -> Result<CompiledPhysicalDAG, String> {
 }
 
 /// Compile a DAG whose root is the Fallback computing `expression`.
-fn compile_dag(expression: &QueryExpr, dag: &PostAsapDAG) -> Result<CompiledPhysicalDAG, String> {
-    let root = u64::from(dag.root.0);
+fn compile_dag(
+    expression: &planner_types::ir::OperatorNode,
+    dag: &PhysicalASAPDAG,
+) -> Result<CompiledPhysicalDAG, String> {
+    let root = u64::from(dag.roots[0].0);
     let inputs = promql_fallback::raw_series(expression)
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -124,14 +129,26 @@ fn evaluate(
     metrics: &[(&str, &[Sample])],
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
-    let expression = lower(query);
-    evaluate_dag(&expression, &fallback_dag(expression.clone()), metrics, at)
+    match parse_root(query, AccuracyTarget::Exact) {
+        planner_types::ir::QueryRoot::Operator(expression) => {
+            let expression =
+                promql_rows::with_series_identity(&expression).map_err(|e| e.to_string())?;
+            evaluate_dag(&expression, &fallback_dag(expression.clone()), metrics, at)
+        }
+        planner_types::ir::QueryRoot::Scalar(expr) => {
+            let expr = expr
+                .map_operator_refs(&mut |node| promql_rows::with_series_identity(node).unwrap());
+            let (program, selectors) =
+                promql_fallback::compile_scalar_root(&expr).map_err(|e| e.to_string())?;
+            execute_program(program, selectors, metrics, at, None)
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
 fn evaluate_dag(
-    expression: &QueryExpr,
-    dag: &PostAsapDAG,
+    expression: &planner_types::ir::OperatorNode,
+    dag: &PhysicalASAPDAG,
     metrics: &[(&str, &[Sample])],
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
@@ -140,15 +157,26 @@ fn evaluate_dag(
 
 #[allow(clippy::type_complexity)]
 fn evaluate_dag_with_range(
-    expression: &QueryExpr,
-    dag: &PostAsapDAG,
+    expression: &planner_types::ir::OperatorNode,
+    dag: &PhysicalASAPDAG,
     metrics: &[(&str, &[Sample])],
     at: i64,
     bounds: Option<(i64, i64)>,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
     let program = compile_dag(expression, dag)?;
-    let mut sources = BTreeMap::new();
     let selectors = promql_fallback::raw_series(expression).unwrap();
+    execute_program(program, selectors, metrics, at, bounds)
+}
+
+#[allow(clippy::type_complexity)]
+fn execute_program(
+    program: CompiledPhysicalDAG,
+    selectors: Vec<promql_fallback::Selector>,
+    metrics: &[(&str, &[Sample])],
+    at: i64,
+    bounds: Option<(i64, i64)>,
+) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
+    let mut sources = BTreeMap::new();
     for (i, (selector, schema)) in selectors.into_iter().enumerate() {
         let name = metric(&selector);
         let rows = metrics
@@ -423,12 +451,15 @@ fn dense_subquery_grids_are_rejected() {
 fn raw_series_contract_is_explicit() {
     let expression = lower("rate(m[5m])");
     let dag = fallback_dag(expression.clone());
-    let root = u64::from(dag.root.0);
+    let root = u64::from(dag.roots[0].0);
     let [(selector, schema)] = promql_fallback::raw_series(&expression)
         .unwrap()
         .try_into()
         .unwrap();
-    assert!(matches!(selector, QueryExpr::TimeRange { .. }));
+    assert!(matches!(
+        selector.expect_non_asap(),
+        planner_types::ir::NonASAPOp::TimeRange { .. }
+    ));
     let missing = compile(&dag, BTreeMap::new(), &[root]).err().unwrap();
     assert!(missing.to_string().contains("raw series input"));
     let mut wrong = (*schema).clone();
@@ -445,54 +476,31 @@ fn raw_series_contract_is_explicit() {
     // A consumed bare selector is raw range rows for its consumer; it is not
     // turned into instant selection.
     let selector = lower("m");
-    let schema = lift_plain(&selector.output_schema().unwrap());
-    let node = |id, payload| PostAsapDAGNode {
-        id: PostAsapNodeId(id),
-        payload,
-        output_state: ExecutionDataState::QUERY_ROWS,
-        output_schema: schema.clone(),
-        guarantee: None,
-    };
-    let consumed = PostAsapDAG {
-        nodes: vec![
-            node(
-                0,
-                PostAsapOperatorPayload::Fallback {
-                    expression: selector.clone(),
-                },
-            ),
-            node(
-                1,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Limit {
-                        n: 1,
-                        offset: 0,
-                        partition_by: Default::default(),
-                    },
-                },
-            ),
-        ],
-        edges: vec![PostAsapDAGEdge {
-            producer: PostAsapNodeId(0),
-            consumer: PostAsapNodeId(1),
-            role: EdgeRole::Input,
-            intermediate_schema: schema.clone(),
-            data_state: ExecutionDataState::QUERY_ROWS,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
-        }],
-        root: PostAsapNodeId(1),
-    };
+    let _schema = lift_plain(&selector.schema.clone());
+    let consumed = planner_types::ir::OperatorNode::new_shared(
+        planner_types::ir::Operator::NonASAP(planner_types::ir::NonASAPOp::Limit {
+            n: Some(1),
+            offset: 0,
+            partition_by: Default::default(),
+            child: selector.clone(),
+        }),
+    )
+    .unwrap();
+    let consumed = fallback_dag(consumed.clone());
     let raw = promql_fallback::raw_series(&selector).unwrap().remove(0).1;
     assert!(compile(
         &consumed,
         BTreeMap::from([(
-            promql_fallback::raw_series_input(0, 0),
+            promql_fallback::raw_series_input(u64::from(consumed.roots[0].0), 0),
             InputContract::bounded(raw)
         )]),
-        &[1],
+        &consumed
+            .roots
+            .iter()
+            .map(|r| u64::from(r.0))
+            .collect::<Vec<_>>()
     )
-    .is_err());
+    .is_ok());
     // Implicit subquery resolution belongs to the deployment's evaluation interval.
     assert!(compile_query("max_over_time(m[5m:])").is_err());
 }
@@ -1231,9 +1239,8 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
             "histogram_quantile(0.5, x_bucket)",
             "histogram_quantile(0.5, sum by (le, job) (x_bucket))",
         ] {
-            let root = Rc::new(
-                promql_rows::with_series_identity(&parse_with(query, target.clone())).unwrap(),
-            );
+            let root =
+                promql_rows::with_series_identity(&parse_with(query, target.clone())).unwrap();
             let space = search_workload_with_targets(
                 vec![(query, root.clone(), Some(target.clone()))],
                 &default_strategies(),
@@ -1243,8 +1250,7 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
             let candidates = &space.candidates_for_target(planned).unwrap().candidates;
             assert!(
                 candidates.iter().all(|c| matches!(&c.replacement,
-                    Replacement::Summary(node) if matches!(&node.expr,
-                        SummaryExpr::KeepPreAsap(e) if **e == *root))),
+                    Replacement::SubDAG(node) if !node.contains_asap() && node.operator == root.operator)),
                 "{query}: {candidates:?}"
             );
             let selected = space
@@ -1252,7 +1258,7 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
                 .assemble_selected_dag(planned)
                 .unwrap()
                 .unwrap();
-            let dag = compile_post_asap_dag(&selected).unwrap();
+            let dag = compile_physical_asap_dag(&selected).unwrap();
             let rows = evaluate_dag(&root, &dag, &[("x_bucket", &samples)], 60).unwrap();
             let values: Vec<_> = rows.iter().map(|(_, _, v)| *v).collect();
             assert_eq!(values, vec![1.75], "{query} {target:?}");
@@ -1285,7 +1291,7 @@ fn nonfinite_literals_round_trip_in_plans() {
     ] {
         let expression = lower(query);
         let json = serde_json::to_vec(&expression).unwrap();
-        let restored: QueryExpr = serde_json::from_slice(&json).unwrap();
+        let restored: Rc<planner_types::ir::OperatorNode> = serde_json::from_slice(&json).unwrap();
         let result = evaluate_dag(&restored, &fallback_dag(restored.clone()), &[], 60).unwrap();
         assert_eq!(result.len(), 1);
         if expected.is_nan() {
@@ -1579,7 +1585,7 @@ fn subquery_label_uniqueness_is_checked_per_evaluation_step() {
 #[test]
 fn logical_nonfinite_quantile_parameter_round_trips() {
     let expression = lower("histogram_quantile(NaN, x_bucket)");
-    let restored: QueryExpr =
+    let restored: Rc<planner_types::ir::OperatorNode> =
         serde_json::from_slice(&serde_json::to_vec(&expression).unwrap()).unwrap();
     let samples = buckets(&[("job=a", HISTOGRAM)]);
     let result = evaluate_dag(
@@ -1591,4 +1597,57 @@ fn logical_nonfinite_quantile_parameter_round_trips() {
     .unwrap();
     assert_eq!(result.len(), 1);
     assert!(result[0].2.is_nan());
+}
+
+/// The proposal's pointwise projections preserve names only for unary minus.
+#[test]
+fn pointwise_projection_names_and_dynamic_parameters() {
+    let samples = [("job=a", 300, -2.5)];
+    assert_eq!(
+        labeled("-m", &[("m", &samples)], 300),
+        [("__name__=m,job=a".into(), 2.5)]
+    );
+    assert_eq!(
+        labeled("abs(m)", &[("m", &samples)], 300),
+        [("job=a".into(), 2.5)]
+    );
+    assert_eq!(
+        run("round(m, scalar(vector(2)))", &samples, 300).unwrap(),
+        [("a".into(), 300_000, -2.0)]
+    );
+    assert_eq!(
+        run("clamp(m, time()-301, time())", &samples, 300).unwrap(),
+        [("a".into(), 300_000, -1.0)]
+    );
+    assert!(run("clamp(m, 2, 1)", &samples, 300).unwrap().is_empty());
+    assert_eq!(
+        run("year(m)", &[("a", 300, 0.0)], 300).unwrap(),
+        [("a".into(), 300_000, 1970.0)]
+    );
+    assert_eq!(
+        run("hour()", &[], 3600).unwrap(),
+        [("".into(), 3_600_000, 1.0)]
+    );
+}
+
+/// Execute every PromQL root/conversion example in the scalar design document.
+#[test]
+fn scalar_design_document_examples_execute() {
+    let samples = [("job=a", 300, 1.0), ("job=b", 300, 2.0)];
+    for (query, expected) in [
+        ("2", 2.0),
+        ("time()", 300.0),
+        ("vector(time())", 300.0),
+        ("scalar(sum(up)) + 1", 4.0),
+    ] {
+        let root = parse_root(query, AccuracyTarget::Exact);
+        root.validate_structure().unwrap();
+        let output = evaluate(query, &[("up", &samples)], 300).unwrap();
+        assert_eq!(output.len(), 1, "{query}");
+        assert_eq!(output[0].2, expected, "{query}");
+    }
+    assert_eq!(
+        labeled("up * 2", &[("up", &samples)], 300),
+        [("job=a".into(), 2.0), ("job=b".into(), 4.0)]
+    );
 }

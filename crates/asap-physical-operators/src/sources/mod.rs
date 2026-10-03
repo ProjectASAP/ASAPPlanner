@@ -7,9 +7,10 @@ use crate::{
     Error,
 };
 use futures::{stream, StreamExt};
+use planner_types::ir::{NonASAPOp, OperatorNode};
 use planner_types::{
-    post_asap::{FieldDataType, Schema},
-    pre_asap::{DataType, QueryExpr, Source},
+    post_asap::FieldDataType as SummaryFamilyType,
+    pre_asap::{DataType, Source},
 };
 use std::sync::Arc;
 
@@ -40,18 +41,18 @@ impl DataSources {
         self.sources.push((identity, source));
         Ok(())
     }
-    pub fn bind(&self, expression: &QueryExpr) -> Result<Scan, Error> {
-        let QueryExpr::Scan {
+    pub fn bind(&self, expression: &OperatorNode) -> Result<Scan, Error> {
+        let Some(NonASAPOp::Scan {
             source,
             predicates,
             schema,
-        } = expression
+        }) = expression.non_asap()
         else {
             return Err(Error::Invalid(
                 "raw Scan requires a Planner Scan leaf".into(),
             ));
         };
-        let output = Arc::new(Schema::lifted(schema.fields.clone(), schema.time_index));
+        let output = Arc::new(schema.clone());
         crate::values::validate_schema(&output)?;
         let reader = self
             .sources

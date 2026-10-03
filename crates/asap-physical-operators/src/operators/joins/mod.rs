@@ -22,6 +22,15 @@ impl Operator {
             output: left,
         })
     }
+    /// Require every candidate key to have an authoritative value at execution.
+    pub fn certified_semi_join(
+        left: SchemaRef,
+        right: SchemaRef,
+        keys: Vec<(usize, usize)>,
+    ) -> Result<Self, Error> {
+        Ok(Self::semi_join(left, right, keys)?.require_complete_right())
+    }
+
     pub(crate) fn require_complete_right(mut self) -> Self {
         if let Kind::SemiJoin {
             require_complete_right,
@@ -45,45 +54,15 @@ impl Operator {
         left: SchemaRef,
         right: SchemaRef,
         kind: planner_types::pre_asap::JoinKind,
-        predicate: &planner_types::pre_asap::Predicate,
-        output: SchemaRef,
-    ) -> Result<Self, Error> {
-        let mut joined = left.fields.clone();
-        joined.extend(right.fields.clone());
-        let predicate = Expression::planner(crate::expressions::CompiledExpression::compile(
-            &predicate.0,
-            &schema(joined),
-        )?);
-        Self::bound_relational_join(left, right, kind, predicate, output)
-    }
-    pub fn unified_relational_join(
-        left: SchemaRef,
-        right: SchemaRef,
-        kind: planner_types::pre_asap::JoinKind,
         predicate: &planner_types::ir::Predicate,
-        output: SchemaRef,
-    ) -> Result<Self, Error> {
-        let mut joined = left.fields.clone();
-        joined.extend(right.fields.clone());
-        let predicate = Expression::unified_planner(
-            crate::expressions::unified_planner::CompiledExpression::compile(
-                &predicate.0,
-                &schema(joined),
-            )?,
-        );
-        Self::bound_relational_join(left, right, kind, predicate, output)
-    }
-    pub(crate) fn bound_relational_join(
-        left: SchemaRef,
-        right: SchemaRef,
-        kind: planner_types::pre_asap::JoinKind,
-        predicate: Expression,
         output: SchemaRef,
     ) -> Result<Self, Error> {
         use planner_types::pre_asap::JoinKind;
         let mut joined = left.fields.clone();
         joined.extend(right.fields.clone());
-        if predicate.dtype(&schema(joined.clone()))?.0 != DataType::Bool {
+        let predicate =
+            crate::expressions::CompiledExpression::compile(&predicate.0, &schema(joined.clone()))?;
+        if predicate.dtype().0 != DataType::Bool {
             return Err(invalid("join predicate must be boolean"));
         }
         let fields = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {

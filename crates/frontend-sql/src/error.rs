@@ -1,11 +1,11 @@
 use std::fmt;
 
-use asap_types::pre_asap::ResolveDAGError;
+use asap_frontend_common::ResolveDAGError;
 
 /// Errors from lowering a SQL query (parse + plan via DataFusion → the
-/// canonical, unresolved DAG, built directly →
-/// [`resolve_root`](asap_types::pre_asap::resolve_root) binds it to the
-/// resolved DAG, issue #179).
+/// name-based [`UnresolvedOp`](asap_frontend_common::UnresolvedOp) tree →
+/// [`resolve_root`](asap_frontend_common::resolve_root) binds it into the
+/// unified IR).
 ///
 /// Carries no PromQL type — the SQL front end never depends on the PromQL
 /// parser. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
@@ -28,8 +28,8 @@ pub enum SqlError {
     UnsupportedFeature(String),
     /// The workload's query language is not SQL.
     WrongLanguage(String),
-    /// Resolving the canonical unresolved DAG failed (name resolution
-    /// against the bound schema).
+    /// Resolving the name-based tree failed (name resolution against the
+    /// bound schema, or schema derivation).
     Convert(ResolveDAGError),
 }
 

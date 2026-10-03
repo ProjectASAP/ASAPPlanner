@@ -1,12 +1,11 @@
 //! Scalar expressions never become constant-wrapper operators.
-#[path = "unified_support.rs"]
 mod support;
 use asap_types::ir::{NonASAPOp, QueryRoot, ScalarExpr};
 use asap_types::pre_asap::{ArithmeticOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 
 fn root(query: &str) -> QueryRoot {
-    asap_frontend_promql::unified::lower_promql_query_workload(
+    asap_frontend_promql::lower_promql_query_workload(
         &support::workload(query, AccuracyTarget::Exact),
         0,
     )

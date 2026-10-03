@@ -35,9 +35,12 @@
 //! `Err`, never panics. The pinned per-query outcomes document today's real
 //! coverage so a regression (or a future improvement) is visible, not silent.
 
+use std::rc::Rc;
+
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::pre_asap::{AggIntent, GroupKeys};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;
@@ -92,7 +95,7 @@ fn queries() -> Vec<String> {
         .collect()
 }
 
-async fn lower(q: &str) -> Result<QueryExpr, LoweringError> {
+async fn lower(q: &str) -> Result<Rc<OperatorNode>, LoweringError> {
     lower_sql_dialect(
         q,
         &catalog(),
@@ -218,19 +221,19 @@ async fn corpus_lowering_matches_the_pinned_per_query_outcome() {
     );
 }
 
-fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
-    match qe {
-        QueryExpr::Aggregate {
+fn first_aggregate(node: &OperatorNode) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
+    match node.expect_non_asap() {
+        NonASAPOp::Aggregate {
             reduction,
             measures,
             ..
         } => Some((reduction.expect_reduce(), measures)),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => first_aggregate(child),
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::Dedup { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => first_aggregate(child),
         _ => None,
     }
 }
@@ -260,7 +263,7 @@ async fn top_k_queries_are_count_grouped_by_prefix() {
             idx + 1
         );
         assert!(
-            matches!(qe, QueryExpr::Limit { .. }),
+            matches!(qe.expect_non_asap(), NonASAPOp::Limit { .. }),
             "q{} ({label}) top-k shape keeps the LIMIT at the root: {qe:?}",
             idx + 1
         );

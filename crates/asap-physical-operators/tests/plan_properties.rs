@@ -8,8 +8,8 @@ use asap_physical_operators::{
     Error,
 };
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema},
-    pre_asap::{DataType, QueryExpr, Source},
+    post_asap::{Field, FieldDataType},
+    pre_asap::{DataType, Schema, Source},
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -35,9 +35,9 @@ impl RawSource for DeclaredSource {
 // A blocking parent must reject unknown and unbounded Scan inputs without opening a reader.
 #[test]
 fn blocking_inputs_require_an_explicit_finite_source() {
-    let schema = Arc::new(Schema {
-        closed: true,
+    let schema = Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![Field {
             table: None,
             name: "v".into(),
@@ -67,11 +67,20 @@ fn blocking_inputs_require_an_explicit_finite_source() {
             )
             .unwrap();
         let scan = registry
-            .bind(&QueryExpr::Scan {
-                source: identity,
-                schema: Schema::new(vec![Field::plain("v", DataType::Int64, false)]),
-                predicates: vec![],
-            })
+            .bind(
+                &planner_types::ir::OperatorNode::new_shared(planner_types::ir::Operator::NonASAP(
+                    planner_types::ir::NonASAPOp::Scan {
+                        source: identity,
+                        schema: Schema::new(vec![planner_types::pre_asap::Field::plain(
+                            "v",
+                            DataType::Int64,
+                            false,
+                        )]),
+                        predicates: vec![],
+                    },
+                ))
+                .unwrap(),
+            )
             .unwrap();
         let mut dag = PhysicalDAG::default();
         dag.add(0, vec![], scan).unwrap();
@@ -112,11 +121,11 @@ fn blocking_inputs_require_an_explicit_finite_source() {
     }
 }
 
-// Kernel support must not be mistaken for executable native state/readout support.
+// Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
     use asap_physical_operators::{
-        capability::{validate_native_family, validate_sketch_readout, validate_summary_kernel},
+        capability::{validate_native_family, validate_sketch_evaluation, validate_summary_kernel},
         planner::post_asap::SketchStatistic,
     };
     use planner_types::{
@@ -148,8 +157,8 @@ fn summary_capability_levels_are_distinct() {
         key: ColumnRef::SampleValue,
         value: None,
     };
-    assert!(validate_sketch_readout(&cms, &bare_count).is_ok());
-    assert!(validate_sketch_readout(
+    assert!(validate_sketch_evaluation(&cms, &bare_count).is_ok());
+    assert!(validate_sketch_evaluation(
         &cms,
         &SketchStatistic::PointCount {
             key: ColumnRef::Named("host".into()),
@@ -162,7 +171,7 @@ fn summary_capability_levels_are_distinct() {
         grouping,
     );
     assert!(validate_native_family(&kll).is_ok());
-    assert!(validate_sketch_readout(&kll, &SketchStatistic::Quantile { q: 1.5 }).is_err());
-    assert!(validate_sketch_readout(&kll, &SketchStatistic::Cardinality).is_err());
-    assert!(validate_sketch_readout(&kll, &SketchStatistic::Quantile { q: 0.5 }).is_ok());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 1.5 }).is_err());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Cardinality).is_err());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 0.5 }).is_ok());
 }

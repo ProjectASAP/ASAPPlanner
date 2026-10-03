@@ -20,7 +20,7 @@ pub use planner_types as planner;
 
 pub mod dag;
 
-pub mod readout;
+pub mod evaluation;
 
 mod error;
 pub use error::Error;
@@ -31,6 +31,3 @@ pub mod plan;
 pub mod runtime;
 pub mod sources;
 pub mod values;
-
-pub mod unified_physical_planner;
-pub mod unified_sources;

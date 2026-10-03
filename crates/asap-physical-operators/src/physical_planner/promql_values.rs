@@ -1,5 +1,6 @@
 //! Physical scalar/vector contracts preserve complete label sets across native computation.
 use super::*;
+use planner_types::post_asap::FieldDataType as SummaryFamilyType;
 
 pub fn scalar_schema() -> SchemaRef {
     crate::operators::vector_binary::value_schema(true)
@@ -63,7 +64,7 @@ pub fn compile_histogram_quantile() -> Result<CompiledPhysicalDAG, Error> {
 
 /// Compile before deployment chooses readers. Input slots 0 and 1 retain operand order.
 pub fn compile_binary(
-    operator: &planner_types::post_asap::BinaryOperator,
+    operator: &crate::expressions::binary::BinaryOperator,
     return_bool: bool,
     left_scalar: bool,
     right_scalar: bool,
@@ -209,8 +210,8 @@ pub fn compile_vector_to_scalar() -> Result<CompiledPhysicalDAG, Error> {
 
 /// A stored exact-state input retains the complete population identity. The
 /// deployment supplies eligible panes; merging and finalization are computation.
-pub fn exact_state_schema(family: FieldDataType) -> Result<SchemaRef, Error> {
-    if !matches!(family, FieldDataType::ExactAggregate(..)) {
+pub fn exact_state_schema(family: SummaryFamilyType) -> Result<SchemaRef, Error> {
+    if !matches!(family, SummaryFamilyType::ExactAggregate(..)) {
         return Err(invalid("exact-state input requires an exact family"));
     }
     crate::values::validate_family(&family)?;
@@ -219,31 +220,33 @@ pub fn exact_state_schema(family: FieldDataType) -> Result<SchemaRef, Error> {
     Ok(Arc::new(schema))
 }
 
-/// Retain exact readout semantics before any deployment state is opened.
-pub fn compile_exact_readout(
-    family: FieldDataType,
+/// Retain exact evaluation semantics before any deployment state is opened.
+pub fn compile_exact_evaluation(
+    family: SummaryFamilyType,
     lookback_ms: u64,
     preserve_metric_name: bool,
 ) -> Result<CompiledPhysicalDAG, Error> {
     use planner_types::post_asap::ExactKind;
     let statistic = match &family {
-        FieldDataType::ExactAggregate(kind, _) => match kind {
+        SummaryFamilyType::ExactAggregate(kind, _) => match kind {
             ExactKind::Sum => crate::Statistic::Sum,
             ExactKind::Count => crate::Statistic::Count,
             ExactKind::Min => crate::Statistic::Min,
             ExactKind::Max => crate::Statistic::Max,
             ExactKind::Rate => crate::Statistic::Rate,
             ExactKind::Increase => crate::Statistic::Increase,
-            ExactKind::IRate => return Err(invalid("instant-rate state readout is not supported")),
+            ExactKind::IRate => {
+                return Err(invalid("instant-rate state evaluation is not supported"))
+            }
         },
-        _ => return Err(invalid("exact readout requires an exact family")),
+        _ => return Err(invalid("exact evaluation requires an exact family")),
     };
     let input = exact_state_schema(family)?;
     let merge = Operator::summary_merge(input.clone(), 1, vec![0])?;
-    let mut readout = Operator::readout(
+    let mut evaluation = Operator::evaluation(
         merge.schema(),
         1,
-        ReadoutQuery::Exact(ExactReadout {
+        SummaryEvaluation::Exact(ExactEvaluation {
             statistic,
             lookback_ms: None,
         }),
@@ -252,12 +255,12 @@ pub fn compile_exact_readout(
         statistic,
         crate::Statistic::Rate | crate::Statistic::Increase
     ) {
-        readout = readout.with_counter_lookback(
+        evaluation = evaluation.with_counter_lookback(
             i64::try_from(lookback_ms).map_err(|_| invalid("counter lookback exceeds Int64"))?,
         )?;
     }
     let project = Operator::project(
-        readout.schema(),
+        evaluation.schema(),
         vec![
             (
                 "labels".into(),
@@ -274,5 +277,5 @@ pub fn compile_exact_readout(
             ("value".into(), Expression::ExactFloat64(1)),
         ],
     )?;
-    unary(vec![merge, readout, project], input)
+    unary(vec![merge, evaluation, project], input)
 }

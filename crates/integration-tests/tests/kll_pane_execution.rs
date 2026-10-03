@@ -1,7 +1,7 @@
 //! Maintenance -> stored pane state -> independently bound query execution.
 mod physical_common;
 use asap_physical_operators::{
-    operators::{Operator, ReadoutQuery},
+    operators::{Operator, SummaryEvaluation},
     physical_planner::{CompiledPhysicalDAG, InputContract, Source},
     plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
@@ -32,8 +32,8 @@ fn family(k: u32) -> FieldDataType {
 }
 fn raw_schema() -> SchemaRef {
     Arc::new(Schema {
-        closed: true,
         unique_keys: vec![],
+        closed: false,
         fields: vec![Field {
             table: None,
             name: "value".into(),
@@ -98,11 +98,11 @@ fn restore(schema: SchemaRef, states: &[Arc<dyn AggregateCore>]) -> Batch {
     )
     .unwrap()
 }
-fn readout(schema: SchemaRef, q: f64) -> Operator {
-    Operator::readout(
+fn evaluation(schema: SchemaRef, q: f64) -> Operator {
+    Operator::evaluation(
         schema,
         0,
-        ReadoutQuery::Sketch(SketchStatistic::Quantile { q }),
+        SummaryEvaluation::Sketch(SketchStatistic::Quantile { q }),
     )
     .unwrap()
 }
@@ -159,8 +159,8 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
                 ),
             ),
             (6, (vec![5], merge.clone())),
-            (7, (vec![6], readout(schema.clone(), 0.5))),
-            (8, (vec![6], readout(schema.clone(), 0.99))),
+            (7, (vec![6], evaluation(schema.clone(), 0.5))),
+            (8, (vec![6], evaluation(schema.clone(), 0.99))),
         ]),
         vec![6, 7, 8],
     )
@@ -247,8 +247,10 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             },
         )
         .unwrap();
-        dag.add(2, vec![1], readout(schema.clone(), 0.5)).unwrap();
-        dag.add(3, vec![1], readout(schema.clone(), 0.99)).unwrap();
+        dag.add(2, vec![1], evaluation(schema.clone(), 0.5))
+            .unwrap();
+        dag.add(3, vec![1], evaluation(schema.clone(), 0.99))
+            .unwrap();
         let outputs = block_on(futures::future::join_all(
             dag.execute(
                 &[2, 3],

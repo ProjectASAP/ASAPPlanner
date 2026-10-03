@@ -5,15 +5,16 @@ use asap_aware_mapping::accuracy::{
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
-use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
+use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 mod support;
+use asap_types::ir::cse::share_common_sub_dags;
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
-    compile_post_asap_dag, cse::share_common_summary_sub_dags, AccuracyError, BoundExpr,
-    CompositionOperator, ErrorMetric, FieldDataType, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchStatistic, SummaryExpr, SummaryInputExpr, SummaryNode,
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, ProbabilityExpr,
+    ResultGuarantee, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
 };
 use asap_types::types::AccuracyTarget;
-use support::lower_promql;
+use support::{lower_promql, post_asap_dag};
 
 // Synthetic evidence exercises structural sharing, never runtime accuracy.
 struct TestEvidence;
@@ -49,22 +50,22 @@ impl AccuracyModel for TestEvidence {
     }
 }
 
-fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
+fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy).unwrap();
-    SketchAlgorithmStrategy::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
-        .replacements(&TargetSubDAG::new(&Rc::new(root)))
+    ASAPStrategies::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
+        .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| {
-            let Replacement::Summary(node) = candidate.replacement else { return None };
-            let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else { return None };
-            matches!(&summary_input.expr, SummaryExpr::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+            let Replacement::SubDAG(node) = candidate.replacement else { return None };
+            let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else { return None };
+            matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
                 if kind.algorithm() == &SketchAlgorithm::UnivMon).then_some(node)
         }).expect("UnivMon candidate")
 }
 
 #[test]
-fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
-    // Equal data, grouping and window produce one state independently of readout.
+fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees() {
+    // Equal data, grouping and window produce one state independently of evaluation.
     let accuracy = AccuracyTarget::Epsilon(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
@@ -76,26 +77,25 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
     .enumerate()
     .map(|(id, (query, accuracy))| (id, candidate(query, accuracy)))
     .collect();
-    let roots = share_common_summary_sub_dags(roots);
+    let roots = share_common_sub_dags(roots);
     let mut first_state = None;
     for (index, root) in &roots {
-        let SummaryExpr::SummaryEstimate {
+        let Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query,
-            ..
-        } = &root.expr
+        }) = &root.operator
         else {
             panic!()
         };
         if let Some(first) = &first_state {
             assert!(
                 Rc::ptr_eq(first, summary_input),
-                "state must be shared across readouts"
+                "state must be shared across evaluations"
             );
         } else {
             first_state = Some(Rc::clone(summary_input));
         }
-        let SummaryExpr::SummaryAgg { input, .. } = &summary_input.expr else {
+        let Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) = &summary_input.operator else {
             panic!()
         };
         assert!(matches!(input.item, Some(SummaryInputExpr::Column(_))));
@@ -108,7 +108,7 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
             assert!(root.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         } else {
             assert!(!root.guarantee.as_ref().unwrap().is_exact());
-            let SummaryExpr::SummaryAgg { family, .. } = &summary_input.expr else {
+            let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
                 panic!()
             };
             assert!(
@@ -118,12 +118,12 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
                 "production has no calibrated error bound"
             );
         }
-        compile_post_asap_dag(root).unwrap();
+        post_asap_dag(root);
     }
 }
 
 #[test]
-fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
+fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // An unmeasured heuristic remains inspectable but is never certified or
     // automatically selected for a caller-visible bounded-error result.
     for query in ["entropy_over_time(m[5m])", "l2_over_time(m[5m])"] {
@@ -135,16 +135,16 @@ fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
                 delta: 0.01,
             },
         ] {
-            let root = Rc::new(lower_promql(query, target.clone()).unwrap());
-            let candidates = SketchAlgorithmStrategy::default_cost_model()
-                .replacements(&TargetSubDAG::new(&root));
+            let root = lower_promql(query, target.clone()).unwrap();
+            let candidates =
+                ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
             let unknown = candidates
                 .iter()
                 .filter(|candidate| {
                     matches!(
                         &candidate.replacement,
-                        Replacement::Summary(node)
-                            if matches!(&node.expr, SummaryExpr::SummaryEstimate { .. })
+                        Replacement::SubDAG(node)
+                            if matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. }))
                                 && node.guarantee.is_none()
                                 && candidate.has_missing_accuracy_evidence()
                     )

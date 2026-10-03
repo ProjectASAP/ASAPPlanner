@@ -2,17 +2,17 @@
 use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::{
-    post_asap::{
-        compile_post_asap_dag,
-        maintained_population::{MaintainedPopulation, PopulationInput},
-        share_common_summary_sub_dags, SummaryExpr, ValueOperation,
+    ir::{
+        apply_lifecycle_timings, cse::share_common_sub_dags, export::compile_physical_asap_dag,
+        ASAPOp, LifecycleAssignment, NonASAPOp, Operator, OperatorNode, TimingMemo,
     },
-    pre_asap::{DataType, Field, QueryExpr, Schema},
+    post_asap::maintained_population::{MaintainedPopulation, PopulationInput},
+    pre_asap::{DataType, Field, Schema},
     types::AccuracyTarget,
 };
 use std::rc::Rc;
 
-async fn aggregate(q: &str) -> Rc<QueryExpr> {
+async fn aggregate(q: &str) -> Rc<OperatorNode> {
     let catalog = SqlCatalog::new().with_table(
         "samples",
         Schema::new(vec![
@@ -20,38 +20,38 @@ async fn aggregate(q: &str) -> Rc<QueryExpr> {
             Field::plain("job", DataType::Utf8, false),
         ]),
     );
-    let root = lower_sql(q, &catalog, AccuracyTarget::Exact).await.unwrap();
-    Rc::new(root)
+    lower_sql(q, &catalog, AccuracyTarget::Exact).await.unwrap()
 }
 
-fn population(
-    mut node: &asap_types::post_asap::SummaryNode,
-) -> (
-    &Rc<asap_types::post_asap::SummaryNode>,
-    &MaintainedPopulation,
-) {
-    while let SummaryExpr::ValueOperation {
-        child,
-        operation: ValueOperation::Project { .. },
-        ..
-    } = &node.expr
-    {
+/// The `MaintainPopulation` node a candidate's evaluation reads, and its spec.
+fn population(mut node: &OperatorNode) -> (&Rc<OperatorNode>, &MaintainedPopulation) {
+    while let Operator::NonASAP(NonASAPOp::Project { child, .. }) = &node.operator {
         node = child;
     }
-    let SummaryExpr::ValueOperation { child, .. } = &node.expr else {
-        panic!("readout")
+    let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &node.operator else {
+        panic!("evaluation")
     };
-    let SummaryExpr::ValueOperation {
-        operation: ValueOperation::MaintainPopulation { population },
-        ..
-    } = &child.expr
-    else {
+    let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator else {
         panic!("state")
     };
     (child, population)
 }
 
-// Quantile parameters are readout identity, while source, value column and grouping are state identity.
+/// Export `plan` the way the planner does: assign the default lifecycle
+/// timings, then compile the timed DAG.
+fn compile(plan: &Rc<OperatorNode>) -> Result<(), String> {
+    let timed = apply_lifecycle_timings(
+        plan,
+        &LifecycleAssignment::default_maintained(),
+        &mut TimingMemo::new(),
+    )
+    .map_err(|e| e.to_string())?;
+    compile_physical_asap_dag(&timed)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+// Quantile parameters are evaluation identity, while source, value column and grouping are state identity.
 #[tokio::test]
 async fn sql_quantiles_share_rows_without_promql_lookback() {
     let roots = vec![
@@ -59,7 +59,7 @@ async fn sql_quantiles_share_rows_without_promql_lookback() {
         aggregate("SELECT approx_percentile_cont(latency, 0.99) FROM samples").await,
     ];
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_summary_sub_dags(
+    let plans = share_common_sub_dags(
         roots
             .iter()
             .enumerate()
@@ -67,7 +67,7 @@ async fn sql_quantiles_share_rows_without_promql_lookback() {
             .collect(),
     );
     for (_, plan) in &plans {
-        compile_post_asap_dag(plan).unwrap();
+        compile(plan).unwrap();
     }
     let (a, spec) = population(&plans[0].1);
     let (b, _) = population(&plans[1].1);
@@ -107,9 +107,9 @@ async fn sql_filters_separate_populations() {
     assert_ne!(population(&a).1.input, population(&b).1.input);
 }
 
-// All four scalar readouts can share the same non-null numeric SQL population.
+// All four scalar evaluations can share the same non-null numeric SQL population.
 #[tokio::test]
-async fn sql_scalar_readouts_share_membership() {
+async fn sql_scalar_evaluations_share_membership() {
     let mut roots = Vec::new();
     for function in [
         "median(latency)",
@@ -120,7 +120,7 @@ async fn sql_scalar_readouts_share_membership() {
         roots.push(aggregate(&format!("SELECT {function} FROM samples")).await);
     }
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_summary_sub_dags(
+    let plans = share_common_sub_dags(
         roots
             .iter()
             .enumerate()
@@ -128,27 +128,29 @@ async fn sql_scalar_readouts_share_membership() {
             .collect(),
     );
     for (_, plan) in &plans {
-        compile_post_asap_dag(plan).unwrap();
+        compile(plan).unwrap();
         assert!(Rc::ptr_eq(population(&plans[0].1).0, population(plan).0));
     }
 }
 
-// A readout cannot reinterpret a label column as its numeric population.
+// A evaluation cannot reinterpret a label column as its numeric population.
 #[tokio::test]
 async fn malformed_table_population_fails_validation() {
     let root = aggregate("SELECT median(latency) FROM samples").await;
     let rule = MaintainedPopulationStrategy::new(std::slice::from_ref(&root));
     let mut candidate = rule.candidate(&root).unwrap();
-    let SummaryExpr::ValueOperation { child, .. } = &mut Rc::make_mut(&mut candidate).expr else {
+    let Operator::NonASAP(NonASAPOp::Project { child, .. }) =
+        &mut Rc::make_mut(&mut candidate).operator
+    else {
         unreachable!()
     };
-    let SummaryExpr::ValueOperation { child, .. } = &mut Rc::make_mut(child).expr else {
+    let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) =
+        &mut Rc::make_mut(child).operator
+    else {
         unreachable!()
     };
-    let SummaryExpr::ValueOperation {
-        operation: ValueOperation::MaintainPopulation { population },
-        ..
-    } = &mut Rc::make_mut(child).expr
+    let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) =
+        &mut Rc::make_mut(child).operator
     else {
         unreachable!()
     };
@@ -156,7 +158,7 @@ async fn malformed_table_population_fails_validation() {
         unreachable!()
     };
     *value_column = 1;
-    assert!(compile_post_asap_dag(&candidate).is_err());
+    assert!(compile(&candidate).is_err());
 }
 
 // SQL ORDER BY value DESC LIMIT k uses the same maximum-k state contract.
@@ -167,7 +169,7 @@ async fn sql_topk_limits_share_maximum_k() {
         aggregate("SELECT * FROM samples ORDER BY latency DESC LIMIT 5").await,
     ];
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_summary_sub_dags(
+    let plans = share_common_sub_dags(
         roots
             .iter()
             .enumerate()
@@ -175,7 +177,7 @@ async fn sql_topk_limits_share_maximum_k() {
             .collect(),
     );
     for (_, plan) in &plans {
-        compile_post_asap_dag(plan).unwrap();
+        compile(plan).unwrap();
         assert_eq!(population(plan).1.max_k, 5);
         assert!(Rc::ptr_eq(population(&plans[0].1).0, population(plan).0));
     }
@@ -187,7 +189,7 @@ async fn sql_topk_over_an_identity_select_list_is_recognized() {
     let root = aggregate("SELECT latency, job FROM samples ORDER BY latency DESC LIMIT 5").await;
     let rule = MaintainedPopulationStrategy::new(std::slice::from_ref(&root));
     let plan = rule.candidate(&root).expect("SQL topk");
-    compile_post_asap_dag(&plan).unwrap();
+    compile(&plan).unwrap();
     assert_eq!(population(&plan).1.max_k, 5);
 }
 

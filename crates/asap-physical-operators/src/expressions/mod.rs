@@ -7,17 +7,15 @@ use planner_types::pre_asap::{ArithmeticOpKind, DataType};
 pub mod arithmetic;
 pub mod binary;
 mod planner;
-pub mod unified_planner;
 pub use planner::CompiledExpression;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Expression {
     Binary {
-        operator: planner_types::post_asap::BinaryOperator,
+        operator: crate::expressions::binary::BinaryOperator,
         left: Box<Expression>,
         right: Box<Expression>,
     },
     Planner(Box<crate::expressions::CompiledExpression>),
-    UnifiedPlanner(Box<unified_planner::CompiledExpression>),
     Column(usize),
     ExactFloat64(usize),
     FiniteFloat64(Box<Expression>),
@@ -56,9 +54,6 @@ pub enum Expression {
     IsNull(Box<Expression>),
 }
 impl Expression {
-    pub fn unified_planner(expression: unified_planner::CompiledExpression) -> Self {
-        Self::UnifiedPlanner(Box::new(expression))
-    }
     pub fn planner(expression: crate::expressions::CompiledExpression) -> Self {
         Self::Planner(Box::new(expression))
     }
@@ -70,7 +65,8 @@ impl Expression {
                 left,
                 right,
             } => {
-                use planner_types::pre_asap::{BinaryOpKind, CompareOpKind};
+                use crate::expressions::binary::BinaryOpKind;
+                use planner_types::pre_asap::CompareOpKind;
                 let (a, n) = left.dtype(input)?;
                 let (b, m) = right.dtype(input)?;
                 if a != DataType::Float64 || b != a || operator.vector_match.is_some() {
@@ -104,10 +100,6 @@ impl Expression {
                     _ => return Err(invalid("unsupported binary operation")),
                 };
                 Ok((dtype, n || m))
-            }
-            UnifiedPlanner(expression) => {
-                expression.validate_input(input)?;
-                Ok(expression.dtype())
             }
             Planner(expression) => {
                 expression.validate_input(input)?;
@@ -296,7 +288,6 @@ impl Expression {
                 }
             }
             Planner(expression) => expression.evaluate(row)?,
-            UnifiedPlanner(expression) => expression.evaluate(row)?,
             Label { column, name } => {
                 let Value::Map(entries) = &row[*column] else {
                     return Err(invalid("label read requires a map"));
