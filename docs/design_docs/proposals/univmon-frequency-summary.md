@@ -35,8 +35,7 @@ cardinality alternatives, and exact count remains the cheaper first count
 candidate.
 
 All four readouts have the same unit-weight update, input sub-DAG, grouping,
-window, parameter identity and state schema
-([ASAP primitive schema](asap-primitive-schema.md)). Existing post-ASAP structural
+window, parameter identity and state schema. Existing post-ASAP structural
 sharing can therefore intern their state producer while preserving distinct
 readout nodes. Sharing is only legal within the same execution/data scope.
 Precompute placement, SummaryCatalog installation, retention, and runtime

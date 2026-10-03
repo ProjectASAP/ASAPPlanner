@@ -325,12 +325,24 @@ backend inspection. Automatic selection skips those unproven ratios. Use
 
 ### Family, category, algorithm, and parameters
 
-A summary's identity has four levels: family (`FieldDataType` variant), sketch
-category (`SketchCategory`), algorithm (`SketchAlgorithm`), and the validated
-committed choice (`SketchKind`). The levels and their validation are specified in
-[Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#22-consideration-2-a-field-can-have-an-asap-primitive-type).
+Sketches separate their query category from the concrete algorithm and its parameters:
 
-Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
+| Level | Type | Example |
+| --- | --- | --- |
+| **family** | `SummaryFamilyType` | `Sketch`, `Sample`, `Wavelet`, `StatModel`, `ExactAggregate` |
+| **category** | `SketchCategory` | `Quantile`, `Cardinality`, `Frequency`, `TopK` |
+| **algorithm** | `SketchAlgorithm` | `Kll` / `DDSketch` (both quantile); `Hll` (HyperLogLog) / `Theta` / `Kmv` (K-Minimum Values), all cardinality |
+| **committed choice** | `SketchKind` | one validated category + algorithm + parameter combination |
+
+A `SketchKind` is a validated committed choice. Its public constructor,
+`SketchKind::new(algorithm, params)`, verifies that the parameter variant belongs
+to the selected algorithm and classifies the pair into its category. The public
+`.category()`, `.algorithm()`, and `.params()` accessors expose the committed
+values without permitting an invalid combination.
+
+Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`.
+
+`Sample`, `Wavelet`, and `StatModel` each use a flat `(Kind, Params)` pair. `Sketch` needs the additional algorithm level because multiple algorithms can serve the same purpose—for example, KLL and DDSketch both answer quantile queries.
 
 ---
 
@@ -366,7 +378,7 @@ The crate provides no default `Matcher` implementation because the answer depend
 
 Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
 
-- `ExplanationKind::SketchApproximation` — the set contains a `Replacement::Summary` that realizes `FieldDataType::Sketch(..)`, not just an exact/pass-through candidate.
+- `ExplanationKind::SketchApproximation` — the set contains a `Replacement::Summary` that realizes `SummaryFamilyType::Sketch(..)`, not just an exact/pass-through candidate.
 - `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubDAGStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the set's `target`).
 
 - `ExplanationKind::ExactComposition` — the candidate set contains an exact operation
