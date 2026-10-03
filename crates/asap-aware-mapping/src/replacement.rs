@@ -352,6 +352,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
+use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
 use asap_types::ir::timing::validate_default;
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
@@ -2253,6 +2254,29 @@ fn realize_binary(
     )))
 }
 
+/// Coverage of a summary built over `child`: every observation of the one
+/// source scanned beneath it. Today's planner proves no time or population
+/// restriction, so this whole-source declaration is trusted, not derived from
+/// the scan (#570). `None` when `child` does not read exactly one source.
+pub(crate) fn whole_source_coverage(child: &Rc<OperatorNode>) -> Option<SummaryCoverage> {
+    let mut sources = OperatorNode::reachable(child)
+        .into_iter()
+        .filter_map(|node| match node.non_asap() {
+            Some(NonASAPOp::Scan { source, .. }) => Some(source.clone()),
+            _ => None,
+        });
+    let source = sources.next()?;
+    sources
+        .all(|other| other == source)
+        .then(|| SummaryCoverage {
+            source,
+            regions: vec![CoverageRegion {
+                time_ms: None,
+                population: Default::default(),
+            }],
+        })
+}
+
 /// Rebuild the summary chain above a per-series `Rate` accumulator with its
 /// `FinalizeExactAccumulator` placed at `timing`. `strict` additionally
 /// requires the fixed-window shape (a `PerEntity` Rate over a `TimeRange`);
@@ -3209,24 +3233,27 @@ fn construct_summary_agg(
     // a genuine empty-`by` reduction apart from a per-entity shape with no
     // grouping concept at all (issue #163). `construct_summary_agg` is the
     // single place that decides this; nothing downstream re-derives it.
-    let agg = std::rc::Rc::new(
-        OperatorNode::with_schema(
-            asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-                child: bound_child,
-                family,
-                input: summary_input,
-                reduction: physical_reduction,
-                grouping: GroupingStrategy::default(),
-                filter: None,
-            }),
-            state_schema,
-        )
-        .with_guarantee(
-            // Summary *state* carries no caller-visible guarantee; only a
-            // finalized value does. An exact accumulator's state is its value.
-            if estimate { None } else { guarantee.clone() },
-        ),
+    let coverage = whole_source_coverage(&bound_child);
+    let agg = OperatorNode::with_schema(
+        asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+            child: bound_child,
+            family,
+            input: summary_input,
+            reduction: physical_reduction,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        }),
+        state_schema,
+    )
+    .with_guarantee(
+        // Summary *state* carries no caller-visible guarantee; only a
+        // finalized value does. An exact accumulator's state is its value.
+        if estimate { None } else { guarantee.clone() },
     );
+    let agg = std::rc::Rc::new(match coverage {
+        Some(coverage) => agg.with_coverage(coverage)?,
+        None => agg,
+    });
     match query {
         // The evaluation: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
@@ -5536,8 +5563,10 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
             }
-            let rebuilt = std::rc::Rc::new(
-                OperatorNode::with_schema(
+            // The same summary over a re-placed input keeps its coverage.
+            let rebuilt = std::rc::Rc::new(OperatorNode {
+                coverage: node.coverage.clone(),
+                ..OperatorNode::with_schema(
                     asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                         child: Rc::clone(new_child),
                         family: family.clone(),
@@ -5548,8 +5577,8 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
                     }),
                     node.schema.clone(),
                 )
-                .with_guarantee(node.guarantee.clone()),
-            );
+                .with_guarantee(node.guarantee.clone())
+            });
             match validate_default(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
@@ -11347,5 +11376,60 @@ mod tests {
             schema.fields[0].dtype,
             FieldDataType::Plain(DataType::Int64)
         );
+    }
+
+    // Every SummaryAgg a strategy proposes declares whole-source coverage of
+    // the one source it reads (trusted, #570).
+    #[test]
+    fn proposed_summary_states_cover_their_whole_source() {
+        let root = agg(
+            vec![],
+            AggIntent::Quantile {
+                q: 0.9,
+                col: None,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["job"]),
+        );
+        let source = Source::TimeSeries { metric: "m".into() };
+        let proposals = ASAPStrategies::default_cost_model().propose(&TargetSubDAG::new(&root));
+        let states: Vec<_> = proposals
+            .candidates
+            .iter()
+            .filter_map(|candidate| match &candidate.replacement {
+                Replacement::SubDAG(node) => Some(node),
+                _ => None,
+            })
+            .flat_map(OperatorNode::reachable)
+            .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            .collect();
+        assert!(!states.is_empty());
+        for state in states {
+            let coverage = state.coverage.as_ref().expect("summary state has coverage");
+            assert_eq!(coverage.source, source);
+            assert_eq!(
+                coverage.regions,
+                [CoverageRegion {
+                    time_ms: None,
+                    population: Default::default(),
+                }]
+            );
+        }
+    }
+
+    // Whole-source coverage names one source; over two it is not declared.
+    #[test]
+    fn whole_source_coverage_needs_exactly_one_source() {
+        let left = metric_scan(&["job"]);
+        let right = crate::test_support::scan("n", left.schema.clone());
+        assert!(whole_source_coverage(&left).is_some());
+        let join = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Join {
+            kind: asap_types::ir::operator_properties::JoinKind::Inner,
+            pred: equi_pred(0, 2),
+            left,
+            right,
+        }))
+        .unwrap();
+        assert_eq!(whole_source_coverage(&join), None);
     }
 }
