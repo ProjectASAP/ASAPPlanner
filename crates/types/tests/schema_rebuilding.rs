@@ -10,9 +10,9 @@ use std::rc::Rc;
 
 fn coverage() -> SummaryCoverage {
     SummaryCoverage {
-        source: "t".into(),
-        input: SummaryUpdate::column(ColumnRef::Named("value".into())),
-        reduction: Reduction::by(vec![0]),
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
         regions: vec![CoverageRegion {
             time_ms: None,
             population: Default::default(),

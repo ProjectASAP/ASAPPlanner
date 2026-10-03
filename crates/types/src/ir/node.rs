@@ -151,14 +151,6 @@ impl OperatorNode {
         if self.result_kind != OperatorResultKind::State {
             return Err(CoverageError::NotState.into());
         }
-        if let Some(ASAPOp::SummaryAgg {
-            input, reduction, ..
-        }) = self.asap()
-        {
-            if *input != coverage.input || *reduction != coverage.reduction {
-                return Err(CoverageError::ProducerMismatch.into());
-            }
-        }
         self.coverage = Some(coverage);
         Ok(self)
     }

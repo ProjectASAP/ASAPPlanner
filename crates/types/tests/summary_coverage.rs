@@ -1,13 +1,18 @@
 //! Coverage composition preserves gaps and rejects duplicate observations.
 use asap_types::{
-    ir::operator_properties::Reduction, ir::summary_coverage::*, post_asap::SummaryUpdate,
-    pre_asap::ColumnRef,
+    ir::operator_properties::Reduction,
+    ir::summary_coverage::*,
+    post_asap::SummaryUpdate,
+    pre_asap::{ColumnRef, Source},
 };
+fn table(name: &str) -> Source {
+    Source::Table {
+        table_ref: name.into(),
+    }
+}
 fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> SummaryCoverage {
     SummaryCoverage {
-        source: "flows".into(),
-        input: SummaryUpdate::column(ColumnRef::Named("latency".into())),
-        reduction: Reduction::by(vec![0]),
+        source: table("flows"),
         regions: vec![CoverageRegion {
             time_ms: Some(start..end),
             population: population
@@ -61,11 +66,18 @@ fn overlap_and_identity_fail_closed() {
         ]),
         Err(CoverageError::PossibleOverlap)
     );
+    assert_eq!(
+        SummaryCoverage::merge_disjoint(&[
+            coverage(0, 2, &[("region", "us")]),
+            coverage(0, 2, &[("region", "us")])
+        ]),
+        Err(CoverageError::PossibleOverlap)
+    );
     let mut other = coverage(1, 2, &[]);
-    other.source = "other-flows".into();
+    other.source = table("other-flows");
     assert_eq!(
         SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), other]),
-        Err(CoverageError::IncompatibleInput)
+        Err(CoverageError::SourceMismatch)
     );
     assert_eq!(
         coverage(2, 1, &[]).validate(),
@@ -77,21 +89,17 @@ fn overlap_and_identity_fail_closed() {
 #[test]
 fn node_coverage_is_required_checked_and_cleared_by_rewrites() {
     use asap_types::{
-        ir::operator_properties::Source,
         ir::{ASAPOp, NonASAPOp, Operator, OperatorNode},
         post_asap::{SketchAlgorithm, SketchKind, SketchParams},
         pre_asap::{DataType, Field, FieldDataType, Schema},
     };
     let raw = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::Table {
-            table_ref: "flows".into(),
-        },
+        source: table("flows"),
         predicates: vec![],
         schema: Schema::new(vec![Field::plain("latency", DataType::Float64, false)]),
     }))
     .unwrap();
-    let mut declared = coverage(0, 1, &[]);
-    declared.reduction = Reduction::by(vec![]);
+    let declared = coverage(0, 1, &[]);
     assert!((*raw).clone().with_coverage(declared.clone()).is_err());
     let state = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: raw,
@@ -99,8 +107,8 @@ fn node_coverage_is_required_checked_and_cleared_by_rewrites() {
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
             Default::default(),
         ),
-        input: declared.input.clone(),
-        reduction: declared.reduction.clone(),
+        input: SummaryUpdate::column(ColumnRef::Named("latency".into())),
+        reduction: Reduction::by(vec![]),
         grouping: Default::default(),
         filter: None,
     }))
@@ -116,9 +124,6 @@ fn node_coverage_is_required_checked_and_cleared_by_rewrites() {
     std::rc::Rc::new(state.clone())
         .validate_structure()
         .unwrap();
-    let mut bad = declared;
-    bad.input = SummaryUpdate::column(ColumnRef::Named("other".into()));
-    assert!(state.clone().with_coverage(bad).is_err());
     let rebuilt = state.map_children(Clone::clone).unwrap();
     assert!(rebuilt.coverage.is_none());
 }
