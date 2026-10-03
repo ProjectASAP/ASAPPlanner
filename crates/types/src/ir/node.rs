@@ -141,7 +141,8 @@ impl OperatorNode {
         self
     }
 
-    /// Attach caller-established observation coverage; unknown coverage remains None.
+    /// Attach caller-established coverage. Required on summary nodes; see
+    /// [`Self::requires_coverage`].
     pub fn with_coverage(
         mut self,
         coverage: SummaryCoverage,
@@ -160,6 +161,11 @@ impl OperatorNode {
         }
         self.coverage = Some(coverage);
         Ok(self)
+    }
+
+    /// Summary nodes whose state can be composed must declare coverage.
+    pub fn requires_coverage(&self) -> bool {
+        matches!(self.asap(), Some(ASAPOp::SummaryAgg { .. }))
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -311,8 +317,12 @@ impl OperatorNode {
                     "invalid time or identity column in schema".into(),
                 ));
             }
-            if let Some(coverage) = &node.coverage {
-                (*node.as_ref()).clone().with_coverage(coverage.clone())?;
+            match &node.coverage {
+                Some(coverage) => {
+                    (*node.as_ref()).clone().with_coverage(coverage.clone())?;
+                }
+                None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
+                None => {}
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {

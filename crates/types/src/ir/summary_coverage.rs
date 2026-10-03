@@ -5,6 +5,7 @@ use super::operator_properties::Reduction;
 use crate::post_asap::SummaryUpdate;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ops::Range;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,9 +25,9 @@ pub struct SummaryCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageRegion {
-    /// Half-open bounds on one canonical time axis, in milliseconds.
-    pub start_ms: i64,
-    pub end_ms: i64,
+    /// Half-open bounds on the source's time column, in milliseconds. `None`
+    /// means no time restriction, e.g. a source without a time column.
+    pub time_ms: Option<Range<i64>>,
     /// Conjunction of non-null equality predicates; empty means unrestricted.
     pub population: BTreeMap<String, String>,
 }
@@ -49,6 +50,8 @@ pub enum CoverageError {
     NotState,
     #[error("coverage input/reduction disagrees with summary producer")]
     ProducerMismatch,
+    #[error("summary node requires coverage")]
+    Missing,
 }
 
 impl SummaryCoverage {
@@ -57,7 +60,7 @@ impl SummaryCoverage {
             return Err(CoverageError::MissingIdentity);
         }
         for (index, region) in self.regions.iter().enumerate() {
-            if region.start_ms >= region.end_ms {
+            if region.time_ms.as_ref().is_some_and(Range::is_empty) {
                 return Err(CoverageError::InvalidInterval);
             }
             if region.population.keys().any(String::is_empty) {
@@ -93,16 +96,21 @@ impl SummaryCoverage {
         merged.validate()?;
         // Coalesce adjacent intervals only for identical population predicates.
         merged.regions.sort_by(|a, b| {
-            a.population
-                .cmp(&b.population)
-                .then(a.start_ms.cmp(&b.start_ms))
+            a.population.cmp(&b.population).then(
+                a.time_ms
+                    .as_ref()
+                    .map(|t| t.start)
+                    .cmp(&b.time_ms.as_ref().map(|t| t.start)),
+            )
         });
         let mut normalized: Vec<CoverageRegion> = Vec::new();
         for region in merged.regions {
             if let Some(last) = normalized.last_mut() {
-                if last.population == region.population && last.end_ms == region.start_ms {
-                    last.end_ms = region.end_ms;
-                    continue;
+                if let (Some(last_time), Some(time)) = (&mut last.time_ms, &region.time_ms) {
+                    if last.population == region.population && last_time.end == time.start {
+                        last_time.end = time.end;
+                        continue;
+                    }
                 }
             }
             normalized.push(region);
@@ -113,8 +121,11 @@ impl SummaryCoverage {
 }
 impl CoverageRegion {
     fn may_overlap(&self, other: &Self) -> bool {
-        self.start_ms < other.end_ms
-            && other.start_ms < self.end_ms
+        let time_overlaps = match (&self.time_ms, &other.time_ms) {
+            (Some(a), Some(b)) => a.start < b.end && b.start < a.end,
+            _ => true,
+        };
+        time_overlaps
             && !self.population.iter().any(|(dimension, value)| {
                 other
                     .population

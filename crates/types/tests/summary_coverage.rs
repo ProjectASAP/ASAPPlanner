@@ -9,8 +9,7 @@ fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> SummaryCoverag
         input: SummaryUpdate::column(ColumnRef::Named("latency".into())),
         reduction: Reduction::by(vec![0]),
         regions: vec![CoverageRegion {
-            start_ms: start,
-            end_ms: end,
+            time_ms: Some(start..end),
             population: population
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -23,7 +22,7 @@ fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> SummaryCoverag
 fn time_union_preserves_gaps() {
     let merged =
         SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), coverage(1, 2, &[])]).unwrap();
-    assert_eq!(merged.regions[0].end_ms, 2);
+    assert_eq!(merged.regions[0].time_ms, Some(0..2));
     assert_eq!(merged.regions.len(), 1);
     let gapped =
         SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), coverage(2, 3, &[])]).unwrap();
@@ -76,7 +75,7 @@ fn overlap_and_identity_fail_closed() {
 
 /// Coverage is logical state metadata, and input rewrites invalidate its proof.
 #[test]
-fn node_coverage_is_checked_and_rewrites_clear_it() {
+fn node_coverage_is_required_checked_and_cleared_by_rewrites() {
     use asap_types::{
         ir::operator_properties::Source,
         ir::{ASAPOp, NonASAPOp, Operator, OperatorNode},
@@ -106,11 +105,41 @@ fn node_coverage_is_checked_and_rewrites_clear_it() {
         filter: None,
     }))
     .unwrap();
+    // Summary nodes cannot validate without coverage.
+    assert!(matches!(
+        std::rc::Rc::new(state.clone()).validate_structure(),
+        Err(asap_types::ir::SchemaDerivationError::Coverage(
+            CoverageError::Missing
+        ))
+    ));
     let state = state.with_coverage(declared.clone()).unwrap();
-    assert!(state.coverage.is_some());
+    std::rc::Rc::new(state.clone())
+        .validate_structure()
+        .unwrap();
     let mut bad = declared;
     bad.input = SummaryUpdate::column(ColumnRef::Named("other".into()));
     assert!(state.clone().with_coverage(bad).is_err());
     let rebuilt = state.map_children(Clone::clone).unwrap();
     assert!(rebuilt.coverage.is_none());
+}
+
+/// Sources without a time column declare no time bounds; such a region overlaps
+/// any region it is not population-disjoint from.
+#[test]
+fn regions_without_time_bounds() {
+    let mut tabular = coverage(0, 1, &[("region", "us")]);
+    tabular.regions[0].time_ms = None;
+    let mut other = coverage(0, 1, &[("region", "eu")]);
+    other.regions[0].time_ms = None;
+    assert_eq!(
+        SummaryCoverage::merge_disjoint(&[tabular.clone(), other])
+            .unwrap()
+            .regions
+            .len(),
+        2
+    );
+    assert_eq!(
+        SummaryCoverage::merge_disjoint(&[tabular, coverage(5, 6, &[("region", "us")])]),
+        Err(CoverageError::PossibleOverlap)
+    );
 }
