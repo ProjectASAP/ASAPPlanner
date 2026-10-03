@@ -106,7 +106,11 @@ impl OperatorNode {
     /// ASAP operator, ...).
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
-        Ok(Self::with_schema(operator, schema))
+        let mut node = Self::with_schema(operator, schema);
+        if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
+            node.observation_extent = Some(op.merged_extent()?);
+        }
+        Ok(node)
     }
 
     /// Build a node with caller-supplied output names and qualifiers. For
@@ -315,6 +319,13 @@ impl OperatorNode {
                 }
                 None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
                 None => {}
+            }
+            if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
+                if node.observation_extent.as_ref() != Some(&op.merged_extent()?) {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "retained merge coverage disagrees with input union".into(),
+                    ));
+                }
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {
