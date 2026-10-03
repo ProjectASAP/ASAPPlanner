@@ -9,7 +9,7 @@ is a target contract, not a statement that its examples execute today.
 | Language frontends and common logical IR | SQL/PromQL/MetricsQL lower to unified operators and scalars. | Floating-point SQL frequency L2 products and the normalized natural-log entropy idiom now have conservative logical rewrites. Integer L2 products remain unrecognized. Preserve alias lineage, filters, NULL groups, empty inputs, count overflow and entropy units when adding recognition. |
 | Local exact and summary alternatives | `replacement::summary_candidates`, realization rules and candidate inventory exist; supplied accuracy models reach Pass 1. | Specialized entropy/norm families in Example 2 are illustrative, not registered families. UnivMon certifies only unit-update total count; L2, entropy and cardinality epsilon/delta bounds need verified evidence or a deployment model. |
 | Summary-capability sharing | CSE interns structurally identical producers, including states with different readers. | It does not enumerate all partial sharing partitions or resize compatible states to the strictest consumer. Example 2's 37 candidates are not an acceptance result. |
-| Window composition | Mergeable state IR/native merge exists; physical pane compatibility and reuse cost helpers exist. | Automatic logical sliding/tumbling/EH alternatives over differing windows, boundary coverage and error proofs are absent. A merge kernel alone does not implement Examples 1/3. |
+| Window composition | Mergeable state IR/native merge exists; physical pane compatibility and reuse cost helpers exist. | Cadence-based disjoint pane composition and automatic native materialization-frontier enumeration are available (acceptance below). Retained rotating panes, historical EH buckets and boundary-error certificates remain separate runtime work. |
 | Physical materialization | Ephemeral/prepared/shared/continuously maintained lifecycle alternatives, costing, capabilities and latency checks exist. | Incremental query-time pane retention, historical backfill and the complete Example 4 matrix need executable implementations and explicit state/input contracts. |
 | Whole-workload selection | One unified selected DAG; shared states are interned and costed across their consumers. | `replacement.rs` documents its selection as non-exhaustive over interacting choices. The proposal's cheapest complete candidate guarantee and 54/156 inventories need a complete workload search/selection path. |
 | Deployment inputs and execution | `PlanningModels` bundles cost, accuracy, evidence and capabilities; native typed UnivMon supports one build with three readouts. | At #557 native exact distinct/L2/entropy fallback is absent; the follow-ups supply those native bindings. End-to-end SQL Example 2 is not established by the native UnivMon fixture. |
@@ -108,3 +108,21 @@ frequency rewrite, comparing filtering, natural-log units, empty-input NULL
 and unequal frequencies. Raw analytical cost lowering still excludes this
 unordered SUM window; supplying native execution does not provide missing
 cost evidence or extend the analytical adapter's existing ordered-window rule.
+
+## Automatic window/materialization acceptance
+
+`window_composition::enumerate_window_compositions` derives disjoint relative
+panes from a summary's lookback and workload cadence. Five minutes every minute
+produces the original state plus a five-pane merge. Non-divisible lookbacks use
+the greatest common divisor, so coverage is exact. Source predicates, grouping,
+summary parameters and selector offsets/anchors stay attached to the panes.
+Unknown recurrence keeps the original; budget exhaustion returns an error.
+
+`compile_materialization_candidates` lowers once and enumerates every legal
+producer/reader frontier, including rebuilding all panes at query time. It
+retains individual failures and never returns a truncated inventory.
+`integration-tests/tests/automatic_window_composition.rs` verifies generated
+panes execute identically with and without retained outputs. The deployment
+still supplies each selector's exact raw window and binds retained outputs to
+that window/revision. This does not introduce a rotating pane cache or claim
+that cadence alone certifies compatibility with a catalog's pane origin.

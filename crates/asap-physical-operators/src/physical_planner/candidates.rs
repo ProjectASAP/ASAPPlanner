@@ -206,6 +206,36 @@ pub fn compile_candidates(
     }
 }
 
+/// One enumerated frontier with its lowering result, including any rejection.
+pub struct MaterializationCandidate {
+    pub frontier: Vec<NodeId>,
+    pub realization: Result<PhysicalASAPDAG, Error>,
+}
+
+/// Automatically enumerate every legal materialization frontier and lower
+/// its producer/reader split. Compile once, preserve individual cut failures,
+/// and fail before returning an inventory if the exhaustive budget is exceeded.
+/// An evaluator must price each complete split, including retained outputs.
+pub fn compile_materialization_candidates(
+    dag: &PostAsapDAG,
+    inputs: BTreeMap<NodeId, InputContract>,
+    roots: &[NodeId],
+    max_candidates: usize,
+) -> Result<Vec<MaterializationCandidate>, Error> {
+    let compiled = compile(dag, inputs, roots)?;
+    let frontiers = enumerate_compiled_frontiers(&compiled, max_candidates)?;
+    Ok(frontiers
+        .into_iter()
+        .map(|frontier| {
+            let candidate = cut_candidate(&compiled, &frontier);
+            MaterializationCandidate {
+                frontier,
+                realization: candidate,
+            }
+        })
+        .collect())
+}
+
 /// Complete workload cost supplied by scoped optimizer/deployment evidence.
 /// The evaluator includes build/update work, retained state, shared producers
 /// and recurrent reads over the same horizon; these are not per-query timings.
