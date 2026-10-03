@@ -3036,10 +3036,12 @@ mod tests {
     fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<OperatorNode> {
         let state_type = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
         let schema = count_state_schema();
+        let child = metrics_scan();
+        let coverage = crate::replacement::whole_source_coverage(&child).unwrap();
         let agg = std::rc::Rc::new(
             OperatorNode::with_schema(
                 asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-                    child: metrics_scan(),
+                    child,
                     family: state_type,
                     input: SummaryUpdate {
                         item: None,
@@ -3052,7 +3054,9 @@ mod tests {
                 }),
                 schema.clone(),
             )
-            .with_guarantee(None),
+            .with_guarantee(None)
+            .with_coverage(coverage)
+            .unwrap(),
         );
         let mut root = Rc::clone(&agg);
         if merge {
