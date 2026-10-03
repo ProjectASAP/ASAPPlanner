@@ -259,6 +259,16 @@ impl PlanOutput {
         nodes
     }
 
+    /// The workload as one physical ASAP DAG: a root per operator query, in
+    /// plan order, with shared sub-DAGs exported once. Standalone scalar
+    /// roots have no physical form yet and are left out.
+    pub fn execution_timed_dag(
+        &self,
+    ) -> Result<asap_types::ir::export::PhysicalASAPDAG, crate::SummaryMaintenanceTimingError> {
+        let plans: Vec<_> = self.plans.iter().map(|p| &p.plan).collect();
+        crate::execution_timed_workload_dag(&plans)
+    }
+
     pub fn len(&self) -> usize {
         self.plans.len() + self.scalar_roots.len()
     }
