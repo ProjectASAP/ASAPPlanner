@@ -100,22 +100,37 @@ pub mod fixtures {
 /// Timing and export helpers for post-ASAP plans.
 pub mod post_asap {
     use asap_types::ir::export::{compile_physical_asap_dag, PhysicalASAPDAG};
-    use asap_types::ir::{apply_lifecycle_timings, LifecycleAssignment, OperatorNode, TimingMemo};
+    use asap_types::ir::{
+        apply_materialization_timings, MaterializationAssignment, OperatorNode, TimingMemo,
+    };
     use std::rc::Rc;
 
-    /// Time `root` under the default (every summary maintained) lifecycle
-    /// assignment. Returns the timed copy; read `node.timing` on it.
+    /// Time `root` under the default assignment (every summary computed at
+    /// query time). Returns the timed copy; read `node.timing` on it.
     pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        apply_lifecycle_timings(
-            root,
-            &LifecycleAssignment::default_maintained(),
-            &mut TimingMemo::new(),
-        )
-        .expect("default lifecycle timing failed")
+        timed_with(root, &MaterializationAssignment::all_query_time())
     }
 
-    /// Time `root` (default assignment), then export the wire-6 DAG.
+    /// Time `root` with every summary maintained at ingestion time.
+    pub fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        timed_with(root, &MaterializationAssignment::all_ingestion_time())
+    }
+
+    fn timed_with(
+        root: &Rc<OperatorNode>,
+        assignment: &MaterializationAssignment,
+    ) -> Rc<OperatorNode> {
+        apply_materialization_timings(root, assignment, &mut TimingMemo::new())
+            .expect("materialization timing failed")
+    }
+
+    /// Time `root` (default assignment), then export the physical DAG.
     pub fn post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
         compile_physical_asap_dag(&timed(root)).expect("post-ASAP DAG export failed")
+    }
+
+    /// Time `root` with every summary maintained, then export the physical DAG.
+    pub fn maintained_post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
+        compile_physical_asap_dag(&maintained(root)).expect("post-ASAP DAG export failed")
     }
 }
