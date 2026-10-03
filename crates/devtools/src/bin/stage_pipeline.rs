@@ -87,7 +87,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<Value, String> {
-    let roots = asap_frontend_promql::unified::lower_promql_query_workload(workload, 0)
+    let roots = asap_frontend_promql::lower_promql_query_workload(workload, 0)
         .map_err(|e| format!("lowering: {e}"))?;
     let stage0 = export(&roots)?;
     let inventory = enumerate_local_logical_candidates(roots.into_iter().enumerate().collect())
