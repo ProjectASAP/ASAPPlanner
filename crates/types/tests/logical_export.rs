@@ -116,7 +116,7 @@ fn merged_summary_preserves_typed_state() {
     let dag = asap_types::ir::export::compile_logical_asap_dag(&root).unwrap();
     dag.validate().unwrap();
     assert_eq!(dag.nodes.len(), 4);
-    let root_id = dag.root.operator_refs()[0];
+    let root_id = dag.roots[0].operator_refs()[0];
     let merged = &dag.nodes[root_id.0 as usize];
     assert_eq!(merged.result_kind, OperatorResultKind::State);
     assert_eq!(merged.output_schema, root.schema);
@@ -157,7 +157,9 @@ fn malformed_transport_is_rejected() {
         Err(LogicalASAPDAGValidationError::DuplicateNode(_))
     ));
     let mut missing = dag.clone();
-    missing.root = asap_types::ir::export::LogicalASAPQueryRoot::Operator(LogicalASAPNodeId(9));
+    missing.roots = vec![asap_types::ir::export::LogicalASAPQueryRoot::Operator(
+        LogicalASAPNodeId(9),
+    )];
     assert!(matches!(
         missing.validate(),
         Err(LogicalASAPDAGValidationError::MissingNode(_))
@@ -198,4 +200,40 @@ fn standalone_scalar_roots_roundtrip_without_synthetic_operators() {
         decoded.validate().unwrap();
         assert_eq!(document, decoded);
     }
+}
+
+/// A batch exports as one DAG: one root per query, shared producers exported once.
+#[test]
+fn batch_exports_one_root_per_query_and_shares_producers() {
+    use asap_types::ir::{export::compile_logical_asap_workload, QueryRoot};
+    let shared = values();
+    let project = |alias: &str| {
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            child: shared.clone(),
+            cols: vec![ProjectItem {
+                alias: Some(alias.into()),
+                expr: ScalarExpr::Column(0),
+            }],
+            qualifier: None,
+        }))
+        .unwrap()
+    };
+    let dag = compile_logical_asap_workload(&[
+        QueryRoot::Operator(project("a")),
+        QueryRoot::Operator(project("b")),
+    ])
+    .unwrap();
+    dag.validate().unwrap();
+    assert_eq!(dag.roots.len(), 2);
+    assert_eq!(
+        dag.nodes.len(),
+        3,
+        "the shared Values node is exported once"
+    );
+    let mut empty = dag.clone();
+    empty.roots.clear();
+    assert!(matches!(
+        empty.validate(),
+        Err(LogicalASAPDAGValidationError::NoRoots)
+    ));
 }

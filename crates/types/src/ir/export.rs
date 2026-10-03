@@ -64,7 +64,9 @@ impl LogicalASAPQueryRoot {
 pub struct LogicalASAPDAG {
     pub nodes: Vec<LogicalASAPDAGNode>,
     pub edges: Vec<LogicalASAPDAGEdge>,
-    pub root: LogicalASAPQueryRoot,
+    /// One root per query of the batch, in workload order. Queries that share
+    /// a sub-DAG reference the same exported nodes.
+    pub roots: Vec<LogicalASAPQueryRoot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +90,8 @@ pub enum LogicalASAPDAGValidationError {
     SummarySchemaMismatch(LogicalASAPNodeId),
     #[error("invalid summary coverage at {0:?}")]
     InvalidCoverage(LogicalASAPNodeId),
+    #[error("logical ASAP DAG has no query roots")]
+    NoRoots,
     #[error("logical ASAP DAG contains a cycle")]
     Cycle,
     #[error("unreachable logical node {0:?}")]
@@ -139,7 +143,14 @@ impl LogicalASAPDAG {
                 }
             }
         }
-        let roots = self.root.operator_refs();
+        if self.roots.is_empty() {
+            return Err(LogicalASAPDAGValidationError::NoRoots);
+        }
+        let roots: Vec<_> = self
+            .roots
+            .iter()
+            .flat_map(LogicalASAPQueryRoot::operator_refs)
+            .collect();
         for root in &roots {
             if !nodes.contains_key(root) {
                 return Err(LogicalASAPDAGValidationError::MissingNode(*root));
@@ -255,23 +266,39 @@ pub fn compile_logical_asap_query(
 pub fn compile_logical_asap_query_with_node_ids(
     root: &QueryRoot,
 ) -> Result<LogicalASAPDAGCompilation, SchemaDerivationError> {
-    root.validate_structure()?;
+    compile_logical_asap_workload_with_node_ids(std::slice::from_ref(root))
+}
+
+/// Export a batch of queries as one DAG with one root per query.
+pub fn compile_logical_asap_workload(
+    roots: &[QueryRoot],
+) -> Result<LogicalASAPDAG, SchemaDerivationError> {
+    Ok(compile_logical_asap_workload_with_node_ids(roots)?.dag)
+}
+
+pub fn compile_logical_asap_workload_with_node_ids(
+    roots: &[QueryRoot],
+) -> Result<LogicalASAPDAGCompilation, SchemaDerivationError> {
     let mut exporter = Exporter::default();
-    let root = match root {
-        QueryRoot::Operator(node) => LogicalASAPQueryRoot::Operator(exporter.visit(node)),
-        QueryRoot::Scalar(expr) => {
-            for node in expr.operator_refs() {
-                exporter.visit(node);
+    let mut exported = Vec::with_capacity(roots.len());
+    for root in roots {
+        root.validate_structure()?;
+        exported.push(match root {
+            QueryRoot::Operator(node) => LogicalASAPQueryRoot::Operator(exporter.visit(node)),
+            QueryRoot::Scalar(expr) => {
+                for node in expr.operator_refs() {
+                    exporter.visit(node);
+                }
+                LogicalASAPQueryRoot::Scalar(WireScalarExpr::from_expr(expr, &mut |n| {
+                    exporter.ids[&Rc::as_ptr(n)]
+                }))
             }
-            LogicalASAPQueryRoot::Scalar(WireScalarExpr::from_expr(expr, &mut |n| {
-                exporter.ids[&Rc::as_ptr(n)]
-            }))
-        }
-    };
+        });
+    }
     let dag = LogicalASAPDAG {
         nodes: exporter.nodes,
         edges: exporter.edges,
-        root,
+        roots: exported,
     };
     Ok(LogicalASAPDAGCompilation {
         dag,
