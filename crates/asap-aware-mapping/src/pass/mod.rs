@@ -17,20 +17,18 @@ mod major;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_types::ir::OperatorNode;
+use asap_types::ir::physical_export::compile_physical_asap_workload;
+use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::parsed_workload::ParsedWorkload;
+use asap_types::post_asap::ExecutionDataStateError;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::recurrence::Horizon;
 use crate::replacement::RealizationError;
-use crate::summary_maintenance_lifecycle::{
-    SummaryMaintenanceLifecycleAssemblyError, SummaryMaintenanceLifecycleCapabilities,
-    SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleSelectionError,
-};
 
 pub use major::MajorPass;
 
@@ -90,66 +88,22 @@ impl<'a> PlanningModels<'a> {
     }
 }
 
-/// Supplying this asks the pass to also decide summary maintenance versus raw
-/// recomputation; leaving it out asks only for the logical DAG.
-#[derive(Clone, Copy)]
-#[non_exhaustive]
-pub struct LifecycleInput {
-    /// Planning clock, Unix milliseconds.
-    pub now_ms: u64,
-    /// Seconds. Required to turn recurring demand into a finite total.
-    pub horizon: Option<Horizon>,
-    pub capabilities: SummaryMaintenanceLifecycleCapabilities,
-}
-
-impl LifecycleInput {
-    pub fn new(now_ms: u64, capabilities: SummaryMaintenanceLifecycleCapabilities) -> Self {
-        Self {
-            now_ms,
-            horizon: None,
-            capabilities,
-        }
-    }
-
-    pub fn with_horizon(mut self, horizon: Horizon) -> Self {
-        self.horizon = Some(horizon);
-        self
-    }
-}
-
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct OptimizationInput<'a> {
     pub workload: &'a ParsedWorkload,
     pub models: PlanningModels<'a>,
-    /// Every plan carries the maintenance-versus-recomputation decision, so
-    /// the planning clock and runtime capabilities are always required.
-    pub lifecycle: LifecycleInput,
 }
 
 impl<'a> OptimizationInput<'a> {
-    pub fn new(
-        workload: &'a ParsedWorkload,
-        models: PlanningModels<'a>,
-        lifecycle: LifecycleInput,
-    ) -> Self {
-        Self {
-            workload,
-            models,
-            lifecycle,
-        }
+    pub fn new(workload: &'a ParsedWorkload, models: PlanningModels<'a>) -> Self {
+        Self { workload, models }
     }
 
     pub fn validate(&self) -> Result<(), OptimizationInputError> {
         self.workload
             .validate()
-            .map_err(OptimizationInputError::Workload)?;
-        if let Some(horizon) = self.lifecycle.horizon {
-            if !horizon.0.is_finite() || horizon.0 <= 0.0 {
-                return Err(OptimizationInputError::InvalidHorizon(horizon.0));
-            }
-        }
-        Ok(())
+            .map_err(OptimizationInputError::Workload)
     }
 }
 
@@ -158,33 +112,29 @@ impl<'a> OptimizationInput<'a> {
 pub enum OptimizationInputError {
     #[error("workload: {0}")]
     Workload(WorkloadError),
-    #[error("planning horizon must be finite and positive, got {0}")]
-    InvalidHorizon(f64),
 }
 
 // ── Output ───────────────────────────────────────────────────────────────
 
 /// One query's selected post-ASAP DAG, or one operator sub-DAG a standalone
-/// scalar query reads, plus the maintenance decisions taken for it. The DAG
-/// is `plan.root`.
+/// scalar query reads. The DAG is `root`.
 #[derive(Debug, Clone)]
-pub struct QueryLifecyclePlan {
+pub struct QueryPlan {
     /// Index into `QueryWorkload::entries()`.
     pub entry_index: usize,
-    pub plan: SummaryMaintenanceLifecyclePlan,
+    pub root: Rc<OperatorNode>,
 }
 
-/// One multi-root workload DAG with query/lifecycle bindings in entry order;
+/// One multi-root workload DAG with query bindings in entry order;
 /// [`check_contract`] enforces that.
 ///
 /// Plans are not deduplicated across entries: a summary state that several
-/// queries share appears in each of their plans as the same `Rc` (with the
-/// same lifecycle), so a consumer that deploys or costs the workload must
-/// dedupe deployments by `Rc::ptr_eq` on the summary node.
+/// queries share appears in each of their plans as the same `Rc`, so a
+/// consumer that deploys or costs the workload must dedupe by `Rc::ptr_eq`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PlanOutput {
-    pub plans: Vec<QueryLifecyclePlan>,
+    pub plans: Vec<QueryPlan>,
     /// Standalone scalar queries, keyed by position in the batch, which is
     /// the entry index because [`check_contract`] requires dense entry
     /// indices. Each operator reference is the root of one of
@@ -192,11 +142,11 @@ pub struct PlanOutput {
     pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
     /// One plan per distinct operator sub-DAG a scalar root reads, keyed by
     /// that scalar's entry, in `scalar_roots` order.
-    pub scalar_plans: Vec<QueryLifecyclePlan>,
+    pub scalar_plans: Vec<QueryPlan>,
 }
 
 impl PlanOutput {
-    pub fn new(plans: Vec<QueryLifecyclePlan>) -> Self {
+    pub fn new(plans: Vec<QueryPlan>) -> Self {
         Self {
             plans,
             scalar_roots: Vec::new(),
@@ -226,7 +176,7 @@ impl PlanOutput {
             .map(|p| {
                 (
                     p.entry_index,
-                    asap_types::ir::QueryRoot::Operator(Rc::clone(&p.plan.root)),
+                    asap_types::ir::QueryRoot::Operator(Rc::clone(&p.root)),
                 )
             })
             .chain(
@@ -241,7 +191,7 @@ impl PlanOutput {
 
     /// The selected operator roots. Use `roots()` to include scalar queries.
     pub fn operator_roots(&self) -> Vec<Rc<OperatorNode>> {
-        self.plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
+        self.plans.iter().map(|p| Rc::clone(&p.root)).collect()
     }
 
     /// Unique operators in the entire workload DAG, including scalar-plan dependencies.
@@ -279,17 +229,16 @@ impl PlanOutput {
     /// its `scalar_roots`.
     pub fn execution_timed_dag(
         &self,
-    ) -> Result<
-        asap_types::ir::physical_export::PhysicalASAPDAG,
-        crate::SummaryMaintenanceTimingError,
-    > {
-        let plans: Vec<_> = self
-            .plans
+    ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
+        // One memo, so a node shared by several roots is timed and exported once.
+        let mut memo = TimingMemo::new();
+        let assignment = LifecycleAssignment::default_maintained();
+        let timed = self
+            .roots()
             .iter()
-            .chain(&self.scalar_plans)
-            .map(|p| &p.plan)
-            .collect();
-        crate::summary_maintenance_lifecycle::execution_timed_workload_dag(&self.roots(), &plans)
+            .map(|root| time_query_root(root, &assignment, &mut memo))
+            .collect::<Result<Vec<_>, _>>()?;
+        compile_physical_asap_workload(&timed)
     }
 
     pub fn len(&self) -> usize {
@@ -299,6 +248,28 @@ impl PlanOutput {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Time one query root: an operator root directly, a standalone scalar by
+/// timing each operator it references and rebuilding it over the timed nodes.
+fn time_query_root(
+    root: &QueryRoot,
+    assignment: &LifecycleAssignment,
+    memo: &mut TimingMemo,
+) -> Result<QueryRoot, ExecutionDataStateError> {
+    Ok(match root {
+        QueryRoot::Operator(node) => {
+            QueryRoot::Operator(apply_lifecycle_timings(node, assignment, memo)?)
+        }
+        QueryRoot::Scalar(expr) => {
+            for node in expr.operator_refs() {
+                apply_lifecycle_timings(node, assignment, memo)?;
+            }
+            QueryRoot::Scalar(expr.map_operator_refs(&mut |node| {
+                Rc::clone(memo.timed(node).expect("scalar reference was timed"))
+            }))
+        }
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -313,13 +284,6 @@ pub enum OptimizeError {
     },
     #[error("search: {0}")]
     Search(crate::replacement::SearchError),
-    #[error("summary-maintenance-lifecycle selection: {0}")]
-    LifecycleSelection(SummaryMaintenanceLifecycleSelectionError),
-    #[error("entry {entry_index}: {source}")]
-    LifecycleAssembly {
-        entry_index: usize,
-        source: SummaryMaintenanceLifecycleAssemblyError,
-    },
     /// The pass returned something the downstream contract forbids. This is a
     /// defect in the pass, not in its input.
     #[error("pass `{pass}` violated the output contract: {detail}")]
@@ -391,8 +355,7 @@ fn check_contract(
         }
         for node in refs {
             match scalar_plans.next() {
-                Some(plan)
-                    if plan.entry_index == *entry_index && Rc::ptr_eq(&plan.plan.root, node) => {}
+                Some(plan) if plan.entry_index == *entry_index && Rc::ptr_eq(&plan.root, node) => {}
                 _ => {
                     return Err(violation(format!(
                         "scalar root {entry_index} reads an operator without its scalar plan"
@@ -526,22 +489,10 @@ mod tests {
     }
 
     /// A scalar plan read from `root`, keyed by `entry_index`.
-    fn scalar_plan(entry_index: usize, root: &Rc<OperatorNode>) -> QueryLifecyclePlan {
-        QueryLifecyclePlan {
+    fn scalar_plan(entry_index: usize, root: &Rc<OperatorNode>) -> QueryPlan {
+        QueryPlan {
             entry_index,
-            plan: crate::SummaryMaintenanceLifecyclePlan {
-                root: Rc::clone(root),
-                deployments: vec![],
-                horizon: None,
-                evaluation_rate: None,
-                update_rate: None,
-                expected_reads: None,
-                selected_raw_recompute: true,
-                selected_window_implementation_id: None,
-                summary_total_cost: None,
-                window_accuracy_guarantee: None,
-                raw_recompute_total_cost: None,
-            },
+            root: Rc::clone(root),
         }
     }
 
@@ -577,7 +528,7 @@ mod tests {
             right: Box::new(right),
             semantics: ExprSemantics::Promql,
         };
-        let with_plans = |plans: Vec<QueryLifecyclePlan>| {
+        let with_plans = |plans: Vec<QueryPlan>| {
             let mut output = PlanOutput::new(Vec::new());
             // `a - b`, then `a - a`: one plan per distinct reference.
             output.scalar_roots = vec![

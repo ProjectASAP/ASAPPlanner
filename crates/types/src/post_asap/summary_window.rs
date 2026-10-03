@@ -1,28 +1,12 @@
-//! Planner-level summary-window primitives.
+//! Planner-level summary-window pane primitives.
 //!
-//! These values identify the abstract window framework selected during
-//! candidate search. They do not identify a runtime library, process,
-//! placement, shard layout, storage backend, or deployment instance; those
-//! choices belong to downstream physical compilation.
+//! These values describe pane layout and window-edge coverage. They do not
+//! identify a runtime library, process, placement, shard layout, storage
+//! backend, or deployment instance; those choices belong to downstream
+//! physical compilation.
 
 use crate::workload::RepeatedDemand;
 use serde::{Deserialize, Serialize};
-
-/// Abstract framework used to organize incrementally maintained summary
-/// state over time.
-///
-/// The built-in variants name semantics that the planner can compare across
-/// implementations with defined planning and accuracy behavior.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SummaryWindowFramework {
-    /// Disjoint, fixed-width windows.
-    Tumbling,
-    /// Overlapping logical windows, commonly realized from reusable panes.
-    Sliding,
-    /// Hierarchical buckets with exponentially increasing coverage.
-    ExponentialHistogram,
-}
 
 /// Concrete pane phase recorded in a catalog layout or inventory snapshot.
 /// Milliseconds are canonical throughout the shared contract.
@@ -121,30 +105,6 @@ pub fn plan_pane_phase(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn built_in_frameworks_round_trip() {
-        for framework in [
-            SummaryWindowFramework::Tumbling,
-            SummaryWindowFramework::Sliding,
-            SummaryWindowFramework::ExponentialHistogram,
-        ] {
-            let encoded = serde_json::to_string(&framework).unwrap();
-            assert_eq!(
-                serde_json::from_str::<SummaryWindowFramework>(&encoded).unwrap(),
-                framework
-            );
-        }
-    }
-
-    /// Opaque names cannot enter planning without defined window semantics.
-    #[test]
-    fn unimplemented_window_extensions_are_rejected() {
-        assert!(serde_json::from_value::<SummaryWindowFramework>(
-            serde_json::json!({"extension": "learned_window"})
-        )
-        .is_err());
-    }
 
     #[test]
     fn pane_only_evaluation_rejects_source_and_query_phase_mismatch() {
