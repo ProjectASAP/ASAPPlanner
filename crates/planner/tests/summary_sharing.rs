@@ -78,7 +78,7 @@ impl CostModel for FixedCosts {
         _summary: &OperatorNode,
         lifecycle: &SummaryMaintenanceLifecycle,
     ) -> Option<f64> {
-        self.latency_estimates.then(|| match lifecycle {
+        self.latency_estimates.then_some(match lifecycle {
             SummaryMaintenanceLifecycle::Ephemeral => 250.0,
             _ => 50.0,
         })
