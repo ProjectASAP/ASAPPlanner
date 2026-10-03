@@ -7,11 +7,11 @@ A Post-ASAP computation is progressively realized through four layers:
 ```mermaid
 flowchart LR
     L["Logical Post-ASAP DAG<br/><b>What computation?</b>"]
-    M["Summary Maintenance Lifecycle<br/><b>How is state maintained?</b>"]
+    M["Materialization<br/><b>How is state maintained?</b>"]
     P["Physical DAG(s)<br/><b>How is it executed?</b>"]
     D["Deployment Plan / DAG<br/><b>How is it instantiated?</b>"]
 
-    L -->|"Summary Maintenance<br/>Candidate Generation"| M
+    L -->|"Stage 2<br/>Materialization (#509)"| M
     M -->|"Physical Plan<br/>Compiler"| P
     P -->|"Deployment Plan<br/>Compiler"| D
 ```
@@ -19,47 +19,44 @@ flowchart LR
 | Layer | Defines |
 | --- | --- |
 | **Logical Post-ASAP DAG** | Computation semantics |
-| **Summary Maintenance Lifecycle** | Build, retention, reuse, and window strategy |
+| **Materialization** | Build, retention, reuse, and window strategy |
 | **Physical DAG(s)** | Supported physical candidates, executable operators and typed input boundaries |
 | **Deployment Plan / DAG** | Selected candidate, concrete data/state bindings and operational lifecycle |
 
 ASAPPlanner owns the first three layers and the shared physical operator
 implementation library. Deployment systems such as ASAPQuery and asap-fusion
-own deployment compilation and operation. The lifecycle is a planning contract
+own deployment compilation and operation. Materialization is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
-The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG (`QueryExpr`), the
+> **Status:** Stage 2 materialization (#509) will decide per sub-DAG whether to
+> materialize and whether at ingestion or query time. It is not implemented yet;
+> until then the planner times every summary at query time. Sections 2 and 3
+> describe the intended contract.
+
+The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG, the
 language-independent query semantics before summary selection. Both are
-logical. Planning builds Post-ASAP `SummaryNode` DAGs; `compile_post_asap_dag`
+logical `OperatorNode` DAGs; `compile_post_asap_dag`
 exports the selected DAG as a `PostAsapDAG`, which is the Physical Plan
 Compiler's input. Its per-node execution phase (ingestion or query time) is
-decided by the selected summary maintenance lifecycle, as the layer contract
-below states.
+decided by a `MaterializationAssignment`, as the layer contract below states.
 
 ### Layer contract
 
 1. **Logical Post-ASAP** (`CandidateLogicalASAPDAGs`) decides what to compute: summary
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
-2. **Summary maintenance lifecycle** (Planner) lists the lifecycle choices for
-   each unique retained state: every summary state (`SummaryAgg`) and every
-   maintained population that does not feed a summary state.
-   A chosen assignment determines every node's
-   `ExecutionTiming`, plus window framework and retention.
-   `SummaryMaintenanceLifecyclePlan::execution_timed_dag` applies it: a retained
-   (non-`Ephemeral`) state and all of its inputs run at ingestion time;
-   readouts, other consumers, and `Ephemeral` states not consumed by retained
-   state run at query time. A population that feeds a summary state is one of
-   that state's inputs and follows its timing.
+2. **Materialization** (Stage 2, #509) chooses ingestion or query time for each
+   summary state (`SummaryAgg`) and records it in a `MaterializationAssignment`.
+   `apply_materialization_timings` writes every node's `ExecutionTiming`: an
+   ingestion-time state and all of its inputs run at ingestion time; readouts,
+   other consumers, and query-time states run at query time.
+   `MaintainPopulation` always runs at ingestion time. The default assignment
+   is all query time, which `PlanOutput::execution_timed_dag` applies.
 3. **Physical compile** (Planner) reads timing: ingestion-time nodes form the
    precompute DAG and the rest form the query DAG, joined by typed outputs. It
    does not see raw ingestion, panes, storage or stored-state readout.
-4. **Backend** chooses the lifecycle assignment with its own `CostModel`:
-   precompute CPU (`maintenance_cost_per_update`), sketch/summary store cost
-   (`retention_cost_rate`), query reads (`summary_read_cost`) and per-query
-   builds (`build_cost`, for `Ephemeral`), counting shared state once.
-   `Ephemeral` requires the deployment to supply the state's raw input as a
-   query-time source.
+4. **Backend** binds and executes the timed DAG. A query-time summary requires
+   the deployment to supply the state's raw input as a query-time source.
 
 ### Candidate generation and deployment selection
 
@@ -69,7 +66,7 @@ because a deployment-independent cost estimate prefers another candidate.
 Logical candidates are an internal search stage, not the deployment handoff.
 
 ```text
-Query semantics + accuracy and lifecycle requirements
+Query semantics + accuracy and freshness requirements
                     ↓ Planner
 Supported Physical DAG candidates + typed inputs/outputs + requirements
                     ↓ backend
@@ -93,9 +90,9 @@ and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
 `CandidateLogicalASAPDAGs` offers one such candidate, with a per-series Rate state and a grouped
-Sum state. Its lifecycle assignment places it: a retained Sum state finalizes
-Rate and builds Sum within a bounded precompute run; an `Ephemeral` Sum over a
-retained Rate state leaves the Rate readout and Sum in the query DAG. Storing a
+Sum state. Its materialization assignment places it: an ingestion-time Sum state
+finalizes Rate and builds Sum within a bounded precompute run; a query-time Sum
+over an ingestion-time Rate state leaves the Rate readout and Sum in the query DAG. Storing a
 value requires its exact evaluation window, revision, readiness and serving
 cadence to match the query contract.
 
@@ -109,7 +106,7 @@ Planner's candidate space decides what to compute, not placement. For an
 instant-vector PromQL TopK, Planner resolves rows that carry the complete series
 identity and lists the current-series heap realizations per root with the other
 candidates, unranked. Precompute or query-time placement of Rate and grouped Sum
-is not a separate Planner candidate: the summary maintenance lifecycle assigns
+is not a separate Planner candidate: the materialization assignment sets
 each node's timing, and the physical compiler reads it.
 
 This is the target ownership contract. A backend path that still reconstructs
@@ -182,10 +179,10 @@ KLLMerge
   p50     p99
 
           │
-          │ Summary Maintenance Candidate Generation
+          │ Stage 2 Materialization (#509)
           ▼
 
-2. Summary Maintenance Lifecycle
+2. Materialization
 
 KLLBuild(k=200)
   strategy = continuously maintain
@@ -239,7 +236,7 @@ Each stage adds a different class of decision while preserving the preceding
 contracts. Here, continuous maintenance means recurring production of pane state;
 the bounded build DAG does not itself implement an unbounded streaming window.
 
-## 2. Logical Post-ASAP DAG → Summary Maintenance Lifecycle
+## 2. Logical Post-ASAP DAG → Materialization
 
 The **Logical Post-ASAP DAG** defines computation semantics:
 
@@ -257,33 +254,13 @@ Quantile(.5)  Quantile(.99)
 It establishes that KLL with `k=200` is used and that the merge is shared by the
 two readouts. It does not determine when KLL states are built or retained.
 
-**Summary Maintenance Candidate Generation** enumerates legal lifecycle choices
-using workload demand, window/freshness requirements and supported physical
-implementations. Backend selection uses runtime feasibility and cost after
-physical compilation. The following example follows one candidate.
-
-Candidate generation and selection are separate steps. For every unique retained
-state, enumeration reports each lifecycle (ephemeral, prepared, shared,
-continuously maintained) as legal, with a Planner cost or explicitly unknown
-cost, or as rejected with a reason. Planner does not remove a legal alternative
-because its own estimate prefers another. A deployment prices the legal
-alternatives over the whole workload, counting shared state once, and binds one
-lifecycle per state. Binding checks that the choice is legal and that states on
-one maintenance path share an evaluation schedule. An alternative whose cost is
-unknown can be bound only when the deployment's cost model is authoritative for
-complete-candidate cost; unknown cost is never treated as zero. It then yields the same
-lifecycle guarantee and window framework the physical compiler consumes when
-Planner selects. Planner's own cheapest-alternative selection remains available
-for callers without deployment pricing. The window framework is decided for the
-complete combination, not for one alternative in isolation.
-
-A maintained population (for example, the current series of `topk by(job)(1, m)`)
-is retained state like a summary. Retaining it maintains the latest sample per
-series at ingestion and leaves only the readout at query time. Choosing
-`Ephemeral` rebuilds that snapshot from raw samples for each query, so the
-deployment must supply the raw source at query time. The caller's `CostModel`
-prices both through the same lifecycle hooks; a model without population
-evidence leaves them unknown, and they are not selected.
+**Stage 2 Materialization (#509)** will choose when states are built and how
+long they are retained, using workload demand, window/freshness requirements
+and supported physical implementations. Backend selection uses runtime
+feasibility and cost after physical compilation. Retained state includes
+maintained populations (for example, the current series of
+`topk by(job)(1, m)`), which keep the latest sample per series at ingestion and
+leave only the readout at query time.
 
 For the running example, assume it selects:
 
@@ -303,24 +280,24 @@ reuse:
     one merged state serves p50 and p99
 ```
 
-This produces the **Summary Maintenance Lifecycle**.
+This is the running example's **Materialization**.
 
-The lifecycle specifies how the selected logical summary should be maintained,
+It specifies how the selected logical summary should be maintained,
 but not its concrete operator implementation or storage location.
 
 Physical feasibility may feed back into selection. For example, if the required
-pane-based maintenance cannot be implemented, this lifecycle candidate cannot be
+pane-based maintenance cannot be implemented, this materialization cannot be
 selected. One-minute panes alone also cannot cover an arbitrarily phased query
 window; that requires supported boundary handling or a different candidate.
 
-## 3. Summary Maintenance Lifecycle → Physical DAG
+## 3. Materialization → Physical DAG
 
 The **Physical Plan Compiler** consumes both computation semantics and maintenance
 requirements:
 
 ```text
 Logical Post-ASAP DAG (PostAsapDAG)
-+ Summary Maintenance Lifecycle
++ Materialization
 + physical capabilities
         ↓
 Physical Plan Compiler
@@ -328,14 +305,13 @@ Physical Plan Compiler
 Physical DAG(s)
 ```
 
-For the running example, the lifecycle creates two execution boundaries.
+For the running example, materialization creates two execution boundaries.
 
 These two halves are named as `PhysicalASAPDAG` names them, `precompute`
-and `query`. *Maintenance* stays the lifecycle's word (section 2): it covers
+and `query`. *Maintenance* stays materialization's word (section 2): it covers
 how state is built, retained, reused and scheduled. A precompute DAG is the
-physical object that a maintenance lifecycle compiles to, so reusing
-*maintenance* for it collapses two layers that the crates keep apart:
-`asap-aware-mapping::summary_maintenance_*` owns the lifecycle, and
+physical object that maintenance compiles to, so reusing *maintenance* for it
+collapses two layers: Stage 2 materialization (#509) owns maintenance, and
 `asap-physical-operators::physical_planner` owns the DAGs.
 
 ### Precompute Physical DAG
@@ -397,17 +373,17 @@ DAG. If the required behavior cannot be realized, physical compilation fails.
 Materialization frontiers are Planner decisions. A candidate records both the
 precompute Physical DAG and the query Physical DAG, with typed outputs connecting
 them. The deployment compiler binds those outputs; it does not move operators.
-Lifecycle timing gives the frontier: ingestion-time nodes read by query-time
-nodes. For `sum by(job)(rate(m[1m]))`, the two lifecycle choices of the single
+Execution timing gives the frontier: ingestion-time nodes read by query-time
+nodes. For `sum by(job)(rate(m[1m]))`, two materialization choices for the single
 logical candidate give:
 
 ```text
-Candidate A (Rate state retained, Sum Ephemeral):
+Candidate A (Rate state at ingestion time, Sum at query time):
   precompute: counter samples → per-series Rate state
   materialized output: per-series Rate states for window/evaluation/revision
   query: stored Rate states → Rate readout → grouped Sum → result
 
-Candidate B (Rate and Sum states retained):
+Candidate B (Rate and Sum states at ingestion time):
   precompute: counter samples → per-series Rate → grouped Sum state
   materialized output: grouped Sum states for window/evaluation/revision
   query: stored grouped Sum states → Sum readout → result
@@ -430,9 +406,9 @@ feasibility is rejected before pricing. The optimizer supplies candidate
 frontiers and cost evidence, including updates, retention, recurrence and sharing.
 `enumerate_frontiers` constructs bounded, reachable antichain frontiers above explicit input boundaries, including query-only and fully precomputed results. It fails explicitly when the candidate budget is exceeded. Maintenance selection must still reject frontiers that violate window, freshness, or reuse requirements; deployment feasibility is checked before pricing.
 
-The lifecycle layer decides timing; physical compilation reads it. Lowering a
+Materialization decides timing; physical compilation reads it. Lowering a
 node does not depend on the frontier, so each query DAG is lowered once and
-different lifecycle assignments are different cuts of that lowering.
+different materialization assignments are different cuts of that lowering.
 `compile(dag, inputs, roots)` yields the complete `CompiledPhysicalDAG`.
 `frontier_from_timing(&timed_dag)` reads an assignment's timed DAG (from
 `execution_timed_dag`) and returns its frontier: ingestion-time nodes read by
@@ -448,7 +424,7 @@ pane candidates remain a separate lowering.
 
 Physical compilation opens no readers. Bounded precompute outputs become typed
 query inputs. Their source, filters, grouping, build window, evaluation time, readiness and
-revision contracts must accompany the selected lifecycle and be checked during
+revision contracts must accompany the selected materialization and be checked during
 deployment binding. Type compatibility alone does not establish reuse legality.
 
 The Planner integration test executes both candidates through the shared runtime
@@ -463,7 +439,7 @@ The **Deployment Plan Compiler** binds the Physical DAGs to the concrete deploym
 
 ```text
 Physical DAGs
-+ Summary Maintenance Lifecycle
++ Materialization
 + deployment catalog/state
 + sources/materializations
 + operational policy
@@ -507,7 +483,7 @@ InputSlot<KllState>[5 panes]
 ```
 
 The Deployment Plan Compiler establishes bindings and checks that their contracts
-satisfy the physical inputs and selected lifecycle, including KLL parameters,
+satisfy the physical inputs and selected materialization, including KLL parameters,
 source, filters, grouping, window coverage and revision scope. The deployment engine
 resolves request-specific states and checks their actual coverage, revisions and
 readiness at execution time. A compiled plan cannot establish future readiness.
@@ -523,8 +499,8 @@ The complete example makes the ownership boundary explicit:
 | Stage | KLL example decision |
 | --- | --- |
 | **Logical Post-ASAP DAG** | Use `KLL(k=200)` with shared merge for p50/p99 |
-| **Summary Maintenance Candidate Generation** | Maintain 1-minute panes and reuse them for aligned five-minute queries |
-| **Summary Maintenance Lifecycle** | Record pane/window/freshness/reuse requirements and each node's execution timing |
+| **Stage 2 Materialization (#509)** | Maintain 1-minute panes and reuse them for aligned five-minute queries |
+| **Materialization** | Record pane/window/freshness/reuse requirements and each node's execution timing |
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
 | **Physical DAG** | Define precompute and query DAGs with typed input/output boundaries |
 | **Deployment Plan Compiler** | Bind raw input and KLL state slots to concrete sources/materializations |
@@ -534,7 +510,7 @@ The complete example makes the ownership boundary explicit:
 Logical:
     "Use KLL for p50/p99."
 
-Lifecycle:
+Materialization:
     "Maintain reusable 1-minute KLL panes."
 
 Physical:
@@ -564,17 +540,11 @@ snapshots as separate inputs.
 
 ## 6. Executable acceptance coverage
 
-The tests cover optimizer-selected lifecycle execution alongside independent
+The tests cover physical candidate execution alongside independent
 operator/runtime fixtures:
 
 | Test | Contract exercised |
 | --- | --- |
-| `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled precompute/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate summarizes the same input samples |
-| `summary_maintenance_lifecycle_e2e::chosen_lifecycle_timing_decides_precompute_contents` | PromQL workload → enumerated lifecycles → explicit choice → timed DAG → compiled candidate; ContinuouslyMaintained stores the state in precompute, Ephemeral leaves precompute empty and reads the raw source at query time; both return the same p99 |
-| `summary_maintenance_lifecycle_e2e::lifecycle_timing_cuts_one_compilation` | KLL quantile and grouped Rate→Sum: one compilation cut by the ContinuouslyMaintained and Ephemeral timed DAGs equals `compile_candidate` for each; the frontier is the retained state or empty |
-
-| `summary_maintenance_lifecycle_e2e::chosen_population_lifecycle_decides_precompute_contents` | PromQL `topk by(job)` over a maintained population → explicit choice → timed DAG → compiled candidate; ContinuouslyMaintained stores the population in precompute, Ephemeral rebuilds it from raw samples at query time; both rank alike |
-| `summary_maintenance_lifecycle_e2e::planner_lifecycle_selection_reproduces_strategy_timing` | For PromQL summary fixtures, the timed DAG from Planner's retained selection equals the DAG realization strategies produce |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute precompute DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::restored_panes_reject_corruption_parameters_schema_and_missing_binding` | Corrupt bytes, parameter relabelling, incompatible schemas and absent bindings fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Cost changes select different legal precompute frontiers; both selected candidates execute with the same reset-sensitive result; uncompilable candidates are not priced |

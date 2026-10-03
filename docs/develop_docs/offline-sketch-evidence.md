@@ -60,8 +60,7 @@ distribution or machine; the provider does not interpolate between datasets.
 Each measured resource is an optional `Measurement` with `value`, optional `stddev`,
 `samples`, and optional `method`. CPU fields are process CPU nanoseconds per
 operation; `build_cpu_ns` measures empty construction. Building an ingested
-snapshot additionally requires `sample_count × update_cpu_ns`; the lifecycle
-helper returns that sum only when both measurements exist. Memory and disk
+snapshot additionally requires `sample_count × update_cpu_ns`. Memory and disk
 fields are bytes; `scan_bytes` records bytes read by scans, not storage occupancy.
 Producer methods must state what
 was measured and how normalization was performed. `retained_bytes` is distinct
@@ -87,12 +86,10 @@ scores as CPU or measured savings.
 
 Deployment cost models can own the provider and call `lookup` with their own
 parameter sizing. This preserves the deployment's other cost and capability
-hooks. The provider's lifecycle helper returns available build/update CPU costs
-for a single independently instantiated state. It deliberately leaves retention,
-retirement and read costs unknown. In particular, a point-frequency benchmark
-read does not price a total-count read, even when both use CMS. A deployment must
-match evaluation semantics and supply the missing lifecycle and raw-query evidence
-before selecting and pricing a complete physical plan. Never combine these
+hooks. A point-frequency benchmark read does not price a total-count read, even
+when both use CMS. A deployment must match evaluation semantics and supply
+retention, retirement, read and raw-query evidence before selecting and pricing
+a complete physical plan. Never combine these
 nanosecond costs with CPU operation counts without explicit calibration.
 
 `error` contains offline observed statistics and a query descriptor. Its metric

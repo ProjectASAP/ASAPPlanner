@@ -6,7 +6,7 @@ corpus coverage. These commands do not deploy or execute a physical plan.
 To develop an application using the Rust library, start with
 [Library API: definitions, options, and examples](../develop_docs/library-api.md).
 That guide explains how to choose strategies and models, rank candidates, and
-work with lifecycle capabilities.
+assemble selected DAGs.
 
 ## Choose a command
 
@@ -96,7 +96,7 @@ cargo run -p asap-devtools --bin show_post_asap_ir -- --data-ingestion-interval-
 available binding from the sketch strategy for each query, numbered in cost-model
 order. If no candidate is available, it prints the pre-ASAP fallback as candidate
 1. It does not show the complete ranked workload candidate set or choose a
-deployment lifecycle. Its SQL examples use a fixed demonstration catalog, not
+deployment. Its SQL examples use a fixed demonstration catalog, not
 your database schema. Use the
 [library workflow](../develop_docs/library-api.md) to retain workload alternatives
 and provide your own models.
