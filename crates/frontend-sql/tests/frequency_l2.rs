@@ -74,7 +74,10 @@ async fn frequency_l2_preserves_accuracy_target() {
     let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
         panic!("project");
     };
-    let NonASAPOp::Aggregate { measures, .. } = child.expect_non_asap() else {
+    let NonASAPOp::Join { left, .. } = child.expect_non_asap() else {
+        panic!("guarded statistic");
+    };
+    let NonASAPOp::Aggregate { measures, .. } = left.expect_non_asap() else {
         panic!("aggregate");
     };
     assert!(matches!(&measures[0], AggIntent::FrequencyL2 { accuracy, .. } if *accuracy == target));
@@ -99,4 +102,33 @@ async fn default_search_keeps_exact_sql_and_frequency_alternatives() {
         .candidates
         .iter()
         .any(|candidate| !has_l2(&candidate[0].1)));
+}
+
+// An approximate L2 estimate must never decide whether SQL returns NULL.
+#[tokio::test]
+async fn frequency_empty_input_guard_uses_an_exact_count() {
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.01,
+        delta: 0.01,
+    };
+    let root = lower_sql("SELECT SQRT(SUM(c*c)) FROM (SELECT src_ip, CAST(COUNT(*) AS DOUBLE) AS c FROM flows GROUP BY src_ip) f", &catalog(false), target).await.unwrap();
+    let candidates = SemanticEquivalentRewriteStrategy.replacements(&TargetSubDAG::new(&root));
+    let Replacement::SubDAG(node) = &candidates[0].replacement else {
+        panic!("rewrite");
+    };
+    let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
+        panic!("project");
+    };
+    let NonASAPOp::Join { right, .. } = child.expect_non_asap() else {
+        panic!("exact population guard");
+    };
+    let NonASAPOp::Aggregate { measures, .. } = right.expect_non_asap() else {
+        panic!("count");
+    };
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Count {
+            accuracy: AccuracyTarget::Exact
+        }]
+    ));
 }

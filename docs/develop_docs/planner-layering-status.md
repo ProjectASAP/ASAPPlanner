@@ -6,7 +6,7 @@ is a target contract, not a statement that its examples execute today.
 
 | Proposal contract | Evidence at #557 | Remaining scope |
 | --- | --- | --- |
-| Language frontends and common logical IR | SQL/PromQL/MetricsQL lower to unified operators and scalars. | Floating-point SQL frequency L2 products now have a conservative logical rewrite. Integer products and the entropy idiom remain unrecognized. Preserve alias lineage, filters, NULL groups, empty inputs, count overflow and entropy units when adding recognition. |
+| Language frontends and common logical IR | SQL/PromQL/MetricsQL lower to unified operators and scalars. | Floating-point SQL frequency L2 products and the normalized natural-log entropy idiom now have conservative logical rewrites. Integer L2 products remain unrecognized. Preserve alias lineage, filters, NULL groups, empty inputs, count overflow and entropy units when adding recognition. |
 | Local exact and summary alternatives | `replacement::summary_candidates`, realization rules and candidate inventory exist; supplied accuracy models reach Pass 1. | Specialized entropy/norm families in Example 2 are illustrative, not registered families. UnivMon certifies only unit-update total count; L2, entropy and cardinality epsilon/delta bounds need verified evidence or a deployment model. |
 | Summary-capability sharing | CSE interns structurally identical producers, including states with different readers. | It does not enumerate all partial sharing partitions or resize compatible states to the strictest consumer. Example 2's 37 candidates are not an acceptance result. |
 | Window composition | Mergeable state IR/native merge exists; physical pane compatibility and reuse cost helpers exist. | Automatic logical sliding/tumbling/EH alternatives over differing windows, boundary coverage and error proofs are absent. A merge kernel alone does not implement Examples 1/3. |
@@ -74,3 +74,21 @@ intent column list retains the existing sample-value convention.
 `integration-tests/tests/sql_cardinality.rs` lowers `COUNT(DISTINCT src_ip)` and
 executes its exact path through raw scan predicates and native wire binding.
 Filtered aggregate measures remain outside native binding's existing scope.
+
+## SQL entropy follow-up acceptance
+
+The proposal's `-SUM(p * LN(p))` form now exposes `FrequencyEntropy` when `p`
+is a grouped unit count divided by the full, unpartitioned count window.
+Recognition requires one nonnullable Boolean/Int64/Utf8 identity, no
+measure filters/HAVING, no ordering, and an unbounded window in both directions.
+The rewrite converts the core intent's bits to nats using `ln(2)`, retains
+SQL's negative zero for a single identity and uses an exact population count
+to restore empty-input NULL. L2 now uses the same exact population guard, so a
+zero approximate estimate cannot decide whether SQL returns NULL.
+
+Frontend tests cover recognition, non-equivalent probability/window/unit
+shapes, candidate retention and accuracy propagation. Native wire execution
+checks filtering, nats, empty population, negative zero and unequal frequencies.
+The original entropy SQL graph remains an alternative, but native SQL window
+binding for that original graph is still a runtime gap at this step. Neither
+recognition nor the exact path proves UnivMon's probabilistic accuracy bound.

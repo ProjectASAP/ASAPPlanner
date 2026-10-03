@@ -32,7 +32,10 @@
 //! frequency L2 alternative through the same semantic strategy. Projection
 //! lineage, predicates, accuracy and empty-input NULL are preserved. Integer
 //! products and nullable grouping keys are excluded because overflow and NULL
-//! groups have observable SQL behavior. See `frequency_rewrite` for the rule.
+//! groups have observable SQL behavior. Normalized natural-log entropy adds an
+//! entropy alternative with explicit bits-to-nats conversion. Both frequency
+//! rules retain SQL empty-input NULL using an exact population guard. See
+//! `frequency_rewrite` for the rules.
 //!
 //! ## Scope
 //!
@@ -408,9 +411,18 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
         avg_rewrite_target(target.root).is_some()
             || composed_aggregate_rewrite(target.root).is_some()
             || crate::frequency_rewrite::frequency_l2_rewrite(target.root).is_some()
+            || crate::frequency_rewrite::frequency_entropy_rewrite(target.root).is_some()
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
+        if let Some(rewritten) = crate::frequency_rewrite::frequency_entropy_rewrite(target.root) {
+            return vec![ReplacementSubDAG {
+                strategy: "SemanticEquivalentRewriteStrategy",
+                replacement: Replacement::SubDAG(rewritten),
+                provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
+                rationale: "recognize SQL natural-log entropy with explicit bits-to-nats conversion and exact empty-population guard".into(),
+            }];
+        }
         if let Some(rewritten) = crate::frequency_rewrite::frequency_l2_rewrite(target.root) {
             return vec![ReplacementSubDAG {
                 strategy: "SemanticEquivalentRewriteStrategy",
