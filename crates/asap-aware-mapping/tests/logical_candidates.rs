@@ -179,7 +179,7 @@ fn promql_lowering_reaches_local_candidates_without_execution_timing() {
             ..Default::default()
         }),
     };
-    let roots = asap_frontend_promql::unified::lower_promql_query_workload(&workload, 0).unwrap();
+    let roots = asap_frontend_promql::lower_promql_query_workload(&workload, 0).unwrap();
     let candidates =
         enumerate_local_logical_candidates(roots.into_iter().enumerate().collect()).unwrap();
     assert!(candidates
