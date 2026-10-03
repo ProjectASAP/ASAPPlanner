@@ -17,7 +17,7 @@ Why this exists alongside index.html:
 This does not add anything index.html doesn't already do — it shares
 viewer.js and node-style.js with it verbatim (see viewer.js's header
 comment) and only differs in packaging: one query's worth of exported
-`QueryExpr` detail *is* its plan (see the side panel on node click), and
+`OperatorNode` detail *is* its plan (see the side panel on node click), and
 shared-hash highlighting *is* what this repo has for CSE today — both a
 hash-based proxy, not real CSE output; see README.md's "Shared-sub-DAG
 highlighting is a proxy" section. Structured cost/benefit annotations
@@ -72,7 +72,7 @@ def _compact(value: object) -> str:
     if not isinstance(value, dict):
         return str(value)
 
-    # Common serde enum/newtype shapes in QueryExpr detail.
+    # Common serde enum/newtype shapes in OperatorNode detail.
     if set(value) == {"Column"}:
         return f"col[{_compact(value['Column'])}]"
     if set(value) == {"Table"} and isinstance(value["Table"], dict):
