@@ -20,7 +20,7 @@
 //! "Rolling up aggregations on a fine-grained group by to get a
 //! coarse-grained group by (like AHA)," alongside "CSE across aggregations,
 //! and group by key management" — this strategy is the *cross-aggregate*
-//! sibling of `pre_asap::cse::share_common_sub_dags`'s *identical*-sub-DAG
+//! sibling of `ir::cse::share_common_sub_dags`'s *identical*-sub-DAG
 //! sharing: CSE shares two structurally-*equal* aggregates onto one `Rc`;
 //! this strategy relates two structurally-*different* (differently grouped)
 //! aggregates over the same shared source.
@@ -207,7 +207,7 @@ fn rollup_combinator(intent: &AggIntent, finer_measure_col: ColumnId) -> Option<
 /// 4. `finer_output_schema` (the finer aggregate's own *output* schema, not
 ///    the shared child's) carries a provable unique key
 ///    ([`Schema::has_unique_key`]) — **the exact legality gate
-///    `pre_asap::cse::share_common_sub_dags` already applies to its own
+///    `ir::cse::share_common_sub_dags` already applies to its own
 ///    sharing decisions**, reused verbatim here rather than re-invented:
 ///    `share_common_sub_dags`'s own doc ("Legality: gated by
 ///    `Schema::unique_keys`") states a producer's output is only safely

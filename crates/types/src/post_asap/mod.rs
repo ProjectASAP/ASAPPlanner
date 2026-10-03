@@ -1,39 +1,31 @@
-//! The post-ASAP IR: summary-bound types, distinct from
-//! [`crate::pre_asap`]'s pre-ASAP IR.
+//! Summary-state types and the execution-timing vocabulary of the operator
+//! IR ([`crate::ir`]).
 //!
-//! Where [`crate::pre_asap`] carries *intent* only ("compute a
-//! quantile to ε accuracy"), this module is the summary-bound IR: the
-//! summary family, kind/algorithm, and parameters are committed (one
-//! `(Kind, Params)` pair per family — [`sketch::ExactKind`]/[`sketch::ExactParams`],
+//! Where an intent ([`crate::pre_asap::AggIntent`]) says *what* to compute
+//! ("a quantile to ε accuracy"), these types say *how* a summary realizes it:
+//! the family, kind/algorithm and parameters are committed — one
+//! `(Kind, Params)` pair per family ([`sketch::ExactKind`]/[`sketch::ExactParams`],
 //! [`sketch::SamplingKind`]/[`sketch::SamplingParams`],
 //! [`sketch::WaveletKind`]/[`sketch::WaveletParams`],
-//! [`sketch::StatModelKind`]/[`sketch::StatModelParams`]), and
-//! [`expr::SummaryNode`] / [`expr::SummaryExpr`] describe the summary
-//! computation. The `Sketch` family is the one exception to that
-//! one-pair-per-family shape: it nests a third level, [`sketch::SketchKind`]
-//! (quantile/cardinality/frequency/top-k), which itself carries the
-//! committed [`sketch::SketchAlgorithm`] and [`sketch::SketchParams`] —
-//! `FieldDataType::Sketch(SketchKind, GroupingStrategy)`, not a flat
-//! `(kind, params)` pair
-//! — because `Sketch` is the one family with more than one algorithm per
-//! purpose today; no other family needs that extra level yet.
+//! [`sketch::StatModelKind`]/[`sketch::StatModelParams`]). The `Sketch` family
+//! nests a third level, [`sketch::SketchKind`] (quantile/cardinality/
+//! frequency/top-k), carrying the committed [`sketch::SketchAlgorithm`] and
+//! [`sketch::SketchParams`], because it is the one family with more than one
+//! algorithm per purpose.
 //!
-//! A second, orthogonal axis lives here too: [`sketch::GroupingStrategy`]
-//! (issue #256) — *how many* physical instances of a chosen family/kind
-//! exist across a grouped aggregate's `by` subpopulations
-//! (`PerSubpopulationInstance`, today's only behavior, vs.
-//! `SharedMultiSubpopulation`/Hydra — see [`sketch::HydraKind`]/
-//! [`sketch::HydraParams`]), carried on [`expr::SummaryExpr::SummaryAgg`]
-//! alongside `reduction` and on sketch-valued edge types
-//! — see `asap_aware_mapping::grouping`'s module docs for why.
+//! [`sketch::GroupingStrategy`] is a second, orthogonal axis: how many
+//! physical instances of a summary exist across a grouped aggregate's `by`
+//! subpopulations (per-subpopulation vs. one shared Hydra instance — see
+//! `asap_aware_mapping::grouping`). It rides on `ASAPOp::SummaryAgg` and on
+//! sketch-valued edge types.
+//!
+//! The rest: accuracy guarantees ([`guarantee`]), maintained populations,
+//! summary windows and maintenance lifecycle, and the execution timing /
+//! data-state vocabulary ([`execution_data_state`]).
 
-// Legacy summary IR: no longer re-exported; removed by the cleanup PR.
-pub mod cse;
 pub mod execution_data_state;
-pub mod expr;
 pub mod guarantee;
 pub mod maintained_population;
-pub mod post_asap_dag;
 pub mod query_time;
 pub mod sketch;
 pub mod summary_maintenance;
@@ -45,30 +37,9 @@ pub use execution_data_state::{
     lift_plain, DataPrimitive, ExactOperationSchemaError, ExecutionDataState,
     ExecutionDataStateError, ExecutionTiming,
 };
-// Legacy summary IR names, kept for the legacy modules above only.
-#[allow(unused_imports)]
-pub(crate) use cse::share_common_summary_sub_dags;
-#[allow(unused_imports)]
-pub(crate) use execution_data_state::{
-    assigned_child_data_state, exact_operation_output_schema, produced_data_state,
-    validate_execution_data_states, validate_execution_data_states_at,
-    ExecutionDataStateAssignment,
-};
-#[allow(unused_imports)]
-pub(crate) use expr::{
-    BinaryOperator, CandidateCompleteness, ExactOperation, SummaryExpr, SummaryNode, ValueOperation,
-};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
-};
-#[allow(unused_imports)]
-pub(crate) use post_asap_dag::{
-    compile_post_asap_dag, compile_post_asap_dag_with_node_ids, EdgeRole,
-    GroupingEdgeCompatibility, PostAsapDAG, PostAsapDAGCompilation, PostAsapDAGDocument,
-    PostAsapDAGEdge, PostAsapDAGNode, PostAsapDAGValidationError, PostAsapNodeId,
-    PostAsapNodeIdentityMap, PostAsapOperatorPayload, WindowEdgeCompatibility,
-    POST_ASAP_DAG_WIRE_VERSION,
 };
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
