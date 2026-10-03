@@ -1,14 +1,14 @@
 # Summary coverage contract
 
 Schema describes field layout; summary coverage describes eligible observations.
-`OperatorNode.summary_coverage` is optional logical metadata. `None` means unknown,
+`OperatorNode.observation_extent` is optional logical metadata. `None` means unknown,
 not unrestricted coverage. Rewriting inputs clears it along with other assessed
-metadata. `with_summary_coverage` validates declared coverage and checks state kind
+metadata. `with_observation_extent` validates declared coverage and checks state kind
 and SummaryAgg input/grouping agreement. Provenance is supplied by a trusted
 composition rule/catalog; this API does not infer predicates from arbitrary SQL.
 
-`SummaryCoverage` records source and revision identity, update expression,
-grouping, once-per-observation multiplicity and a union of joint `CoverageRegion`s.
+`ObservationExtent` records source and revision identity, update expression,
+grouping, once-per-observation multiplicity and a union of joint `ExtentRegion`s.
 Each region pairs half-open time bounds in milliseconds with a conjunction of
 non-null equality predicates over canonical population dimensions. Source identity
 must include the time axis and observation-identity namespace. Revision identifies
@@ -33,3 +33,13 @@ merge capability, accuracy certificate, storage policy or execution timing.
 The following merge PR must require known coverage, derive the output union and
 validate it rather than treating matching schemas as sufficient authorization.
 Logical transport and CSE must preserve and compare coverage metadata.
+
+## Why extent
+
+`ObservationExtent` describes the declared set of source observations represented
+by a state. The name borrows the set meaning of "extent" from object databases;
+it is a project-specific term, not an ODMG class extent implementation.
+`None` means unknown extent; an empty region list means a known empty extent.
+Disjoint union preserves gaps and joint population/time relationships.
+The later query-relative coverage check asks whether this extent satisfies a
+requested population/window. Declaring an extent does not prove that check.
