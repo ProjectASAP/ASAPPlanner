@@ -18,7 +18,7 @@ cytoscape.use(window.cytoscapeDagre);
 // --post-asap whole-query merged post-ASAP DAG (same flattened
 // `{nodes, root}` shape as `dag`, but nodes may be post-ASAP-only kinds
 // like "SummaryAgg" mixed in, and any such node has no `hash` — there's no
-// corresponding QueryExpr to hash) — left `undefined` when absent (omitted
+// corresponding OperatorNode to hash) — left `undefined` when absent (omitted
 // whenever --post-asap wasn't set, or this query had zero replacements),
 // unlike `replacements` which always defaults to an array. `workload_cost`
 // is the optional per-query `NamedDAG.workload_cost` (issue #286), also
