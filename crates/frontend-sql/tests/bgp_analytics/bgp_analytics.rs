@@ -38,9 +38,9 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
+use asap_types::ir::operator::{AggIntent, GroupKeys};
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;

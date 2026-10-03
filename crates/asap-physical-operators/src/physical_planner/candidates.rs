@@ -94,7 +94,7 @@ pub fn cut_candidate(
 /// aligns by value column) has the same timing at compile time as here.
 /// A query-time node feeding an ingestion-time node has no valid placement.
 pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error> {
-    use planner_types::post_asap::ExecutionTiming::IngestionTime;
+    use planner_types::ir::properties::ExecutionTiming::IngestionTime;
     let timing = dag
         .nodes
         .iter()
@@ -408,7 +408,7 @@ mod tests {
 
     fn with_timing(
         dag: &PhysicalASAPDAG,
-        timing: impl Fn(&PhysicalASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
+        timing: impl Fn(&PhysicalASAPDAGNode) -> planner_types::ir::properties::ExecutionTiming,
     ) -> PhysicalASAPDAG {
         let mut timed = dag.clone();
         for node in &mut timed.nodes {
@@ -443,7 +443,7 @@ mod tests {
     /// lowers each Planner node once and matches `compile_candidate`.
     #[test]
     fn timing_cuts_share_one_lowering() {
-        use planner_types::post_asap::ExecutionTiming::QueryTime;
+        use planner_types::ir::properties::ExecutionTiming::QueryTime;
         let (retained, _, root) = grouped_rate();
         let ephemeral = with_timing(&retained, |_| QueryTime);
         let inputs = raw_input(&retained);
@@ -473,7 +473,7 @@ mod tests {
     /// ingestion-time root is itself the frontier.
     #[test]
     fn frontier_from_timing_includes_ingestion_root() {
-        use planner_types::post_asap::ExecutionTiming::IngestionTime;
+        use planner_types::ir::properties::ExecutionTiming::IngestionTime;
         let (dag, _, root) = grouped_rate();
         let timed = with_timing(&dag, |_| IngestionTime);
         assert_eq!(frontier_from_timing(&timed).unwrap(), [root]);
@@ -482,7 +482,7 @@ mod tests {
     /// A query-time node feeding an ingestion-time node is rejected.
     #[test]
     fn frontier_from_timing_rejects_query_time_input_to_ingestion() {
-        use planner_types::post_asap::ExecutionTiming::{IngestionTime, QueryTime};
+        use planner_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
         let (dag, _, _) = grouped_rate();
         let timed = with_timing(&dag, |node| {
             if node.id == dag.roots[0] {

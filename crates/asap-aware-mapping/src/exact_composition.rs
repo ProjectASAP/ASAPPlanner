@@ -62,19 +62,20 @@
 //!   formulas (see `crate::cost_model::read_operation_plan_cost_rate` and
 //!   siblings). Missing statistics keep the conservative kept sub-DAG.
 
-use asap_types::ir::non_asap::any_measure_filtered;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
 use std::rc::Rc;
 
-use asap_types::ir::aggregate_schema::aggregate_output_schema;
-use asap_types::ir::operator_properties::Reduction;
-use asap_types::ir::timing::{planned_data_state, validate_maintained};
-use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate};
-use asap_types::post_asap::execution_data_state::lift_plain;
-use asap_types::post_asap::{
-    AccuracyError, ExactOperationSchemaError, ExecutionDataState, ExecutionDataStateError,
-    ResultGuarantee, Schema,
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::properties::timing::{planned_data_state, validate_maintained};
+use asap_types::ir::properties::{
+    AccuracyError, ExecutionDataState, ExecutionDataStateError, ResultGuarantee,
 };
-use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::ir::schema::aggregate_schema::aggregate_output_schema;
+use asap_types::ir::schema::Schema;
+use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate};
+use asap_types::physical::execution_data_state::lift_plain;
+use asap_types::physical::ExactOperationSchemaError;
 use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
@@ -85,7 +86,7 @@ use crate::replacement::{
 use crate::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
 
 #[cfg(test)]
-use asap_types::post_asap::ExecutionTiming;
+use asap_types::ir::properties::ExecutionTiming;
 
 /// Which side of the maintenance/read boundary an [`ExactComposition`]'s
 /// exact function executes on.
@@ -202,7 +203,7 @@ impl ExactComposition {
 
     /// Build the composed, data_state-validated node over `child`. Every edge of
     /// the result (including everything beneath `child`) is checked by
-    /// `asap_types::ir::timing::validate_maintained`; an illegal
+    /// `asap_types::ir::properties::timing::validate_maintained`; an illegal
     /// placement is a typed [`RealizationError::ExecutionDataState`], never deferred to a
     /// runtime.
     pub fn compose(&self, child: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
@@ -509,9 +510,10 @@ mod tests {
     use crate::cost_model::{DefaultCostModel, ValueOperationCapabilities};
     use crate::replacement::retain_exact;
     use crate::test_support::{agg, agg_per_entity as per_entity, metric_scan, timed};
+    use asap_types::ir::operator::agg_intent::default_quantile;
+    use asap_types::ir::properties::ExecutionDataStateError;
+    use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::ASAPOp;
-    use asap_types::post_asap::{ExecutionDataStateError, FieldDataType, SketchAlgorithm};
-    use asap_types::pre_asap::agg_intent::default_quantile;
 
     /// `max by (zone) (quantile by (zone, host) (m))`.
     fn max_over_quantile() -> Rc<OperatorNode> {
@@ -730,11 +732,11 @@ mod tests {
     #[test]
     fn exact_operator_rejects_non_plain_input() {
         let state = Schema::lifted(
-            vec![asap_types::pre_asap::Field::new(
+            vec![asap_types::ir::schema::Field::new(
                 "state",
                 FieldDataType::ExactAggregate(
-                    asap_types::post_asap::ExactKind::Sum,
-                    asap_types::post_asap::ExactParams::Sum,
+                    asap_types::ir::schema::ExactKind::Sum,
+                    asap_types::ir::schema::ExactParams::Sum,
                 ),
                 false,
             )],

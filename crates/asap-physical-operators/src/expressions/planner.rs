@@ -3,7 +3,8 @@ use crate::{
     values::{SchemaRef, Value},
     Error,
 };
-use planner_types::pre_asap::{ArithmeticOpKind, CompareOpKind, DataType, ScalarValue};
+use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+use planner_types::ir::schema::DataType;
 
 use planner_types::ir::ScalarExpr;
 use std::{cmp::Ordering, sync::Arc};
@@ -11,7 +12,7 @@ use std::{cmp::Ordering, sync::Arc};
 pub(super) fn evaluate(
     expr: &ScalarExpr,
     row: &[Value],
-    schema: &planner_types::pre_asap::Schema,
+    schema: &planner_types::ir::schema::Schema,
 ) -> Result<Value, Error> {
     match expr {
         ScalarExpr::Column(index) => row.get(*index).cloned().ok_or(Error::Invalid(format!(
@@ -115,8 +116,8 @@ pub(super) fn evaluate(
             Value::Null
         ))),
         ScalarExpr::FunctionCall { name, args } => {
-            use planner_types::pre_asap::scalar_type_rules::MapScalarFunction;
-            if planner_types::pre_asap::scalar_type_rules::promql_function_arity(name).is_some() {
+            use planner_types::ir::scalar::scalar_type_rules::MapScalarFunction;
+            if planner_types::ir::scalar::scalar_type_rules::promql_function_arity(name).is_some() {
                 let values = args
                     .iter()
                     .map(|arg| match evaluate(arg, row, schema)? {
@@ -497,7 +498,7 @@ fn promql_function(name: &str, args: &[f64]) -> Result<f64, Error> {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct CompiledExpression {
     expression: ScalarExpr,
-    schema: planner_types::pre_asap::Schema,
+    schema: planner_types::ir::schema::Schema,
     output: (DataType, bool),
 }
 impl CompiledExpression {
@@ -563,7 +564,7 @@ impl CompiledExpression {
         evaluate(&self.expression, row, &self.schema)
     }
 }
-fn validate(expr: &ScalarExpr, schema: &planner_types::pre_asap::Schema) -> Result<(), Error> {
+fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Result<(), Error> {
     let invalid = || Error::Invalid(format!("unsupported scalar expression: {expr:?}"));
     expr.scalar_type(schema)
         .map_err(|e| Error::Invalid(e.to_string()))?;
@@ -646,10 +647,11 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::pre_asap::Schema) -> Resu
         }
         ScalarExpr::FunctionCall { name, args } => {
             if name != "promql_drop_metric_name"
-                && planner_types::pre_asap::scalar_type_rules::promql_function_arity(name).is_none()
+                && planner_types::ir::scalar::scalar_type_rules::promql_function_arity(name)
+                    .is_none()
                 && name != "asap_struct_field"
                 && name != "asap_element_access"
-                && planner_types::pre_asap::scalar_type_rules::MapScalarFunction::from_name(name)
+                && planner_types::ir::scalar::scalar_type_rules::MapScalarFunction::from_name(name)
                     .is_none()
             {
                 return Err(invalid());

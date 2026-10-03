@@ -1,8 +1,6 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::{
-    pre_asap::schema::{DataType, Field, Schema},
-    types::AccuracyTarget,
-};
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::types::AccuracyTarget;
 fn catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
         "t",

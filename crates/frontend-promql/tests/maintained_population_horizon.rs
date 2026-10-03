@@ -1,7 +1,7 @@
 mod support;
 use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
+use asap_types::ir::operator::maintained_population::PopulationInput;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
-use asap_types::post_asap::maintained_population::PopulationInput;
 use asap_types::types::AccuracyTarget;
 
 // A population for a one-second selector must expire members after one second.

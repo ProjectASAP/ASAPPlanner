@@ -6,7 +6,9 @@ use crate::summary_kernels::{
     HydraKllSketchAccumulator,
 };
 use crate::{AggregateCore, KeyByLabelValues};
-use planner_types::post_asap::{FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams};
+use planner_types::ir::schema::{
+    FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams,
+};
 
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
 /// inner `acc` field implements `Clone + AggregateCore`.
@@ -528,15 +530,15 @@ fn cms_heap_dims(params: &SketchParams) -> (usize, usize, usize) {
 /// tags participate in this dispatch and unsupported payloads are errors.
 pub fn create_planner_accumulator(
     family: &SummaryFamilyType,
-    input: &planner_types::post_asap::SummaryUpdate,
-    grouping: &planner_types::post_asap::GroupingStrategy,
+    input: &planner_types::ir::schema::SummaryUpdate,
+    grouping: &planner_types::ir::schema::GroupingStrategy,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
     if input.item.is_some()
         && matches!(
             input.weight_domain,
-            planner_types::post_asap::WeightDomain::NonNegative {
+            planner_types::ir::schema::WeightDomain::NonNegative {
                 proof:
-                    planner_types::post_asap::NonNegativeWeightProof::ResetAwareCounterDerivative
+                    planner_types::ir::schema::NonNegativeWeightProof::ResetAwareCounterDerivative
             }
         )
     {
@@ -544,7 +546,7 @@ pub fn create_planner_accumulator(
     }
 
     crate::capability::validate_summary_kernel(family, input, grouping)?;
-    use planner_types::post_asap::GroupingStrategy;
+    use planner_types::ir::schema::GroupingStrategy;
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
         return Err("shared summary grouping requires a supported Planner Hydra kernel".into());
     }
@@ -711,7 +713,7 @@ impl AccumulatorUpdater for UnivMonUpdater {
 #[cfg(test)]
 mod planner_parameter_regression {
     use super::*;
-    use planner_types::post_asap::{SketchKind, SummaryInputExpr, SummaryUpdate};
+    use planner_types::ir::schema::{SketchKind, SummaryInputExpr, SummaryUpdate};
 
     // Planner width is the bucket count; depth is the independent hash-row count.
     #[test]
@@ -754,7 +756,7 @@ mod planner_parameter_regression {
             );
             let update = SummaryUpdate {
                 item: Some(SummaryInputExpr::Column(
-                    planner_types::pre_asap::ColumnRef::Named("host".into()),
+                    planner_types::ir::scalar::ColumnRef::Named("host".into()),
                 )),
                 weight: SummaryInputExpr::Constant(1.0),
                 weight_domain: Default::default(),

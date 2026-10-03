@@ -1,6 +1,6 @@
 //! Window bounds are typed input data; aggregation and histogram semantics stay native.
 use super::*;
-use planner_types::pre_asap::AggIntent;
+use planner_types::ir::operator::AggIntent;
 
 pub(crate) fn matrix_schema() -> SchemaRef {
     let mut fields = vector_binary::value_schema(false).fields.clone();

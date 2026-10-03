@@ -5,13 +5,11 @@ use asap_aware_mapping::{
     },
     Realization,
 };
-use asap_types::{
-    ir::operator_properties::{Reduction, Source},
-    ir::{NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr},
-    post_asap::{ExactKind, SketchAlgorithm},
-    pre_asap::{AggIntent, DataType, Field, Schema},
-    types::AccuracyTarget,
-};
+use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::{DataType, ExactKind, Field, Schema, SketchAlgorithm};
+use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
 fn approximate() -> AccuracyTarget {
@@ -199,7 +197,7 @@ fn assigned_timing_and_invalid_accuracy_are_rejected() {
         accuracy: approximate(),
     }))
     .clone();
-    producer.timing = Some(asap_types::post_asap::ExecutionTiming::QueryTime);
+    producer.timing = Some(asap_types::ir::properties::ExecutionTiming::QueryTime);
     assert!(matches!(
         enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(producer)))]),
         Err(LogicalCandidateError::AssignedTiming)

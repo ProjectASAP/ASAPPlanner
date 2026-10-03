@@ -6,16 +6,16 @@ use asap_physical_operators::dag::{
     Error, Limits, OutputStream, RunContext, Scope,
 };
 use futures::{executor::block_on, stream, StreamExt};
+use planner_types::ir::operator::{GroupKeys, Source};
 use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::properties::*;
+use planner_types::ir::schema::*;
+use planner_types::ir::schema::{DataType, Field};
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
-use planner_types::{
-    post_asap::*,
-    pre_asap::{DataType, Field, GroupKeys, Source},
-};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -25,12 +25,13 @@ use std::{
 };
 
 fn fixture() -> (planner_types::ir::NonASAPOp, SchemaRef, Vec<Batch>) {
-    let schema = planner_types::pre_asap::Schema::new(vec![planner_types::pre_asap::Field::plain(
-        "value",
-        DataType::Int64,
-        true,
-    )]);
-    let output = Arc::new(planner_types::pre_asap::Schema {
+    let schema =
+        planner_types::ir::schema::Schema::new(vec![planner_types::ir::schema::Field::plain(
+            "value",
+            DataType::Int64,
+            true,
+        )]);
+    let output = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
@@ -320,7 +321,7 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
 // An empty table is a valid empty scan; nullable comparisons retain only TRUE.
 #[test]
 fn empty_sources_and_three_valued_predicates() {
-    use planner_types::pre_asap::{CompareOpKind, ScalarValue};
+    use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 
     let (mut scan, schema, batches) = fixture();
     if let planner_types::ir::NonASAPOp::Scan {

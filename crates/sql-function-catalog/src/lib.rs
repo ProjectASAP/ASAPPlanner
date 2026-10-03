@@ -74,7 +74,7 @@ pub enum Arity {
 /// classification [`lower_agg_intent`](../asap_frontend_sql/index.html)
 /// switches on to build the real `AggIntent`.
 ///
-/// Deliberately *not* `asap_types::pre_asap::agg_intent::AggIntent` itself:
+/// Deliberately *not* `asap_types::ir::operator::agg_intent::AggIntent` itself:
 /// most `AggIntent` variants carry call-site-only state that isn't a
 /// function of the name alone -- the ambient `AccuracyTarget` (thread-local,
 /// not catalog data), φ pulled from a call's literal 2nd argument, whether

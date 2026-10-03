@@ -3,7 +3,8 @@ use crate::{
     values::{plain, SchemaRef, Value},
     Error,
 };
-use planner_types::pre_asap::{ArithmeticOpKind, DataType};
+use planner_types::ir::scalar::ArithmeticOpKind;
+use planner_types::ir::schema::DataType;
 pub mod arithmetic;
 pub mod binary;
 mod planner;
@@ -66,7 +67,7 @@ impl Expression {
                 right,
             } => {
                 use crate::expressions::binary::BinaryOpKind;
-                use planner_types::pre_asap::CompareOpKind;
+                use planner_types::ir::scalar::CompareOpKind;
                 let (a, n) = left.dtype(input)?;
                 let (b, m) = right.dtype(input)?;
                 if a != DataType::Float64 || b != a || operator.vector_match.is_some() {

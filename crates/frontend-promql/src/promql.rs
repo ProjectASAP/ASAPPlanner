@@ -69,16 +69,15 @@ use promql_parser::parser::{
 use asap_frontend_common::{
     UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
 };
-use asap_types::ir::operator_properties::{
+use asap_types::ir::operator::agg_intent::{topk, AggIntent, TimeFunc};
+use asap_types::ir::operator::operator_properties::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
-use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
 
-use asap_types::pre_asap::{
-    ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
-};
+use asap_types::ir::operator::{InfoMatcher, SampleKind};
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 
 /// Every scalar expression this front end builds follows PromQL's numeric rules.

@@ -9,11 +9,9 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::{
-    post_asap::FieldDataType,
-    pre_asap::{DataType, Field, Schema},
-    types::AccuracyTarget,
-};
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::types::AccuracyTarget;
 use futures::StreamExt;
 use physical_common::compile_physical_asap_dag;
 use std::{collections::BTreeMap, sync::Arc};

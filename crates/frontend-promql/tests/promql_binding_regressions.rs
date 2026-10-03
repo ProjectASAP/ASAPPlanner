@@ -33,8 +33,8 @@ fn irate_and_rate_have_distinct_canonical_intents() {
 /// PromQL count counts series even when two sample values are equal.
 #[test]
 fn count_is_row_count_not_distinct_sample_value_count() {
+    use asap_types::ir::operator::AggIntent;
     use asap_types::ir::NonASAPOp;
-    use asap_types::pre_asap::AggIntent;
     let tree = lower_promql("count(smoke_gauge)", AccuracyTarget::Exact).unwrap();
     let NonASAPOp::Aggregate { measures, .. } = tree.expect_non_asap() else {
         panic!("expected aggregate")

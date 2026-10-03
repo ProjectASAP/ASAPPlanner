@@ -646,5 +646,5 @@ cargo doc -p asap-aware-mapping -p asap-types --no-deps
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
 - [Search, ranking and selection](../../crates/asap-aware-mapping/src/replacement.rs)
 - [Cost models](../../crates/asap-aware-mapping/src/cost_model.rs)
-- [Workload types](../../crates/types/src/workload.rs)
+- [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

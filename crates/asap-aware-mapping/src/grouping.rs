@@ -3,7 +3,7 @@
 //! per `by` subpopulation (today's only, implicit behavior) or as one
 //! shared Hydra-family structure serving all of them — orthogonal to
 //! *which* summary family/kind answers the intent, the same way
-//! [`asap_types::post_asap::GroupingStrategy`]'s own doc explains.
+//! [`asap_types::ir::schema::GroupingStrategy`]'s own doc explains.
 //!
 //! ## Placement: planning metadata and edge-state type
 //!
@@ -26,7 +26,7 @@
 //!   with no grouping concept at all) has nothing for a
 //!   shared-multi-subpopulation structure to multiplex across.
 //! - **The family has a Hydra variant**
-//!   ([`asap_types::post_asap::hydra_kind_for`]): `Cms` and `CountSketch`
+//!   ([`asap_types::ir::schema::hydra_kind_for`]): `Cms` and `CountSketch`
 //!   have structural Hydra mappings. `HydraKll` remains an explicit
 //!   experimental IR value, but the paper excludes quantiles and search
 //!   therefore never emits it. The shared-grid term is represented
@@ -71,14 +71,17 @@
 
 use std::rc::Rc;
 
-use asap_types::ir::operator_properties::Reduction;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
-    default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
-    FieldDataType, GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::properties::{
+    AccuracyError, BoundExpr, CompositionOperator, GuaranteeSource, ProbabilityExpr,
+    ResultGuarantee,
+};
+use asap_types::ir::schema::{
+    default_hydra_params, hydra_kind_for, FieldDataType, GroupingStrategy, HydraKind,
     SketchAlgorithm, SketchParams,
 };
-use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
@@ -303,7 +306,7 @@ impl<'a> HydraGroupingStrategy<'a> {
                  serving every subpopulation of this grouped aggregate, instead of one \
                  {sketch_kind:?} instance per distinct `by` key — legal because this \
                  aggregate has a non-empty subpopulation concept and {sketch_kind:?} has a \
-                 modeled Hydra variant (asap_types::post_asap::hydra_kind_for); whether it's \
+                 modeled Hydra variant (asap_types::ir::schema::hydra_kind_for); whether it's \
                  *worth* the shared/independent trade-off for the actual subpopulation \
                  cardinality is a CostModel's call, not this strategy's",
                 describe_intent(intent)
@@ -498,8 +501,8 @@ mod tests {
     use super::*;
     use crate::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
     use crate::test_support::{agg, agg_per_entity, metric_scan};
-    use asap_types::post_asap::ErrorMetric;
-    use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
+    use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile};
+    use asap_types::ir::properties::ErrorMetric;
     use asap_types::types::AccuracyTarget;
 
     // ── has_subpopulations ────────────────────────────────────────────────
@@ -521,7 +524,7 @@ mod tests {
 
     #[test]
     fn without_grouping_has_a_subpopulation_concept_even_when_empty() {
-        use asap_types::ir::operator_properties::GroupKeys;
+        use asap_types::ir::operator::operator_properties::GroupKeys;
         // `without([])` groups by every remaining label — a real
         // subpopulation concept, unlike `by([])`'s genuine full reduction.
         assert!(has_subpopulations(&Reduction::Reduce(GroupKeys::without(
@@ -635,7 +638,7 @@ mod tests {
             &self,
             _op: &CompositionOperator,
             _family: &FieldDataType,
-            _query: Option<&asap_types::post_asap::SketchStatistic>,
+            _query: Option<&asap_types::ir::schema::SketchStatistic>,
         ) -> PropagationStats {
             PropagationStats {
                 hydra_shared_grid_collision_bound: Some(0.0),
@@ -679,7 +682,7 @@ mod tests {
                 &self,
                 _op: &CompositionOperator,
                 _family: &FieldDataType,
-                _query: Option<&asap_types::post_asap::SketchStatistic>,
+                _query: Option<&asap_types::ir::schema::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_failure_probability: Some(1.5),
@@ -725,7 +728,7 @@ mod tests {
                 &self,
                 _op: &CompositionOperator,
                 _family: &FieldDataType,
-                _query: Option<&asap_types::post_asap::SketchStatistic>,
+                _query: Option<&asap_types::ir::schema::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_collision_bound: Some(0.1),

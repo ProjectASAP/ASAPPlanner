@@ -9,11 +9,10 @@ use std::rc::Rc;
 use asap_aware_mapping::{search_workload, DefaultCostModel};
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_types::ir::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
+use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
+use asap_types::ir::scalar::ScalarValue;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-use asap_types::pre_asap::expr_ir::ScalarValue;
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn accuracy() -> AccuracyTarget {

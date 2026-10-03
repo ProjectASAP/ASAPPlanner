@@ -7,9 +7,9 @@ use crate::{
     Error,
 };
 use futures::StreamExt;
-use planner_types::{
-    post_asap::{Field as SummaryField, FieldDataType as SummaryFamilyType, Schema, SummaryUpdate},
-    pre_asap::{ColumnRef, DataType},
+use planner_types::ir::scalar::ColumnRef;
+use planner_types::ir::schema::{
+    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema, SummaryUpdate,
 };
 use std::{collections::BTreeMap, sync::Arc};
 pub(crate) mod common;
@@ -67,11 +67,11 @@ enum Kind {
         operator: crate::expressions::binary::BinaryOperator,
     },
     RangeWindow {
-        intent: Box<planner_types::pre_asap::AggIntent<ColumnRef>>,
+        intent: Box<planner_types::ir::operator::AggIntent<ColumnRef>>,
     },
     HistogramQuantile,
     SeriesWindow {
-        function: Option<Box<planner_types::pre_asap::AggIntent<ColumnRef>>>,
+        function: Option<Box<planner_types::ir::operator::AggIntent<ColumnRef>>>,
         coordinate: usize,
         value: usize,
         range_ms: i64,
@@ -79,12 +79,12 @@ enum Kind {
         at_ms: Option<i64>,
         steps: Option<SubquerySteps>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        range_at: Option<planner_types::pre_asap::AtModifier>,
+        range_at: Option<planner_types::ir::operator::AtModifier>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        steps_range_at: Option<planner_types::pre_asap::AtModifier>,
+        steps_range_at: Option<planner_types::ir::operator::AtModifier>,
     },
     SeriesLabels {
-        kind: planner_types::pre_asap::VectorMatchKind,
+        kind: planner_types::ir::operator::VectorMatchKind,
         labels: Vec<String>,
         unique: bool,
     },
@@ -114,7 +114,7 @@ enum Kind {
         groups: Vec<usize>,
     },
     Window {
-        intent: Box<planner_types::pre_asap::AggIntent<ColumnRef>>,
+        intent: Box<planner_types::ir::operator::AggIntent<ColumnRef>>,
         coordinate: usize,
         value: usize,
         groups: Vec<usize>,
@@ -129,7 +129,7 @@ enum Kind {
         require_complete_right: bool,
     },
     Join {
-        kind: planner_types::pre_asap::JoinKind,
+        kind: planner_types::ir::operator::JoinKind,
         predicate: Box<crate::expressions::CompiledExpression>,
     },
     SummaryBuild {

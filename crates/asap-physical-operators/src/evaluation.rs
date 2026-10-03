@@ -54,7 +54,7 @@ pub fn exact_evaluation(
 #[cfg(test)]
 mod counter_tests {
     use super::*;
-    use planner_types::post_asap::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
+    use planner_types::ir::schema::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
 
     fn counter(kind: ExactKind, params: ExactParams, keyed: bool) -> ExactAccumulator {
         ExactAccumulator::new(SummaryFamilyType::ExactAggregate(kind, params), keyed).unwrap()

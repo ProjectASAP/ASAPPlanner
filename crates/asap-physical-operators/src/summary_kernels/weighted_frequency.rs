@@ -41,9 +41,9 @@ pub struct WeightedFrequency {
 }
 impl WeightedFrequency {
     pub(crate) fn configuration(
-        kind: &planner_types::post_asap::SketchKind,
+        kind: &planner_types::ir::schema::SketchKind,
     ) -> Result<(FrequencyAlgorithm, usize, usize, usize), Error> {
-        use planner_types::post_asap::{SketchAlgorithm as A, SketchParams as P};
+        use planner_types::ir::schema::{SketchAlgorithm as A, SketchParams as P};
         let (algorithm, width, depth, capacity) = match (kind.algorithm(), kind.params()) {
             (
                 A::CmsWithHeap,

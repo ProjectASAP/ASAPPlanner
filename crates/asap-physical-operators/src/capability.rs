@@ -9,7 +9,7 @@
 //! Stored-state encodings belong to deployments. Full plan acceptance is
 //! owned by `binding`, which also validates schemas, expressions and inputs.
 use crate::Error;
-use planner_types::post_asap::{
+use planner_types::ir::schema::{
     ExactKind, ExactParams, FieldDataType as SummaryFamilyType, GroupingStrategy, SketchAlgorithm,
     SketchParams, SketchStatistic, SummaryUpdate,
 };
@@ -122,12 +122,12 @@ fn valid_matrix(width: u32, depth: u32) -> bool {
             .is_some()
 }
 
-pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::SummaryUpdate) -> bool {
-    use planner_types::post_asap::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
+pub(crate) fn is_unit_sample_frequency(update: &planner_types::ir::schema::SummaryUpdate) -> bool {
+    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
     matches!(
         update.item,
         Some(SummaryInputExpr::Column(
-            planner_types::pre_asap::ColumnRef::SampleValue
+            planner_types::ir::scalar::ColumnRef::SampleValue
         ))
     ) && matches!(update.weight, SummaryInputExpr::Constant(1.0))
         && matches!(
@@ -139,7 +139,7 @@ pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::Summar
 }
 
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
-    use planner_types::post_asap::SketchAlgorithm as A;
+    use planner_types::ir::schema::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
         // its bare count, but the DAG does not build it from rows.
@@ -176,8 +176,8 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     }
     crate::capability::validate_summary_kernel(
         family,
-        &planner_types::post_asap::SummaryUpdate::column(
-            planner_types::pre_asap::ColumnRef::SampleValue,
+        &planner_types::ir::schema::SummaryUpdate::column(
+            planner_types::ir::scalar::ColumnRef::SampleValue,
         ),
         &Default::default(),
     )
@@ -190,7 +190,7 @@ pub fn validate_sketch_evaluation(
     query: &SketchStatistic,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
-    use planner_types::post_asap::SketchAlgorithm as A;
+    use planner_types::ir::schema::SketchAlgorithm as A;
     // A point count without an item value reads the total count.
     let bare_count = matches!(query, SketchStatistic::PointCount { value: None, .. });
     let supported = match family {
@@ -229,7 +229,7 @@ pub fn validate_exact_evaluation(
 ) -> Result<(), Error> {
     validate_native_family(family)?;
     use crate::Statistic as S;
-    use planner_types::post_asap::ExactKind as E;
+    use planner_types::ir::schema::ExactKind as E;
     let supported = matches!(
         (family, evaluation.statistic),
         (SummaryFamilyType::ExactAggregate(E::Sum, _), S::Sum)

@@ -2,10 +2,10 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
-use asap_types::post_asap::SketchAlgorithm;
-use asap_types::pre_asap::AggIntent;
-use asap_types::resources::CacheProfile;
+use asap_types::workload::resources::CacheProfile;
 
 use crate::analytical_cost::{
     estimate_physical_dag_comparison, AnalyticalCostError,
@@ -359,8 +359,9 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
+    use asap_types::ir::operator::{Reduction, Source};
+    use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::{NonASAPOp, OperatorNode};
-    use asap_types::pre_asap::{DataType, Field, Reduction, Schema, Source};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,

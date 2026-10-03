@@ -18,7 +18,7 @@
 // bytes)` catalog — the same table used in cross_language.rs and topk_ir.rs.
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
 

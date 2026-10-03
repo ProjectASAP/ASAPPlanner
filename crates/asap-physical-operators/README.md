@@ -27,7 +27,7 @@ use asap_physical_operators::{
     plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
 };
-use asap_physical_operators::planner::pre_asap::DataType;
+use asap_physical_operators::planner::ir::schema::DataType;
 use futures::{executor::block_on, StreamExt};
 
 let source = Operator::scalar(Value::Int64(7), DataType::Int64)?;

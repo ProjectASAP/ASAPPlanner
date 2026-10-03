@@ -7,8 +7,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use asap_types::post_asap::{SketchAlgorithm, SketchParams};
-pub use asap_types::resources::{CacheCapacityEvidence, CacheEvidence, CacheProfile, ModeledCpu};
+use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
+pub use asap_types::workload::resources::{
+    CacheCapacityEvidence, CacheEvidence, CacheProfile, ModeledCpu,
+};
 use asap_types::workload::DataArrival;
 use serde::{Deserialize, Serialize};
 
@@ -185,7 +187,7 @@ impl ResourceCalibration {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(from = "ResourceEstimateWire", into = "ResourceEstimateWire")]
 pub struct ResourceEstimate {
-    resources: asap_types::resources::PhysicalResources<ModeledCpu, u64>,
+    resources: asap_types::workload::resources::PhysicalResources<ModeledCpu, u64>,
 }
 
 // Keep the established three-field JSON format. Required fields make a missing
@@ -216,7 +218,7 @@ impl From<ResourceEstimate> for ResourceEstimateWire {
 impl ResourceEstimate {
     pub const fn new(cpu_ops: f64, peak_memory_bytes: u64, scan_bytes: u64) -> Self {
         Self {
-            resources: asap_types::resources::PhysicalResources {
+            resources: asap_types::workload::resources::PhysicalResources {
                 cpu: ModeledCpu { cpu_ops },
                 peak_memory_bytes: Some(peak_memory_bytes),
                 retained_memory_bytes: None,
@@ -243,7 +245,9 @@ impl ResourceEstimate {
             .expect("analytical scan bytes are required by construction")
     }
 
-    pub fn resources(&self) -> &asap_types::resources::PhysicalResources<ModeledCpu, u64> {
+    pub fn resources(
+        &self,
+    ) -> &asap_types::workload::resources::PhysicalResources<ModeledCpu, u64> {
         &self.resources
     }
 }
@@ -2244,7 +2248,7 @@ mod tests {
         assert_eq!(estimate.cpu_ops(), 12.5);
         assert_eq!(estimate.peak_memory_bytes(), u64::MAX);
         assert_eq!(estimate.scan_bytes(), 0);
-        let shared: &asap_types::resources::PhysicalResources<ModeledCpu, u64> =
+        let shared: &asap_types::workload::resources::PhysicalResources<ModeledCpu, u64> =
             estimate.resources();
         assert_eq!(shared.cpu.cpu_ops, 12.5);
         assert_eq!(shared.peak_memory_bytes, Some(u64::MAX));
@@ -2968,7 +2972,7 @@ mod tests {
     }
 
     fn comparison_scope() -> ComparisonScope {
-        use asap_types::ir::operator_properties::Source;
+        use asap_types::ir::operator::operator_properties::Source;
         use asap_types::workload::{
             DurationMs, QueryRecurrence, QueryTimeScope, RepeatedDemand, RepetitionInterval,
             TimeSelection, TimestampMs,
@@ -3243,7 +3247,7 @@ mod tests {
             operator: PhysicalOperator::Scan,
             children: vec![],
             scan_selection: Some(ScanSelection {
-                source: asap_types::ir::operator_properties::Source::Table {
+                source: asap_types::ir::operator::operator_properties::Source::Table {
                     table_ref: "other_metrics".into(),
                 },
                 source_snapshot_id: "catalog-version-42".into(),
@@ -3308,7 +3312,7 @@ mod tests {
         let mut scope = comparison_scope();
         let coverage = scope.sources[0].clone();
         scope.sources.push(ScanSelection {
-            source: asap_types::ir::operator_properties::Source::Table {
+            source: asap_types::ir::operator::operator_properties::Source::Table {
                 table_ref: "auxiliary".into(),
             },
             source_snapshot_id: "catalog-version-42".into(),
@@ -3672,10 +3676,10 @@ mod tests {
     // Legacy mapping imports are aliases of the shared schema, not a second type.
     #[test]
     fn shared_cache_types_work_through_legacy_mapping_imports() {
-        let central: asap_types::resources::CacheProfile = cache_profile(100, 50);
+        let central: asap_types::workload::resources::CacheProfile = cache_profile(100, 50);
         let legacy: CacheProfile =
             serde_json::from_value(serde_json::to_value(&central).unwrap()).unwrap();
-        fn accepts_shared(_: &asap_types::resources::CacheProfile) {}
+        fn accepts_shared(_: &asap_types::workload::resources::CacheProfile) {}
         accepts_shared(&legacy);
         assert_eq!(central, legacy);
         assert_eq!(

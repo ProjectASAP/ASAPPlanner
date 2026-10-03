@@ -3,8 +3,8 @@ use std::rc::Rc;
 use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, HistogramCatalog, PromqlError,
 };
+use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
-use asap_types::pre_asap::ScalarValue;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,

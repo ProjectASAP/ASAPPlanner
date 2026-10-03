@@ -231,8 +231,8 @@ mod tests {
     #[test]
     fn generic_rse_sizing_does_not_certify_confidence() {
         use crate::replacement::default_size_params;
-        use asap_types::post_asap::{GroupingStrategy, SketchKind};
-        use asap_types::pre_asap::agg_intent::default_cardinality;
+        use asap_types::ir::operator::agg_intent::default_cardinality;
+        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = default_cardinality();
         let params = default_size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
         let g = DefaultAccuracyModel

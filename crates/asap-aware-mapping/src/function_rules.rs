@@ -1,7 +1,8 @@
 //! Function facts shared by value-operation propagation and accumulator realization.
 //! Runtime support remains a deployment decision in `CostModel`.
-use asap_types::post_asap::{CompositionOperator, ExactKind, ExactParams};
-use asap_types::pre_asap::AggIntent;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::properties::CompositionOperator;
+use asap_types::ir::schema::{ExactKind, ExactParams};
 
 pub(crate) struct FunctionRules {
     pub accuracy: CompositionOperator,
