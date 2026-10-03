@@ -30,9 +30,9 @@ fn state(k: u32) -> Rc<OperatorNode> {
     std::rc::Rc::new(
         summary
             .with_coverage(asap_types::ir::summary_coverage::SummaryCoverage {
-                source: "latencies:timestamp".into(),
-                input: SummaryUpdate::column(ColumnRef::SampleValue),
-                reduction: Reduction::by(vec![]),
+                source: Source::Table {
+                    table_ref: "latencies".into(),
+                },
                 regions: vec![asap_types::ir::summary_coverage::CoverageRegion {
                     time_ms: Some(0..1),
                     population: Default::default(),

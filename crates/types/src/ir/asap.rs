@@ -492,6 +492,14 @@ impl ASAPOp {
                         ));
                     }
                 }
+                // Coverage records only time and population; what each state
+                // summarizes and how it is grouped come from the producers.
+                let update = first.summary_update();
+                if update.is_none() || children.iter().any(|c| c.summary_update() != update) {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "summary merge inputs must share update expression and reduction".into(),
+                    ));
+                }
                 self.merged_coverage()?;
                 Ok(())
             }
