@@ -2,7 +2,7 @@
 
 > Status: implemented model with explicit support limits. The
 > [analytical estimator](../../../../crates/asap-aware-mapping/src/analytical_cost.rs)
-> and physical/streaming adapters implement supported evidenced comparisons.
+> and physical-plan adapter implement supported evidenced comparisons.
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
 > proposed extensions are not implied by the implemented formulas.
 
@@ -17,23 +17,19 @@ plans. These are separate concerns:
   evidence to estimate CPU work, peak memory, and source/disk I/O.
 
 The physical-resource estimator itself is independent of the arrival mode.
-Two planner adapters currently lower work into it. `PhysicalPlanCostModel`
-compares complete at-rest plans. `SummaryMaintenanceCostModel` resolves
-`DataArrival::ContinuouslyIngesting` over a finite horizon, including
-bootstrap, arriving updates, retained state, and query readout. Evidence from
-one arrival mode must not be reused for the other. `Mixed` and `Unknown`
-remain unavailable until their distinct data regions are modeled.
+One planner adapter currently lowers work into it: `PhysicalPlanCostModel`
+compares complete at-rest plans. Continuously-ingesting, `Mixed` and `Unknown`
+comparisons are unavailable; costing summary maintenance over arriving data
+belongs to Stage 2 materialization (#509). Evidence from one arrival mode must
+not be reused for another.
 
-Both entry points replace dimensionless plan-node counts with estimates
+The adapter replaces dimensionless plan-node counts with estimates
 derived from operator complexity, cardinality, row width, and concrete summary
 parameters. The estimates are predictions; they are not measurements reported
 by a physical executor.
 
 The model does not decide semantic legality. Ordinary summary guarantees are
-composed before costing. A window framework that itself introduces error must,
-however, carry a typed composed guarantee in the same complete evidence bundle;
-the streaming adapter checks that guarantee against every bound workload
-accuracy target before the candidate can be ranked. Missing evidence produces
+composed before costing. Missing evidence produces
 an unavailable estimate, never an assumed zero or a structural-cost fallback.
 
 The implementation keeps five layers distinct:
@@ -64,21 +60,12 @@ physical_operator_statistics.rs ──────┤ physical evidence contract
                                       ▼
 analytical_cost.rs ─────────── operator formulas and CPU/memory/I/O composition
         │
-        ├──────────────► physical_plan_cost_model.rs
-        │                 at-rest raw/rewrite/summary comparison adapter
-        │
-        └──────────────► summary_maintenance_cost/
-                          evidence.rs   authoritative summary evidence
-                          estimator.rs  complete maintenance-DAG resources
-                          window.rs     window assignment and accuracy
-                          model.rs      lifecycle/alternative ranking adapter
+        └──────────────► physical_plan_cost_model.rs
+                          at-rest raw/rewrite/summary comparison adapter
 ```
 
-Raw query plans and incrementally maintained summary plans share
-`EvidenceBackedPhysicalDAG`; there is no streaming-only duplicate of the
-physical DAG or operator-statistics contract. Summary-maintenance modules add
-only the evidence and scheduling semantics that do not exist for an ordinary
-query plan.
+Raw query plans and summary plans share `EvidenceBackedPhysicalDAG`; there is
+no separate physical DAG or operator-statistics contract for summaries.
 
 An estimate has physical dimensions:
 
@@ -236,14 +223,14 @@ normalized workload, lowered query IR, and freshness-aware statistics:
 `DataWorkload` does define whether input is streaming: its `arrival` field is
 `AtRest`, `ContinuouslyIngesting`, `Mixed`, or `Unknown`, and a continuous
 arrival rate comes from fresh `ingestion_rate` evidence. These facts describe
-how source data arrives. They do not choose a lifecycle or a window framework:
+how source data arrives. They do not choose materialization or a window framework:
 `Incremental` describes how a selected summary state is updated, while
 tumbling, sliding, and exponential histogram describe how that state is
 organized over time.
 
 Evidence is read through `Evidence<T>::value_at(planning_time)`. Stale,
 future, or improperly time-bounded evidence remains unknown. Costing follows
-the same freshness rule as accuracy and lifecycle planning.
+the same freshness rule as accuracy checking.
 
 The current workload schema does not yet contain every physical statistic.
 The missing facts have explicit ownership:
@@ -306,7 +293,7 @@ physical operators and matching statistics variants. Until then, a candidate
 containing such an unlowered operation is unavailable rather than partially
 costed.
 
-## Workload horizon and lifecycle
+## Workload horizon
 
 Every alternative must cover the same source data and query horizon. The
 `DataArrival::AtRest` physical-DAG comparison is build-once, read-many:
@@ -327,9 +314,7 @@ incremental updates are a one-time snapshot build.
 
 The at-rest summary alternative scans the selected source snapshot once and
 retains state. Its raw alternative recomputes from that snapshot for every
-query read. The continuously-ingesting entry point separately charges
-bootstrap, updates, summary operations, retained state, and raw evaluations;
-its lifecycle rules are defined below.
+query read.
 
 ### Comparable source and workload scope
 
@@ -733,157 +718,14 @@ input.
 
 ## Summary operator formulas
 
-### Incremental single-summary foundation
-
-For `DataArrival::ContinuouslyIngesting`, the incremental estimator accepts
-one selected lifecycle and one unique logical `SummaryAgg`. This deliberately
-narrow contract prevents one flat evidence record from being reused across
-several summary nodes with different input cardinalities, algorithms, or state
-sizes. Complete multi-node streaming alternatives require per-node physical
-evidence.
-
-The canonical workload supplies fresh bootstrap cardinality, ingestion rate,
-query recurrence, planning time, and a finite horizon. Physical evidence adds
-logical/bootstrap bytes, physical bootstrap scan bytes, active and retained
-window counts, the number of concrete summary-state instances per window, and
-bytes per state instance. Names use `summary`, not `sketch`, because an exact
-aggregate or another non-sketch state is equally valid.
-
-For bootstrap rows `B`, arrivals `U`, simultaneously updated windows `A`,
-query evaluations `Q`, physical summary instances `P`, and state bytes `S`:
-
-```text
-insert invocations = (B + U) × A
-retained memory     = (A + retained_windows) × P × S
-```
-
-Each input row is routed to its matching summary instance; it is not inserted
-into every group. Merge, subtract, and readout work may operate over all `P`
-instances. Delete work follows the same routed window updates rather than
-multiplying every update by every possible group.
-
-An empty bootstrap is valid and has zero logical bytes and zero source reads.
-A non-empty bootstrap requires positive logical and physical source bytes.
-Active window count, summary-instance count, state width, horizon, and query
-evaluation count must be positive; retained-window count may be zero for a new
-stream. Required per-operation CPU evidence must be finite and positive.
-
-Lifecycle retention and the planning horizon are different quantities. A
-short retained window may be maintained throughout a much longer planning
-horizon, so the estimator does not require `retention >= horizon`. Lifecycle
-legality and query time-coverage checks establish whether the retained window
-can answer the query.
-
-### Comparing single-summary lifecycle alternatives
-
-For one logical `SummaryAgg`, the analytical lifecycle adapter converts the
-same physical evidence into the existing lifecycle planner's five cost terms:
-
-| Lifecycle term | Resource basis |
-|---|---|
-| Initial build | Bootstrap rows routed to every bootstrap-active window, plus the bootstrap source read. |
-| Maintenance per update | One arriving row routed to every currently active window. |
-| Summary read | Readout of every physical summary instance needed by one query evaluation. |
-| Retention rate | All active and retained state bytes calibrated over the finite comparison horizon. |
-| Retirement | Zero only for releasing modeled memory; an actual delete, expiration, or rebuild requires explicit operation evidence. |
-
-The existing lifecycle model—not this adapter—enumerates `Ephemeral`,
-`Prepared`, `Shared`, and `ContinuouslyMaintained`, checks workload and runtime
-legality, and multiplies per-update and per-read terms by the normalized
-workload rates. Missing any required term leaves that alternative unavailable.
-
-`Ephemeral` is a direct build, not incremental maintenance. For every query
-evaluation, it rebuilds from the snapshot visible at that evaluation, charges
-that evaluation's complete source read, and releases its state afterward.
-Its state contributes to peak transient memory but not persistent retention.
-
-The raw side is supplied as a complete `ResourceEstimate` for one execution of
-the raw physical DAG. The lifecycle planner applies the same recurrence and
-horizon. This deliberately avoids reconstructing raw work with a special-case
-`input_rows × cpu_per_row` formula that would omit joins, windows, sorts, or
-other operators.
-
-Flat single-summary evidence is bound to the exact `SummaryNode` and raw
-`QueryExpr` identities for which it was produced. It cannot be reused for a
-structurally similar node or for multiple summary states. A complete
-multi-summary `SummaryExpr` DAG requires per-node physical evidence and
-physical-identity deduplication.
-
-### Complete bound streaming summary DAGs
-
-The multi-node streaming path accepts a complete, already-bound
-`SummaryExpr` DAG. It does not guess physical implementations. The provider must
-provide evidence for every reachable node:
-
-| Logical node | Required physical evidence |
-|---|---|
-| `KeepPreAsap` | One retained preprocessing operator with output edge, horizon CPU, workspace, and output buffer. |
-| `SummaryAgg` | Input/output edges, insert CPU, concrete state count and width, bootstrap/update window fanout, and explicit source-read ownership. |
-| `SummaryMerge` | Typed merge evidence with total CPU, workspace, output buffer, I/O, and execution multiplicity. |
-| `SummarySubtract` | Typed subtract evidence with the same resource dimensions. |
-| `SummaryDelete` | Typed delete evidence plus expiration/retraction rate, routing fanout, and the exact state owner. |
-| `SummaryEstimate` | Typed readout evidence with total resource use per execution. |
-| `SummaryJoin` | Ordered input/output edges and total physical join CPU, workspace, output buffer, I/O, and multiplicity. |
-
-The merge/subtract/delete/readout evidence is an enum structured by operation
-kind. Delete-only rate and routing fields therefore cannot be attached to a
-merge or readout. Join CPU is the total build, probe, match-production, and
-output work of the selected algorithm; matched output pairs alone are not a
-valid join cost.
-
-Every parent input edge must equal the corresponding child output edge.
-Provider-owned `physical_id` values deduplicate a shared operator only when
-its complete evidence and physical child identities also agree. The cost model
-holds owning `Rc` references for bound target and summary roots, so pointer
-keys cannot become stale and alias a later allocation.
-
-A `SummaryAgg` that reads storage declares `scan_selection_index = Some(i)`,
-a non-empty bootstrap-read identity, and positive physical source bytes. An
-aggregate over an already-materialized summary edge declares `None`, an empty
-read identity, and zero source bytes. Its logical input rows and bytes remain
-positive when the intermediate is non-empty. This prevents nested aggregates
-from charging the original source scan repeatedly.
-
-For streaming raw recomputation, `planning_time_input_rows`,
-`planning_time_input_bytes`, and `planning_time_source_scan_bytes` describe the
-initial snapshot. Logical bytes per arriving row and physical source bytes per
-arriving row are separate. The recurrence determines every evaluation offset;
-the provider supplies one once-counted physical DAG whose statistics aggregate
-those evolving evaluations over the complete horizon. Marking its nodes
-`PerEvaluation` would multiply the already-aggregated evidence again and is
-rejected. Validation follows only nodes reachable from the physical root. If
-the raw algorithm intentionally reads the same semantic source more than once,
-each reachable scan carries the same evolved source statistics and is charged
-separately; equal scan selection does not deduplicate physical I/O.
-
-This raw-evolution contract currently supports exactly one distinct source
-coverage. A multi-source streaming target is unavailable until per-source
-arrival rates and widths are supplied. Target lineage includes ordinary
-predicates and PromQL info selectors; extra, missing, or mismatched source
-coverage makes both sides incomparable.
-
-Lifecycle enumeration considers only alternatives legal for the canonical
-workload and runtime. A `Prepared` state must cover every scheduled evaluation
-it serves. `Shared.retention` describes data/window coverage, not the planning
-horizon, so a shorter retention value is not rejected merely because the
-optimizer horizon is longer. Missing node evidence, zero required CPU,
-unknown I/O, inconsistent edges, or an unsupported lifecycle combination
-makes the complete candidate unavailable; partial per-state costs are never
-used as a fallback.
+Costing incremental maintenance of continuously-ingested summaries was removed
+with the summary maintenance lifecycle; Stage 2 materialization (#509) will
+define it. The formulas below give per-operation work and state size.
 
 ### Ranking complete physical implementations
 
 A logical summary candidate can be bound to more than one complete physical
-implementation. Each alternative has a non-empty, provider-owned identity and
-a complete `StreamingNodeEvidence` bundle. The planner evaluates every legal
-lifecycle combination against every bound physical implementation over the
-same `ComparisonScope`, excludes alternatives whose evidence is incomplete or
-invalid, and returns both the least calibrated cost and its physical-plan
-identity. Duplicate identities are rejected because they would make the
-selection result ambiguous. If no explicit alternatives are registered, the
-candidate's single canonical evidence bundle is used.
-
-Physical evidence is alternative-specific: window fanout, retained state,
+implementation. Physical evidence is alternative-specific: window fanout, retained state,
 operation costs, and source reads must describe that implementation as a
 whole. The planner does not mix individual nodes from different alternatives.
 
@@ -903,7 +745,7 @@ cpu_ops = bootstrap_rows × bootstrap_window_count × insert_ops(params)
 scan_bytes = source_read_bytes for the build
 ```
 
-Merge, subtract, and delete add their own invocation counts described above;
+Merge, subtract, and delete add their own invocation counts;
 they are never folded into the simple formula implicitly.
 
 Concrete accuracy-sized parameters determine state and work:
@@ -927,7 +769,7 @@ from logical group count alone.
 Summary merge, subtract, delete, and readout are separate physical operators.
 Their CPU and memory use the concrete summary state size and number of input
 states. A plan using one of these operations is unavailable until the
-corresponding formula and required lifecycle evidence are present.
+corresponding formula and required evidence are present.
 
 Summary construction uses physical-input realization rules before it emits a
 `SummaryAgg`. The default rule consumes the logical aggregate's immediate
@@ -988,9 +830,7 @@ mismatches and arithmetic overflow also fail closed.
 ### Downstream physical-planning boundary
 
 This cost model consumes resource evidence for a physical implementation, but
-ASAPPlanner does not own or select that implementation. It does select the
-abstract per-summary `SummaryWindowFramework` assignment by comparing complete
-`StreamingWindowFrameworkCandidate` evidence bundles. Component ownership,
+ASAPPlanner does not own or select that implementation. Component ownership,
 including the distinction between a window primitive and its concrete runtime
 implementation, is defined in
 [ASAPPlanner planner-runtime contract](../../architecture/planner-runtime-contract.md).
@@ -1064,7 +904,7 @@ candidate.
 The intended end-to-end selection pipeline is:
 
 1. enumerates semantically valid alternatives;
-2. checks end-to-end accuracy and lifecycle legality;
+2. checks end-to-end accuracy;
 3. derives fresh workload and operator statistics;
 4. sizes physical summary parameters;
 5. estimates the complete candidate DAG;
@@ -1075,31 +915,8 @@ listed above. `PhysicalPlanCostModel` executes this pipeline for every
 candidate supplied to `CandidateLogicalASAPDAGs::global_selection`. Logical rewrites are
 lowered recursively. Summary candidates participate only after the deployment
 has bound their complete `SummaryExpr` DAG; there is no optimistic generic
-summary fallback. The streaming adapter connects raw recomputation and
-primitive summary lifecycle costs to the existing global lifecycle-selection
-hooks.
-The lifecycle planner enumerates compatible lifecycle combinations for the
-unique `SummaryAgg` deployments and invokes
-`complete_summary_candidate_estimate`
-for each combination before selecting the minimum. The hook receives explicit
-node-to-guarantee bindings plus the horizon and expected reads. Each logical
-occurrence is looked up by exact `Rc` identity, while every
-evidence record also carries a provider-owned physical identity. Equal physical
-identities deduplicate work and retained state only when their logical summary,
-selected window framework, operator facts, edge statistics, lifecycle
-guarantee, and physical child identities agree;
-conflicts make the candidate unavailable. Thus heterogeneous states are costed
-independently and genuinely shared deployments once. Merge, subtract, delete,
-readout, and join participate in automatic
-candidate ranking. Exhaustive whole-root scoring is capped at 4,096 lifecycle
-combinations because an arbitrary whole-candidate hook cannot be soundly
-pruned by primitive costs; a larger space is unavailable rather than consuming
-exponential planner time. If the root needs unavailable operation evidence, the
-hook returns unavailable. Global selection then excludes that summary and
-materialization retains the raw expression. A missing raw estimate also forces
-raw fallback, because no public selection/materialization path may publish an
-uncompared summary. The planner never falls back to the partial `SummaryAgg`
-sum.
+summary fallback. Choosing between a maintained summary and raw recomputation
+belongs to Stage 2 materialization (#509).
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same

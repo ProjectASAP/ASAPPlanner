@@ -24,8 +24,8 @@ The earlier #445 renames (`TargetSubDAGCandidates`,
 counterpart) are prerequisites, not additional changes here.
 
 The workflow remains one selection call per workload followed by one assembly
-call per query root. `SummaryMaintenanceLifecyclePlan` contains the assembled
-Post-ASAP DAG root plus maintenance decisions; it is not an executable plan.
+call per query root. The summary-maintenance lifecycle API named above was later
+removed; Stage 2 materialization (#509) will own maintenance decisions.
 
 ## Later: unified operator IR (operator flattening)
 
@@ -41,7 +41,7 @@ or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
 | `SummaryExpr::ValueOperation { .. }` over a evaluation | An ordinary `NonASAPOp` (`Project`, `Filter`, `Sort`, `Limit`, `Aggregate`) reading an ASAP node; `FinalizeExactAccumulator`, `MaintainPopulation`, `EvaluatePopulation` are `ASAPOp` variants |
 | `Replacement::Summary(..)` / `Replacement::Rewrite(..)` | `Replacement::SubDAG(Rc<OperatorNode>)`; `is_logical_rewrite` tells them apart |
 | `SummaryFamilyType` | `FieldDataType` (its non-`Plain` variants) |
-| Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_lifecycle_timings` writes it from a `LifecycleAssignment` |
+| Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_materialization_timings` writes it from a `MaterializationAssignment` (default: all query time) |
 | `UnresolvedQueryExpr` + `asap_types::pre_asap::resolve_root` | `UnresolvedOp` / `UnresolvedScalar` + `asap_frontend_common::resolve_root` |
 | `pre_asap::canonicalize`, `pre_asap::cse::share_common_sub_dags` | `ir::canonicalize::canonicalize`, `ir::cse::share_common_sub_dags` |
 | `asap_types::post_asap::compile_post_asap_dag` (wire version 5, `Fallback`/`Binary`/`Value` payloads) | `asap_types::ir::export::compile_post_asap_dag` (wire version 7: one node per operator, `Relational` payloads, `ScalarRef` edges); input must be timed |
