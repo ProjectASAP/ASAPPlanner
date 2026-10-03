@@ -23,7 +23,7 @@ use asap_types::{
     ir::operator_properties::Reduction,
     ir::{ASAPOp, OperatorResultKind, ProjectItem, ScalarExpr},
     post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
-    pre_asap::{ColumnRef, DataType, Field, FieldDataType, ScalarValue},
+    pre_asap::{ColumnRef, DataType, Field, FieldDataType, ScalarValue, Source},
 };
 use std::rc::Rc;
 
@@ -100,9 +100,9 @@ fn merged_summary_preserves_typed_state() {
         children: (0..2)
             .map(|start| {
                 let coverage = asap_types::ir::summary_coverage::SummaryCoverage {
-                    source: "values:timestamp".into(),
-                    input: SummaryUpdate::column(ColumnRef::Named("value".into())),
-                    reduction: Reduction::by(vec![]),
+                    source: Source::Table {
+                        table_ref: "values".into(),
+                    },
                     regions: vec![asap_types::ir::summary_coverage::CoverageRegion {
                         time_ms: Some(start..start + 1),
                         population: Default::default(),
