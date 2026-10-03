@@ -13,15 +13,13 @@ fn scan() -> Rc<OperatorNode> {
     }))
     .unwrap()
 }
-/// Tabular coverage for a whole-table summary of column `x`.
+/// Tabular coverage for a whole-table summary.
 fn whole_table() -> asap_types::ir::summary_coverage::SummaryCoverage {
     use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
     SummaryCoverage {
-        source: "t".into(),
-        input: asap_types::post_asap::SummaryUpdate::column(
-            asap_types::pre_asap::ColumnRef::Named("x".into()),
-        ),
-        reduction: asap_types::pre_asap::Reduction::by(vec![]),
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
         regions: vec![CoverageRegion {
             time_ms: None,
             population: Default::default(),
