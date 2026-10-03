@@ -10,13 +10,13 @@ use asap_aware_mapping::pass::{PlanOutput, PlanningModels};
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_aware_mapping::{
     CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceLifecycleCostInputs,
+    SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection,
 };
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
-    SketchStatistic,
+    SketchStatistic, SummaryMaintenanceLifecycle,
 };
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::agg_intent::default_quantile;
@@ -37,6 +37,7 @@ const HORIZON_S: f64 = 3_600.0;
 struct FixedCosts {
     build: f64,
     raw_per_read: f64,
+    latency_estimates: bool,
 }
 
 impl CostModel for FixedCosts {
@@ -72,6 +73,17 @@ impl CostModel for FixedCosts {
         }
     }
 
+    fn summary_read_latency_ms(
+        &self,
+        _summary: &OperatorNode,
+        lifecycle: &SummaryMaintenanceLifecycle,
+    ) -> Option<f64> {
+        self.latency_estimates.then_some(match lifecycle {
+            SummaryMaintenanceLifecycle::Ephemeral => 250.0,
+            _ => 50.0,
+        })
+    }
+
     fn raw_query_recompute_cost(&self, _target: &OperatorNode) -> Option<Cost> {
         Some(Cost(self.raw_per_read))
     }
@@ -82,6 +94,7 @@ impl CostModel for FixedCosts {
 const CHEAP_SUMMARY: FixedCosts = FixedCosts {
     build: 1.0,
     raw_per_read: 1_000.0,
+    latency_estimates: false,
 };
 
 fn requirements(epsilon: f64) -> QueryRequirements {
@@ -145,6 +158,74 @@ async fn plan_promql(queries: &[(&str, f64)], costs: &FixedCosts) -> PlanOutput 
         lifecycle(),
     );
     e2e_plan(input).await.expect("workload plans")
+}
+
+#[tokio::test]
+async fn latency_bound_rejects_slow_ephemeral_summary_and_keeps_fast_maintained_one() {
+    let mut workload = promql_workload(&[("quantile_over_time(0.99, lat[5m])", 0.01)]);
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0]
+        .requirements
+        .response_latency = LatencyRequirement::ExplicitMaxMs(100.0);
+    let costs = FixedCosts {
+        build: 1.0,
+        raw_per_read: 1_000.0,
+        latency_estimates: true,
+    };
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Promql {
+            now_ms: NOW_MS,
+            histograms: None,
+        },
+        PlanningModels::builtin().with_cost(&costs),
+        lifecycle(),
+    ))
+    .await
+    .expect("maintained summary satisfies the response bound");
+
+    let deployment = &output.plans[0].plan.deployments[0];
+    assert!(deployment.alternatives.iter().any(|alternative| {
+        matches!(
+            alternative.summary_maintenance_lifecycle,
+            SummaryMaintenanceLifecycle::Ephemeral
+        ) && alternative.rejection
+            == Some(SummaryMaintenanceLifecycleRejection::ExceedsLatencyBound)
+    }));
+    assert!(deployment.alternatives.iter().any(|alternative| {
+        matches!(
+            alternative.summary_maintenance_lifecycle,
+            SummaryMaintenanceLifecycle::ContinuouslyMaintained
+        ) && alternative.rejection.is_none()
+    }));
+}
+
+#[tokio::test]
+async fn missing_latency_estimate_keeps_candidate_and_records_unchecked_reason() {
+    let mut workload = promql_workload(&[("quantile_over_time(0.99, lat[5m])", 0.01)]);
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0]
+        .requirements
+        .response_latency = LatencyRequirement::ExplicitMaxMs(100.0);
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Promql {
+            now_ms: NOW_MS,
+            histograms: None,
+        },
+        PlanningModels::builtin().with_cost(&CHEAP_SUMMARY),
+        lifecycle(),
+    ))
+    .await
+    .expect("an unchecked bound keeps legal candidates");
+
+    assert!(output.plans[0].plan.deployments.iter().any(|deployment| {
+        deployment.alternatives.iter().any(|alternative| {
+            alternative.rejection.is_none()
+                && alternative
+                    .assumptions
+                    .iter()
+                    .any(|assumption| assumption.contains("latency bound 100 ms unchecked"))
+        })
+    }));
 }
 
 async fn plan_sql(queries: &[&str], costs: &FixedCosts) -> PlanOutput {
@@ -430,6 +511,7 @@ async fn shared_amortization_alone_can_beat_raw_recompute() {
     let costs = FixedCosts {
         build: 100.0,
         raw_per_read: 10.0,
+        latency_estimates: false,
     };
     let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
     let p99 = ("quantile_over_time(0.99, lat[5m])", 0.01);
