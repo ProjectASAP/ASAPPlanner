@@ -65,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn heap_readout_retains_frequency_metric() {
+    fn heap_evaluation_retains_frequency_metric() {
         use asap_types::post_asap::{GroupingStrategy, SketchKind};
         let cms_heap = SketchParams::CmsWithHeap {
             width: 272,

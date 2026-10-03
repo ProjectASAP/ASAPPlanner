@@ -2,22 +2,22 @@
 //!
 //! `validate_summary_kernel` checks update kernels, including families without a
 //! native batch representation. `validate_native_family` and
-//! `validate_sketch_readout` / `validate_exact_readout` check native state and readout support.
-//! Keyed weighted-frequency readouts are checked by `Operator::keyed_readout`.
+//! `validate_sketch_evaluation` / `validate_exact_evaluation` check native state and evaluation support.
+//! Keyed weighted-frequency evaluations are checked by `Operator::keyed_evaluation`.
 //! A successful kernel check alone does not mean a physical DAG will bind.
 //!
 //! Stored-state encodings belong to deployments. Full plan acceptance is
 //! owned by `binding`, which also validates schemas, expressions and inputs.
 use crate::Error;
 use planner_types::post_asap::{
-    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams,
-    SketchStatistic, SummaryUpdate,
+    ExactKind, ExactParams, FieldDataType as SummaryFamilyType, GroupingStrategy, SketchAlgorithm,
+    SketchParams, SketchStatistic, SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
 /// is accepted. Execution timing is deliberately not a kernel property.
 pub fn validate_summary_kernel(
-    family: &FieldDataType,
+    family: &SummaryFamilyType,
     input: &SummaryUpdate,
     grouping: &GroupingStrategy,
 ) -> Result<(), String> {
@@ -25,7 +25,7 @@ pub fn validate_summary_kernel(
         return Err("shared summary grouping has no registered kernel".into());
     }
     let keyed = match family {
-        FieldDataType::ExactAggregate(kind, params) => {
+        SummaryFamilyType::ExactAggregate(kind, params) => {
             use ExactKind as K;
             use ExactParams as P;
             if !matches!(
@@ -41,7 +41,7 @@ pub fn validate_summary_kernel(
             }
             input.item.is_some()
         }
-        FieldDataType::Sketch(kind, layout) => {
+        SummaryFamilyType::Sketch(kind, layout) => {
             if layout != grouping {
                 return Err("Planner family and operator grouping disagree".into());
             }
@@ -138,9 +138,9 @@ pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::Summar
         )
 }
 
-pub fn validate_native_family(family: &FieldDataType) -> Result<(), Error> {
+pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::post_asap::SketchAlgorithm as A;
-    if let FieldDataType::Sketch(kind, grouping) = family {
+    if let SummaryFamilyType::Sketch(kind, grouping) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
         // its bare count, but the DAG does not build it from rows.
         if let (A::Cms, SketchParams::Cms { width, depth }) = (kind.algorithm(), kind.params()) {
@@ -165,8 +165,8 @@ pub fn validate_native_family(family: &FieldDataType) -> Result<(), Error> {
         }
     }
     match family {
-        FieldDataType::ExactAggregate(..) => {}
-        FieldDataType::Sketch(kind, _)
+        SummaryFamilyType::ExactAggregate(..) => {}
+        SummaryFamilyType::Sketch(kind, _)
             if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll) => {}
         _ => {
             return Err(Error::Invalid(
@@ -184,9 +184,9 @@ pub fn validate_native_family(family: &FieldDataType) -> Result<(), Error> {
     .map_err(Error::Invalid)
 }
 
-/// A sketch readout is native only for the families Planner can read directly.
-pub fn validate_sketch_readout(
-    family: &FieldDataType,
+/// A sketch evaluation is native only for the families Planner can read directly.
+pub fn validate_sketch_evaluation(
+    family: &SummaryFamilyType,
     query: &SketchStatistic,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
@@ -194,12 +194,12 @@ pub fn validate_sketch_readout(
     // A point count without an item value reads the total count.
     let bare_count = matches!(query, SketchStatistic::PointCount { value: None, .. });
     let supported = match family {
-        FieldDataType::Sketch(kind, _) => match (kind.algorithm(), query) {
+        SummaryFamilyType::Sketch(kind, _) => match (kind.algorithm(), query) {
             (A::Kll, SketchStatistic::Quantile { q })
             | (A::DDSketch, SketchStatistic::Quantile { q }) => {
                 if !(0.0..=1.0).contains(q) {
                     return Err(Error::Invalid(
-                        "quantile readout requires quantile in [0,1]".into(),
+                        "quantile evaluation requires quantile in [0,1]".into(),
                     ));
                 }
                 true
@@ -208,7 +208,7 @@ pub fn validate_sketch_readout(
             (A::Hll, SketchStatistic::Cardinality) => true,
             (A::Hll, _) => bare_count,
             // Only count intents read a Count-Min bare count, and their
-            // updates have unit weight; the readout is typed Int64 on that basis.
+            // updates have unit weight; the evaluation is typed Int64 on that basis.
             (A::Cms, _) => bare_count,
             _ => false,
         },
@@ -216,36 +216,39 @@ pub fn validate_sketch_readout(
     };
     if !supported {
         return Err(Error::Invalid(
-            "readout is not implemented for this summary family".into(),
+            "evaluation is not implemented for this summary family".into(),
         ));
     }
     Ok(())
 }
 
-/// An exact readout must match the exact family it reads.
-pub fn validate_exact_readout(
-    family: &FieldDataType,
-    readout: &crate::summary_kernels::exact::ExactReadout,
+/// An exact evaluation must match the exact family it reads.
+pub fn validate_exact_evaluation(
+    family: &SummaryFamilyType,
+    evaluation: &crate::summary_kernels::exact::ExactEvaluation,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
     use crate::Statistic as S;
     use planner_types::post_asap::ExactKind as E;
     let supported = matches!(
-        (family, readout.statistic),
-        (FieldDataType::ExactAggregate(E::Sum, _), S::Sum)
-            | (FieldDataType::ExactAggregate(E::Count, _), S::Count)
-            | (FieldDataType::ExactAggregate(E::Min, _), S::Min)
-            | (FieldDataType::ExactAggregate(E::Max, _), S::Max)
-            | (FieldDataType::ExactAggregate(E::Rate, _), S::Rate)
-            | (FieldDataType::ExactAggregate(E::Increase, _), S::Increase)
+        (family, evaluation.statistic),
+        (SummaryFamilyType::ExactAggregate(E::Sum, _), S::Sum)
+            | (SummaryFamilyType::ExactAggregate(E::Count, _), S::Count)
+            | (SummaryFamilyType::ExactAggregate(E::Min, _), S::Min)
+            | (SummaryFamilyType::ExactAggregate(E::Max, _), S::Max)
+            | (SummaryFamilyType::ExactAggregate(E::Rate, _), S::Rate)
+            | (
+                SummaryFamilyType::ExactAggregate(E::Increase, _),
+                S::Increase
+            )
     );
     if !supported {
         return Err(Error::Invalid(
-            "readout is not implemented for this summary family".into(),
+            "evaluation is not implemented for this summary family".into(),
         ));
     }
-    if readout.lookback_ms.is_some_and(|lookback| {
-        lookback <= 0 || !matches!(readout.statistic, S::Rate | S::Increase)
+    if evaluation.lookback_ms.is_some_and(|lookback| {
+        lookback <= 0 || !matches!(evaluation.statistic, S::Rate | S::Increase)
     }) {
         return Err(Error::Invalid("invalid exact counter lookback".into()));
     }

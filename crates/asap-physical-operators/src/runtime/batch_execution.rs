@@ -88,7 +88,7 @@ mod tests {
         values::Value,
     };
     use planner_types::{
-        post_asap::{Field, FieldDataType, Schema},
+        post_asap::{Field as SummaryField, FieldDataType as SummaryFamilyType, Schema},
         pre_asap::DataType,
     };
     use std::sync::Arc;
@@ -97,15 +97,15 @@ mod tests {
     #[test]
     fn same_native_chain_inside_query_and_ingestion_execution() {
         let schema = Arc::new(Schema {
-            closed: true,
-            unique_keys: vec![],
-            fields: vec![Field {
-                table: None,
+            fields: vec![SummaryField {
                 name: "value".into(),
-                dtype: FieldDataType::Plain(DataType::Float64),
+                dtype: SummaryFamilyType::Plain(DataType::Float64),
                 nullable: false,
+                table: None,
             }],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         for scope in [
             Scope::Query {
@@ -143,10 +143,10 @@ mod tests {
     #[test]
     fn in_memory_source_drives_cooperative_yields() {
         let schema = Arc::new(Schema {
-            closed: true,
-            unique_keys: vec![],
             fields: vec![],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         let batch = Batch::try_new(schema.clone(), vec![vec![]]).unwrap();
         let source = Operator::source(schema, vec![batch; 65]).unwrap();
@@ -165,10 +165,10 @@ mod tests {
     #[test]
     fn returned_batches_keep_their_resource_reservation() {
         let schema = Arc::new(Schema {
-            closed: true,
-            unique_keys: vec![],
             fields: vec![],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         let batch = Batch::try_new(schema.clone(), vec![vec![]]).unwrap();
         let bytes = batch.bytes();
@@ -196,10 +196,10 @@ mod tests {
     #[test]
     fn cancellation_is_not_bypassed_by_in_memory_execution() {
         let schema = Arc::new(Schema {
-            closed: true,
-            unique_keys: vec![],
             fields: vec![],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         let batch = Batch::try_new(schema, vec![vec![]]).unwrap();
         let context = RunContext::new(

@@ -1,30 +1,45 @@
-//! Export the pre-ASAP [`QueryExpr`] DAG as a generic node/edge DAG, for tools
-//! that need to render or diff the IR (the `dag_export` example + the
-//! `tools/dag-viewer` viewer — see issue #133) rather than walk it in Rust.
+//! Export an [`OperatorNode`] DAG as a generic node/edge dag, for tools
+//! that need to render or diff the IR (the `dag_export` devtools binary +
+//! the `tools/dag-viewer` viewer — see issue #133) rather than walk it in
+//! Rust.
 //!
-//! `QueryExpr` already derives `Serialize`, but as a Rust-shaped tagged DAG
-//! (`Rc` children nested inside each variant's own field). This module
-//! flattens that into an explicit node list + child-id edges — the shape a
-//! generic DAG renderer wants — and additionally tags each node with
-//! [`structural_hash`](crate::pre_asap::cse::structural_hash), so a caller
-//! with several exported queries can spot identical sub-DAGs (a
-//! shared `Scan`, a repeated `Aggregate` shape, …) by comparing hashes
-//! rather than re-implementing `QueryExpr: PartialEq` structural comparison
-//! client-side.
+//! `OperatorNode` already derives `Serialize`, but as a Rust-shaped tagged
+//! tree (`Rc` children nested inside each variant's own field, repeated once
+//! per reference). This module flattens that into an explicit node list +
+//! child-id edges — one entry per unique node, deduplicated by `Rc` pointer
+//! identity, so a shared sub-DAG stays one node with several parents — and
+//! additionally tags each node with
+//! [`structural_hash`](crate::ir::cse::structural_hash), so a caller with
+//! several exported queries can spot identical sub-DAGs (a shared `Scan`, a
+//! repeated `Aggregate` shape, …) by comparing hashes rather than
+//! re-implementing structural comparison client-side.
 //!
 //! This is literally the same hashing
-//! [`share_common_sub_dags`](crate::pre_asap::cse::share_common_sub_dags)
-//! uses to bucket candidates in its `InternTable` (issue #223 stage 3) — not
-//! a parallel reimplementation. `tools/dag-viewer`'s "shared sub-DAG"
+//! [`share_common_sub_dags`](crate::ir::cse::share_common_sub_dags) uses to
+//! bucket candidates in its `InternTable` (issue #223 stage 3) — not a
+//! parallel reimplementation. `tools/dag-viewer`'s "shared sub-DAG"
 //! highlighting is still a *proxy* for real CSE, though: a hash match here
 //! only means two nodes are legal `InternTable` bucket-mates (same coarse
-//! hash), the same candidate-narrowing step `structural_hash` performs
-//! inside `InternTable::intern` — it does not mean `share_common_sub_dags`
-//! actually ran on this data and merged them onto one `Rc` (that also
-//! requires the `PartialEq` check `InternTable::intern` performs, and the
+//! hash) — it does not mean `share_common_sub_dags` actually ran on this
+//! data and merged them onto one `Rc` (that also requires the structural
+//! equality check `InternTable::intern` performs, and the
 //! `Schema::has_unique_key` legality gate, neither of which this export
 //! step evaluates). See `tools/dag-viewer/README.md` for the up-to-date
 //! caveat.
+//!
+//! There is one IR before and after ASAP optimization, so there is one
+//! exporter: an ordinary operator and an ASAP summary operator are both
+//! rendered by the same per-variant [`shape`] match, whichever entry point
+//! ([`export`], [`export_summary`], [`export_post_asap`]) reached them.
+//!
+//! ## Scalar expressions
+//!
+//! A [`ScalarExpr`] is owned by value by an operator field (`Filter.pred`,
+//! `Project.cols`, …) and is rendered into that operator's `detail`, not as
+//! a node of its own. The operator nodes a scalar expression reads
+//! (`scalar(v)`, `EXISTS (subquery)`, …) *are* nodes of the dag — they are
+//! in [`OperatorNode::children`] — so inside `detail` each such reference is
+//! rendered as `{"scalar_ref": <child node id>}` rather than inlined.
 //!
 //! ## `DAGNode::notes` — a layering seam, not a feature this module implements
 //!
@@ -33,13 +48,12 @@
 //! `asap_types`, never the reverse — can annotate an already-exported DAG
 //! after the fact without this module needing to know anything about that
 //! layer's concepts. Concretely: `asap-aware-mapping`'s `explanation` module
-//! (issue #257) computes `structural_hash` over the same `QueryExpr`
-//! sub-DAGs this module does (via the identical function). The devtools
-//! exporter uses that hash to narrow candidates, then compares
-//! `ReplacementExplanation::target` with [`DAGNode::source_expr`] for a
-//! collision-safe match before pushing a [`DAGNote`] onto the node.
-//! `asap_types` itself never constructs a `DAGNote` — see [`DAGNode::notes`]
-//! for the layering rule this keeps.
+//! (issue #257) computes `structural_hash` over the same nodes this module
+//! does (via the identical function). The devtools exporter uses that hash
+//! to narrow candidates, then compares its target with
+//! [`DAGNode::source_node`] for a collision-safe match before pushing a
+//! [`DAGNote`] onto the node. `asap_types` itself never constructs a
+//! `DAGNote` — see [`DAGNode::notes`] for the layering rule this keeps.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -47,9 +61,11 @@ use std::rc::Rc;
 use serde::Serialize;
 
 use crate::cost::CostAnnotation;
-use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
-use crate::pre_asap::cse::{structural_hash, HashCache};
-use crate::pre_asap::query_expr::{QueryExpr, Source};
+use crate::ir::cse::{structural_hash, HashCache};
+use crate::ir::operator_properties::Source;
+use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use crate::post_asap::{AccuracyError, ResultGuarantee};
+use crate::pre_asap::schema::FieldDataType;
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
 /// (predicates, aggregate funcs, schema, sort keys, …) — everything except
@@ -57,56 +73,48 @@ use crate::pre_asap::query_expr::{QueryExpr, Source};
 #[derive(Debug, Clone, Serialize)]
 pub struct DAGNode {
     pub id: u32,
-    /// The `QueryExpr` variant name (e.g. `"Aggregate"`).
+    /// The operator variant name — [`Operator::kind_name`] (e.g.
+    /// `"Aggregate"`, `"SummaryAgg"`).
     pub kind: &'static str,
     /// Short human-readable summary for a node's collapsed on-DAG label.
     pub label: String,
     pub detail: serde_json::Value,
-    /// Output schema carried by every exported node. Edge renderers use the
-    /// child node's schema as the schema flowing along child → consumer.
+    /// Output schema carried by every exported node ([`OperatorNode::schema`]
+    /// as JSON). Edge renderers use the child node's schema as the schema
+    /// flowing along child → consumer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<serde_json::Value>,
-    /// Child node ids, in the variant's field order (e.g. `Join` is
-    /// `[left, right]`).
+    /// Child node ids in [`OperatorNode::children`] order: the operator's
+    /// own inputs in field order (e.g. `Join` is `[left, right]`), then the
+    /// nodes referenced from its scalar expressions.
     pub children: Vec<u32>,
     /// Explicit workload-wide identity assigned by a higher-level exporter.
     /// Viewers use this field to union nodes and must not reconstruct a
     /// structural signature client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workload_node_id: Option<u32>,
-    /// [`structural_hash`](crate::pre_asap::cse::structural_hash) of the
-    /// sub-DAG rooted at this node — the exact same function `cse`'s
-    /// `InternTable` uses to bucket CSE candidates, so two nodes hash
-    /// equally here iff they would land in the same `InternTable` bucket.
-    /// See the module doc for what a hash match here does and doesn't
-    /// guarantee.
-    ///
-    /// `None` for the same reason `source_expr` is `None` — a post-ASAP-
-    /// originated node in an [`export_post_asap`] merged DAG has no
-    /// `QueryExpr` to hash. Omitted from JSON entirely (rather than, say,
-    /// serialized as `0`) so a consumer's shared-sub-DAG-by-hash pass can
-    /// tell "no hash" apart from a real hash that happens to collide with a
-    /// placeholder — `0` is a legal `structural_hash` output, not a safe
-    /// sentinel.
+    /// [`structural_hash`](crate::ir::cse::structural_hash) of the sub-DAG
+    /// rooted at this node — the exact same function `cse`'s `InternTable`
+    /// uses to bucket CSE candidates, so two nodes hash equally here iff they
+    /// would land in the same `InternTable` bucket. See the module doc for
+    /// what a hash match here does and doesn't guarantee. Always `Some`
+    /// for a node this module produces; the `Option` is retained for the
+    /// JSON shape (`None` is omitted rather than serialized as a sentinel,
+    /// since `0` is a legal hash).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<u64>,
-    /// Exact source expression for in-process annotation matching. It is not
-    /// part of the JSON format: callers first narrow by `hash`, then compare
-    /// this value structurally to avoid treating a hash collision as node
-    /// identity.
-    ///
-    /// `None` for a node with no corresponding pre-ASAP `QueryExpr` at all —
-    /// only possible for a post-ASAP-originated node inside a merged
-    /// [`export_post_asap`] DAG (a `SummaryAgg`/`SummaryJoin`/… node has no
-    /// single `QueryExpr` it corresponds to). Every node [`export`] itself
-    /// produces is pre-ASAP by construction and always carries `Some`.
+    /// The exported node itself, for in-process annotation matching. Not
+    /// part of the JSON format: callers first narrow by `hash`, then
+    /// compare this value (by pointer or structurally) to avoid treating a
+    /// hash collision as node identity. Always `Some` for a node this
+    /// module produces.
     #[serde(skip)]
-    pub source_expr: Option<QueryExpr>,
-    /// In-process identity of the source `QueryExpr`. Unlike `source_expr`'s
-    /// structural value, this preserves an `Rc` child reached from multiple
-    /// parents so post-ASAP flattening can retain true DAG sharing.
+    pub source_node: Option<Rc<OperatorNode>>,
+    /// In-process identity of `source_node` (`Rc::as_ptr` as an address):
+    /// the key the builder deduplicates on, so a node reached from several
+    /// parents is exported once. Not part of the JSON format.
     #[serde(skip)]
-    source_ptr: Option<usize>,
+    pub source_ptr: Option<usize>,
     /// Arbitrary reporting-layer annotations for this node — e.g. why a
     /// replacement exists here. `asap_types` never populates this itself
     /// (it has no notion of a "replacement" at all — see the module doc's
@@ -187,7 +195,7 @@ pub struct EdgeCostAnnotation {
     pub cost: CostAnnotation,
 }
 
-/// One query's exported DAG. `nodes[root as usize]` is the DAG's root.
+/// One query's exported dag. `nodes[root as usize]` is the DAG's root.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportDAG {
     pub nodes: Vec<DAGNode>,
@@ -195,8 +203,7 @@ pub struct ExportDAG {
     /// See [`EdgeCostAnnotation`]. Always empty unless a higher layer
     /// explicitly populated it (same layering rule as [`DAGNode::notes`]);
     /// omitted from JSON entirely when empty, so every existing producer of
-    /// [`ExportDAG`] (every call to [`export`]/[`export_summary`]) is
-    /// unaffected.
+    /// [`ExportDAG`] is unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_annotations: Vec<EdgeCostAnnotation>,
 }
@@ -205,10 +212,10 @@ pub struct ExportDAG {
 #[derive(Debug, Clone, Serialize)]
 pub struct NamedDAG {
     pub name: String,
-    /// The original query text (SQL or PromQL) this DAG was lowered from,
-    /// for display alongside the DAG — not used by `export` itself, since
-    /// that only sees the already-lowered `QueryExpr`. Optional because not
-    /// every producer of a `NamedDAG` has the source text on hand.
+    /// The original query text (SQL or PromQL) this dag was lowered from,
+    /// for display alongside the dag — not used by `export` itself, since
+    /// that only sees the already-lowered DAG. Optional because not every
+    /// producer of a `NamedDAG` has the source text on hand.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     pub dag: ExportDAG,
@@ -228,15 +235,13 @@ pub struct NamedDAG {
     /// [`TargetReplacement::before`]/`::after` (small, self-contained
     /// before/after pairs, one per independently-discovered replacement
     /// site), this is a single flattened [`ExportDAG`] spanning the whole
-    /// query: every node that has no winning replacement renders as an
-    /// ordinary pre-ASAP [`DAGNode`] (same shape [`export`] itself
-    /// produces), and every node that does splices in its winning
-    /// candidate's shape instead — a rewritten [`QueryExpr`] sub-DAG, or a
-    /// bound `SummaryNode` sub-DAG, rendered inline in the very same node
-    /// list. `None` unless a higher layer explicitly built one (e.g. the
-    /// `dag_export` devtools binary's `--post-asap` flag); omitted from the
-    /// JSON entirely when absent, so every existing producer/consumer of
-    /// `NamedDAG` is unaffected.
+    /// query: every node that has no winning replacement renders as it does
+    /// in [`export`], and every node that does splices in its winning
+    /// candidate's sub-DAG instead, in the very same node list. `None`
+    /// unless a higher layer explicitly built one (e.g. the `dag_export`
+    /// devtools binary's `--post-asap` flag); omitted from the JSON entirely
+    /// when absent, so every existing producer/consumer of `NamedDAG` is
+    /// unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_dag: Option<ExportDAG>,
     /// This query's own selected-workload cost/benefit — one of issue
@@ -282,81 +287,51 @@ pub struct WorkloadDAG {
     pub workload_cost: Option<crate::cost::WorkloadCostSummary>,
 }
 
-// ── Post-ASAP replacement export — a second, layering-seam-shaped feature ──
+// ── Post-ASAP replacement export — a layering-seam-shaped feature ──────────
 //
-// Everything below this point is the post-ASAP counterpart of the pre-ASAP
-// flattening above: [`export_summary`] flattens a `SummaryNode` the same way
-// [`export`] flattens a `QueryExpr`, and [`TargetReplacement`] is the
-// generic, crate-agnostic "one replacement site, before and after" shape a
-// higher layer (`asap-aware-mapping`, via the `dag_export` devtools binary's
-// `--post-asap` flag) populates after running its own search — the exact
-// same layering rule [`DAGNode::notes`]'s doc above already states: this
-// module never runs `asap_aware_mapping::replacement::search_workload_with`
-// itself, never picks a "winning" candidate, and has no opinion on what a
+// [`TargetReplacement`] is the generic, crate-agnostic "one replacement
+// site, before and after" shape a higher layer (`asap-aware-mapping`, via
+// the `dag_export` devtools binary's `--post-asap` flag) populates after
+// running its own search — the exact same layering rule [`DAGNode::notes`]'s
+// doc above already states: this module never runs
+// `asap_aware_mapping::replacement::search_workload_with` itself, never
+// picks a "winning" candidate, and has no opinion on what a
 // `ReplacementProvenance` or a cost model even is. It only defines shapes
 // concrete and serializable enough for a higher layer to fill in, and for
 // `tools/dag-viewer` to render without needing to know anything about
 // `asap-aware-mapping`'s own vocabulary.
-//
-// A single whole-query "post-ASAP DAG" isn't attempted here, and isn't
-// representable in the current type system either: `SummaryExpr` has no
-// variant letting a `SummaryNode` be embedded back inside a plain
-// `QueryExpr`'s child slot (`QueryExpr`'s own children are always
-// `Rc<QueryExpr>`, never `Rc<SummaryNode>`), so there is no way to splice a
-// post-ASAP binding back into its original pre-ASAP DAG in place. Inventing
-// a bridge type for that is a real `asap_types`/`asap-aware-mapping` IR
-// design decision, well beyond what a devtools visualization export should
-// decide unilaterally. Instead, each independently-discovered replacement
-// target gets its own small, self-contained `before`/`after` pair — the
-// target's own pre-ASAP sub-DAG, and either the winning `SummaryNode` or the
-// winning rewritten `QueryExpr`, both of which *are* fully representable
-// today via [`export`]/[`export_summary`] as-is.
 
-/// One flattened post-ASAP node — the [`SummaryExpr`] analogue of
-/// [`DAGNode`]. `detail` holds this node's own scalar fields (the summarized
-/// column, the summary family, grouping strategy, sketch-query kind, …) —
-/// everything except its `SummaryNode` children, which live in `children`
-/// instead.
-///
-/// Unlike [`DAGNode`], this carries no `hash`/`source_expr` pair: nothing in
-/// this module ever needs to re-identify a particular `SummaryDAGNode` the
-/// way `DAGNode::hash` lets a higher layer re-identify a pre-ASAP node (a
-/// `SummaryNode` is always freshly exported for exactly one
-/// [`TargetReplacementAfter::Summary`] site, never matched back against a
-/// separately-exported DAG the way pre-ASAP notes are).
-///
-/// Several of `SummaryExpr`'s own fields (`FieldDataType`,
-/// `GroupingStrategy`, `SketchStatistic`) derive neither `Serialize` nor
-/// `Deserialize` in `asap_types::post_asap` — they carry no reporting
-/// obligation there, since nothing before this module ever needed to
-/// serialize a post-ASAP node. Rather than adding `Serialize` impls to
-/// `post_asap`'s own core types purely for this devtools-facing export (a
-/// change to that module's own public API contract, out of scope for a
-/// reporting concern), this module renders those particular fields into
-/// `detail` via their `Debug` formatting instead — human-readable, and
-/// sufficient for the display purpose `detail` exists for on every other
-/// node in this file (see [`DAGNode::detail`]'s own doc), at the cost of
-/// those particular fields being opaque strings rather than structured JSON
-/// on the `SummaryDAGNode` side of the export.
+/// One flattened node of a [`SummaryDAG`] — the same node as a
+/// [`DAGNode`], in the shape the summary-maintenance consumers read:
+/// snake_case `kind`, the accuracy guarantee as its own field, no
+/// hash/annotation seams.
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryDAGNode {
     pub id: u32,
-    /// The `SummaryExpr` variant name (e.g. `"SummaryAgg"`).
+    /// The operator variant name in snake_case (e.g. `"summary_agg"`,
+    /// `"scan"`) — see [`snake_case_kind`].
     pub kind: &'static str,
     /// Short human-readable summary for a node's collapsed on-DAG label.
     pub label: String,
     pub detail: serde_json::Value,
-    /// Child node ids, in the variant's field order (e.g. `SummaryJoin` is
-    /// `[outer, inner]`).
+    /// [`OperatorNode::schema`] as JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+    /// Child node ids in [`OperatorNode::children`] order.
     pub children: Vec<u32>,
     /// The value's machine-readable accuracy guarantee (issue #172) —
-    /// [`SummaryNode::guarantee`] serialized structurally (metric, symbolic
+    /// [`OperatorNode::guarantee`] serialized structurally (metric, symbolic
     /// bound, failure probability, provenance including any budget
     /// allocation), not as prose. Omitted when the node carries none (raw
     /// summary state, or a family with no error model), so every consumer
     /// predating this field parses the same shape it always has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guarantee: Option<ResultGuarantee>,
+    /// The exported node itself, so a caller annotating the dag can find
+    /// a node by `Rc` pointer identity rather than by walk order. Not part
+    /// of the JSON format. Always `Some`.
+    #[serde(skip)]
+    pub source_node: Option<Rc<OperatorNode>>,
 }
 
 /// One accuracy-illegal candidate a higher layer's search refused for a
@@ -378,237 +353,12 @@ pub struct TargetRejection {
     pub error: AccuracyError,
 }
 
-/// One post-ASAP `SummaryNode` DAG, flattened the same way [`ExportDAG`]
-/// flattens a pre-ASAP `QueryExpr` DAG.
+/// A DAG flattened into [`SummaryDAGNode`]s — the same dag [`ExportDAG`]
+/// holds, in the summary-maintenance consumers' node shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryDAG {
     pub nodes: Vec<SummaryDAGNode>,
     pub root: u32,
-}
-
-/// Flatten a [`SummaryNode`] the same way [`export`] flattens a `QueryExpr`
-/// — post-order, one [`SummaryDAGNode`] per [`SummaryExpr`] variant, no
-/// memoization of repeated `Rc<SummaryNode>` references (a shared
-/// sub-expression reachable through two parents is flattened twice, into two
-/// separate node entries — the same "this is a flattened DAG view, not a
-/// pointer-identity-preserving DAG" behavior [`build`] already has for
-/// `QueryExpr`).
-///
-/// A `KeepPreAsap(inner)` leaf embeds the *whole* pre-ASAP sub-DAG beneath it
-/// as a nested [`ExportDAG`] (via [`export(inner)`](export)) inside its own
-/// `detail` field (`{"pre_asap_sub_dag": <ExportDAG>}`) rather than trying to
-/// flatten it into this same node list — [`DAGNode`] and [`SummaryDAGNode`]
-/// are different types with different id spaces, so mixing them into one
-/// `Vec` isn't type-safe; nesting is. `label` for a `KeepPreAsap` node is
-/// `format!("KeepPreAsap({kind})")`, where `kind` is the inner sub-DAG's own
-/// top-level `DAGNode::kind`.
-pub fn export_summary(node: &SummaryNode) -> SummaryDAG {
-    let mut nodes = Vec::new();
-    let root = build_summary(node, &mut nodes);
-    SummaryDAG { nodes, root }
-}
-
-fn push_summary_node(
-    nodes: &mut Vec<SummaryDAGNode>,
-    kind: &'static str,
-    label: String,
-    detail: serde_json::Value,
-    children: Vec<u32>,
-    guarantee: Option<ResultGuarantee>,
-) -> u32 {
-    let id = nodes.len() as u32;
-    nodes.push(SummaryDAGNode {
-        id,
-        kind,
-        label,
-        detail,
-        children,
-        guarantee,
-    });
-    id
-}
-
-/// A short, human-readable label for a [`crate::post_asap::FieldDataType`]
-/// (e.g. `"Sketch(Kll)"`, `"ExactAggregate(Sum)"`) — for
-/// [`SummaryDAGNode::label`] text on a `SummaryAgg`/`SummaryJoin` node. Not
-/// exhaustive prose (mirrors `asap_aware_mapping::replacement::describe_intent`'s
-/// own "this is a label, not a decision" stance) — every variant is covered,
-/// but via `Debug` for the inner kind rather than hand-written prose per
-/// algorithm.
-fn family_label(family: &crate::post_asap::FieldDataType) -> String {
-    use crate::post_asap::FieldDataType;
-    match family {
-        FieldDataType::Plain(dtype) => format!("Plain({dtype:?})"),
-        FieldDataType::ExactAggregate(kind, _) => format!("ExactAggregate({kind:?})"),
-        FieldDataType::Sketch(kind, _grouping) => format!("Sketch({:?})", kind.algorithm()),
-        FieldDataType::Sample(kind, _) => format!("Sample({kind:?})"),
-        FieldDataType::Wavelet(kind, _) => format!("Wavelet({kind:?})"),
-        FieldDataType::StatModel(kind, _) => format!("StatModel({kind:?})"),
-    }
-}
-
-/// `(kind, label, detail)` for every [`SummaryExpr`] variant *except*
-/// [`SummaryExpr::KeepPreAsap`] — that variant has no `SummaryDAGNode`/
-/// `DAGNode` of its own (see [`build_summary`]/[`build_summary_hybrid`], its
-/// only two callers, both of which special-case it before ever reaching
-/// this function). Factored out so [`build_summary`] (nests a `KeepPreAsap`
-/// leaf's pre-ASAP sub-DAG as its own [`SummaryDAG`]) and
-/// [`build_summary_hybrid`] (splices that same sub-DAG directly into a
-/// shared [`ExportDAG`] node list — see [`export_post_asap`]) can't drift
-/// apart on how every *other* variant's own shape is described, since
-/// nothing about that description differs between the two.
-macro_rules! define_summary_kind_tags {
-    ($($pattern:pat => $tag:literal),+ $(,)?) => {
-        #[cfg(test)]
-        const SUMMARY_KIND_TAGS: &[&str] = &[$($tag),+];
-
-        fn summary_kind_tag(expr: &SummaryExpr) -> &'static str {
-            match expr {
-                SummaryExpr::KeepPreAsap(_) => unreachable!(
-                    "summary_kind_tag's callers special-case KeepPreAsap"
-                ),
-                $($pattern => $tag),+
-            }
-        }
-    };
-}
-
-define_summary_kind_tags! {
-    SummaryExpr::BinaryOp { .. } => "SummaryBinaryOp",
-
-    SummaryExpr::ValueOperation { .. } => "ValueOperation",
-    SummaryExpr::RelationalJoin { .. } => "RelationalJoin",
-    SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
-    SummaryExpr::SummaryJoin { .. } => "SummaryJoin",
-    SummaryExpr::SummarySubtract { .. } => "SummarySubtract",
-    SummaryExpr::SummaryDelete { .. } => "SummaryDelete",
-    SummaryExpr::SummaryEstimate { .. } => "SummaryEstimate",
-    SummaryExpr::SummaryMerge { .. } => "SummaryMerge",
-}
-
-fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value) {
-    let kind = summary_kind_tag(expr);
-    match expr {
-        SummaryExpr::KeepPreAsap(_) => {
-            unreachable!("summary_shape's callers special-case KeepPreAsap before calling it")
-        }
-        SummaryExpr::BinaryOp { operator, .. } => {
-            let label = format!("BinaryOp({:?})", operator.kind);
-            let detail = serde_json::json!({
-                "kind": format!("{:?}", operator.kind),
-                "vector_match": operator.vector_match,
-            });
-            (kind, label, detail)
-        }
-
-        SummaryExpr::ValueOperation {
-            operation, timing, ..
-        } => (
-            kind,
-            format!("ValueOperation({operation:?})"),
-            serde_json::json!({
-                "operation": format!("{operation:?}"),
-                "timing": timing.as_str(),
-            }),
-        ),
-        SummaryExpr::RelationalJoin {
-            kind: join_kind,
-            pred,
-            ..
-        } => (
-            kind,
-            format!("RelationalJoin({join_kind:?})"),
-            serde_json::json!({ "join_kind": join_kind, "predicate": pred }),
-        ),
-        SummaryExpr::SummaryAgg {
-            family,
-            input,
-            reduction,
-            grouping,
-            ..
-        } => {
-            let label = format!("SummaryAgg({})", family_label(family));
-            let detail = serde_json::json!({
-                "family": format!("{family:?}"),
-                "input": input,
-                "reduction": reduction,
-                "grouping": format!("{grouping:?}"),
-            });
-            (kind, label, detail)
-        }
-        SummaryExpr::SummaryJoin { key, family, .. } => {
-            let label = format!("SummaryJoin({})", family_label(family));
-            let detail = serde_json::json!({
-                "key": key,
-                "family": format!("{family:?}"),
-            });
-            (kind, label, detail)
-        }
-        SummaryExpr::SummarySubtract { .. } => {
-            (kind, "SummarySubtract".into(), serde_json::json!({}))
-        }
-        SummaryExpr::SummaryDelete { key, .. } => {
-            let detail = serde_json::json!({ "key": key });
-            (kind, "SummaryDelete".into(), detail)
-        }
-        SummaryExpr::SummaryEstimate { query, .. } => {
-            let label = format!("SummaryEstimate({query:?})");
-            let detail = serde_json::json!({ "query": format!("{query:?}") });
-            (kind, label, detail)
-        }
-        SummaryExpr::SummaryMerge { children, .. } => {
-            let label = format!("SummaryMerge({} children)", children.len());
-            (kind, label, serde_json::json!({}))
-        }
-    }
-}
-
-/// `expr`'s own `Rc<SummaryNode>` children, in the variant's field order
-/// (e.g. `SummaryJoin` is `[outer, inner]`) — empty for
-/// [`SummaryExpr::KeepPreAsap`], which has no `SummaryNode` children at all
-/// (only a boxed pre-ASAP `QueryExpr`). Shared by [`build_summary`] and
-/// [`build_summary_hybrid`] for the same reason [`summary_shape`] is.
-fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
-    match expr {
-        SummaryExpr::KeepPreAsap(_) => vec![],
-        SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
-
-        SummaryExpr::ValueOperation { child, .. } => vec![child],
-        SummaryExpr::RelationalJoin { left, right, .. } => vec![left, right],
-        SummaryExpr::SummaryAgg { child, .. } => vec![child],
-        SummaryExpr::SummaryJoin { outer, inner, .. } => vec![outer, inner],
-        SummaryExpr::SummarySubtract { left, right } => vec![left, right],
-        SummaryExpr::SummaryDelete { summary_input, .. } => vec![summary_input],
-        SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        SummaryExpr::SummaryMerge { children, .. } => children.iter().collect(),
-    }
-}
-
-/// Recursively flatten `node`, appending [`SummaryDAGNode`]s to `nodes` in
-/// post-order (children pushed before their parent), and return the pushed
-/// root's id. Exhaustive over every [`SummaryExpr`] variant, matching this
-/// file's own exhaustive style for `QueryExpr` in [`build`].
-fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDAGNode>) -> u32 {
-    if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
-        let pre_asap_sub_dag = export(inner);
-        let inner_kind = pre_asap_sub_dag.nodes[pre_asap_sub_dag.root as usize].kind;
-        let label = format!("KeepPreAsap({inner_kind})");
-        let detail = serde_json::json!({ "pre_asap_sub_dag": pre_asap_sub_dag });
-        return push_summary_node(
-            nodes,
-            "KeepPreAsap",
-            label,
-            detail,
-            vec![],
-            node.guarantee.clone(),
-        );
-    }
-    let children: Vec<u32> = summary_children(&node.expr)
-        .into_iter()
-        .map(|child| build_summary(child, nodes))
-        .collect();
-    let (kind, label, detail) = summary_shape(&node.expr);
-    push_summary_node(nodes, kind, label, detail, children, node.guarantee.clone())
 }
 
 /// One replacement site a higher layer (the `dag_export` binary) found by
@@ -624,7 +374,7 @@ pub struct TargetReplacement {
     /// so renderers can explain a clicked post-ASAP node without guessing by
     /// label, hash, or DAG shape.
     pub decision_id: u32,
-    /// Id of the [`DAGNode`] (in this query's own `DAG.nodes`, i.e. the
+    /// Id of the [`DAGNode`] (in this query's own `dag.nodes`, i.e. the
     /// [`NamedDAG`] this `TargetReplacement` is attached to) this
     /// replacement's `before` sub-DAG is rooted at.
     pub target_pre_id: u32,
@@ -648,7 +398,7 @@ pub struct TargetReplacement {
     /// doesn't estimate a numeric cost for this candidate shape (see that
     /// field's own doc upstream).
     pub cost: f64,
-    /// The target's own pre-ASAP sub-DAG, before replacement — literally
+    /// The target's own sub-DAG, before replacement — literally
     /// `export(target)` for the `TargetSubDAGCandidates`'s own `target`, reused as-is.
     pub before: ExportDAG,
     pub after: TargetReplacementAfter,
@@ -668,8 +418,10 @@ pub struct TargetReplacement {
 }
 
 /// What a [`TargetReplacement`] became — either a genuine post-ASAP binding
-/// or a still-pre-ASAP-shaped structural rewrite, mirroring
-/// `asap_aware_mapping::replacement::Replacement`'s own two variants.
+/// or a still-relational structural rewrite, mirroring
+/// `asap_aware_mapping::replacement::Replacement`'s own two variants. Both
+/// carry an ordinary [`ExportDAG`]: the unified IR renders a summary sub-DAG
+/// and a rewritten relational sub-DAG through the same [`export`].
 ///
 /// Serializes as `{"kind": "Summary"|"Rewrite", "DAG": {...}}` (serde's
 /// adjacently-tagged representation for a `#[serde(tag = "kind", content =
@@ -680,73 +432,83 @@ pub struct TargetReplacement {
 #[serde(tag = "kind", content = "dag")]
 pub enum TargetReplacementAfter {
     /// A `Replacement::Summary` candidate — a genuine post-ASAP binding.
-    Summary(SummaryDAG),
-    /// A `Replacement::Rewrite` candidate — still pre-ASAP shaped (CSE
+    Summary(ExportDAG),
+    /// A `Replacement::Rewrite` candidate — still relational (CSE
     /// share/recompute, `AvgToSumOverCountStrategy`, and `RollupStrategy`
-    /// all produce this kind), so this reuses [`ExportDAG`]/[`export`] too,
-    /// not a new type.
+    /// all produce this kind).
     Rewrite(ExportDAG),
 }
 
-/// Flatten `expr` into a [`ExportDAG`].
-pub fn export(expr: &QueryExpr) -> ExportDAG {
-    let mut nodes = Vec::new();
-    // One cache for the whole export — persisted across every `build`/
-    // `push_node` call, not reset per node, so `structural_hash` memoizes
-    // real work across this pass instead of re-walking an already-hashed
-    // shared descendant once per node that references it.
-    let mut cache = HashCache::new();
-    // No substitution: an ordinary pre-ASAP export never splices anything
-    // in — see `build`'s own doc for why it always takes a `find_winner`
-    // callback regardless (so `export_post_asap` can share this exact
-    // per-variant traversal instead of duplicating it).
-    let root = build(expr, &mut nodes, &mut cache, &mut |_| None);
-    ExportDAG {
-        nodes,
-        root,
-        edge_annotations: Vec::new(),
-    }
-}
-
-/// What a higher layer found for one specific pre-ASAP node when building a
-/// merged post-ASAP DAG via [`export_post_asap`] — see that function's own
-/// doc for the full design. `asap_types` has no opinion on *how* this is
+/// What a higher layer found for one specific node when building a merged
+/// post-ASAP dag via [`export_post_asap`] — see that function's own doc
+/// for the full design. `asap_types` has no opinion on *how* this is
 /// decided (that's `asap_aware_mapping::replacement::search_workload_with` +
 /// `CandidateLogicalASAPDAGs::cost_sorted`'s job, a higher layer, exactly the layering rule
 /// [`DAGNode::notes`] already states); it only defines the shape a decision
-/// comes back in.
+/// comes back in. Both variants render identically (one IR, one builder);
+/// they are kept apart so the caller's `Replacement` maps one-to-one.
 #[derive(Debug, Clone)]
 pub enum PostAsapSubstitution {
     /// This exact node has a winning `Replacement::Rewrite` — keep building
-    /// from `.0` instead of the original node. Still pre-ASAP shaped, so
-    /// [`build`] renders it via the same ordinary `DAGNode` path — see
-    /// [`build`]'s own doc for why `.0`'s own top level is rendered without
-    /// re-querying `find_winner` on it (its descendants still are).
+    /// from `replacement` instead of the original node.
     Rewrite {
-        replacement: Rc<QueryExpr>,
+        replacement: Rc<OperatorNode>,
         decision: DAGDecision,
     },
-    /// This exact node has a winning `Replacement::Summary` — switch to
-    /// rendering `.0`'s bound `SummaryNode` shape from here down, via
-    /// [`build_summary_hybrid`].
+    /// This exact node has a winning `Replacement::Summary` — keep building
+    /// from `replacement` (a summary-bound sub-DAG) instead of the original
+    /// node.
     Summary {
-        replacement: Rc<SummaryNode>,
+        replacement: Rc<OperatorNode>,
         decision: DAGDecision,
     },
 }
 
+/// Flatten the DAG rooted at `root` into a [`ExportDAG`]: one [`DAGNode`]
+/// per unique reachable node, children pushed before their parents.
+pub fn export(root: &Rc<OperatorNode>) -> ExportDAG {
+    let mut no_substitution = |_: &Rc<OperatorNode>| None;
+    let mut builder = Builder::new(&mut no_substitution);
+    let root = builder.build(root);
+    builder.finish(root)
+}
+
+/// Flatten the DAG rooted at `node` into a [`SummaryDAG`] — the same
+/// nodes [`export`] produces, in the [`SummaryDAGNode`] shape (snake_case
+/// `kind`, `guarantee` as its own field).
+pub fn export_summary(node: &Rc<OperatorNode>) -> SummaryDAG {
+    let dag = export(node);
+    let nodes = dag
+        .nodes
+        .into_iter()
+        .map(|node| {
+            let source = node
+                .source_node
+                .expect("every exported node carries its source");
+            SummaryDAGNode {
+                id: node.id,
+                kind: snake_case_kind(&source.operator),
+                label: node.label,
+                detail: node.detail,
+                schema: node.schema,
+                children: node.children,
+                guarantee: source.guarantee.clone(),
+                source_node: Some(source),
+            }
+        })
+        .collect();
+    SummaryDAG {
+        nodes,
+        root: dag.root,
+    }
+}
+
 /// Build one merged "whole query, but post-ASAP" [`ExportDAG`] by walking
-/// `root`'s ordinary pre-ASAP shape and, at every node, asking `find_winner`
-/// whether *that exact node* has a winning replacement — if so, splicing
-/// the replacement's own shape in at that position instead, in the very
-/// same flattened node list (not a nested sub-DAG the way
-/// [`TargetReplacement::before`]/`::after` — small, independent, per-site
-/// before/after pairs — already do; see this file's "Post-ASAP replacement
-/// export" section doc for why *that* design doesn't attempt a single
-/// whole-query composite, and why this one can: this is a synthetic
-/// id/edge list, the same kind of thing [`ExportDAG`] already is for the
-/// pre-ASAP side, not a real `QueryExpr`/`SummaryNode` value with a type
-/// system to satisfy).
+/// `root` and, at every node, asking `find_winner` whether *that exact
+/// node* has a winning replacement — if so, splicing the replacement's own
+/// sub-DAG in at that position instead, in the very same flattened node
+/// list (not a nested sub-dag the way [`TargetReplacement::before`]/
+/// `::after` — small, independent, per-site before/after pairs — do).
 ///
 /// `find_winner` is the whole layering seam: `asap_types` never runs
 /// `asap_aware_mapping::replacement::search_workload_with` or
@@ -758,7 +520,7 @@ pub enum PostAsapSubstitution {
 /// for [`TargetReplacement`] discovery, and passes it in here unchanged.
 ///
 /// `find_winner` is deliberately consulted only once per node, at the
-/// moment [`build`] first reaches it — **not** re-consulted on a
+/// moment the builder first reaches it — **not** re-consulted on a
 /// substitution's own immediate top level (only on that substitution's
 /// *descendants*, which get an ordinary fresh call same as any other node).
 /// This matters for correctness, not just efficiency:
@@ -770,225 +532,189 @@ pub enum PostAsapSubstitution {
 /// re-query at exactly that one level is what makes this termination-safe
 /// for every registered strategy, not just the ones that happen not to
 /// return the target itself as a candidate.
+///
+/// Every node a substitution introduced carries the substitution's
+/// [`DAGDecision`] (`role = "replacement_root"` on the spliced-in root,
+/// `"replacement_region"` on its newly exported descendants); a descendant
+/// that was already exported before the splice (a shared input the
+/// replacement reuses) keeps whatever it already had.
 pub fn export_post_asap(
-    root: &QueryExpr,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+    root: &Rc<OperatorNode>,
+    find_winner: &mut dyn FnMut(&Rc<OperatorNode>) -> Option<PostAsapSubstitution>,
 ) -> ExportDAG {
-    let mut nodes = Vec::new();
-    let mut cache = HashCache::new();
-    let root_id = build(root, &mut nodes, &mut cache, find_winner);
-    deduplicate_pointer_shared_nodes(nodes, root_id)
+    let mut builder = Builder::new(find_winner);
+    let root = builder.build(root);
+    builder.finish(root)
 }
 
-fn deduplicate_pointer_shared_nodes(nodes: Vec<DAGNode>, root: u32) -> ExportDAG {
-    let mut by_source_ptr = HashMap::<usize, u32>::new();
-    let mut old_to_new = vec![0_u32; nodes.len()];
-    let mut deduplicated = Vec::with_capacity(nodes.len());
-    for mut node in nodes {
-        node.children = node
-            .children
-            .into_iter()
-            .map(|child| old_to_new[child as usize])
-            .collect();
-        if let Some(existing) = node
-            .source_ptr
-            .and_then(|source_ptr| by_source_ptr.get(&source_ptr).copied())
-        {
-            old_to_new[node.id as usize] = existing;
-            continue;
-        }
-        let old_id = node.id;
-        let new_id = deduplicated.len() as u32;
-        node.id = new_id;
-        if let Some(source_ptr) = node.source_ptr {
-            by_source_ptr.insert(source_ptr, new_id);
-        }
-        old_to_new[old_id as usize] = new_id;
-        deduplicated.push(node);
-    }
-
-    ExportDAG {
-        nodes: deduplicated,
-        root: old_to_new[root as usize],
-        edge_annotations: Vec::new(),
-    }
+/// The one flattening pass behind every entry point. Nodes are memoized by
+/// `Rc` pointer identity: a node reached from several parents (an operator
+/// input shared with a scalar reference, say) is exported once.
+struct Builder<'a> {
+    nodes: Vec<DAGNode>,
+    /// `Rc::as_ptr` of every node already exported (or substituted) → its id.
+    ids: HashMap<*const OperatorNode, u32>,
+    /// One cache for the whole export — persisted across every node, not
+    /// reset per node, so `structural_hash` memoizes real work across this
+    /// pass instead of re-walking an already-hashed shared descendant once
+    /// per node that references it.
+    cache: HashCache,
+    find_winner: &'a mut dyn FnMut(&Rc<OperatorNode>) -> Option<PostAsapSubstitution>,
 }
 
-macro_rules! define_query_kind_tags {
-    ($($pattern:pat => $tag:literal),+ $(,)?) => {
-        #[cfg(test)]
-        const QUERY_KIND_TAGS: &[&str] = &[$($tag),+];
+impl<'a> Builder<'a> {
+    fn new(
+        find_winner: &'a mut dyn FnMut(&Rc<OperatorNode>) -> Option<PostAsapSubstitution>,
+    ) -> Self {
+        Self {
+            nodes: Vec::new(),
+            ids: HashMap::new(),
+            cache: HashCache::new(),
+            find_winner,
+        }
+    }
 
-        fn kind_tag(expr: &QueryExpr) -> &'static str {
-            match expr {
-                $($pattern => $tag),+,
-                other @ (QueryExpr::Column(_)
-                | QueryExpr::Literal(_)
-                | QueryExpr::Compare { .. }
-                | QueryExpr::BoolAnd(_)
-                | QueryExpr::BoolOr(_)
-                | QueryExpr::Not(_)
-                | QueryExpr::IsNull(_)
-                | QueryExpr::IsNotNull(_)
-                | QueryExpr::Cast { .. }
-                | QueryExpr::InList { .. }
-                | QueryExpr::FunctionCall { .. }
-                | QueryExpr::Arithmetic { .. }
-                | QueryExpr::Case { .. }) => unreachable!(
-                    "kind_tag reached a scalar QueryExpr variant directly: {other:?}"
-                ),
+    fn finish(self, root: u32) -> ExportDAG {
+        ExportDAG {
+            nodes: self.nodes,
+            root,
+            edge_annotations: Vec::new(),
+        }
+    }
+
+    /// Export `node` (or, when `find_winner` has a substitution for it, the
+    /// substitution's sub-DAG in its place) and return its id.
+    fn build(&mut self, node: &Rc<OperatorNode>) -> u32 {
+        let ptr = Rc::as_ptr(node);
+        if let Some(&id) = self.ids.get(&ptr) {
+            return id;
+        }
+        let (replacement, decision) = match (self.find_winner)(node) {
+            None => return self.build_node(node),
+            Some(PostAsapSubstitution::Rewrite {
+                replacement,
+                decision,
+            })
+            | Some(PostAsapSubstitution::Summary {
+                replacement,
+                decision,
+            }) => (replacement, decision),
+        };
+        let first = self.nodes.len();
+        let root = self.build_node(&replacement);
+        for exported in &mut self.nodes[first..] {
+            if exported.decision.is_none() {
+                let mut node_decision = decision.clone();
+                node_decision.role = if exported.id == root {
+                    "replacement_root"
+                } else {
+                    "replacement_region"
+                };
+                exported.decision = Some(node_decision);
             }
         }
-    };
-}
-
-define_query_kind_tags! {
-    QueryExpr::Scan { .. } => "Scan",
-    QueryExpr::PromqlScalarBridge(_) => "PromqlScalarBridge",
-    QueryExpr::EvalTimestamp => "EvalTimestamp",
-    QueryExpr::CurrentTimestamp => "CurrentTimestamp",
-    QueryExpr::PromqlVectorFromScalar(_) => "PromqlVectorFromScalar",
-    QueryExpr::PromqlScalarFromVector(_) => "PromqlScalarFromVector",
-    QueryExpr::PromqlRelabel { .. } => "PromqlRelabel",
-    QueryExpr::PromqlInfoEnrich { .. } => "PromqlInfoEnrich",
-    QueryExpr::PromqlSeriesSample { .. } => "PromqlSeriesSample",
-    QueryExpr::Filter { .. } => "Filter",
-    QueryExpr::Project { .. } => "Project",
-    QueryExpr::Aggregate { .. } => "Aggregate",
-    QueryExpr::Dedup { .. } => "Dedup",
-    QueryExpr::Concat { .. } => "Concat",
-    QueryExpr::Join { .. } => "Join",
-    QueryExpr::SetOp { .. } => "SetOp",
-    QueryExpr::Sort { .. } => "Sort",
-    QueryExpr::Limit { .. } => "Limit",
-    QueryExpr::PromqlSubquery { .. } => "PromqlSubquery",
-    QueryExpr::TimeRange { .. } => "TimeRange",
-    QueryExpr::TimeShift { .. } => "TimeShift",
-    QueryExpr::SQLWindowFunc { .. } => "SQLWindowFunc",
-    QueryExpr::BinaryOp { .. } => "BinaryOp",
-}
-
-/// Push one flattened node for `expr`. `expr` is the *whole* sub-DAG this
-/// node represents (not just its own fields) — `hash` is
-/// [`structural_hash(expr)`](structural_hash), the identical function and
-/// the identical input `InternTable::intern` would hash for this same
-/// sub-DAG, so this node's `hash` matches what `cse::share_common_sub_dags`
-/// would bucket it under. `kind` is [`kind_tag(expr)`](kind_tag), not a
-/// caller-supplied argument — see that function's doc for why.
-fn push_node(
-    nodes: &mut Vec<DAGNode>,
-    expr: &QueryExpr,
-    cache: &mut HashCache,
-    label: String,
-    detail: serde_json::Value,
-    children: Vec<u32>,
-) -> u32 {
-    let id = nodes.len() as u32;
-    let hash = Some(structural_hash(expr, cache));
-    nodes.push(DAGNode {
-        id,
-        kind: kind_tag(expr),
-        label,
-        detail,
-        schema: expr
-            .output_schema()
-            .ok()
-            .and_then(|schema| serde_json::to_value(schema).ok()),
-        children,
-        workload_node_id: None,
-        hash,
-        source_expr: Some(expr.clone()),
-        source_ptr: Some(expr as *const QueryExpr as usize),
-        notes: Vec::new(),
-        decision: None,
-    });
-    id
-}
-
-/// Push one flattened node with no corresponding pre-ASAP `QueryExpr` at
-/// all — a post-ASAP-originated node inside [`export_post_asap`]'s merged
-/// DAG (a `SummaryAgg`/`SummaryJoin`/… node, via [`build_summary_hybrid`]).
-/// `hash`/`source_expr`-based re-identification (see [`DAGNode::hash`]'s own
-/// doc) has no meaning for a node with no `QueryExpr` behind it, so this
-/// pushes a fixed placeholder hash (`0`) and `source_expr: None` rather than
-/// inventing a hash over `SummaryExpr` (which, unlike `QueryExpr`, has no
-/// [`structural_hash`]-equivalent function at all — see [`SummaryDAGNode`]'s
-/// own doc on why `SummaryExpr`'s fields don't even derive `Hash`/`PartialEq`
-/// consistently enough to build one).
-fn push_summary_originated_node(
-    nodes: &mut Vec<DAGNode>,
-    kind: &'static str,
-    label: String,
-    detail: serde_json::Value,
-    children: Vec<u32>,
-) -> u32 {
-    let id = nodes.len() as u32;
-    nodes.push(DAGNode {
-        id,
-        kind,
-        label,
-        detail,
-        schema: None,
-        children,
-        workload_node_id: None,
-        hash: None,
-        source_expr: None,
-        source_ptr: None,
-        notes: Vec::new(),
-        decision: None,
-    });
-    id
-}
-
-/// The [`build_summary`]/[`build_summary_hybrid`] counterpart of [`build`]
-/// for a bound [`SummaryNode`] reached while building
-/// [`export_post_asap`]'s merged DAG: appends into the *same* `nodes:
-/// Vec<DAGNode>` list `build` itself is filling, instead of a separate
-/// [`SummaryDAG`]. A `KeepPreAsap(inner)` leaf recurses back into
-/// [`build`] on `inner` (the general pre-ASAP entry, `find_winner` included)
-/// rather than nesting a `{"pre_asap_sub_dag": ...}` blob the way
-/// [`build_summary`] does — so the merged DAG reads as one seamless DAG
-/// with no dead ends, and so a target reachable underneath a `KeepPreAsap`
-/// wrapper (a nested aggregate a strategy independently found a
-/// replacement for, say) still gets spliced in correctly.
-fn build_summary_hybrid(
-    node: &SummaryNode,
-    nodes: &mut Vec<DAGNode>,
-    cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
-) -> u32 {
-    if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
-        return build(inner, nodes, cache, find_winner);
+        // The original node now resolves to the substitution: another
+        // parent of the same `Rc` reuses the spliced-in sub-DAG.
+        self.ids.insert(ptr, root);
+        root
     }
-    let children: Vec<u32> = summary_children(&node.expr)
-        .into_iter()
-        .map(|child| build_summary_hybrid(child, nodes, cache, find_winner))
-        .collect();
-    let (kind, label, mut detail) = summary_shape(&node.expr);
-    // The merged DAG's `DAGNode` has no dedicated guarantee field (it is
-    // the pre-ASAP node shape); the guarantee rides in `detail` under the
-    // same key/shape `SummaryDAGNode::guarantee` uses, additively.
-    if let Some(guarantee) = &node.guarantee {
-        if let (serde_json::Value::Object(map), Ok(value)) =
-            (&mut detail, serde_json::to_value(guarantee))
-        {
-            map.insert("guarantee".into(), value);
+
+    /// Export `node` itself (no substitution check at this level; children
+    /// still go through [`Self::build`]) and return its id.
+    fn build_node(&mut self, node: &Rc<OperatorNode>) -> u32 {
+        let ptr = Rc::as_ptr(node);
+        if let Some(&id) = self.ids.get(&ptr) {
+            return id;
         }
+        let children: Vec<u32> = node.children().into_iter().map(|c| self.build(c)).collect();
+        let (label, mut detail) = shape(node, &self.ids);
+        if let serde_json::Value::Object(map) = &mut detail {
+            if let Some(timing) = node.timing {
+                map.insert("timing".into(), serde_json::json!(timing.as_str()));
+            }
+            if let Some(guarantee) = &node.guarantee {
+                if let Ok(value) = serde_json::to_value(guarantee) {
+                    map.insert("guarantee".into(), value);
+                }
+            }
+        }
+        let hash = structural_hash(node, &mut self.cache);
+        self.cache.insert(ptr, hash);
+        let id = self.nodes.len() as u32;
+        self.nodes.push(DAGNode {
+            id,
+            kind: node.operator.kind_name(),
+            label,
+            detail,
+            schema: serde_json::to_value(&node.schema).ok(),
+            children,
+            workload_node_id: None,
+            hash: Some(hash),
+            source_node: Some(Rc::clone(node)),
+            source_ptr: Some(ptr as usize),
+            notes: Vec::new(),
+            decision: None,
+        });
+        self.ids.insert(ptr, id);
+        id
     }
-    let id = push_summary_originated_node(nodes, kind, label, detail, children);
-    nodes[id as usize].schema = Some(summary_schema_json(&node.schema));
-    id
 }
 
-fn summary_schema_json(schema: &crate::post_asap::Schema) -> serde_json::Value {
-    serde_json::json!({
-        "fields": schema.fields.iter().map(|field| serde_json::json!({
-            "name": field.name,
-            "dtype": format!("{:?}", field.dtype),
-            "nullable": field.nullable,
-        })).collect::<Vec<_>>(),
-        "time_index": schema.time_index,
-    })
+/// [`Operator::kind_name`] in snake_case, for [`SummaryDAGNode::kind`].
+/// Exhaustive so a new operator variant fails to compile here until it is
+/// named.
+fn snake_case_kind(operator: &Operator) -> &'static str {
+    match operator {
+        Operator::NonASAP(op) => match op {
+            NonASAPOp::Scan { .. } => "scan",
+            NonASAPOp::Values { .. } => "values",
+            NonASAPOp::Filter { .. } => "filter",
+            NonASAPOp::Project { .. } => "project",
+            NonASAPOp::Aggregate { .. } => "aggregate",
+            NonASAPOp::Join { .. } => "join",
+            NonASAPOp::SetOp { .. } => "set_op",
+            NonASAPOp::Concat { .. } => "concat",
+            NonASAPOp::Dedup { .. } => "dedup",
+            NonASAPOp::Sort { .. } => "sort",
+            NonASAPOp::Limit { .. } => "limit",
+            NonASAPOp::BinaryOp { .. } => "binary_op",
+            NonASAPOp::SQLWindowFunc { .. } => "sql_window_func",
+            NonASAPOp::TimeRange { .. } => "time_range",
+            NonASAPOp::TimeShift { .. } => "time_shift",
+            NonASAPOp::PromqlVectorFromScalar(_) => "promql_vector_from_scalar",
+            NonASAPOp::PromqlRelabel { .. } => "promql_relabel",
+            NonASAPOp::PromqlInfoEnrich { .. } => "promql_info_enrich",
+            NonASAPOp::PromqlSeriesSample { .. } => "promql_series_sample",
+            NonASAPOp::PromqlSubquery { .. } => "promql_subquery",
+        },
+        Operator::ASAP(op) => match op {
+            ASAPOp::SummaryAgg { .. } => "summary_agg",
+            ASAPOp::SummaryEstimate { .. } => "summary_estimate",
+            ASAPOp::FinalizeExactAccumulator { .. } => "finalize_exact_accumulator",
+            ASAPOp::MaintainPopulation { .. } => "maintain_population",
+            ASAPOp::EvaluatePopulation { .. } => "read_population",
+            ASAPOp::SummaryMerge { .. } => "summary_merge",
+            ASAPOp::SummarySubtract { .. } => "summary_subtract",
+            ASAPOp::SummaryDelete { .. } => "summary_delete",
+            ASAPOp::SummaryJoin { .. } => "summary_join",
+            ASAPOp::Extension { .. } => "extension",
+        },
+    }
+}
+
+/// A short, human-readable label for a [`FieldDataType`] (e.g.
+/// `"Sketch(Kll)"`, `"ExactAggregate(Sum)"`) — for the label text on a
+/// `SummaryAgg`/`SummaryJoin` node. Every variant is covered, via `Debug`
+/// for the inner kind rather than hand-written prose per algorithm.
+fn family_label(family: &FieldDataType) -> String {
+    match family {
+        FieldDataType::Plain(dtype) => format!("Plain({dtype:?})"),
+        FieldDataType::ExactAggregate(kind, _) => format!("ExactAggregate({kind:?})"),
+        FieldDataType::Sketch(kind, _grouping) => format!("Sketch({:?})", kind.algorithm()),
+        FieldDataType::Sample(kind, _) => format!("Sample({kind:?})"),
+        FieldDataType::Wavelet(kind, _) => format!("Wavelet({kind:?})"),
+        FieldDataType::StatModel(kind, _) => format!("StatModel({kind:?})"),
+    }
 }
 
 fn source_label(source: &Source) -> String {
@@ -998,407 +724,336 @@ fn source_label(source: &Source) -> String {
     }
 }
 
-/// Recursively flatten `expr`, appending nodes to `nodes` in post-order
-/// (children pushed before their parent), and return the id of the pushed
-/// root node. Exhaustive over every **operator** `QueryExpr` variant — a new
-/// one fails to compile here until this match is extended, matching the rest
-/// of the IR's exhaustive-match style (e.g. `output_schema`). The scalar
-/// variants (issue #205) are never passed to `build` directly: every operator
-/// arm that carries one (`Filter.pred`, `Project.cols`, `Aggregate.having`, …)
-/// serializes it as opaque `detail` JSON via `Predicate`/`ProjectItem`/
-/// `AggIntent`'s own `Serialize` impl, same as before the merge — a scalar
-/// sub-DAG was never a separate DAG node, so this doesn't change that.
-///
-/// `find_winner` is [`export_post_asap`]'s substitution seam, threaded
-/// through every recursive call (including [`export`]'s own, which always
-/// passes a closure that returns `None`) so both entry points share this
-/// exact traversal instead of maintaining two copies of it. `build` itself
-/// only ever calls `find_winner` once, right here at the top, before
-/// dispatching into the ordinary per-variant match below — see
-/// [`export_post_asap`]'s own doc for why a substitution's own immediate
-/// result is rendered via that match directly (recursing into its children
-/// through `build` again, so *they* still get a fresh `find_winner` call)
-/// rather than by looping back through this check a second time.
-fn build(
-    expr: &QueryExpr,
-    nodes: &mut Vec<DAGNode>,
-    cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
-) -> u32 {
-    match find_winner(expr) {
-        Some(PostAsapSubstitution::Rewrite {
-            replacement,
-            decision,
-        }) => {
-            let first = nodes.len();
-            let root = build_no_recheck(&replacement, nodes, cache, find_winner);
-            for node in &mut nodes[first..] {
-                if node.decision.is_none() {
-                    let mut node_decision = decision.clone();
-                    node_decision.role = if node.id == root {
-                        "replacement_root"
-                    } else {
-                        "replacement_region"
-                    };
-                    node.decision = Some(node_decision);
-                }
+/// `(label, detail)` for one node: its own fields, never its children.
+/// Exhaustive over every operator variant — a new one fails to compile
+/// here until this match is extended, matching the rest of the IR's
+/// exhaustive-match style. Scalar expressions are rendered through
+/// [`scalar_json`] with `ids` resolving their operator references.
+fn shape(
+    node: &OperatorNode,
+    ids: &HashMap<*const OperatorNode, u32>,
+) -> (String, serde_json::Value) {
+    let scalar = |expr: &ScalarExpr| scalar_json(expr, ids);
+    let scalars =
+        |exprs: &[ScalarExpr]| -> Vec<serde_json::Value> { exprs.iter().map(scalar).collect() };
+    let predicate = |pred: &crate::ir::Predicate| scalar(&pred.0);
+    let sort_keys = |keys: &[crate::ir::SortKey]| -> Vec<serde_json::Value> {
+        keys.iter()
+            .map(|key| {
+                serde_json::json!({
+                    "expr": scalar(&key.expr),
+                    "ascending": key.ascending,
+                    "nulls_first": key.nulls_first,
+                })
+            })
+            .collect()
+    };
+    match &node.operator {
+        Operator::NonASAP(op) => match op {
+            NonASAPOp::Scan {
+                source,
+                predicates,
+                schema,
+            } => (
+                format!("Scan({})", source_label(source)),
+                serde_json::json!({
+                    "source": source,
+                    "predicates": predicates.iter().map(predicate).collect::<Vec<_>>(),
+                    "schema": schema,
+                }),
+            ),
+            NonASAPOp::Values { rows, schema } => (
+                format!("Values({} rows)", rows.len()),
+                serde_json::json!({
+                    "rows": rows.iter().map(|row| scalars(row)).collect::<Vec<_>>(),
+                    "schema": schema,
+                }),
+            ),
+            NonASAPOp::Filter { pred, .. } => (
+                "Filter".into(),
+                serde_json::json!({ "pred": predicate(pred) }),
+            ),
+            NonASAPOp::Project {
+                cols, qualifier, ..
+            } => (
+                format!("Project({} cols)", cols.len()),
+                serde_json::json!({
+                    "cols": cols.iter().map(|item| serde_json::json!({
+                        "alias": item.alias,
+                        "expr": scalar(&item.expr),
+                    })).collect::<Vec<_>>(),
+                    "qualifier": qualifier,
+                }),
+            ),
+            NonASAPOp::Aggregate {
+                reduction,
+                measures,
+                output_names,
+                having,
+                ..
+            } => (
+                format!("Aggregate({} measures)", measures.len()),
+                serde_json::json!({
+                    "reduction": reduction,
+                    "measures": measures,
+                    "output_names": output_names,
+                    "having": having.as_ref().map(predicate),
+                }),
+            ),
+            NonASAPOp::Join { kind, pred, .. } => (
+                format!("Join({kind:?})"),
+                serde_json::json!({ "kind": kind, "pred": predicate(pred) }),
+            ),
+            NonASAPOp::SetOp { kind, all, .. } => (
+                format!("SetOp({kind:?})"),
+                serde_json::json!({ "kind": kind, "all": all }),
+            ),
+            NonASAPOp::Concat {
+                children,
+                discriminator_unique_key,
+            } => (
+                format!("Concat({} branches)", children.len()),
+                serde_json::json!({ "discriminator_unique_key": discriminator_unique_key }),
+            ),
+            NonASAPOp::Dedup { cols, .. } => (
+                format!("Dedup({} cols)", cols.len()),
+                serde_json::json!({ "cols": cols }),
+            ),
+            NonASAPOp::Sort {
+                keys, partition_by, ..
+            } => (
+                format!("Sort({} keys)", keys.len()),
+                serde_json::json!({ "keys": sort_keys(keys), "partition_by": partition_by }),
+            ),
+            NonASAPOp::Limit {
+                n,
+                offset,
+                partition_by,
+                ..
+            } => (
+                match n {
+                    Some(n) => format!("Limit({n})"),
+                    None => format!("Limit(offset {offset})"),
+                },
+                serde_json::json!({ "n": n, "offset": offset, "partition_by": partition_by }),
+            ),
+            NonASAPOp::BinaryOp {
+                operator,
+                return_bool,
+                ..
+            } => (
+                format!("BinaryOp({})", operator.kind),
+                serde_json::json!({
+                    "op": operator.kind.to_string(),
+                    "vector_match": operator.vector_match,
+                    "checked_relative_division": operator.checked_relative_division,
+                    "checked_finite_division": operator.checked_finite_division,
+                    "return_bool": return_bool,
+                }),
+            ),
+            NonASAPOp::SQLWindowFunc {
+                func,
+                args,
+                partition_by,
+                order_by,
+                frame,
+                output_name,
+                ..
+            } => (
+                format!("SQLWindowFunc({func:?})"),
+                serde_json::json!({
+                    "func": func,
+                    "args": scalars(args),
+                    "partition_by": partition_by,
+                    "order_by": sort_keys(order_by),
+                    "frame": frame,
+                    "output_name": output_name,
+                }),
+            ),
+            NonASAPOp::TimeRange { range, kind, .. } => (
+                format!("TimeRange({kind:?}, {range:?})"),
+                serde_json::json!({ "range": range, "kind": kind }),
+            ),
+            NonASAPOp::TimeShift { shift, .. } => {
+                ("TimeShift".into(), serde_json::json!({ "shift": shift }))
             }
-            return root;
-        }
-        Some(PostAsapSubstitution::Summary {
-            replacement,
-            decision,
-        }) => {
-            let first = nodes.len();
-            let root = build_summary_hybrid(&replacement, nodes, cache, find_winner);
-            for node in &mut nodes[first..] {
-                if node.decision.is_none() {
-                    let mut node_decision = decision.clone();
-                    node_decision.role = if node.id == root {
-                        "replacement_root"
-                    } else {
-                        "replacement_region"
-                    };
-                    node.decision = Some(node_decision);
-                }
+            NonASAPOp::PromqlVectorFromScalar(value) => (
+                "vector()".into(),
+                serde_json::json!({ "value": scalar(value) }),
+            ),
+            NonASAPOp::PromqlRelabel { dst, value, .. } => (
+                format!("PromqlRelabel(dst={dst})"),
+                serde_json::json!({ "dst": dst, "value": scalar(value) }),
+            ),
+            NonASAPOp::PromqlInfoEnrich { selector, .. } => (
+                "PromqlInfoEnrich".into(),
+                serde_json::json!({ "selector": selector }),
+            ),
+            NonASAPOp::PromqlSeriesSample { by, kind, .. } => (
+                format!("PromqlSeriesSample({kind:?})"),
+                serde_json::json!({ "by": by, "kind": kind }),
+            ),
+            NonASAPOp::PromqlSubquery {
+                range, resolution, ..
+            } => (
+                "PromqlSubquery".into(),
+                serde_json::json!({ "range": range, "resolution": resolution }),
+            ),
+        },
+        Operator::ASAP(op) => match op {
+            ASAPOp::SummaryAgg {
+                family,
+                input,
+                reduction,
+                grouping,
+                ..
+            } => (
+                format!("SummaryAgg({})", family_label(family)),
+                serde_json::json!({
+                    "family": format!("{family:?}"),
+                    "input": input,
+                    "reduction": reduction,
+                    "grouping": format!("{grouping:?}"),
+                }),
+            ),
+            ASAPOp::SummaryEstimate { query, .. } => (
+                format!("SummaryEstimate({query:?})"),
+                serde_json::json!({ "query": format!("{query:?}") }),
+            ),
+            ASAPOp::FinalizeExactAccumulator { .. } => {
+                ("FinalizeExactAccumulator".into(), serde_json::json!({}))
             }
-            return root;
-        }
-        None => {}
+            ASAPOp::MaintainPopulation { population, .. } => (
+                format!("MaintainPopulation(max_k={})", population.max_k),
+                serde_json::json!({ "population": population }),
+            ),
+            ASAPOp::EvaluatePopulation { evaluation, .. } => (
+                format!("EvaluatePopulation({evaluation:?})"),
+                serde_json::json!({ "evaluation": evaluation }),
+            ),
+            ASAPOp::SummaryMerge { children } => (
+                format!("SummaryMerge({} children)", children.len()),
+                serde_json::json!({}),
+            ),
+            ASAPOp::SummarySubtract { .. } => ("SummarySubtract".into(), serde_json::json!({})),
+            ASAPOp::SummaryDelete { key, .. } => {
+                ("SummaryDelete".into(), serde_json::json!({ "key": key }))
+            }
+            ASAPOp::SummaryJoin { key, family, .. } => (
+                format!("SummaryJoin({})", family_label(family)),
+                serde_json::json!({ "key": key, "family": format!("{family:?}") }),
+            ),
+            ASAPOp::Extension { name, .. } => (
+                format!("Extension({name})"),
+                serde_json::json!({ "name": name }),
+            ),
+        },
     }
-    build_no_recheck(expr, nodes, cache, find_winner)
 }
 
-/// The actual per-variant match [`build`] dispatches to once it has decided
-/// (by consulting `find_winner` exactly once) which `QueryExpr` value to
-/// render at this position — either `expr` itself (unchanged), or a winning
-/// `Replacement::Rewrite`'s own target. Every recursive call here goes back
-/// through [`build`] (not this function), so every child gets its own fresh
-/// `find_winner` query.
-fn build_no_recheck(
-    expr: &QueryExpr,
-    nodes: &mut Vec<DAGNode>,
-    cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
-) -> u32 {
+/// `{"scalar_ref": <id>}` for an operator node a scalar expression reads.
+/// The node is one of the owning operator's children, so it has already
+/// been exported by the time its parent's `detail` is built.
+fn scalar_ref(
+    node: &Rc<OperatorNode>,
+    ids: &HashMap<*const OperatorNode, u32>,
+) -> serde_json::Value {
+    serde_json::json!({ "scalar_ref": ids.get(&Rc::as_ptr(node)).copied() })
+}
+
+/// `expr` as JSON in `ScalarExpr`'s own serde shape (externally tagged
+/// variants), except that every operator reference is rendered via
+/// [`scalar_ref`] instead of inlining the referenced sub-DAG. Exhaustive so
+/// a new variant fails to compile here until it is rendered.
+fn scalar_json(expr: &ScalarExpr, ids: &HashMap<*const OperatorNode, u32>) -> serde_json::Value {
+    let sub = |e: &ScalarExpr| scalar_json(e, ids);
+    let list = |es: &[ScalarExpr]| -> Vec<serde_json::Value> { es.iter().map(sub).collect() };
     match expr {
-        QueryExpr::Scan {
-            source,
-            predicates,
-            schema,
-        } => {
-            let label = format!("Scan({})", source_label(source));
-            let detail = serde_json::json!({
-                "source": source,
-                "predicates": predicates,
-                "schema": schema,
-            });
-            push_node(nodes, expr, cache, label, detail, vec![])
-        }
-        // The bridged child is a scalar-sub-language node (issue #220), not
-        // an operator node `build` can recurse into — serialize it as opaque
-        // `detail` JSON, same as every other scalar-typed field
-        // (`Filter.pred`, `Project.cols`, …) rather than pushing it as a
-        // separate DAG node.
-        QueryExpr::PromqlScalarBridge(inner) => {
-            let detail = serde_json::json!({ "value": inner });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("PromqlScalarBridge({inner:?})"),
-                detail,
-                vec![],
-            )
-        }
-        QueryExpr::EvalTimestamp => push_node(
-            nodes,
-            expr,
-            cache,
-            "EvalTimestamp".into(),
-            serde_json::json!({}),
-            vec![],
-        ),
-        QueryExpr::CurrentTimestamp => push_node(
-            nodes,
-            expr,
-            cache,
-            "CurrentTimestamp".into(),
-            serde_json::json!({}),
-            vec![],
-        ),
-        QueryExpr::PromqlVectorFromScalar(child) => {
-            let c = build(child, nodes, cache, find_winner);
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "vector()".into(),
-                serde_json::json!({}),
-                vec![c],
-            )
-        }
-        QueryExpr::PromqlScalarFromVector(child) => {
-            let c = build(child, nodes, cache, find_winner);
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "scalar()".into(),
-                serde_json::json!({}),
-                vec![c],
-            )
-        }
-        QueryExpr::PromqlRelabel { dst, value, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "dst": dst, "value": value });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("PromqlRelabel(dst={dst})"),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::PromqlInfoEnrich { selector, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "selector": selector });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "PromqlInfoEnrich".into(),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::PromqlSeriesSample { by, kind, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "by": by, "kind": kind });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("PromqlSeriesSample({kind:?})"),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::Filter { pred, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "pred": pred });
-            push_node(nodes, expr, cache, "Filter".into(), detail, vec![c])
-        }
-        QueryExpr::Project {
-            cols,
-            qualifier,
-            child,
-        } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "cols": cols, "qualifier": qualifier });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("Project({} cols)", cols.len()),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::Aggregate {
-            reduction,
-            measures,
-            output_names,
-            filters,
-            having,
-            child,
-        } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({
-                "reduction": reduction,
-                "measures": measures,
-                "output_names": output_names,
-                "filters": filters,
-                "having": having,
-            });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("Aggregate({} measures)", measures.len()),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::Dedup { cols, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "cols": cols });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("Dedup({} cols)", cols.len()),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::Concat {
-            children,
-            discriminator_unique_key,
-        } => {
-            let ids: Vec<u32> = children
-                .iter()
-                .map(|c| build(c, nodes, cache, find_winner))
-                .collect();
-            let label = format!("Concat({} branches)", ids.len());
-            let detail =
-                serde_json::json!({ "discriminator_unique_key": discriminator_unique_key });
-            push_node(nodes, expr, cache, label, detail, ids)
-        }
-        QueryExpr::Join {
-            kind,
-            pred,
+        ScalarExpr::Column(id) => serde_json::json!({ "Column": id }),
+        ScalarExpr::Literal(value) => serde_json::json!({ "Literal": value }),
+        ScalarExpr::Negative { expr, semantics } => serde_json::json!({
+            "Negative": { "expr": sub(expr), "semantics": semantics }
+        }),
+        ScalarExpr::Compare {
             left,
-            right,
-        } => {
-            let l = build(left, nodes, cache, find_winner);
-            let r = build(right, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "kind": kind, "pred": pred });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("Join({kind:?})"),
-                detail,
-                vec![l, r],
-            )
-        }
-        QueryExpr::SetOp {
-            kind,
-            all,
-            left,
-            right,
-        } => {
-            let l = build(left, nodes, cache, find_winner);
-            let r = build(right, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "kind": kind, "all": all });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("SetOp({kind:?})"),
-                detail,
-                vec![l, r],
-            )
-        }
-        QueryExpr::Sort {
-            keys,
-            partition_by,
-            child,
-        } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "keys": keys, "partition_by": partition_by });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("Sort({} keys)", keys.len()),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::Limit { n, offset, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "n": n, "offset": offset });
-            push_node(nodes, expr, cache, format!("Limit({n})"), detail, vec![c])
-        }
-        QueryExpr::PromqlSubquery {
-            range,
-            resolution,
-            child,
-        } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "range": range, "resolution": resolution });
-            push_node(nodes, expr, cache, "PromqlSubquery".into(), detail, vec![c])
-        }
-        QueryExpr::TimeRange { range, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "range": range });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("TimeRange({range:?})"),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::TimeShift { shift, child } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "shift": shift });
-            push_node(nodes, expr, cache, "TimeShift".into(), detail, vec![c])
-        }
-        QueryExpr::SQLWindowFunc {
-            func,
-            args,
-            partition_by,
-            order_by,
-            frame,
-            output_name,
-            child,
-        } => {
-            let c = build(child, nodes, cache, find_winner);
-            let detail = serde_json::json!({
-                "func": func,
-                "args": args,
-                "partition_by": partition_by,
-                "order_by": order_by,
-                "frame": frame,
-                "output_name": output_name,
-            });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("SQLWindowFunc({func:?})"),
-                detail,
-                vec![c],
-            )
-        }
-        QueryExpr::BinaryOp {
             op,
-            lhs,
-            rhs,
-            vector_match,
-        } => {
-            let l = build(lhs, nodes, cache, find_winner);
-            let r = build(rhs, nodes, cache, find_winner);
-            let detail = serde_json::json!({ "op": op.to_string(), "vector_match": vector_match });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                format!("BinaryOp({op})"),
-                detail,
-                vec![l, r],
-            )
-        }
-        other @ (QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::Cast { .. }
-        | QueryExpr::InList { .. }
-        | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arithmetic { .. }
-        | QueryExpr::Case { .. }) => {
-            unreachable!("dag_export::build reached a scalar QueryExpr variant directly: {other:?}")
-        }
+            right,
+            semantics,
+        } => serde_json::json!({
+            "Compare": {
+                "left": sub(left),
+                "op": op,
+                "right": sub(right),
+                "semantics": semantics,
+            }
+        }),
+        ScalarExpr::BoolAnd(parts) => serde_json::json!({ "BoolAnd": list(parts) }),
+        ScalarExpr::BoolOr(parts) => serde_json::json!({ "BoolOr": list(parts) }),
+        ScalarExpr::Not(e) => serde_json::json!({ "Not": sub(e) }),
+        ScalarExpr::IsNull(e) => serde_json::json!({ "IsNull": sub(e) }),
+        ScalarExpr::IsNotNull(e) => serde_json::json!({ "IsNotNull": sub(e) }),
+        ScalarExpr::Cast { expr, to, try_cast } => serde_json::json!({
+            "Cast": { "expr": sub(expr), "to": to, "try_cast": try_cast }
+        }),
+        ScalarExpr::InList {
+            expr,
+            list: items,
+            negated,
+        } => serde_json::json!({
+            "InList": { "expr": sub(expr), "list": list(items), "negated": negated }
+        }),
+        ScalarExpr::FunctionCall { name, args } => serde_json::json!({
+            "FunctionCall": { "name": name, "args": list(args) }
+        }),
+        ScalarExpr::Arithmetic {
+            op,
+            left,
+            right,
+            semantics,
+        } => serde_json::json!({
+            "Arithmetic": {
+                "op": op,
+                "left": sub(left),
+                "right": sub(right),
+                "semantics": semantics,
+            }
+        }),
+        ScalarExpr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => serde_json::json!({
+            "Case": {
+                "operand": operand.as_deref().map(sub),
+                "branches": branches
+                    .iter()
+                    .map(|(when, then)| serde_json::json!([sub(when), sub(then)]))
+                    .collect::<Vec<_>>(),
+                "else_expr": else_expr.as_deref().map(sub),
+            }
+        }),
+        ScalarExpr::CurrentTimestamp => serde_json::json!("CurrentTimestamp"),
+        ScalarExpr::EvalTimestamp => serde_json::json!("EvalTimestamp"),
+        ScalarExpr::PromqlScalarFromVector(node) => serde_json::json!({
+            "PromqlScalarFromVector": scalar_ref(node, ids)
+        }),
+        ScalarExpr::ScalarSubquery(node) => serde_json::json!({
+            "ScalarSubquery": scalar_ref(node, ids)
+        }),
+        ScalarExpr::Exists { subquery, negated } => serde_json::json!({
+            "Exists": { "subquery": scalar_ref(subquery, ids), "negated": negated }
+        }),
+        ScalarExpr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => serde_json::json!({
+            "InSubquery": {
+                "expr": sub(expr),
+                "subquery": scalar_ref(subquery, ids),
+                "negated": negated,
+            }
+        }),
     }
 }
 
@@ -1407,14 +1062,20 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::ir::operator_properties::{GroupKeys, JoinKind, Reduction};
+    use crate::ir::Predicate;
+    use crate::post_asap::{
+        BoundExpr, CompositionOperator, ErrorMetric, GroupingStrategy, GuaranteeSource,
+        ProbabilityExpr, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
+    };
     use crate::pre_asap::agg_intent::AggIntent;
-    use crate::pre_asap::expr_ir::ScalarValue;
-    use crate::pre_asap::query_expr::{GroupKeys, Predicate, Reduction};
+    use crate::pre_asap::expr_ir::{ColumnRef, ScalarValue};
     use crate::pre_asap::schema::{DataType, Field, Schema};
+
     use crate::types::AccuracyTarget;
 
-    fn scan(table: &str, columns: Vec<Field>) -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan(table: &str, columns: Vec<Field>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: table.into(),
             },
@@ -1425,11 +1086,79 @@ mod tests {
                 unique_keys: vec![],
                 closed: true,
             },
-        }
+        }))
+        .unwrap()
     }
 
     fn value_col() -> Vec<Field> {
         vec![Field::plain("value", DataType::Float64, false)]
+    }
+
+    fn true_pred() -> Predicate {
+        Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true)))
+    }
+
+    fn count_agg(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(GroupKeys::none()),
+            measures: vec![AggIntent::Count {
+                accuracy: AccuracyTarget::Exact,
+            }],
+            output_names: vec![],
+            filters: vec![],
+            having: None,
+            child,
+        }))
+        .unwrap()
+    }
+
+    fn join(left: Rc<OperatorNode>, right: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Join {
+            kind: JoinKind::Inner,
+            pred: true_pred(),
+            left,
+            right,
+        }))
+        .unwrap()
+    }
+
+    /// A KLL `SummaryAgg` over `leaf`'s `v` column, read out as a quantile.
+    fn quantile_evaluation(
+        leaf: Rc<OperatorNode>,
+        guarantee: Option<ResultGuarantee>,
+    ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
+        let family = FieldDataType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 40 }),
+            GroupingStrategy::default(),
+        );
+        let agg = std::rc::Rc::new(
+            OperatorNode::with_schema(
+                crate::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                    child: leaf,
+                    family: family.clone(),
+                    input: SummaryUpdate::column(ColumnRef::Named("v".into())),
+                    reduction: Reduction::by(vec![]),
+                    grouping: GroupingStrategy::default(),
+                    filter: None,
+                }),
+                Schema::lifted(vec![Field::new("state", family, false)], None),
+            )
+            .with_guarantee(None),
+        );
+        let evaluation = std::rc::Rc::new(
+            OperatorNode::with_schema(
+                crate::ir::Operator::ASAP(ASAPOp::SummaryEstimate {
+                    summary_input: Rc::clone(&agg),
+                    query: SketchStatistic::Quantile { q: 0.99 },
+                }),
+                Schema::lifted(
+                    vec![Field::plain("quantile", DataType::Float64, false)],
+                    None,
+                ),
+            )
+            .with_guarantee(guarantee),
+        );
+        (agg, evaluation)
     }
 
     #[test]
@@ -1438,12 +1167,14 @@ mod tests {
         assert_eq!(dag.nodes.len(), 1);
         assert_eq!(dag.root, 0);
         assert_eq!(dag.nodes[0].kind, "Scan");
+        assert_eq!(dag.nodes[0].label, "Scan(metrics)");
         assert!(dag.nodes[0].children.is_empty());
+        assert!(dag.nodes[0].source_node.is_some());
     }
 
     /// `export` itself never populates higher-layer annotations. Empty
-    /// annotations must not appear in serialized JSON, so ordinary (non-ASAP)
-    /// exports retain their existing shape.
+    /// annotations must not appear in serialized JSON, so ordinary exports
+    /// retain their existing shape.
     #[test]
     fn export_omits_empty_higher_layer_annotations() {
         let dag = export(&scan("metrics", value_col()));
@@ -1460,6 +1191,10 @@ mod tests {
             !json.contains("decision"),
             "empty `decision` must be skipped, not serialized as `null`: {json}"
         );
+        assert!(
+            !json.contains("source_node"),
+            "`source_node` is in-process only: {json}"
+        );
         let dag_json = serde_json::to_string(&dag).unwrap();
         assert!(
             !dag_json.contains("edge_annotations"),
@@ -1473,22 +1208,29 @@ mod tests {
         // single child slot) share the exact same `Rc` Scan —
         // `export_post_asap` must merge them onto one node id. Sharing alone
         // is not physical cost evidence, so no edge cost may be fabricated.
-        let shared_scan = Rc::new(scan("metrics", value_col()));
-        let left_branch = QueryExpr::Dedup {
-            cols: vec![0],
-            child: Rc::clone(&shared_scan),
-        };
-        let right_branch = QueryExpr::Limit {
-            n: 5,
-            offset: 0,
-            child: Rc::clone(&shared_scan),
-        };
-        let root = QueryExpr::Concat {
+        let shared_scan = scan("metrics", value_col());
+        let left_branch =
+            OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Dedup {
+                cols: vec![0],
+                child: Rc::clone(&shared_scan),
+            }))
+            .unwrap();
+        let right_branch =
+            OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Limit {
+                n: Some(5),
+                offset: 0,
+                partition_by: GroupKeys::none(),
+                child: Rc::clone(&shared_scan),
+            }))
+            .unwrap();
+        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Concat {
             children: vec![left_branch, right_branch],
             discriminator_unique_key: None,
-        };
+        }))
+        .unwrap();
         let dag = export_post_asap(&root, &mut |_| None);
 
+        assert_eq!(dag.nodes.len(), 4, "Scan, Dedup, Limit, Concat");
         assert_eq!(
             dag.nodes.iter().filter(|n| n.kind == "Scan").count(),
             1,
@@ -1497,20 +1239,15 @@ mod tests {
         assert!(dag.edge_annotations.is_empty());
     }
 
-    /// Regression test: a single parent referencing the same shared child
-    /// from two of its own operand slots at once (a `Join` whose left and
-    /// right sides are the exact same `Rc`, post pointer-dedup) is *one*
-    /// downstream consumer, not two — this must not inflate
-    /// produce an edge-cost annotation without explicit physical evidence.
+    /// A single parent referencing the same shared child from two of its
+    /// own operand slots at once (a `Join` whose left and right sides are
+    /// the exact same `Rc`) is *one* downstream consumer, not two — this
+    /// must not produce an edge-cost annotation without explicit physical
+    /// evidence.
     #[test]
     fn a_single_parent_referencing_a_shared_child_twice_is_one_consumer_not_two() {
-        let shared_scan = Rc::new(scan("metrics", value_col()));
-        let root = QueryExpr::Join {
-            kind: crate::pre_asap::query_expr::JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            left: Rc::clone(&shared_scan),
-            right: Rc::clone(&shared_scan),
-        };
+        let shared_scan = scan("metrics", value_col());
+        let root = join(Rc::clone(&shared_scan), Rc::clone(&shared_scan));
         let dag = export_post_asap(&root, &mut |_| None);
 
         assert_eq!(
@@ -1518,6 +1255,7 @@ mod tests {
             1,
             "the shared Scan must be merged onto one node, not duplicated"
         );
+        assert_eq!(dag.nodes[dag.root as usize].children, vec![0, 0]);
         assert!(
             dag.edge_annotations.is_empty(),
             "a single parent referencing the same child twice is one consumer, not a genuine \
@@ -1527,38 +1265,33 @@ mod tests {
     }
 
     #[test]
-    fn export_never_produces_edge_annotations_since_it_never_shares_nodes() {
-        // Plain `export` (no `export_post_asap`) never deduplicates by `Rc`
-        // pointer identity — even a workload-level shared sub-DAG renders as
-        // two independent DAG nodes here, so there is nothing to annotate.
-        let shared_scan = Rc::new(scan("metrics", value_col()));
-        let root = QueryExpr::Join {
-            kind: crate::pre_asap::query_expr::JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            left: Rc::clone(&shared_scan),
-            right: Rc::clone(&shared_scan),
-        };
-        let dag = export(&root);
-        assert_eq!(dag.nodes.iter().filter(|n| n.kind == "Scan").count(), 2);
+    fn export_merges_pointer_shared_nodes_but_not_equal_copies() {
+        // Plain `export` deduplicates by `Rc` pointer identity: the same
+        // `Rc` reached twice is one node ...
+        let shared_scan = scan("metrics", value_col());
+        let dag = export(&join(Rc::clone(&shared_scan), Rc::clone(&shared_scan)));
+        assert_eq!(dag.nodes.iter().filter(|n| n.kind == "Scan").count(), 1);
         assert!(dag.edge_annotations.is_empty());
+
+        // ... while two structurally equal but distinct `Rc`s stay two
+        // nodes (with equal hashes — that is CSE's job, not the export's).
+        let dag = export(&join(
+            scan("metrics", value_col()),
+            scan("metrics", value_col()),
+        ));
+        let scans: Vec<_> = dag.nodes.iter().filter(|n| n.kind == "Scan").collect();
+        assert_eq!(scans.len(), 2);
+        assert_eq!(scans[0].hash, scans[1].hash);
     }
 
     #[test]
     fn chain_preserves_shape_and_child_links() {
-        let expr = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            child: Rc::new(QueryExpr::Aggregate {
-                reduction: Reduction::Reduce(GroupKeys::none()),
-                measures: vec![AggIntent::Count {
-                    accuracy: AccuracyTarget::Exact,
-                }],
-                output_names: vec![],
-                filters: vec![],
-                having: None,
-                child: Rc::new(scan("metrics", value_col())),
-            }),
-        };
-        let dag = export(&expr);
+        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Filter {
+            pred: true_pred(),
+            child: count_agg(scan("metrics", value_col())),
+        }))
+        .unwrap();
+        let dag = export(&root);
         assert_eq!(dag.nodes.len(), 3, "Filter -> Aggregate -> Scan");
 
         let filter = &dag.nodes[dag.root as usize];
@@ -1567,6 +1300,7 @@ mod tests {
 
         let agg = &dag.nodes[filter.children[0] as usize];
         assert_eq!(agg.kind, "Aggregate");
+        assert_eq!(agg.label, "Aggregate(1 measures)");
         assert_eq!(agg.children.len(), 1);
 
         let leaf = &dag.nodes[agg.children[0] as usize];
@@ -1576,16 +1310,74 @@ mod tests {
 
     #[test]
     fn merge_keeps_every_branch_as_a_child() {
-        let expr = QueryExpr::concat(vec![
-            scan("a", value_col()),
-            scan("b", value_col()),
-            scan("c", value_col()),
-        ]);
-        let dag = export(&expr);
+        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Concat {
+            children: vec![
+                scan("a", value_col()),
+                scan("b", value_col()),
+                scan("c", value_col()),
+            ],
+            discriminator_unique_key: None,
+        }))
+        .unwrap();
+        let dag = export(&root);
         assert_eq!(dag.nodes.len(), 4, "3 branches + the Concat node");
         let merge = &dag.nodes[dag.root as usize];
         assert_eq!(merge.kind, "Concat");
         assert_eq!(merge.children.len(), 3);
+    }
+
+    /// An operator node read from a scalar expression is a child of the
+    /// owning operator (after its operator inputs), and the expression's
+    /// `detail` points at it by id instead of inlining it.
+    #[test]
+    fn scalar_operator_references_are_children_rendered_as_scalar_refs() {
+        let subquery = scan("other", value_col());
+        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Exists {
+                subquery: Rc::clone(&subquery),
+                negated: false,
+            }),
+            child: scan("metrics", value_col()),
+        }))
+        .unwrap();
+        let dag = export(&root);
+        assert_eq!(dag.nodes.len(), 3);
+        let filter = &dag.nodes[dag.root as usize];
+        assert_eq!(
+            filter.children.len(),
+            2,
+            "operator input, then the scalar reference"
+        );
+        let input = &dag.nodes[filter.children[0] as usize];
+        let referenced = &dag.nodes[filter.children[1] as usize];
+        assert_eq!(input.label, "Scan(metrics)");
+        assert_eq!(referenced.label, "Scan(other)");
+        assert_eq!(
+            filter.detail["pred"]["Exists"]["subquery"]["scalar_ref"],
+            serde_json::json!(referenced.id)
+        );
+        assert_eq!(filter.detail["pred"]["Exists"]["negated"], false);
+        let json = serde_json::to_string(&filter.detail).unwrap();
+        assert!(
+            !json.contains("other"),
+            "the referenced sub_dag must not be inlined into detail: {json}"
+        );
+    }
+
+    #[test]
+    fn limit_without_n_is_offset_only() {
+        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Limit {
+            n: None,
+            offset: 3,
+            partition_by: GroupKeys::none(),
+            child: scan("metrics", value_col()),
+        }))
+        .unwrap();
+        let dag = export(&root);
+        let limit = &dag.nodes[dag.root as usize];
+        assert_eq!(limit.label, "Limit(offset 3)");
+        assert_eq!(limit.detail["n"], serde_json::Value::Null);
+        assert_eq!(limit.detail["offset"], 3);
     }
 
     #[test]
@@ -1615,17 +1407,18 @@ mod tests {
         // Two roots that each wrap the *same* Scan shape in a different outer
         // node — the exported hash should still flag the shared Scan even
         // though it's embedded at different depths / under different parents.
-        let shared_shape = || scan("metrics", value_col());
-
-        let q1 = QueryExpr::Limit {
-            n: 10,
+        let q1 = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Limit {
+            n: Some(10),
             offset: 0,
-            child: Rc::new(shared_shape()),
-        };
-        let q2 = QueryExpr::Dedup {
+            partition_by: GroupKeys::none(),
+            child: scan("metrics", value_col()),
+        }))
+        .unwrap();
+        let q2 = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Dedup {
             cols: vec![0],
-            child: Rc::new(shared_shape()),
-        };
+            child: scan("metrics", value_col()),
+        }))
+        .unwrap();
 
         let g1 = export(&q1);
         let g2 = export(&q2);
@@ -1647,9 +1440,9 @@ mod tests {
     fn root_hash_matches_cse_structural_hash_for_the_same_node() {
         // Not just "hashes equal for equal inputs" (any two consistent hash
         // functions would do that) — the exported root's `hash` must be the
-        // literal `u64` `crate::pre_asap::cse::structural_hash` produces for
-        // this exact node, because it's the same function call, not a
-        // parallel reimplementation that happens to agree.
+        // literal `u64` `crate::ir::cse::structural_hash` produces for this
+        // exact node, because it's the same function call, not a parallel
+        // reimplementation that happens to agree.
         let leaf = scan("metrics", value_col());
         let dag = export(&leaf);
         assert_eq!(
@@ -1661,24 +1454,15 @@ mod tests {
 
     #[test]
     fn every_node_hash_matches_cse_structural_hash_on_its_own_sub_dag() {
-        // A multi-level DAG: check the parity holds at every depth, not
-        // just the root — each `DAGNode::hash` must equal
-        // `structural_hash` applied to the actual `QueryExpr` sub-DAG that
-        // node represents.
-        let agg = QueryExpr::Aggregate {
-            reduction: Reduction::Reduce(GroupKeys::none()),
-            measures: vec![AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
-            }],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: Rc::new(scan("metrics", value_col())),
-        };
-        let root = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            child: Rc::new(agg.clone()),
-        };
+        // A multi-level tree: check the parity holds at every depth, not
+        // just the root — each `DAGNode::hash` must equal `structural_hash`
+        // applied to the actual node it represents.
+        let agg = count_agg(scan("metrics", value_col()));
+        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Filter {
+            pred: true_pred(),
+            child: Rc::clone(&agg),
+        }))
+        .unwrap();
 
         let dag = export(&root);
         assert_eq!(
@@ -1697,39 +1481,23 @@ mod tests {
         );
     }
 
-    /// Issue #172: a readout's guarantee is exported structurally — metric,
+    /// Issue #172: a evaluation's guarantee is exported structurally — metric,
     /// symbolic bound, failure probability, provenance (allocation
-    /// included) — and a rejection carries its typed reason.
+    /// included) — and a rejection carries its typed reason. A relational
+    /// node below a summary is its own node, in the same dag.
     #[test]
     fn export_carries_guarantee_allocation_and_rejection_reason() {
-        use crate::post_asap::{
-            BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GroupingStrategy,
-            GuaranteeSource, ProbabilityExpr, Schema, SketchAlgorithm, SketchKind, SketchParams,
-            SketchStatistic,
-        };
-        let leaf = Rc::new(scan("t", vec![Field::plain("v", DataType::Float64, false)]));
-        let kept = Rc::new(SummaryNode {
-            expr: SummaryExpr::KeepPreAsap(Rc::clone(&leaf)),
-            schema: Schema::lifted(vec![], None),
-            guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
-        });
-        let agg = Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryAgg {
-                child: kept,
-                family: FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 40 }),
-                    GroupingStrategy::default(),
-                ),
-                input: crate::post_asap::SummaryUpdate::column(
-                    crate::pre_asap::expr_ir::ColumnRef::Named("v".into()),
-                ),
-                reduction: Reduction::by(vec![]),
-                grouping: GroupingStrategy::default(),
-                filter: None,
-            },
-            schema: Schema::lifted(vec![], None),
-            guarantee: None,
-        });
+        let leaf = Rc::new(
+            OperatorNode::new(Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::Table {
+                    table_ref: "t".into(),
+                },
+                predicates: vec![],
+                schema: Schema::lifted(vec![Field::plain("v", DataType::Float64, false)], None),
+            }))
+            .unwrap()
+            .with_guarantee(Some(ResultGuarantee::exact("Scan"))),
+        );
         let guarantee = ResultGuarantee {
             metric: ErrorMetric::Rank,
             bound: BoundExpr::Sum {
@@ -1755,15 +1523,15 @@ mod tests {
                 },
             ],
         };
-        let root = SummaryNode {
-            expr: SummaryExpr::SummaryEstimate {
-                summary_input: agg,
-                query: SketchStatistic::Quantile { q: 0.99 },
-            },
-            schema: Schema::lifted(vec![], None),
-            guarantee: Some(guarantee),
-        };
+        let (_, root) = quantile_evaluation(Rc::clone(&leaf), Some(guarantee));
         let dag = export_summary(&root);
+        assert_eq!(
+            dag.nodes.iter().map(|n| n.kind).collect::<Vec<_>>(),
+            ["scan", "summary_agg", "summary_estimate"]
+        );
+        assert_eq!(dag.nodes[1].label, "SummaryAgg(Sketch(Kll))");
+        assert!(dag.nodes[2].label.starts_with("SummaryEstimate(Quantile"));
+        assert!(dag.nodes.iter().all(|n| n.schema.is_some()));
         let json = serde_json::to_value(&dag).unwrap();
         let root_json = &json["nodes"][dag.root as usize];
         assert_eq!(root_json["guarantee"]["metric"], "rank");
@@ -1779,9 +1547,17 @@ mod tests {
         assert!(provenance.iter().any(|s| s["kind"] == "composition_step"));
         // Raw sketch state carries none; the exact leaf carries zero error.
         let state = &json["nodes"][1];
-        assert_eq!(state["kind"], "SummaryAgg");
         assert!(state.get("guarantee").is_none());
         assert_eq!(json["nodes"][0]["guarantee"]["bound"]["op"], "zero");
+
+        // The `DAGNode` shape carries the same guarantee inside `detail`.
+        let dag = export(&root);
+        assert_eq!(
+            dag.nodes.iter().map(|n| n.kind).collect::<Vec<_>>(),
+            ["Scan", "SummaryAgg", "SummaryEstimate"]
+        );
+        assert_eq!(dag.nodes[2].detail["guarantee"]["metric"], "rank");
+        assert!(dag.nodes[1].detail.get("guarantee").is_none());
 
         let named = NamedDAG {
             name: "q".into(),
@@ -1792,7 +1568,7 @@ mod tests {
             workload_cost: None,
             rejections: vec![TargetRejection {
                 target_pre_id: 0,
-                strategy: "SketchAlgorithmStrategy".into(),
+                strategy: "ASAPStrategies".into(),
                 description: "quantile over quantile".into(),
                 error: AccuracyError::UnsupportedComposition {
                     operator: CompositionOperator::ApproximateAggregate,
@@ -1819,38 +1595,166 @@ mod tests {
             .is_none());
     }
 
-    fn viewer_kind_categories() -> std::collections::BTreeMap<String, String> {
-        const START: &str = "const KIND_CATEGORY_JSON = `";
-        let source = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tools/dag-viewer/node-style.js"
-        ));
-        let json = source
-            .split_once(START)
-            .expect("node-style.js must declare KIND_CATEGORY_JSON")
-            .1
-            .split_once("`;")
-            .expect("KIND_CATEGORY_JSON must be a template literal")
-            .0;
-        serde_json::from_str(json).expect("KIND_CATEGORY_JSON must be valid JSON")
+    /// `export_post_asap` splices a winning summary in place of its target,
+    /// tags every node the splice introduced with the decision, and leaves
+    /// the rest of the query — including an input the summary reuses that
+    /// was already exported — untagged and shared.
+    #[test]
+    fn export_post_asap_splices_a_summary_substitution_in_place() {
+        let leaf = scan("t", vec![Field::plain("v", DataType::Float64, false)]);
+        let target = count_agg(Rc::clone(&leaf));
+        // `leaf` is exported through the Join's left side before the target
+        // (its right side) is reached and substituted.
+        let root = join(Rc::clone(&leaf), Rc::clone(&target));
+        let (_, evaluation) = quantile_evaluation(Rc::clone(&leaf), None);
+        let decision = DAGDecision {
+            id: 7,
+            strategy: "Sketch".into(),
+            rationale: "quantile via KLL".into(),
+            rank: 0,
+            cost: 1.0,
+            role: "",
+            baseline_cost: None,
+            selected_cost: None,
+            benefit: None,
+        };
+        let mut calls = Vec::new();
+        let dag = export_post_asap(&root, &mut |node| {
+            calls.push(node.operator.kind_name());
+            Rc::ptr_eq(node, &target).then(|| PostAsapSubstitution::Summary {
+                replacement: Rc::clone(&evaluation),
+                decision: decision.clone(),
+            })
+        });
+
+        let kinds: Vec<_> = dag.nodes.iter().map(|n| n.kind).collect();
+        assert_eq!(kinds, ["Scan", "SummaryAgg", "SummaryEstimate", "Join"]);
+        assert!(!kinds.contains(&"Aggregate"), "the target itself is gone");
+        let join_node = &dag.nodes[dag.root as usize];
+        assert_eq!(join_node.children, vec![0, 2]);
+        assert!(join_node.decision.is_none());
+        let estimate = &dag.nodes[2];
+        assert_eq!(estimate.kind, "SummaryEstimate");
+        assert_eq!(
+            estimate.decision.as_ref().map(|d| (d.id, d.role)),
+            Some((7, "replacement_root"))
+        );
+        let agg = &dag.nodes[estimate.children[0] as usize];
+        assert_eq!(
+            agg.decision.as_ref().map(|d| (d.id, d.role)),
+            Some((7, "replacement_region"))
+        );
+        let scan_node = &dag.nodes[agg.children[0] as usize];
+        assert_eq!(
+            scan_node.id, 0,
+            "the summary reuses the already-exported input"
+        );
+        assert!(
+            scan_node.decision.is_none(),
+            "a node exported before the splice is not tagged by it"
+        );
+        assert_eq!(
+            calls,
+            ["Join", "Scan", "Aggregate", "SummaryAgg"],
+            "the substitution's own top level (SummaryEstimate) is never re-queried; its \
+             descendants are, except the input already exported"
+        );
     }
 
+    /// A `SharedSubDAGStrategy`-shaped substitution returns the target
+    /// itself as its replacement; the walk must still terminate and render
+    /// the target once.
     #[test]
-    fn viewer_categorizes_exactly_the_exported_node_kinds() {
-        let expected: std::collections::BTreeSet<_> = QUERY_KIND_TAGS
-            .iter()
-            .chain(SUMMARY_KIND_TAGS)
-            .copied()
-            .chain(std::iter::once("KeepPreAsap"))
-            .collect();
+    fn export_post_asap_terminates_when_the_replacement_is_the_target() {
+        let target = count_agg(scan("t", value_col()));
+        let decision = DAGDecision {
+            id: 1,
+            strategy: "SharedSubDAG".into(),
+            rationale: "share".into(),
+            rank: 0,
+            cost: f64::NAN,
+            role: "",
+            baseline_cost: None,
+            selected_cost: None,
+            benefit: None,
+        };
+        let dag = export_post_asap(&target, &mut |node| {
+            Rc::ptr_eq(node, &target).then(|| PostAsapSubstitution::Rewrite {
+                replacement: Rc::clone(&target),
+                decision: decision.clone(),
+            })
+        });
+        assert_eq!(dag.nodes.len(), 2);
+        assert_eq!(dag.nodes[dag.root as usize].kind, "Aggregate");
         assert_eq!(
-            expected.len(),
-            QUERY_KIND_TAGS.len() + SUMMARY_KIND_TAGS.len() + 1,
-            "exported kind tags must be unique"
+            dag.nodes[dag.root as usize]
+                .decision
+                .as_ref()
+                .map(|d| d.role),
+            Some("replacement_root")
         );
-        let categories = viewer_kind_categories();
-        let actual: std::collections::BTreeSet<_> = categories.keys().map(String::as_str).collect();
+    }
 
-        assert_eq!(actual, expected);
+    /// The snake_case `kind` table is exactly `kind_name` re-cased, for
+    /// every variant: a `SummaryDAGNode` and a `DAGNode` for the same node
+    /// never disagree on what it is.
+    #[test]
+    fn summary_kind_is_the_operator_kind_name_in_snake_case() {
+        fn to_snake(name: &str) -> String {
+            let mut out = String::new();
+            let chars: Vec<char> = name.chars().collect();
+            for (i, &c) in chars.iter().enumerate() {
+                if c.is_ascii_uppercase() {
+                    let prev_lower = i > 0 && !chars[i - 1].is_ascii_uppercase();
+                    let next_lower = chars.get(i + 1).is_some_and(|n| n.is_ascii_lowercase());
+                    if i > 0 && (prev_lower || next_lower) {
+                        out.push('_');
+                    }
+                    out.push(c.to_ascii_lowercase());
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        let leaf = scan("t", vec![Field::plain("v", DataType::Float64, false)]);
+        let (_, evaluation) = quantile_evaluation(Rc::clone(&leaf), None);
+        let finalize = std::rc::Rc::new(
+            OperatorNode::with_schema(
+                crate::ir::Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: evaluation }),
+                Schema::lifted(vec![], None),
+            )
+            .with_guarantee(None),
+        );
+        let root =
+            OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::SQLWindowFunc {
+                func: crate::ir::operator_properties::WindowFuncKind::RowNumber,
+                args: vec![],
+                partition_by: GroupKeys::none(),
+                order_by: vec![],
+                frame: None,
+                output_name: "rn".into(),
+                child: finalize,
+            }))
+            .unwrap();
+        let dag = export(&root);
+        let summary = export_summary(&root);
+        assert_eq!(dag.nodes.len(), summary.nodes.len());
+        for (a, b) in dag.nodes.iter().zip(&summary.nodes) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(b.kind, to_snake(a.kind), "{}", a.kind);
+            assert_eq!(a.children, b.children);
+            assert_eq!(a.label, b.label);
+        }
+        assert_eq!(
+            summary.nodes.iter().map(|n| n.kind).collect::<Vec<_>>(),
+            [
+                "scan",
+                "summary_agg",
+                "summary_estimate",
+                "finalize_exact_accumulator",
+                "sql_window_func",
+            ]
+        );
     }
 }
