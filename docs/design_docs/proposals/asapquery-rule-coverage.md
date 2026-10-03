@@ -21,7 +21,7 @@ cost, and selection rules under `optimizer/`. The reviewed source is
 | Temporal aggregate functions | Lowering covered; realization varies | `Aggregate(PerEntity)` over `TimeRange` represents the full family. Sum, count, min, max, quantile, rate, and increase have summary realizations; `avg_over_time` is currently exact `PassThrough`, matching ASAPQuery's exact-only multi-stat fallback rather than claiming a maintained summary. |
 | Spatial aggregate functions | Lowering covered; realization varies | `Aggregate(Reduce(GroupKeys))` is shared by SQL and PromQL. Supported single accumulators and ordinary `by(...)` avg rewrites generate candidates; shapes such as `avg without(...)` retain the same exact raw fallback that ASAPQuery uses for multi-stat AQEs. |
 | Collapsible temporal + spatial aggregates | Semantic-equivalent rewriting | The existing rewrite strategy uses accumulator algebra: sum∘sum, sum∘count, min∘min, and max∘max. It rejects all other pairs and requires identical output schemas. |
-| Sketch alternatives and exact fallback | Covered more generally | `SketchAlgorithmStrategy` enumerates legal summary realizations. The enclosing memo group always retains the original raw expression as the exact fallback; the strategy does not falsely label an approximate sketch as exact. |
+| Sketch alternatives and exact fallback | Covered more generally | `ASAPStrategies` enumerates legal summary realizations. The enclosing memo group always retains the original raw expression as the exact fallback; the strategy does not falsely label an approximate sketch as exact. |
 | Subpopulation label placement | Covered more generally | `HydraGroupingStrategy` and `GroupingStrategy` express per-subpopulation and shared multi-subpopulation realizations. |
 | Shared computation | Covered more generally | workload-wide CSE and `SharedSubDAGStrategy` operate on physical DAG identity rather than AQE names. |
 | Average decomposition | Semantic-equivalent rewriting | The same rewrite strategy exposes independently optimizable sum/count accumulators when null semantics and schema permit it. |
@@ -38,7 +38,7 @@ does not create a new strategy category.
 
 | Decision | Existing owner |
 |---|---|
-| Which summary algorithm can implement one aggregate intent | `SketchAlgorithmStrategy` |
+| Which summary algorithm can implement one aggregate intent | `ASAPStrategies` |
 | How grouping/subpopulation state is laid out | `HydraGroupingStrategy` |
 | Whether an equivalent logical expression exposes better accumulators | `SemanticEquivalentRewriteStrategy` (the broadened existing avg rewrite; `AvgToSumOverCountStrategy` remains a compatibility name) |
 | Whether identical physical work is shared | `SharedSubDAGStrategy` |
@@ -52,7 +52,7 @@ does not create a new strategy category.
 Accordingly, ASAPQuery's four collapsible temporal/spatial patterns extend the
 existing semantic-rewrite owner. Temporal and spatial function recognition is
 already front-end lowering into `AggIntent`; sketch compatibility remains in
-`SketchAlgorithmStrategy`; labels remain in `HydraGroupingStrategy`; and
+`ASAPStrategies`; labels remain in `HydraGroupingStrategy`; and
 maintenance lifecycle legality remains in the lifecycle planner. Window
 framework selection is separate physical-planning work. None of these become a
 parallel syntax-oriented `PatternStrategy`.

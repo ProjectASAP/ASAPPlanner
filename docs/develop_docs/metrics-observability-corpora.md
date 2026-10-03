@@ -49,19 +49,19 @@ o11y-bench, and awesome-prometheus-alerts. They are not duplicated here.
 
 The test prints totals, parse errors, lowering errors, pre-ASAP successes,
 post-ASAP candidates, unchanged queries, and post-ASAP errors. `Pre-ASAP` means
-that parsing and lowering produced a `QueryExpr`. `Post-ASAP candidate` means
-the isolated `SketchAlgorithmStrategy` produced a non-`KeepPreAsap` summary
-candidate. `Unchanged` is a successful pre-ASAP query for which that strategy
-returned only the pre-ASAP fallback.
+that parsing and lowering produced an `OperatorNode` DAG. `Post-ASAP candidate`
+means the isolated `ASAPStrategies` produced a candidate that contains
+an ASAP operator (`contains_asap()`). `Unchanged` is a successful pre-ASAP query
+for which that strategy returned only the kept pre-ASAP sub-DAG (`retain_exact`).
 
 ## Strategies
 
 The corpus measurement deliberately uses only
-`SketchAlgorithmStrategy::default_cost_model().replacements(...)` on each
+`ASAPStrategies::default_cost_model().replacements(...)` on each
 query root. It does not measure workload-wide search or the other default
 strategies.
 
-The default workload search currently registers `SketchAlgorithmStrategy`,
+The default workload search currently registers `ASAPStrategies`,
 `HydraGroupingStrategy`, `SharedSubDAGStrategy`, and
 `AvgToSumOverCountStrategy`. Workload context can additionally contribute
 `RollupStrategy` and `AccuracyReconciliationStrategy`. This baseline is
