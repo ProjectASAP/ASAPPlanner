@@ -207,6 +207,29 @@ impl ASAPOp {
         }
     }
 
+    /// Derive joint observation coverage; unknown or overlapping inputs fail closed.
+    pub fn merged_extent(
+        &self,
+    ) -> Result<super::observation_extent::ObservationExtent, SchemaDerivationError> {
+        let ASAPOp::SummaryMerge { children } = self else {
+            return Err(SchemaDerivationError::InvalidScalarSignature(
+                "coverage merge requires SummaryMerge".into(),
+            ));
+        };
+        let inputs = children
+            .iter()
+            .map(|child| {
+                child.observation_extent.clone().ok_or_else(|| {
+                    SchemaDerivationError::InvalidScalarSignature(
+                        "summary merge requires known observation coverage".into(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        super::observation_extent::ObservationExtent::merge_disjoint(&inputs)
+            .map_err(|error| SchemaDerivationError::InvalidScalarSignature(error.to_string()))
+    }
+
     /// Output schema derived from the operator and its children. Summary
     /// planning may retain a more specific schema (evaluation column naming)
     /// through [`OperatorNode::with_schema`]; all structural metadata must
@@ -477,6 +500,7 @@ impl ASAPOp {
                         ));
                     }
                 }
+                self.merged_extent()?;
                 Ok(())
             }
             SummaryEstimate {
