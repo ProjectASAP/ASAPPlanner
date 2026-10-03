@@ -26,8 +26,8 @@ use asap_aware_mapping::{
     ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::OperatorNode;
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
 use std::rc::Rc;
@@ -176,10 +176,10 @@ mod tests {
             candidates[0].guarantee.is_none(),
             "missing evidence must not claim a certified ratio bound"
         );
-        let timed = asap_types::ir::timing::apply_materialization_timings(
+        let timed = asap_types::ir::properties::timing::apply_materialization_timings(
             &candidates[0],
-            &asap_types::ir::timing::MaterializationAssignment::all_query_time(),
-            &mut asap_types::ir::timing::TimingMemo::new(),
+            &asap_types::ir::properties::timing::MaterializationAssignment::all_query_time(),
+            &mut asap_types::ir::properties::timing::TimingMemo::new(),
         )
         .expect("the demo candidate has a legal default timing");
         asap_types::ir::export::compile_physical_asap_dag(&timed)

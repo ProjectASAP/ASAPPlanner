@@ -1,6 +1,24 @@
+//! Summary-state types carried by [`FieldDataType`](crate::ir::schema::FieldDataType).
+//!
+//! Where an intent ([`crate::ir::operator::AggIntent`]) says *what* to compute
+//! ("a quantile to ε accuracy"), these types say *how* a summary realizes it:
+//! the family, kind/algorithm and parameters are committed — one
+//! `(Kind, Params)` pair per family ([`ExactKind`]/[`ExactParams`],
+//! [`SamplingKind`]/[`SamplingParams`], [`WaveletKind`]/[`WaveletParams`],
+//! [`StatModelKind`]/[`StatModelParams`]). The `Sketch` family nests a third
+//! level, [`SketchKind`] (quantile/cardinality/frequency/top-k), carrying the
+//! committed [`SketchAlgorithm`] and [`SketchParams`], because it is the one
+//! family with more than one algorithm per purpose.
+//!
+//! [`GroupingStrategy`] is a second, orthogonal axis: how many physical
+//! instances of a summary exist across a grouped aggregate's `by`
+//! subpopulations (per-subpopulation vs. one shared Hydra instance — see
+//! `asap_aware_mapping::grouping`). It rides on `ASAPOp::SummaryAgg` and on
+//! sketch-valued edge types.
+
 use serde::{Deserialize, Serialize};
 
-use crate::pre_asap::ColumnRef;
+use crate::ir::scalar::ColumnRef;
 
 // ── Exact accumulators ──────────────────────────────────────────────────────
 
@@ -134,7 +152,7 @@ pub enum SketchCategory {
 /// quantile-style, cardinality-style, frequency-style, or heavy-hitter/
 /// top-k-style estimation — together with the concrete [`SketchAlgorithm`]
 /// and [`SketchParams`] realizing it. Sits between
-/// [`FieldDataType::Sketch`](super::schema::FieldDataType::Sketch)
+/// [`FieldDataType::Sketch`](crate::ir::schema::FieldDataType::Sketch)
 /// (the `Sketch` family as a whole, sibling to `Sample`/`Wavelet`/
 /// `StatModel`) and the bare algorithm: `Kll` vs. `DDSketch` is a choice
 /// *within* `Quantile`, not a choice *of* `SketchKind` — every `Quantile`

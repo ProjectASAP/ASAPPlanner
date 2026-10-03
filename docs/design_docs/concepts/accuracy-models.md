@@ -320,5 +320,5 @@ not require a new selection rule for every sketch. Deployment extensions to
 metrics, assumptions and propagation.
 
 For implementation details, see the [accuracy module](../../../crates/asap-aware-mapping/src/accuracy/mod.rs),
-[guarantee representation](../../../crates/types/src/post_asap/guarantee.rs), and
+[guarantee representation](../../../crates/types/src/ir/properties/guarantee.rs), and
 [accuracy propagation companion](../../develop_docs/end-to-end-accuracy-guarantees.md).

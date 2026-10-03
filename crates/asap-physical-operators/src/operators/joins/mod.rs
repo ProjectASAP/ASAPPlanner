@@ -53,11 +53,11 @@ impl Operator {
     pub fn relational_join(
         left: SchemaRef,
         right: SchemaRef,
-        kind: planner_types::pre_asap::JoinKind,
+        kind: planner_types::ir::operator::JoinKind,
         predicate: &planner_types::ir::Predicate,
         output: SchemaRef,
     ) -> Result<Self, Error> {
-        use planner_types::pre_asap::JoinKind;
+        use planner_types::ir::operator::JoinKind;
         let mut joined = left.fields.clone();
         joined.extend(right.fields.clone());
         let predicate =
@@ -101,7 +101,7 @@ pub(super) fn execute<'a>(
         let right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;
         let left = inputs.pop().ok_or_else(|| invalid("left input missing"))?;
         return Ok(futures::stream::once(async move {
-            use planner_types::pre_asap::JoinKind;
+            use planner_types::ir::operator::JoinKind;
             let ((left, _left_memory), (right, _right_memory)) =
                 futures::try_join!(collect_rows(left, &context), collect_rows(right, &context))?;
             let mut workspace = Workspace::new(&context)?;

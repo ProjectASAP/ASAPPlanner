@@ -1,6 +1,6 @@
 # Physical handoff byte estimates
 
-`asap_types::resources` owns the canonical `PhysicalHandoffBytes` and
+`asap_types::workload::resources` owns the canonical `PhysicalHandoffBytes` and
 `PhysicalHandoffKind` definitions in `resources/physical_handoff.rs`. The mapping
 crate re-exports those same types from `physical_handoff_cost` for import compatibility;
 all estimator and export consumers therefore use shared definitions, not copies.

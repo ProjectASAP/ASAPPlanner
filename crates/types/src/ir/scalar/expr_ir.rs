@@ -1,7 +1,7 @@
 //! Column-reference and scalar-operator vocabulary shared by the IR's scalar
 //! expressions ([`crate::ir::ScalarExpr`]) and the front ends' unresolved
 //! form: [`ColumnRef`] (name-based, front-end-emitted; positional
-//! [`ColumnId`](super::schema::ColumnId) once bound), and [`ScalarValue`],
+//! [`ColumnId`](crate::ir::schema::ColumnId) once bound), and [`ScalarValue`],
 //! [`CompareOpKind`], [`ArithmeticOpKind`] — the **union** of what the two
 //! front ends need: PromQL contributes `Regex` / `NotRegex` (`=~` / `!~`); SQL
 //! contributes arithmetic, `CASE`, `IN`, `CAST`, `IS [NOT] NULL`, scalar
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// A name-based column reference — the front-end-emitted, unresolved form of
 /// [`ScalarExpr::Column`](crate::ir::ScalarExpr::Column); front-end name
-/// resolution turns it into a positional [`ColumnId`](super::schema::ColumnId).
+/// resolution turns it into a positional [`ColumnId`](crate::ir::schema::ColumnId).
 /// This is a logical reference, not schema metadata or a runtime data array.
 /// `SampleValue` names the implicit PromQL sample column; `Wildcard` represents
 /// an all-columns/rows request.

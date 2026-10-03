@@ -1,32 +1,33 @@
 //! The operator IR from #511: one operator DAG for every planning stage.
-pub mod aggregate_schema;
-pub mod asap;
-pub mod error;
-pub mod node;
-pub mod non_asap;
-pub mod operator_properties;
+//!
+//! - [`operator`] — §1 operators: [`OperatorNode`] and its operator families.
+//! - [`scalar`] — §2.2 scalar expressions and column references.
+//! - [`schema`] — §2.1 per-edge [`schema::Schema`] and summary state types.
+//! - [`properties`] — §2.2–2.3 node properties: accuracy guarantees, execution
+//!   timing, and summary coverage.
+//! - [`export`], [`physical_export`], [`cse`], [`canonicalize`] — DAG passes and
+//!   wire transport.
+pub mod operator;
+pub mod properties;
 pub mod query;
 pub mod scalar;
-pub use asap::{ASAPOp, UNIMPLEMENTED_ASAP_OP};
-pub use error::SchemaDerivationError;
-pub use node::{Operator, OperatorNode, OperatorResultKind};
-pub use non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
+pub mod schema;
+pub use operator::asap::{ASAPOp, UNIMPLEMENTED_ASAP_OP};
+pub use operator::node::{Operator, OperatorNode, OperatorResultKind};
+pub use operator::non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
 pub use query::QueryRoot;
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+pub use schema::error::SchemaDerivationError;
 
 pub mod canonicalize;
 pub mod cse;
 pub mod export;
 /// Physical ASAP DAG transport: the logical payloads plus execution timing.
 pub mod physical_export;
-/// Execution timing for physical plans: a materialization assignment expanded onto every node.
-pub mod timing;
-pub use timing::{
+pub use properties::timing::{
     apply_materialization_timings, data_state, planned_data_state, split_shared_by_phase,
     validate_maintained, MaterializationAssignment, TimingMemo,
 };
-/// Semantic observation coverage, separate from field layout and physical timing.
-pub mod summary_coverage;
 mod wire;
 
 pub mod schema_support;

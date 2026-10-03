@@ -11,16 +11,15 @@ use asap_physical_operators::{
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::export::NonASAPOpKind as ValueOperation;
 use planner_types::ir::export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+use planner_types::ir::operator::JoinKind;
+use planner_types::ir::scalar::CompareOpKind;
+use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::Predicate;
 use planner_types::ir::ScalarExpr;
-use planner_types::{
-    post_asap::{Field, FieldDataType},
-    pre_asap::{CompareOpKind, DataType, JoinKind},
-};
 use std::sync::Arc;
 
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
-    Arc::new(planner_types::pre_asap::Schema {
+    Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: fields
@@ -348,22 +347,21 @@ fn projection_rejects_expression_bound_to_another_schema() {
 #[test]
 fn global_extrema_bind_with_planner_derived_schema() {
     use asap_physical_operators::physical_planner::compile_node;
-    use planner_types::{
-        post_asap::*,
-        pre_asap::{AggIntent, GroupKeys, Reduction as PlanReduction},
-    };
+    use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlanReduction};
+    use planner_types::ir::properties::*;
+    use planner_types::ir::schema::*;
     let input = schema(&[("v", DataType::Int64, false)]);
     for measure in [
         AggIntent::Min { col: Some(0) },
         AggIntent::Max { col: Some(0) },
     ] {
         let planner_input =
-            planner_types::pre_asap::Schema::new(vec![planner_types::pre_asap::Field::plain(
+            planner_types::ir::schema::Schema::new(vec![planner_types::ir::schema::Field::plain(
                 "v",
                 DataType::Int64,
                 false,
             )]);
-        let derived = planner_types::pre_asap::aggregate_output_schema(
+        let derived = planner_types::ir::schema::aggregate_output_schema(
             &planner_input,
             &PlanReduction::Reduce(GroupKeys::by(vec![])),
             std::slice::from_ref(&measure),
@@ -556,7 +554,7 @@ fn boolean_truth_tables_agree_between_expression_paths() {
 // Partial/final execution must agree with one build for an uncompacted KLL population.
 #[test]
 fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
-    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
 
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
@@ -605,7 +603,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                     state.clone(),
                     0,
                     asap_physical_operators::operators::SummaryEvaluation::Sketch(
-                        planner_types::post_asap::SketchStatistic::Quantile { q },
+                        planner_types::ir::schema::SketchStatistic::Quantile { q },
                     ),
                 )
                 .unwrap(),
@@ -674,7 +672,7 @@ fn zero_column_output_obeys_memory_limit() {
 #[test]
 fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
     use asap_physical_operators::Statistic;
-    use planner_types::post_asap::{ExactKind, ExactParams};
+    use planner_types::ir::schema::{ExactKind, ExactParams};
 
     let input = schema(&[("v", DataType::Float64, false)]);
     for (kind, params, statistic) in [

@@ -3,7 +3,8 @@
 use super::*;
 use crate::expressions::binary::BinaryOpKind;
 use crate::expressions::binary::BinaryOperator;
-use planner_types::pre_asap::{schema::PROMQL_SERIES_IDENTITY, VectorMatchKind};
+use planner_types::ir::operator::VectorMatchKind;
+use planner_types::ir::schema::PROMQL_SERIES_IDENTITY;
 
 type Labels = BTreeMap<String, String>;
 
@@ -194,7 +195,8 @@ impl Operator {
         operator: BinaryOperator,
         scalars: [bool; 2],
     ) -> Result<Self, Error> {
-        use planner_types::pre_asap::{CompareOpKind::*, GroupSide, PromQLVectorSetOpKind};
+        use planner_types::ir::operator::{GroupSide, PromQLVectorSetOpKind};
+        use planner_types::ir::scalar::CompareOpKind::*;
         let vectors = scalars == [false, false];
         let valid = match &operator.kind {
             BinaryOpKind::Arithmetic(_) => true,
@@ -317,7 +319,7 @@ async fn series_binary(
     work: &mut Cooperative,
     workspace: &mut Workspace,
 ) -> Result<Vec<Vec<Value>>, Error> {
-    use planner_types::pre_asap::{GroupSide, PromQLVectorSetOpKind};
+    use planner_types::ir::operator::{GroupSide, PromQLVectorSetOpKind};
     let drops_name = matches!(
         binary.kind,
         BinaryOpKind::Arithmetic(_) | BinaryOpKind::CompareBool(_)

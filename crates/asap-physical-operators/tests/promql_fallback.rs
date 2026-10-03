@@ -11,9 +11,9 @@ use asap_physical_operators::{
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::export::PhysicalASAPDAG;
-use planner_types::{
-    post_asap::execution_data_state::lift_plain, types::AccuracyTarget, workload::*,
-};
+use planner_types::physical::execution_data_state::lift_plain;
+use planner_types::types::AccuracyTarget;
+use planner_types::workload::*;
 use std::{collections::BTreeMap, rc::Rc};
 
 /// Bare selectors look back one ingestion interval: 60s.
@@ -86,7 +86,7 @@ fn labels(spec: &str) -> BTreeMap<String, String> {
 fn metric(selector: &planner_types::ir::OperatorNode) -> String {
     match selector.expect_non_asap() {
         planner_types::ir::NonASAPOp::Scan {
-            source: planner_types::pre_asap::Source::TimeSeries { metric },
+            source: planner_types::ir::operator::Source::TimeSeries { metric },
             ..
         } => metric.clone(),
         planner_types::ir::NonASAPOp::TimeRange { child, .. }

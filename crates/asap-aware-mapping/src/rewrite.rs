@@ -57,14 +57,14 @@
 //! the rewritten form is actually worth picking, by letting the original
 //! and rewritten forms compete on cost — not this strategy.
 
-use asap_types::ir::non_asap::any_measure_filtered;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
 use std::rc::Rc;
 
-use asap_types::ir::operator_properties::{BinaryOpKind, Reduction};
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::operator_properties::{BinaryOpKind, Reduction};
+use asap_types::ir::scalar::ArithmeticOpKind;
+use asap_types::ir::schema::{ColumnId, DataType};
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ProjectItem, ScalarExpr};
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
-use asap_types::pre_asap::schema::{ColumnId, DataType};
 
 use asap_types::types::AccuracyTarget;
 
@@ -434,8 +434,8 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::ir::operator_properties::Source;
-    use asap_types::pre_asap::schema::{Field, Schema};
+    use asap_types::ir::operator::operator_properties::Source;
+    use asap_types::ir::schema::{Field, Schema};
     use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 
@@ -523,7 +523,7 @@ mod tests {
             None,
             vec![],
             Some(asap_types::ir::Predicate(ScalarExpr::Literal(
-                asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true),
+                asap_types::ir::scalar::ScalarValue::Boolean(true),
             ))),
             metric_scan(&["job"]),
         );
@@ -563,9 +563,9 @@ mod tests {
     #[test]
     fn does_not_match_a_without_grouped_avg_aggregate() {
         let q = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
-            reduction: Reduction::Reduce(asap_types::ir::operator_properties::GroupKeys::without(
-                vec![2],
-            )),
+            reduction: Reduction::Reduce(
+                asap_types::ir::operator::operator_properties::GroupKeys::without(vec![2]),
+            ),
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             filters: vec![],

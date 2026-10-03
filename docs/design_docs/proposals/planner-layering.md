@@ -56,7 +56,7 @@ In order to achieve the goals, ASAPPlanner needs to abstract the modeling the fo
 | Deployment inputs | Empirical cost model, empirical accuracy model and execution capabilities |
 | ASAP replacement strategies | Rules that replace a sub-DAG of the query expression with summary expressions, and the summary families each computation may use |
 
-ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
+ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs#L534) and the deployment's
 inputs (TODO: define this data structure, [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how
 it is computed, and which plan is best. The deployment only supplies inputs and
 executes the plan: it provides its empirical cost model, empirical accuracy
@@ -439,7 +439,7 @@ given: it does not choose among summaries or decide what to materialize.
 
 Each example's workload is shown as tables. Field names in code font are the
 fields of
-[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs).
+[`workload/mod.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs).
 Each query reads the event-time window [`as_of` − `lookback`, `as_of`] (fields
 of `TimeSelection`). `as_of` is the window's end; `lookback` is its length. An
 `as_of` of "evaluation time" means `as_of: None`: the window ends whenever the

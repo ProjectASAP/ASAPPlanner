@@ -5,7 +5,7 @@ use crate::analytical_cost::{
     PhysicalDAGNode,
 };
 use crate::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
-pub use asap_types::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
+pub use asap_types::workload::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 

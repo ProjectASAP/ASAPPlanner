@@ -15,18 +15,17 @@
 //! label names its enclosing scope references (issue #52): the `job` in
 //! `sum by (job)(a or b)` appears in neither side's own matchers.
 
-use asap_types::ir::aggregate_schema::aggregate_output_schema;
+use asap_types::ir::schema::aggregate_schema::aggregate_output_schema;
 use std::rc::Rc;
 
 use thiserror::Error;
 
-use asap_types::ir::operator_properties::ConcatDiscriminatorKey;
+use asap_types::ir::operator::operator_properties::ConcatDiscriminatorKey;
+use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction};
+use asap_types::ir::scalar::column_resolution::resolve_group_keys_promql;
+use asap_types::ir::scalar::{resolve_column_ref, resolve_column_refs, ColumnRef, ResolveError};
+use asap_types::ir::schema::{ColumnId, Schema, SchemaDerivationError};
 use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, ProjectItem, ScalarExpr, SortKey};
-use asap_types::pre_asap::column_resolution::resolve_group_keys_promql;
-use asap_types::pre_asap::{
-    resolve_column_ref, resolve_column_refs, AggIntent, ColumnId, ColumnRef, GroupKeys, Reduction,
-    ResolveError, Schema, SchemaDerivationError,
-};
 
 use crate::schema_resolver::{collect_referenced_columns, SchemaResolver};
 use crate::unresolved::{UnresolvedOp, UnresolvedScalar, UnresolvedSortKey};
@@ -726,12 +725,14 @@ pub fn resolve_scalar_root(tree: &UnresolvedScalar) -> Result<ScalarExpr, Resolv
 fn lower_scalar_vector(
     child: Rc<OperatorNode>,
     scalar: ScalarExpr,
-    op: &asap_types::pre_asap::BinaryOpKind,
+    op: &asap_types::ir::operator::BinaryOpKind,
     scalar_left: bool,
     return_bool: bool,
 ) -> Result<Rc<OperatorNode>, ResolveDAGError> {
+    use asap_types::ir::operator::BinaryOpKind;
+    use asap_types::ir::scalar::ScalarValue;
+    use asap_types::ir::schema::DataType;
     use asap_types::ir::ExprSemantics;
-    use asap_types::pre_asap::{BinaryOpKind, DataType, ScalarValue};
     let value = child
         .schema
         .column_id("value")
@@ -800,7 +801,7 @@ fn project_sample(
     computed: ScalarExpr,
     drop_metric_name: bool,
 ) -> Result<Rc<OperatorNode>, ResolveDAGError> {
-    let value = asap_types::pre_asap::column_resolution::resolve_column_ref(
+    let value = asap_types::ir::scalar::column_resolution::resolve_column_ref(
         &ColumnRef::SampleValue,
         &child.schema,
     )?;
@@ -813,9 +814,7 @@ fn project_sample(
         .map(|(i, f)| {
             let expr = if i == value {
                 computed.clone()
-            } else if drop_metric_name
-                && f.name == asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY
-            {
+            } else if drop_metric_name && f.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY {
                 ScalarExpr::FunctionCall {
                     name: "promql_drop_metric_name".into(),
                     args: vec![ScalarExpr::Column(i)],
@@ -840,12 +839,13 @@ fn project_sample(
 mod tests {
     use super::*;
     use crate::unresolved::UnresolvedPredicate;
+    use asap_types::ir::operator::{
+        BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Source, VectorMatch,
+    };
+    use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
+    use asap_types::ir::schema::{DataType, Field};
     use asap_types::ir::BinaryOperator;
     use asap_types::ir::ExprSemantics;
-    use asap_types::pre_asap::{
-        BinaryOpKind, CompareOpKind, DataType, Field, JoinKind, PromQLVectorSetOpKind, ScalarValue,
-        Source, VectorMatch,
-    };
     use asap_types::types::AccuracyTarget;
 
     fn scan(metric: &str) -> UnresolvedOp {
@@ -1127,7 +1127,7 @@ mod tests {
         let unresolved = UnresolvedOp::PromqlScalarOp {
             child: Rc::new(scan("m")),
             scalar: UnresolvedScalar::PromqlScalarFromVector(Rc::new(x)),
-            op: BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Mul),
+            op: BinaryOpKind::Arithmetic(asap_types::ir::scalar::ArithmeticOpKind::Mul),
             scalar_left: false,
             return_bool: false,
         };

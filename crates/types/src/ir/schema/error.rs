@@ -3,7 +3,7 @@
 //! [`SchemaDerivationError`] distinguishes invalid scalar signatures, out-of-range
 //! grouping columns, empty concatenations, and invalid sample columns.
 //! Structural DAG and execution-timing validation have separate error types.
-use crate::pre_asap::ColumnId;
+use crate::ir::schema::ColumnId;
 use thiserror::Error;
 /// Errors from schema and type derivation over an operator DAG.
 #[derive(Debug, Error)]
@@ -17,5 +17,5 @@ pub enum SchemaDerivationError {
     #[error("invalid per-series sample column: {0}")]
     InvalidSampleColumn(String),
     #[error("invalid summary coverage: {0}")]
-    Coverage(#[from] super::summary_coverage::CoverageError),
+    Coverage(#[from] crate::ir::properties::summary_coverage::CoverageError),
 }

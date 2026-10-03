@@ -1,5 +1,5 @@
 //! Series-identity realization for the unified dag.
-use crate::pre_asap::schema::*;
+use crate::ir::schema::*;
 /// Resolve a PromQL root to rows carrying [`PROMQL_SERIES_IDENTITY`] before
 /// candidate search. `closed` describes physical columns here: the final
 /// column contains every dynamic source label. It does not assert that the
@@ -12,8 +12,8 @@ use crate::pre_asap::schema::*;
 pub fn with_promql_series_identity(
     root: &std::rc::Rc<crate::ir::OperatorNode>,
 ) -> Result<std::rc::Rc<crate::ir::OperatorNode>, String> {
+    use crate::ir::operator::Source;
     use crate::ir::{NonASAPOp, Operator, OperatorNode};
-    use crate::pre_asap::Source;
     use std::{collections::HashMap, rc::Rc};
     fn visit(
         node: &Rc<OperatorNode>,

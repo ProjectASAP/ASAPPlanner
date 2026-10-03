@@ -4,19 +4,19 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::asap::ASAPOp;
-use super::node::{Operator, OperatorNode};
-use super::non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
-use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
-use crate::ir::operator_properties::{
+use crate::ir::operator::agg_intent::AggIntent;
+use crate::ir::operator::asap::ASAPOp;
+use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
+use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
+use crate::ir::operator::operator_properties::{
     ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind,
     SampleKind, Source, TimeShift, WindowFrame, WindowFuncKind,
 };
-use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
-use crate::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
-use crate::pre_asap::agg_intent::AggIntent;
-use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use crate::pre_asap::schema::{ColumnId, DataType, FieldDataType, Schema};
+use crate::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+use crate::ir::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+use crate::ir::schema::state_type::{GroupingStrategy, SketchStatistic, SummaryUpdate};
+use crate::ir::schema::{ColumnId, DataType, FieldDataType, Schema};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeRole {

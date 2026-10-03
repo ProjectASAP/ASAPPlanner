@@ -5,11 +5,11 @@ use std::{rc::Rc, time::Duration};
 use asap_frontend_common::{
     resolve_root, UnresolvedOp as U, UnresolvedPredicate, UnresolvedScalar,
 };
-use asap_types::ir::{BinaryOperator, ExprSemantics, OperatorNode, TimeRangeKind};
-use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, CompareOpKind, GroupKeys,
-    PromQLVectorSetOpKind, Reduction, ScalarValue, Source,
+use asap_types::ir::operator::{
+    AggIntent, BinaryOpKind, GroupKeys, PromQLVectorSetOpKind, Reduction, Source,
 };
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::{BinaryOperator, ExprSemantics, OperatorNode, TimeRangeKind};
 use asap_types::types::AccuracyTarget;
 use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
 use metricsql_parser::functions::{AggregateFunction, BuiltinFunction, RollupFunction};

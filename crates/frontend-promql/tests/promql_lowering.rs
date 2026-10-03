@@ -3,11 +3,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use asap_types::ir::operator::{AggIntent, BinaryOpKind, Reduction, Source};
+use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::{
     BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind,
-};
-use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, Reduction, ScalarValue, Source,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -835,7 +834,7 @@ fn binary_op_with_on_grouping() {
         panic!("expected BinaryOp, got {qe:?}");
     };
     let vm = vector_match.as_ref().expect("vector_match present");
-    use asap_types::pre_asap::VectorMatchKind;
+    use asap_types::ir::operator::VectorMatchKind;
     assert_eq!(vm.kind, VectorMatchKind::On);
     assert_eq!(vm.labels, vec!["host".to_string()]);
 }

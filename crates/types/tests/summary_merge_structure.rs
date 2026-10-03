@@ -1,10 +1,11 @@
 //! Window composition merges compatible summary states without consuming raw rows.
-use asap_types::{
-    ir::operator_properties::{Reduction, Source},
-    ir::{ASAPOp, NonASAPOp, Operator, OperatorNode},
-    post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
-    pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema},
+use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{
+    DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
+    SketchParams, SummaryUpdate,
 };
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
 fn state(k: u32) -> Rc<OperatorNode> {
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -29,15 +30,19 @@ fn state(k: u32) -> Rc<OperatorNode> {
     .unwrap();
     std::rc::Rc::new(
         summary
-            .with_coverage(asap_types::ir::summary_coverage::SummaryCoverage {
-                source: Source::Table {
-                    table_ref: "latencies".into(),
+            .with_coverage(
+                asap_types::ir::properties::summary_coverage::SummaryCoverage {
+                    source: Source::Table {
+                        table_ref: "latencies".into(),
+                    },
+                    regions: vec![
+                        asap_types::ir::properties::summary_coverage::CoverageRegion {
+                            time_ms: Some(0..1),
+                            population: Default::default(),
+                        },
+                    ],
                 },
-                regions: vec![asap_types::ir::summary_coverage::CoverageRegion {
-                    time_ms: Some(0..1),
-                    population: Default::default(),
-                }],
-            })
+            )
             .unwrap(),
     )
 }

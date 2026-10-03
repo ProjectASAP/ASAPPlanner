@@ -8,15 +8,15 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::asap::ASAPOp;
-use super::non_asap::NonASAPOp;
-use super::operator_properties::Reduction;
-use super::summary_coverage::{CoverageError, SummaryCoverage};
+use crate::ir::operator::asap::ASAPOp;
+use crate::ir::operator::non_asap::NonASAPOp;
+use crate::ir::operator::operator_properties::Reduction;
+use crate::ir::properties::execution::ExecutionTiming;
+use crate::ir::properties::guarantee::ResultGuarantee;
+use crate::ir::properties::summary_coverage::{CoverageError, SummaryCoverage};
+use crate::ir::schema::Schema;
+use crate::ir::schema::SummaryUpdate;
 use crate::ir::SchemaDerivationError;
-use crate::post_asap::execution_data_state::ExecutionTiming;
-use crate::post_asap::guarantee::ResultGuarantee;
-use crate::post_asap::SummaryUpdate;
-use crate::pre_asap::schema::Schema;
 
 /// The output category of an operator, derived from the operation and its
 /// inputs. Matching column schemas do not make categories interchangeable.
@@ -293,9 +293,9 @@ impl OperatorNode {
                     "execution timing is unassigned".into(),
                 )
             })?;
-            if timing == crate::post_asap::ExecutionTiming::IngestionTime
+            if timing == crate::ir::properties::ExecutionTiming::IngestionTime
                 && node.children().iter().any(|child| {
-                    child.timing != Some(crate::post_asap::ExecutionTiming::IngestionTime)
+                    child.timing != Some(crate::ir::properties::ExecutionTiming::IngestionTime)
                 })
             {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
@@ -315,10 +315,9 @@ impl OperatorNode {
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         for node in Self::reachable(self) {
             if node.schema.time_index.is_some_and(|i| {
-                node.schema
-                    .fields
-                    .get(i)
-                    .is_none_or(|f| f.plain_dtype() != Some(&crate::pre_asap::DataType::Timestamp))
+                node.schema.fields.get(i).is_none_or(|f| {
+                    f.plain_dtype() != Some(&crate::ir::schema::DataType::Timestamp)
+                })
             }) || node
                 .schema
                 .unique_keys

@@ -2,11 +2,11 @@
 //! Preserve IEEE non-finite results; callers own their output policies.
 
 pub fn evaluate_float64_arithmetic(
-    operator: &planner_types::pre_asap::ArithmeticOpKind,
+    operator: &planner_types::ir::scalar::ArithmeticOpKind,
     left: f64,
     right: f64,
 ) -> f64 {
-    use planner_types::pre_asap::ArithmeticOpKind::*;
+    use planner_types::ir::scalar::ArithmeticOpKind::*;
     match operator {
         Add => left + right,
         Sub => left - right,
@@ -26,7 +26,7 @@ pub fn evaluate_binary(
 ) -> Result<crate::values::Value, crate::Error> {
     use crate::expressions::binary::BinaryOpKind;
     use crate::{values::Value, Error};
-    use planner_types::pre_asap::ArithmeticOpKind;
+    use planner_types::ir::scalar::ArithmeticOpKind;
     let invalid =
         || Error::Invalid("unsupported binary operation or invalid checked-division domain".into());
     if operator.vector_match.is_some() {
@@ -63,8 +63,8 @@ pub fn evaluate_binary(
 }
 
 /// IEEE comparison, as Go's: NaN is unequal to everything, itself included.
-fn compare(op: &planner_types::pre_asap::CompareOpKind, left: f64, right: f64) -> Option<bool> {
-    use planner_types::pre_asap::CompareOpKind;
+fn compare(op: &planner_types::ir::scalar::CompareOpKind, left: f64, right: f64) -> Option<bool> {
+    use planner_types::ir::scalar::CompareOpKind;
     Some(match op {
         CompareOpKind::Eq => left == right,
         CompareOpKind::Ne => left != right,
