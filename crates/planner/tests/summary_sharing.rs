@@ -10,7 +10,8 @@ use asap_aware_mapping::pass::{PlanOutput, PlanningModels};
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_aware_mapping::{
     CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection,
+    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
+    SummaryMaintenanceLifecycleRejection,
 };
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
@@ -82,6 +83,10 @@ impl CostModel for FixedCosts {
             SummaryMaintenanceLifecycle::Ephemeral => 250.0,
             _ => 50.0,
         })
+    }
+
+    fn raw_query_response_latency_ms(&self, _target: &OperatorNode) -> Option<f64> {
+        self.latency_estimates.then_some(250.0)
     }
 
     fn raw_query_recompute_cost(&self, _target: &OperatorNode) -> Option<Cost> {
@@ -602,4 +607,67 @@ async fn e2e_certified_frequency_evaluations_share_one_univmon_state() {
         let guarantee = plan.plan.root.guarantee.as_ref().expect("certified");
         assert!(DefaultAccuracyModel.satisfies(guarantee, &AccuracyTarget::Epsilon(epsilon)));
     }
+}
+
+/// A cheap raw scan cannot beat a maintained state when it misses the response deadline.
+#[tokio::test]
+async fn slow_cheap_raw_recompute_cannot_bypass_the_response_bound() {
+    let mut workload = promql_workload(&[("quantile_over_time(0.99, lat[5m])", 0.01)]);
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0]
+        .requirements
+        .response_latency = LatencyRequirement::ExplicitMaxMs(100.0);
+    let costs = FixedCosts {
+        build: 100.0,
+        raw_per_read: 0.01,
+        latency_estimates: true,
+    };
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Promql {
+            now_ms: NOW_MS,
+            histograms: None,
+        },
+        PlanningModels::builtin().with_cost(&costs),
+        lifecycle(),
+    ))
+    .await
+    .expect("a fast maintained alternative exists");
+    assert!(!output.plans[0].plan.selected_raw_recompute);
+    assert!(output.plans[0].plan.summary_total_cost.is_some());
+}
+
+/// With only raw execution available, a known missed deadline fails planning.
+#[tokio::test]
+async fn slow_raw_only_query_reports_no_latency_feasible_plan() {
+    let mut workload = promql_workload(&[("quantile_over_time(0.99, lat[5m])", 0.01)]);
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0]
+        .requirements
+        .response_latency = LatencyRequirement::ExplicitMaxMs(100.0);
+    let costs = FixedCosts {
+        build: 100.0,
+        raw_per_read: 0.01,
+        latency_estimates: true,
+    };
+    let result = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Promql {
+            now_ms: NOW_MS,
+            histograms: None,
+        },
+        PlanningModels::builtin()
+            .with_cost(&costs)
+            .with_capabilities(SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: true,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: false,
+            }),
+        lifecycle(),
+    ))
+    .await;
+    let error = result.expect_err("a known slow raw fallback must not escape summary rejection");
+    assert!(
+        error.to_string().contains("no latency-feasible plan"),
+        "{error}"
+    );
 }

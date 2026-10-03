@@ -33,8 +33,8 @@ use asap_types::post_asap::{
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand,
-    TimestampMs, WorkloadError,
+    DataArrival, DataWorkload, LatencyRequirement, Predictability, QueryRecurrence, QueryWorkload,
+    RepeatedDemand, TimestampMs, WorkloadError,
 };
 
 use crate::analytical_cost::AnalyticalCostError;
@@ -351,6 +351,8 @@ impl<'a> WorkloadDemand<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SummaryMaintenanceLifecyclePlanError {
+    #[error("no latency-feasible plan: raw response estimate {estimate_ms} ms cannot meet {bound_ms} ms, and no costed summary alternative is available")]
+    NoLatencyFeasiblePlan { bound_ms: f64, estimate_ms: f64 },
     #[error(transparent)]
     InvalidWorkload(#[from] WorkloadError),
     #[error("optimization horizon must be finite and strictly positive")]
@@ -841,10 +843,22 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
             let raw = plan
                 .expected_reads
                 .and_then(|reads| cost_model.raw_query_recompute_total_cost(&group.target, reads));
-            // Final comparison is atomic: without the raw side, no summary
-            // override is published even when that summary alone is costed.
-            if let Some(raw) = raw {
-                costs.insert_raw(&group.target, raw);
+            let raw_admitted = raw_response_latency_violation(
+                &group.target,
+                WorkloadDemand {
+                    workload,
+                    data_workload,
+                    entry_indices,
+                },
+                cost_model,
+            )
+            .is_none();
+            // Missing cost evidence keeps the atomic comparison, unless the
+            // response deadline has already ruled out raw execution.
+            if raw.is_some() || !raw_admitted {
+                if raw_admitted {
+                    costs.insert_raw(&group.target, raw.expect("checked above"));
+                }
                 if !plan.deployments.is_empty() {
                     if let Some(total) = plan.summary_total_cost {
                         costs.insert(&group.target, candidate, total);
@@ -1046,7 +1060,20 @@ pub(crate) fn plan_assembled_dag(
     plan.raw_recompute_total_cost = plan
         .expected_reads
         .and_then(|reads| cost_model.raw_query_recompute_total_cost(target, reads));
-    if !plan.selected_raw_recompute
+    let raw_violation = raw_response_latency_violation(target, demand, cost_model);
+    if let Some((bound_ms, estimate_ms)) = raw_violation {
+        if plan.selected_raw_recompute || plan.summary_total_cost.is_none() {
+            return Err(
+                SummaryMaintenanceLifecyclePlanError::NoLatencyFeasiblePlan {
+                    bound_ms,
+                    estimate_ms,
+                }
+                .into(),
+            );
+        }
+    }
+    if raw_violation.is_none()
+        && !plan.selected_raw_recompute
         && plan.raw_recompute_total_cost.is_none_or(|raw| {
             plan.summary_total_cost
                 .is_none_or(|summary| raw.0 <= summary.0)
@@ -1060,6 +1087,28 @@ pub(crate) fn plan_assembled_dag(
         plan.window_accuracy_guarantee = None;
     }
     Ok(plan)
+}
+
+/// A quote is per execution, so every consumer's bound applies even when
+/// repeated reads make this alternative cheap over the planning horizon.
+fn raw_response_latency_violation(
+    target: &OperatorNode,
+    demand: WorkloadDemand<'_>,
+    cost_model: &dyn CostModel,
+) -> Option<(f64, f64)> {
+    let bound_ms = demand
+        .workload
+        .entries()
+        .enumerate()
+        .filter(|(index, _)| demand.entry_indices.contains(index))
+        .filter_map(|(_, entry)| match entry.requirements.response_latency {
+            LatencyRequirement::ExplicitMaxMs(bound) => Some(bound),
+            LatencyRequirement::Unspecified => None,
+        })
+        .min_by(f64::total_cmp)?;
+    let estimate_ms = cost_model.raw_query_response_latency_ms(target)?;
+    (!estimate_ms.is_finite() || estimate_ms < 0.0 || estimate_ms > bound_ms)
+        .then_some((bound_ms, estimate_ms))
 }
 
 fn workload_facts(

@@ -131,3 +131,14 @@ states, merges them through unified export/native compilation, and checks p99
 for both rebuilding raw inputs and reading materialized panes (Examples 3B/4B).
 This proves the merge building block; automatic window candidate generation and
 Exponential Histogram construction remain separate work.
+
+## Planner-layering follow-up: raw response latency
+
+`CostModel::raw_query_response_latency_ms` quotes one execution separately from
+amortized workload cost. A known quote that exceeds any bound of its consumers
+cannot win against a feasible summary, and cannot reappear during final raw
+fallback. If no costed summary survives, planning returns `NoLatencyFeasiblePlan`.
+The public planner's `slow_cheap_raw_recompute_cannot_bypass_the_response_bound`
+and `slow_raw_only_query_reports_no_latency_feasible_plan` reproduce both paths.
+As with summary latency quotes, missing raw latency evidence remains unchecked;
+this does not establish a latency guarantee for an unmeasured deployment.
