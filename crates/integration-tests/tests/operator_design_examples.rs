@@ -410,4 +410,20 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
             rows
         );
     }
+    // The batch exports as one physical DAG: a root per query and the shared
+    // SUM state once.
+    let workload_dag = output.execution_timed_dag().unwrap();
+    assert_eq!(workload_dag.roots.len(), 2);
+    assert_ne!(workload_dag.roots[0], workload_dag.roots[1]);
+    assert_eq!(
+        workload_dag
+            .nodes
+            .iter()
+            .filter(|n| matches!(
+                n.payload,
+                asap_types::ir::export::PhysicalASAPOperatorPayload::SummaryAgg { .. }
+            ))
+            .count(),
+        1
+    );
 }

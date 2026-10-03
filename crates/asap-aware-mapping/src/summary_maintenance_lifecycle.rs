@@ -22,8 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::export::{
-    compile_physical_asap_dag_with_node_ids, PhysicalASAPDAG, PhysicalASAPDAGValidationError,
-    PhysicalASAPNodeId,
+    compile_physical_asap_dag_with_node_ids, compile_physical_asap_workload_with_node_ids,
+    PhysicalASAPDAG, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
 };
 use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
@@ -247,64 +247,79 @@ impl SummaryMaintenanceLifecyclePlan {
     /// a `SummaryAgg` is one of its inputs. Timings already on the root are
     /// ignored.
     pub fn execution_timed_dag(&self) -> Result<PhysicalASAPDAG, SummaryMaintenanceTimingError> {
-        let mut memo = TimingMemo::new();
-        let timed = apply_lifecycle_timings(
-            &self.root,
-            &LifecycleAssignment::default_maintained(),
-            &mut memo,
-        )?;
-        let compiled = compile_physical_asap_dag_with_node_ids(&timed)?;
-        let dag = compiled.dag;
-        for population in &standalone_populations(&self.root) {
-            let id = compiled
-                .node_ids
-                .node_id(memo.timed(population).expect("population was timed"))
-                .expect("collected population belongs to the compiled DAG");
-            if !self
-                .deployments
-                .iter()
-                .any(|deployment| deployment.post_asap_node_id == id)
-            {
+        execution_timed_workload_dag(&[self])
+    }
+}
+
+/// One physical ASAP DAG for a workload: a root per plan, in order, with
+/// sub-DAGs shared between plans exported once. Timing follows the selected
+/// lifecycles of every plan's deployments, as in
+/// [`SummaryMaintenanceLifecyclePlan::execution_timed_dag`].
+pub fn execution_timed_workload_dag(
+    plans: &[&SummaryMaintenanceLifecyclePlan],
+) -> Result<PhysicalASAPDAG, SummaryMaintenanceTimingError> {
+    // One memo, so a node shared by several roots is timed and exported once.
+    let mut memo = TimingMemo::new();
+    let assignment = LifecycleAssignment::default_maintained();
+    let timed = plans
+        .iter()
+        .map(|plan| apply_lifecycle_timings(&plan.root, &assignment, &mut memo))
+        .collect::<Result<Vec<_>, _>>()?;
+    let compiled = compile_physical_asap_workload_with_node_ids(&timed)?;
+    let id_of = |node: &Rc<OperatorNode>| {
+        compiled
+            .node_ids
+            .node_id(memo.timed(node).expect("plan node was timed"))
+            .expect("timed plan node belongs to the compiled DAG")
+    };
+    let deployments: Vec<_> = plans
+        .iter()
+        .flat_map(|plan| &plan.deployments)
+        .map(|deployment| (id_of(&deployment.summary), deployment))
+        .collect();
+    for plan in plans {
+        for population in &standalone_populations(&plan.root) {
+            let id = id_of(population);
+            if !deployments.iter().any(|(deployed, _)| *deployed == id) {
                 return Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(id));
             }
         }
-        let mut pending = Vec::new();
-        for deployment in &self.deployments {
-            let guarantee = deployment
-                .summary_maintenance_lifecycle_guarantee
-                .as_ref()
-                .ok_or(SummaryMaintenanceTimingError::UnselectedLifecycle(
-                    deployment.post_asap_node_id,
-                ))?;
-            if guarantee.summary_maintenance_lifecycle != SummaryMaintenanceLifecycle::Ephemeral {
-                pending.push(deployment.post_asap_node_id);
-            }
-        }
-        let mut ingestion = HashSet::new();
-        while let Some(id) = pending.pop() {
-            if ingestion.insert(id) {
-                pending.extend(
-                    dag.edges
-                        .iter()
-                        .filter(|edge| edge.consumer == id)
-                        .map(|edge| edge.producer),
-                );
-            }
-        }
-        let phases = dag
-            .nodes
-            .iter()
-            .map(|node| {
-                let timing = if ingestion.contains(&node.id) {
-                    ExecutionTiming::IngestionTime
-                } else {
-                    ExecutionTiming::QueryTime
-                };
-                (node.id, timing)
-            })
-            .collect();
-        Ok(dag.with_execution_phases(&phases)?)
     }
+    let dag = compiled.dag;
+    let mut pending = Vec::new();
+    for (id, deployment) in &deployments {
+        let guarantee = deployment
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()
+            .ok_or(SummaryMaintenanceTimingError::UnselectedLifecycle(*id))?;
+        if guarantee.summary_maintenance_lifecycle != SummaryMaintenanceLifecycle::Ephemeral {
+            pending.push(*id);
+        }
+    }
+    let mut ingestion = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if ingestion.insert(id) {
+            pending.extend(
+                dag.edges
+                    .iter()
+                    .filter(|edge| edge.consumer == id)
+                    .map(|edge| edge.producer),
+            );
+        }
+    }
+    let phases = dag
+        .nodes
+        .iter()
+        .map(|node| {
+            let timing = if ingestion.contains(&node.id) {
+                ExecutionTiming::IngestionTime
+            } else {
+                ExecutionTiming::QueryTime
+            };
+            (node.id, timing)
+        })
+        .collect();
+    Ok(dag.with_execution_phases(&phases)?)
 }
 
 /// Explicit association between a materialized target and the normalized
