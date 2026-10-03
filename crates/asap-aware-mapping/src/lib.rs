@@ -138,7 +138,7 @@
 //! - [`accuracy`] — the [`AccuracyModel`](accuracy::AccuracyModel) /
 //!   [`AccuracyBudgetAllocator`](accuracy::AccuracyBudgetAllocator)
 //!   extension points (issue #172): the planning-time algebra that derives
-//!   a machine-readable [`ResultGuarantee`](asap_types::post_asap::ResultGuarantee)
+//!   a machine-readable [`ResultGuarantee`](asap_types::ir::properties::ResultGuarantee)
 //!   for every finalized post-ASAP value, propagates it through
 //!   approximate-over-approximate compositions under conservative rules
 //!   (no independence assumptions, unknown statistics stay unknown), and

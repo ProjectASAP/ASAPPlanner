@@ -13,8 +13,8 @@
 
 pub mod fixtures {
 
+    use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::OperatorNode;
-    use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,

@@ -1,10 +1,13 @@
 //! Window composition merges compatible summary states without consuming raw rows.
-use asap_types::{
-    ir::operator_properties::{Reduction, Source},
-    ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr},
-    post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
-    pre_asap::expr_ir::{CompareOpKind, ScalarValue},
-    pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema},
+use asap_types::ir::operator::{Reduction, Source};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::schema::{
+    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
+};
+use asap_types::ir::{
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
 };
 use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are

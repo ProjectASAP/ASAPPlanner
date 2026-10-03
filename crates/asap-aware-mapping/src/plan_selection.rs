@@ -15,14 +15,15 @@
 use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
 
+use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
+use asap_types::ir::schema::{DataType, Schema};
+use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
-use asap_types::pre_asap::{DataType, Reduction, Schema};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::DataWorkload;
 use thiserror::Error;

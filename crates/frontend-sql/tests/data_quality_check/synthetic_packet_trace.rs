@@ -22,9 +22,9 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
+use asap_types::ir::operator::{AggIntent, GroupKeys};
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/synthetic_packet_trace_queries.sql");

@@ -165,7 +165,7 @@
 //! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::SubDAG` rewrite candidate that rolls a coarse aggregate up from a compatible finer aggregate |
 //! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Realization::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
-//! | Deep generative compression | No representation at all — no `Realization`/`FieldDataType` variant | Needs a new summary family added to `asap_types::post_asap` first |
+//! | Deep generative compression | No representation at all — no `Realization`/`FieldDataType` variant | Needs a new summary family added to `asap_types::ir::schema::state_type` first |
 //! | Approximation frameworks for windows | No representation — `TimeRange`/`PromqlSubquery` windows are always evaluated exactly | Would key off those node types once an approximate-window operator exists |
 //! | Function decomposition | No representation anywhere | No hook point identified yet |
 //! | Continuous distributed monitoring | No representation — `RepeatingEntry`/`RepetitionInterval` in `asap_types::workload` describe *that* a query repeats, not any monitoring-specific decomposition | Would likely key off `RepeatingEntry` once such logic exists |
@@ -186,8 +186,8 @@ use std::fmt::Display;
 use std::rc::Rc;
 
 use asap_types::ir::cse::{structural_hash, HashCache};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::FieldDataType;
 
 use crate::replacement::{
     self, CandidateLogicalASAPDAGs, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
@@ -510,10 +510,10 @@ fn visit_children(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::operator_properties::{BinaryOpKind, Reduction, Source};
+    use asap_types::ir::operator::agg_intent::{default_quantile, AggIntent};
+    use asap_types::ir::operator::operator_properties::{BinaryOpKind, Reduction, Source};
+    use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
-    use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
-    use asap_types::pre_asap::schema::{DataType, Field, Schema};
 
     use asap_types::types::AccuracyTarget;
 
@@ -660,7 +660,7 @@ mod tests {
 
     /// A sketch-applicable `Aggregate` reachable via two paths that CSE
     /// collapses onto one `Rc` — the same `median(x) == median(x)` shape
-    /// `pre_asap::cse`'s own `single_query_shares_its_own_repeated_sub-DAG`
+    /// `ir::cse`'s own `single_query_shares_its_own_repeated_sub-DAG`
     /// test uses — must be reported once, not once per path: it is exactly
     /// one [`crate::replacement::TargetSubDAGCandidates`], keyed by `Rc` pointer identity,
     /// not one per path that reaches it.
@@ -668,7 +668,7 @@ mod tests {
     fn a_shared_sketchable_aggregate_is_reported_only_once() {
         let quantile = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let root = binary(
-            BinaryOpKind::Compare(asap_types::pre_asap::expr_ir::CompareOpKind::Eq),
+            BinaryOpKind::Compare(asap_types::ir::scalar::CompareOpKind::Eq),
             Rc::clone(&quantile),
             quantile,
         );
@@ -759,7 +759,7 @@ mod tests {
         // shape) — single-query CSE.
         let branch = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let q = binary(
-            BinaryOpKind::Arithmetic(asap_types::pre_asap::expr_ir::ArithmeticOpKind::Div),
+            BinaryOpKind::Arithmetic(asap_types::ir::scalar::ArithmeticOpKind::Div),
             Rc::clone(&branch),
             branch,
         );
@@ -786,7 +786,7 @@ mod tests {
     /// (deleted) traversal.
     #[test]
     fn a_deeply_shared_sub_dag_under_different_parents_is_reported_once() {
-        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::ir::scalar::ScalarValue;
 
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let root_a =
@@ -822,12 +822,12 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[asap_types::post_asap::SketchAlgorithm],
-        ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
+            candidates: &[asap_types::ir::schema::SketchAlgorithm],
+        ) -> Vec<asap_types::ir::schema::SketchAlgorithm> {
             let mut v = candidates.to_vec();
             if let Some(pos) = v
                 .iter()
-                .position(|k| *k == asap_types::post_asap::SketchAlgorithm::DDSketch)
+                .position(|k| *k == asap_types::ir::schema::SketchAlgorithm::DDSketch)
             {
                 let dd = v.remove(pos);
                 v.insert(0, dd);

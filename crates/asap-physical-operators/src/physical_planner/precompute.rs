@@ -1,20 +1,19 @@
 //! Compile immutable summary-input computation with explicit population and pane identity.
 use super::promql_rows::SERIES_IDENTITY_COLUMN as SERIES_IDENTITY;
 use super::*;
+use planner_types::ir::properties::ExecutionTiming;
+use planner_types::ir::schema::DataType;
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+use planner_types::ir::schema::{GroupingStrategy, Schema};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::NonASAPOp;
-use planner_types::post_asap::FieldDataType as SummaryFamilyType;
-use planner_types::{
-    post_asap::{ExecutionTiming, GroupingStrategy, Schema},
-    pre_asap::DataType,
-};
 
 /// Physical rows carry the population and pane coordinate alongside the logical value.
 /// These fields preserve identities which are implicit in a stored summary instance.
 pub fn population_schema(family: SummaryFamilyType) -> SchemaRef {
     Arc::new(Schema {
         fields: vec![
-            planner_types::post_asap::Field {
+            planner_types::ir::schema::Field {
                 name: "$population".into(),
                 dtype: SummaryFamilyType::Plain(DataType::Map {
                     key: Box::new(DataType::Utf8),
@@ -24,13 +23,13 @@ pub fn population_schema(family: SummaryFamilyType) -> SchemaRef {
                 nullable: false,
                 table: None,
             },
-            planner_types::post_asap::Field {
+            planner_types::ir::schema::Field {
                 name: "$window_end".into(),
                 dtype: SummaryFamilyType::Plain(DataType::Timestamp),
                 nullable: false,
                 table: None,
             },
-            planner_types::post_asap::Field {
+            planner_types::ir::schema::Field {
                 name: "value".into(),
                 dtype: family,
                 nullable: false,
@@ -90,7 +89,7 @@ pub fn boundary_schema(node: &PhysicalASAPDAGNode) -> Result<SchemaRef, Error> {
         &node.payload,
         Payload::NonASAP(
             NonASAPOp::Scan {
-                source: planner_types::pre_asap::Source::TimeSeries { .. },
+                source: planner_types::ir::operator::Source::TimeSeries { .. },
                 ..
             } | NonASAPOp::TimeRange { .. }
         )
@@ -264,7 +263,7 @@ fn validate_value_output(node: &PhysicalASAPDAGNode) -> Result<(), Error> {
     let schema = &node.output_schema;
     // Physical population rows already carry the complete identity in `$population`.
     // Typed logical plans may expose its opaque series-identity column as metadata.
-    let identity = planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY;
+    let identity = planner_types::ir::schema::PROMQL_SERIES_IDENTITY;
     let identities = schema
         .fields
         .iter()
@@ -353,11 +352,11 @@ fn fragment(
             };
             validate_value_output(node)?;
             let statistic = match &input.fields[2].dtype {
-                SummaryFamilyType::ExactAggregate(planner_types::post_asap::ExactKind::Sum, _) => {
+                SummaryFamilyType::ExactAggregate(planner_types::ir::schema::ExactKind::Sum, _) => {
                     crate::Statistic::Sum
                 }
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::post_asap::ExactKind::Count,
+                    planner_types::ir::schema::ExactKind::Count,
                     _,
                 ) => crate::Statistic::Count,
                 _ => {
@@ -416,10 +415,10 @@ fn fragment(
                 && crate::capability::is_unit_sample_frequency(update)
                 && matches!(family, SummaryFamilyType::Sketch(kind, _) if !matches!(
                     kind.algorithm(),
-                    planner_types::post_asap::SketchAlgorithm::Cms
-                        | planner_types::post_asap::SketchAlgorithm::CountSketch
-                        | planner_types::post_asap::SketchAlgorithm::CmsWithHeap
-                        | planner_types::post_asap::SketchAlgorithm::CountSketchWithHeap
+                    planner_types::ir::schema::SketchAlgorithm::Cms
+                        | planner_types::ir::schema::SketchAlgorithm::CountSketch
+                        | planner_types::ir::schema::SketchAlgorithm::CmsWithHeap
+                        | planner_types::ir::schema::SketchAlgorithm::CountSketchWithHeap
                 ));
             let keyed = update.item.is_some() && !unit_frequency;
             if (keyed && !raw) || !matches!(grouping, GroupingStrategy::PerSubpopulationInstance) {
@@ -432,8 +431,8 @@ fn fragment(
             if raw
                 && matches!(
                     update.weight_domain,
-                    planner_types::post_asap::WeightDomain::NonNegative {
-                        proof: planner_types::post_asap::NonNegativeWeightProof::ResetAwareCounterDerivative
+                    planner_types::ir::schema::WeightDomain::NonNegative {
+                        proof: planner_types::ir::schema::NonNegativeWeightProof::ResetAwareCounterDerivative
                     }
                 )
             {
@@ -442,10 +441,10 @@ fn fragment(
                 ));
             }
             if keyed
-                && matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+                && matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
                 && !matches!(
                     update.weight_domain,
-                    planner_types::post_asap::WeightDomain::NonNegative { .. }
+                    planner_types::ir::schema::WeightDomain::NonNegative { .. }
                 )
             {
                 return Err(invalid("CMS requires a nonnegative weight contract"));
@@ -515,7 +514,7 @@ fn fragment(
                 )?;
                 for (index, (expression, dtype)) in items.into_iter().enumerate() {
                     let name = format!("$item{index}");
-                    fields.push(planner_types::post_asap::Field {
+                    fields.push(planner_types::ir::schema::Field {
                         name: name.clone(),
                         dtype: SummaryFamilyType::Plain(dtype),
                         nullable: false,
@@ -627,7 +626,7 @@ fn raw_items(
             DataType::Utf8,
         )),
         SummaryInputExpr::EntityIdentity(
-            planner_types::post_asap::EntityIdentity::PromqlLabelSet { excluding },
+            planner_types::ir::schema::EntityIdentity::PromqlLabelSet { excluding },
         ) => items.push(identity(
             excluding
                 .iter()

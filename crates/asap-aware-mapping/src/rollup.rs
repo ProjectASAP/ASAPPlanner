@@ -66,7 +66,7 @@
 //!
 //! ## `ColumnId` comparability — only sound for identical child IR
 //!
-//! A `ColumnId` is a *position* into a specific `Schema` (`crates/types/src/pre_asap/schema.rs`'s
+//! A `ColumnId` is a *position* into a specific `Schema` (`crates/types/src/ir/schema/mod.rs`'s
 //! own doc: "the same edge, the same schema, the same positional numbering").
 //! Comparing the coarser aggregate's `by` positions against the finer
 //! aggregate's `by` positions is only meaningful when both aggregates have
@@ -97,14 +97,14 @@
 //!   against a superset/subset relationship at all; [`is_legal_rollup_source`]
 //!   declines both directions.
 
-use asap_types::ir::non_asap::any_measure_filtered;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use asap_types::ir::operator_properties::{GroupKeys, Reduction};
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction};
+use asap_types::ir::schema::{ColumnId, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::schema::{ColumnId, Schema};
 
 use asap_types::types::AccuracyTarget;
 
@@ -396,8 +396,8 @@ fn build_rollup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::operator_properties::Source;
-    use asap_types::pre_asap::schema::{DataType, Field};
+    use asap_types::ir::operator::operator_properties::Source;
+    use asap_types::ir::schema::{DataType, Field};
     use asap_types::types::AccuracyTarget;
 
     /// `[ts(0), value(1), job(2), region(3)]`.

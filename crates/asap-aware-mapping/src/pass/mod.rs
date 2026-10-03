@@ -18,12 +18,10 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use asap_types::ir::physical_export::compile_physical_asap_workload;
-use asap_types::ir::timing::{
-    apply_materialization_timings, MaterializationAssignment, TimingMemo,
-};
+use asap_types::ir::properties::ExecutionDataStateError;
 use asap_types::ir::OperatorNode;
-use asap_types::parsed_workload::ParsedWorkload;
-use asap_types::post_asap::ExecutionDataStateError;
+use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{

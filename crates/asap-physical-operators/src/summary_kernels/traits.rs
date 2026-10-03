@@ -1,4 +1,4 @@
-use planner_types::post_asap::SketchStatistic;
+use planner_types::ir::schema::SketchStatistic;
 
 pub type KernelError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -53,7 +53,7 @@ mod tests {
             .unwrap();
         dd.inner.update(3.0);
         let count = SketchStatistic::PointCount {
-            key: planner_types::pre_asap::ColumnRef::SampleValue,
+            key: planner_types::ir::scalar::ColumnRef::SampleValue,
             value: None,
         };
         assert_eq!(state.estimate(&count).unwrap(), 1.0);
