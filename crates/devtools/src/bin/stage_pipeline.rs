@@ -1,5 +1,5 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
-//     --example planner-layering-1 --out planner-layering-example1.stage01.json
+//     --example planner-layering-1 --out planner-layering-example1.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 //
