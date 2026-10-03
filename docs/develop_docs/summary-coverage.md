@@ -85,9 +85,7 @@ different coverage.
 
 ```rust
 pub struct SummaryCoverage {
-    pub source: String,               // observation data source; any tabular data, not necessarily time series
-    pub input: SummaryUpdate,         // must equal the producing SummaryAgg.input
-    pub reduction: Reduction,         // must equal the producing SummaryAgg.reduction
+    pub source: Source,               // as named by Scan: Table { table_ref } or TimeSeries { metric }
     pub regions: Vec<CoverageRegion>, // union of time × population blocks
 }
 pub struct CoverageRegion {
@@ -102,9 +100,12 @@ Rules:
   `SummaryAgg` or `SummaryMerge` whose coverage is `None` with
   `CoverageError::Missing`. Other nodes leave it `None`. The field is an
   `Option` only because all operators share `OperatorNode`.
-- `with_coverage` validates the declaration, requires `State` output
-  (`NotState`), and checks `input`/`reduction` against a `SummaryAgg` producer
-  (`ProducerMismatch`). `validate_structure` re-checks it.
+- Coverage holds only what the operator does not already record. What is fed
+  into the state and how it is grouped stay on `SummaryAgg.input` and
+  `SummaryAgg.reduction`; `SummaryMerge` compares those on its inputs. `source`
+  uses the same `Source` type as `Scan`, so equal sources compare equal.
+- `with_coverage` validates the declaration and requires `State` output
+  (`NotState`). `validate_structure` re-checks it.
 - `SummaryMerge` derives its coverage from its inputs. `validate_structure`
   rejects a retained value that differs from that union.
 - Rewriting a node's inputs clears its coverage. The rewriter must declare it
@@ -116,8 +117,9 @@ Rules:
 
 ## Merging
 
-`SummaryCoverage::merge_disjoint` requires equal `source`/`input`/`reduction`
-and provably disjoint regions. Two regions are disjoint when their time ranges
+`SummaryCoverage::merge_disjoint` requires equal `source` and provably
+disjoint regions. `SummaryMerge` additionally requires equal input schemas and
+equal `input`/`reduction` on its inputs' producers. Two regions are disjoint when their time ranges
 do not intersect, or when they give different values for the same population
 label. Different labels prove nothing. The examples above come out as:
 
@@ -127,10 +129,11 @@ label. Different labels prove nothing. The examples above come out as:
 | `[0,1)` + `[2,3)` | accepted, **two** regions (gap kept) |
 | `[0,2)` + `[1,3)` | `PossibleOverlap` |
 | `region=us` + `region=eu`, same time | accepted, two regions |
+| `region=us` + `region=us`, same time | `PossibleOverlap` |
 | `region=us` + `tier=premium` | `PossibleOverlap` |
 | `us×[0,1)` + `eu×[1,2)` | accepted, two regions, never widened to `{us,eu}×[0,2)` |
 | no time bounds + any region of the same population | `PossibleOverlap` |
-| different source / input / reduction | `IncompatibleInput` |
+| different source | `SourceMismatch` |
 
 Adjacent intervals coalesce only when their population maps are identical.
 Merging an empty input list fails with `EmptyMerge`.
@@ -138,8 +141,7 @@ Merging an empty input list fails with `EmptyMerge`.
 ## Trusted declarations
 
 Coverage is declared by the composition rule or catalog that built the
-subtree. Nothing is inferred from SQL. Only `input` and `reduction` are checked
-against the producer. Population is not compared with `SummaryAgg.filter`,
+subtree. Nothing is inferred from SQL. Population is not compared with `SummaryAgg.filter`,
 `Filter` nodes or `Scan.predicates`. Time bounds cannot be checked, because
 `TimeRange` stores a relative duration. So a wrong declaration passes:
 
