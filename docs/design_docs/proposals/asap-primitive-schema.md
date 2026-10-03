@@ -4,17 +4,27 @@ This document is the single source of truth for the schema, and column design fo
 
 ## 1. Goal and problem
 
-ASAP primitives are compact summaries over raw data: a KLL sketch over latency
-samples, an exact `Sum` accumulator, a Count-Min sketch over request keys. Once a
-plan contains them, three things must be explicit:
+Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, 
 
-1. **What flows on an edge.** Every operator, before and after ASAP optimization,
-   needs one typed output contract, so a projection above a summary and one below
-   it are the same operator.
-2. **That a field can be a primitive.** A state column is not a number. It has a
-   family, an algorithm and parameters, and it can only be read through a
-   readout.
-3. **What a primitive summarizes.** Two states of the same type can hold different
+Once an [ASAP Operator](https://github.com/ProjectASAP/ASAPPlanner/blob/main/docs/design_docs/proposals/operator-sharing.md) is a summary state operator, the ASAP Operator node in LogicalASAPDAG and PhysicalASAPDAG should represent the following information: 
+
+
+## Schema Design
+
+Schema represents the metadata of information flow along an edge between two nodes in a logical or physical DAG. The schema field is associated with a node in the DAG. 
+
+Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
+Each field should contain the following information. 
+1. **The data type of a column.** A state column can be a raw data type (e.g., numerical number, string). It can also be a [summary type](), e.g., the summary family is sketch, and the sketch type is quantile KLL sketch algorithm, and KLL sketch has K  as parameter.   It has a
+   family, an algorithm and parameters.
+2. ** **. 
+
+
+
+## Node design 
+
+Each node in the DAG should contain the information of the instance this nodes is computing, in addition to schema or metadata. 
+4. **What a ASAP primitive summarizes.** Two states of the same type can hold different
    data. The planner must know which observations each holds before it combines or
    reuses them.
 
