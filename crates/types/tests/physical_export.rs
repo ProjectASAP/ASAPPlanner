@@ -100,3 +100,25 @@ fn query_time_input_to_ingestion_is_rejected() {
 fn untimed_plan_is_rejected() {
     assert!(compile_physical_asap_dag(&plan()).is_err());
 }
+
+/// Two queries reading one summary state export once, with one root per query.
+#[test]
+fn batch_shares_the_summary_and_keeps_one_root_per_query() {
+    use asap_types::ir::export::compile_physical_asap_workload;
+    let first = plan();
+    let state = first.children()[0].clone();
+    let second = OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+        child: state,
+    }))
+    .unwrap();
+    let assignment = LifecycleAssignment::default_maintained();
+    let mut memo = TimingMemo::new();
+    let timed: Vec<_> = [first, second]
+        .iter()
+        .map(|root| apply_lifecycle_timings(root, &assignment, &mut memo).unwrap())
+        .collect();
+    let dag = compile_physical_asap_workload(&timed).unwrap();
+    dag.validate().unwrap();
+    assert_eq!(dag.roots.len(), 2);
+    assert_eq!(dag.nodes.len(), 4, "scan and summary are exported once");
+}

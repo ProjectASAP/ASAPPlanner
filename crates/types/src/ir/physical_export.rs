@@ -72,7 +72,9 @@ pub struct PhysicalASAPDAG {
     pub edges: Vec<PhysicalASAPDAGEdge>,
     /// Semantic workload root. Physical query/precompute sinks are selected
     /// downstream by the control plane.
-    pub root: PhysicalASAPNodeId,
+    /// One root per query of the batch, in workload order. Scalar query roots
+    /// are not physical nodes yet.
+    pub roots: Vec<PhysicalASAPNodeId>,
 }
 
 /// Versioned transport envelope for a physical ASAP DAG.
@@ -112,6 +114,8 @@ pub enum PhysicalASAPDAGValidationError {
         producer: PhysicalASAPNodeId,
         consumer: PhysicalASAPNodeId,
     },
+    #[error("physical ASAP DAG has no query roots")]
+    NoRoots,
     #[error("physical ASAP DAG contains a cycle")]
     Cycle,
     #[error("physical ASAP node {0:?} is not reachable from the root")]
@@ -200,8 +204,13 @@ impl PhysicalASAPDAG {
                 }
             }
         }
-        if !nodes.contains_key(&self.root) {
-            return Err(PhysicalASAPDAGValidationError::MissingRoot(self.root));
+        if self.roots.is_empty() {
+            return Err(PhysicalASAPDAGValidationError::NoRoots);
+        }
+        for root in &self.roots {
+            if !nodes.contains_key(root) {
+                return Err(PhysicalASAPDAGValidationError::MissingRoot(*root));
+            }
         }
         let mut children: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
         for edge in &self.edges {
@@ -262,13 +271,11 @@ impl PhysicalASAPDAG {
             visited.insert(id);
             true
         }
-        if !visit(
-            self.root,
-            &children,
-            &mut HashSet::new(),
-            &mut HashSet::new(),
-        ) {
-            return Err(PhysicalASAPDAGValidationError::Cycle);
+        let mut visited = HashSet::new();
+        for root in &self.roots {
+            if !visit(*root, &children, &mut HashSet::new(), &mut visited) {
+                return Err(PhysicalASAPDAGValidationError::Cycle);
+            }
         }
         fn mark(
             id: PhysicalASAPNodeId,
@@ -283,7 +290,9 @@ impl PhysicalASAPDAG {
             }
         }
         let mut reachable = HashSet::new();
-        mark(self.root, &children, &mut reachable);
+        for root in &self.roots {
+            mark(*root, &children, &mut reachable);
+        }
         if let Some(id) = nodes.keys().find(|id| !reachable.contains(id)) {
             return Err(PhysicalASAPDAGValidationError::UnreachableNode(*id));
         }
@@ -332,12 +341,28 @@ pub fn compile_physical_asap_dag(
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
+    compile_physical_asap_workload_with_node_ids(std::slice::from_ref(root))
+}
+
+/// Export a timed batch as one DAG with one root per query.
+pub fn compile_physical_asap_workload(
+    roots: &[Rc<OperatorNode>],
+) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
+    Ok(compile_physical_asap_workload_with_node_ids(roots)?.dag)
+}
+
+pub fn compile_physical_asap_workload_with_node_ids(
+    roots: &[Rc<OperatorNode>],
+) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
     let mut exporter = Exporter::default();
-    let root = exporter.visit(root)?;
+    let roots = roots
+        .iter()
+        .map(|root| exporter.visit(root))
+        .collect::<Result<Vec<_>, _>>()?;
     let dag = PhysicalASAPDAG {
         nodes: exporter.nodes,
         edges: exporter.edges,
-        root,
+        roots,
     };
     dag.validate()
         .expect("compiler emits a valid physical ASAP DAG");
