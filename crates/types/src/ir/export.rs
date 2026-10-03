@@ -130,6 +130,9 @@ impl LogicalASAPDAG {
                 family, grouping, ..
             } = &node.payload
             {
+                if node.coverage.is_none() {
+                    return Err(LogicalASAPDAGValidationError::InvalidCoverage(node.id));
+                }
                 if !node.output_schema.fields.iter().any(|field| &field.dtype == family)
                     || node.output_schema.fields.iter().any(|field| matches!(&field.dtype, FieldDataType::Sketch(_, actual) if actual != grouping)) {
                     return Err(LogicalASAPDAGValidationError::SummarySchemaMismatch(node.id));
