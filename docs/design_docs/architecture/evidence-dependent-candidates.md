@@ -58,12 +58,10 @@ not emit a `RejectedCandidate` for that case.
 | HLL confidence | Symbolic failure probability | Reject a fully known unmet root target. |
 | Relative-value composition | Symbolic bound when input sign is unknown | Reject known signed input for this rule. |
 | Exact sum/average/extremum | Symbolic row-count probability term | Reject unsupported metric combinations. |
-| Cost/rate/physical evidence | `None` cost or missing workload rate; candidate remains in `CandidateLogicalASAPDAGs` | Physical/lifecycle evaluation reports unavailable or rejected evidence. |
+| Cost/rate/physical evidence | `None` cost or missing workload rate; candidate remains in `CandidateLogicalASAPDAGs` | Physical evaluation reports unavailable or rejected evidence. |
 | Mixed exact/summary operator | Unknown runtime support; candidate remains in `CandidateLogicalASAPDAGs` | `Some(false)` prevents construction. |
 
-Lifecycle deployment choices are a separate output from `CandidateLogicalASAPDAGs`; their
-capability/cost rejections do not erase the logical summary candidate. The
-backend must still check ordinary summary family, window, and state-operation
+The backend must still check summary family, window, and state-operation
 capabilities before deployment.
 
 - Accuracy/domain: `AccuracyEvidenceProvider` supplies quantile domains and

@@ -62,11 +62,9 @@ Reserved (migrated but unimplemented; schema derivation rejects them with
 
 The earlier draft listed `SummaryCreate` and `SummaryInsert`. These are not
 separate variants. `SummaryAgg` describes the state-producing
-computation and its update input. The
-[summary-maintenance lifecycle](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
-separately describes when state is created, retained, shared, updated and retired.
-Physical binding and runtime execution implement the actual build and update
-operations. Not every summary family supports incremental maintenance.
+computation and its update input. Stage 2 materialization (#509) will decide
+whether and when that state is maintained. Physical binding and runtime
+execution implement the actual build and update operations. Not every summary family supports incremental maintenance.
 
 ## Exact work and composition
 
@@ -79,8 +77,8 @@ Exact work is represented by the ordinary operators, unchanged:
   assessed yet (`is_logical_rewrite`).
 - `BinaryOp` combines independently planned operands. Summary planning may set
   its typed division guards (`checked_finite_division`,
-  `checked_relative_division`); the operator's timing comes from the lifecycle
-  assignment, not from the operator.
+  `checked_relative_division`); the operator's timing comes from the
+  materialization assignment, not from the operator.
 - Aggregate, projection, filter, sort and limit over an evaluation are the ordinary
   `Aggregate`, `Project`, `Filter`, `Sort` and `Limit` operators reading an ASAP
   node. Exact-accumulator state may pass through the projection-like
@@ -109,11 +107,12 @@ not definitions of the operator.
 
 The logical DAG carries no timing: `OperatorNode::timing` is `None` on every
 front-end node and every candidate, and `map_children` clears it. Summary
-materialization chooses a lifecycle per summary state and records it in a
-[`LifecycleAssignment`](../../../crates/types/src/ir/timing.rs) (ingestion-time
-maintenance or query-time recomputation per `SummaryAgg`; a state absent from
-the assignment defaults to ingestion-time maintenance).
-`apply_lifecycle_timings(root, &assignment, &mut TimingMemo)` then writes a
+materialization chooses a timing per summary state and records it in a
+[`MaterializationAssignment`](../../../crates/types/src/ir/timing.rs) (ingestion-time
+maintenance or query-time computation per `SummaryAgg`). The default is
+`all_query_time()`; until Stage 2 materialization (#509) decides otherwise, the
+planner times every `SummaryAgg` at query time.
+`apply_materialization_timings(root, &assignment, &mut TimingMemo)` then writes a
 timing into every node, top-down:
 
 - a node of fixed kind takes its kind's timing — `SummaryEstimate` and
@@ -129,8 +128,9 @@ The pass then validates every edge (rows or exact-accumulator state into a
 an `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a
 node reached from two consumers that need different timings;
 `split_shared_by_phase` copies such a sub-DAG for one side before the
-assignment is applied. `validate_default` and `planned_data_state` answer the
-same questions for a candidate at planning time without keeping anything.
+assignment is applied. `validate_maintained` and `planned_data_state` answer the
+same questions for a candidate at planning time, assuming every summary is
+maintained at ingestion time, without keeping anything.
 
 ## Exported DAG
 
@@ -157,7 +157,7 @@ children as edges and no embedded sub-DAGs:
   producer's data state and grouping/window compatibility.
 - Each node records `output_state` (timing plus `Raw` or `SummaryState`),
   `output_schema` and `guarantee`. Export reads the timing written by
-  `apply_lifecycle_timings` and rejects an untimed node
+  `apply_materialization_timings` and rejects an untimed node
   (`ExecutionDataStateError::UntimedNode`); it does not re-run data-state
   validation.
 
@@ -196,7 +196,7 @@ membership guarantee's child provenance. An exact request does not accept this
 approximate output path merely because its selected identities are certified.
 
 Deployment chooses ingestion time or query time for these operators. The
-lifecycle assignment writes the placement; `with_execution_phases` can
+materialization assignment writes the placement; `with_execution_phases` can
 reassign it on the exported DAG. Either deployment must give each evaluation a complete
 rate window and an isolated summary state, or maintain an equivalent replacement
 strategy. Appending successive rate snapshots to one cumulative state is invalid.

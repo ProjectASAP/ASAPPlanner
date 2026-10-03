@@ -4,33 +4,27 @@
 
 ASAPPlanner produces `CandidateLogicalASAPDAGs`, a compact logical candidate space. Integrators
 may select candidates downstream or ask Planner's helpers to select and assemble
-DAGs. Summary-maintenance lifecycle decisions belong to Planner only when the
-integration uses its lifecycle-aware workflow; physical deployment and execution
-remain downstream. The [input/output/workflow design](input-output-workflow.md)
-defines this boundary.
-
-A downstream provider can report implementation alternatives and their cost and
-accuracy evidence for a Planner-owned comparison. The resulting
-`SummaryMaintenanceLifecyclePlan` contains a Post-ASAP DAG root and maintenance
-decisions; it is not an executable plan. Repeated provider calls do not constitute
-an implemented end-to-end replanning or deployment-transition protocol.
+DAGs. Stage 2 materialization (#509) will decide per sub-DAG whether to
+materialize and whether at ingestion or query time; until then every summary
+runs at query time. Physical deployment and execution remain downstream. The
+[input/output/workflow design](input-output-workflow.md) defines this boundary.
 
 ## Three decision layers
 
 | Layer | Owner | Examples |
 |---|---|---|
 | Logical candidate semantics | ASAPPlanner | Query rewrite; summary family and parameters; grouping; accuracy guarantees when established. |
-| Summary maintenance and realization selection | Planner helpers when delegated to Planner; otherwise downstream | `Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`; `DirectBuild` or `Incremental`; window implementations compared using provider evidence. |
+| Summary materialization and realization selection | Stage 2 materialization (#509); downstream until then | Ingestion-time maintenance or query-time computation per summary state; direct build or incremental update; window implementations compared using provider evidence. |
 | Concrete implementation and deployment | ASAPQuery-backend and its workload optimizer | Library and data-structure implementation, exact pane layout, placement, sharding, storage, transmission, materialization IDs, executor configuration, and workload-wide assignment. |
 
 ASAPCollector and the ASAPQuery data plane execute the compiled downstream
 plans. They validate capabilities and plan identities, maintain or read the
 specified state, and report runtime observations. They do not silently choose
-a different summary, lifecycle, or realization framework.
+a different summary, materialization, or realization framework.
 
 ## Incremental-maintenance example
 
-When the integration delegates summary-maintenance decisions to Planner,
+Once Stage 2 materialization (#509) owns summary-maintenance decisions,
 ASAPPlanner may decide that a logical summary should be incrementally
 maintained: new data updates existing summary state. It may also select the
 planner-visible window realization—such as tumbling, sliding/panes, or an
@@ -43,7 +37,7 @@ pane representation, runtime operator implementation, placement, sharding,
 watermark behavior, and materialization identifiers. ASAPCollector maintains
 the compiled panes and summary state.
 
-Thus `Incremental` describes the state-update lifecycle, while tumbling,
+Thus incremental update describes how state is maintained, while tumbling,
 sliding, and exponential-histogram describe realization algorithms. They are
 distinct axes, but both can participate in ASAPPlanner's candidate space. The
 backend still owns how the selected algorithms are physically realized.
@@ -64,11 +58,10 @@ selected algorithm's semantics or guarantees.
 ## Iterative planning protocol (future integration)
 
 The sequence below is an intended integration design, not one shipped public
-API or a required path for every caller. Current provider and lifecycle helpers
-support a bounded planning decision; cross-run identity, migration, activation,
-and rollback are not an end-to-end Planner protocol.
+API or a required path for every caller. Cross-run identity, migration,
+activation, and rollback are not an end-to-end Planner protocol.
 
-1. ASAPPlanner enumerates semantically valid logical summaries, lifecycle
+1. ASAPPlanner enumerates semantically valid logical summaries, materialization
    alternatives, and registered realization strategies.
 2. A physical-plan provider maps those candidates to executor-feasible complete
    alternatives. Unsupported candidates are omitted or explicitly rejected.
@@ -76,12 +69,12 @@ and rollback are not an end-to-end Planner protocol.
    scan selection, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
 4. ASAPPlanner keeps constructible candidates with missing evidence visible
-   in `CandidateLogicalASAPDAGs` but does not certify unknown accuracy. The
-   summary-maintenance-lifecycle-aware workflow compares supported alternatives
-   over the same workload horizon. Missing or incomparable costs do not establish
+   in `CandidateLogicalASAPDAGs` but does not certify unknown accuracy.
+   Materialization compares supported alternatives over the same workload
+   horizon. Missing or incomparable costs do not establish
    that maintaining a summary beats raw recomputation; structural scores and
    optimistic zeroes are not substitutes.
-5. ASAPPlanner outputs the selected Post-ASAP semantics, lifecycle guarantees,
+5. ASAPPlanner outputs the selected Post-ASAP semantics, materialization choices,
    realization contract, and chosen provider identity.
 6. ASAPQuery-backend compiles that result into consistent `CollectorPlan`,
    `BackendPlan`, and `QueryPlan` projections and performs deployment-level and
@@ -106,11 +99,8 @@ such as cache behavior, serialization overhead, compression, spill I/O, or
 data-distribution-dependent sketch error. Provenance and version information
 must accompany those facts so stale observations fail closed.
 
-`SummaryPhysicalPlanAlternative` is the current integration point for a
-complete provider-enumerated implementation. Its identity is returned with the
-winning lifecycle combination. More structured planner-owned realization
-contracts can refine the candidate space without moving executor
-implementation into ASAPPlanner.
+More structured planner-owned realization contracts can refine the candidate
+space without moving executor implementation into ASAPPlanner.
 
 ## Workload-wide optimization
 
@@ -146,7 +136,7 @@ in one cost formula.
   automatically selected.
 - Shared logical nodes remain shared across the planner-runtime contract; physical sharing
   additionally requires compatible filters, grouping, windows, parameters,
-  lifecycle, and guarantees.
+  materialization, and guarantees.
 - Collector, backend, and query plans are projections of one compiled decision
   and cannot be optimized independently into inconsistent semantics.
 
@@ -155,7 +145,6 @@ in one cost formula.
 - [Post-ASAP IR](../concepts/post-asap-ir.md)
 - [Physical plan integration](physical-plan-integration.md)
 - [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
-- [Workload demand and summary lifecycle](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
 - [ASAPCollector physical compilation](https://github.com/ProjectASAP/ASAPCollector/blob/87684f4b61514382d8b087724694f93187bfc19c/docs/design_docs/control-plane/post-asap-physical-compilation.md)
 - [ASAPQuery configuration formulation](https://github.com/ProjectASAP/ASAPQuery/blob/main/.design_docs/sketch-config-optimization-formulation.md)
 - [ASAPQuery optimizer MIP formulation](https://github.com/ProjectASAP/ASAPQuery/blob/main/.design_docs/optimizer-mip-formulation.md)
