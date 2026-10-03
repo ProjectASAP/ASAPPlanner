@@ -41,14 +41,11 @@
 //!   to obtain ranked views, and perform selection downstream.
 //! - Call [`CandidateLogicalASAPDAGs::global_selection`] once for the workload, then
 //!   [`GlobalSelection::assemble_selected_dag`] for each query root. This
-//!   coordinates logical choices and preserves shared nodes, but makes no
-//!   summary-maintenance lifecycle decision.
-//! - When Planner owns maintenance-versus-recomputation decisions, use
-//!   [`global_selection_with_summary_maintenance_lifecycles`] followed by
-//!   [`assemble_selected_dag_with_summary_maintenance_lifecycles`] per root.
-//!   This alternative workflow returns [`SummaryMaintenanceLifecyclePlan`]
-//!   values containing DAG roots and maintenance decisions; callers do not need
-//!   to run ordinary selection/assembly first.
+//!   coordinates logical choices and preserves shared nodes. Whether and when
+//!   a summary state is materialized is not decided here: every summary runs
+//!   at query time until Stage 2 materialization (#509) owns that choice.
+//! - Run the whole pipeline through [`optimize`] with [`MajorPass`], which
+//!   performs the two steps above for every root of a parsed workload.
 //!
 //! Models and evidence determine which choices the helpers can justify.
 //! Physical operator binding, placement, storage, deployment, and execution
@@ -172,9 +169,6 @@ pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
 pub mod storage_io;
-pub mod summary_maintenance_cost;
-pub mod summary_maintenance_dag_export;
-pub mod summary_maintenance_lifecycle;
 #[cfg(test)]
 mod test_support;
 pub mod topk_reuse;
@@ -185,7 +179,6 @@ pub use accuracy::{
     CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
     PropagationStats, WorkloadAccuracyEvidence,
 };
-pub use cost_model::CompleteSummaryCandidateEstimate;
 pub use cost_model::{
     maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
     CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
@@ -197,9 +190,8 @@ pub use explanation::{
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use pass::{
-    optimize, LifecycleInput, MajorPass, OptimizationInput, OptimizationInputError,
-    OptimizationPass, OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels,
-    QueryLifecyclePlan,
+    optimize, MajorPass, OptimizationInput, OptimizationInputError, OptimizationPass,
+    OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
 };
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
@@ -216,22 +208,6 @@ pub use replacement::{
     MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
-pub use summary_maintenance_dag_export::{
-    export_summary_maintenance_plan, SummaryMaintenanceDAGExport,
-    SummaryMaintenanceDeploymentExport, SummaryMaintenanceLifecycleAlternativeExport,
-};
-pub use summary_maintenance_lifecycle::{
-    assemble_selected_dag_with_summary_maintenance_lifecycles,
-    enumerate_summary_maintenance_lifecycles, execution_timed_workload_dag,
-    global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
-    SummaryMaintenanceCapabilities, SummaryMaintenanceDeployment,
-    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleAssemblyError,
-    SummaryMaintenanceLifecycleCandidates, SummaryMaintenanceLifecycleCapabilities,
-    SummaryMaintenanceLifecycleChoiceError, SummaryMaintenanceLifecycleCostInputs,
-    SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError,
-    SummaryMaintenanceLifecycleRejection, SummaryMaintenanceLifecycleSelectionError,
-    SummaryMaintenanceTimingError, WorkloadDemand,
-};
 pub use topk_reuse::TopKLimitReuseStrategy;
 
 pub mod maintained_population;

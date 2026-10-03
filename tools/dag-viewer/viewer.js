@@ -122,13 +122,7 @@ function loadFiles(fileList) {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
-        const incoming = parsed.queries || (parsed.dag && parsed.deployments ? [{
-          name: file.name.replace(/\.json$/i, '') || 'Summary maintenance plan',
-          dag: parsed.dag,
-          post_dag: parsed.dag,
-          lifecycle_plan: true,
-          lifecycle_summary: lifecyclePlanSummary(parsed),
-        }] : []);
+        const incoming = parsed.queries || [];
         const existingNames = new Set(queries.map((q) => q.name));
         // One batch id per *file* — every query this one dag_export
         // invocation produced shares its decision.id numbering.
@@ -137,7 +131,7 @@ function loadFiles(fileList) {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch });
+          queries.push({ name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, sourceBatch });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -152,19 +146,6 @@ function loadFiles(fileList) {
     reader.readAsText(file);
   });
   fileInput.value = '';
-}
-
-function lifecyclePlanSummary(plan) {
-  return {
-    selected_raw_recompute: Boolean(plan.selected_raw_recompute),
-    summary_total_cost: plan.summary_total_cost ?? null,
-    raw_recompute_total_cost: plan.raw_recompute_total_cost ?? null,
-    horizon_seconds: plan.horizon_seconds ?? null,
-    evaluation_rate_per_second: plan.evaluation_rate_per_second ?? null,
-    update_rate_per_second: plan.update_rate_per_second ?? null,
-    expected_reads: plan.expected_reads ?? null,
-    deployment_count: Array.isArray(plan.deployments) ? plan.deployments.length : 0,
-  };
 }
 
 function getParticipants() {
@@ -481,28 +462,6 @@ function renderPrePostAsap() {
     return;
   }
   hideModeHint();
-  if (selected.length === 1 && selected[0].lifecycle_plan) {
-    viewTitleEl.textContent = `Summary maintenance: ${selected[0].name}`;
-    const elements = laneElements(
-      'summary-maintenance',
-      `${selected[0].name} · lifecycle plan`,
-      selected[0].post_dag,
-      selected[0],
-      'post',
-    );
-    buildCy(elements);
-    finalizeDAGInteractions();
-    applyHighlighting();
-    const initial = cy.nodes().filter((node) => !node.data('isLane') && node.data('root')).first();
-    if (initial && initial.length) {
-      initial.select();
-      showPrePostDetail(initial.data());
-    } else {
-      clearDetail();
-    }
-    fitAndSyncZoom();
-    return;
-  }
   viewTitleEl.textContent = selected.length === 1
     ? `Pre/Post-ASAP: ${selected[0].name}`
     : `Pre/Post-ASAP workload union: ${selected.length} queries`;
@@ -655,7 +614,6 @@ function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
         laneId,
         stage,
         queryName: query.name,
-        lifecycleSummary: query.lifecycle_summary,
         translations: translationsForNode(query, node, stage),
       },
       classes: node.decision && typeof node.decision.benefit?.value === 'number'
@@ -1009,33 +967,6 @@ function showPrePostDetail(data) {
     : '';
 
   const decisions = data.translations || [];
-  const planSummary = data.lifecycleSummary;
-  let planSummaryHtml = '';
-  if (planSummary) {
-    const value = (item) => item === null || item === undefined ? 'unknown' : String(item);
-    const selected = planSummary.selected_raw_recompute
-      ? 'Raw recomputation'
-      : 'Summary maintenance';
-    planSummaryHtml = `<div class="translationBlock"><h3>Lifecycle plan decision</h3>
-      <div><strong>Selected:</strong> ${escapeHtml(selected)}</div>
-      <div class="translationMeta">summary cost: ${escapeHtml(value(planSummary.summary_total_cost))} · raw recompute cost: ${escapeHtml(value(planSummary.raw_recompute_total_cost))} · deployments: ${escapeHtml(value(planSummary.deployment_count))}</div>
-      <div class="translationMeta">horizon: ${escapeHtml(value(planSummary.horizon_seconds))} s · expected reads: ${escapeHtml(value(planSummary.expected_reads))} · evaluation rate: ${escapeHtml(value(planSummary.evaluation_rate_per_second))}/s · update rate: ${escapeHtml(value(planSummary.update_rate_per_second))}/s</div>
-    </div>`;
-  }
-  const lifecycle = node.detail && node.detail.summary_maintenance;
-  let lifecycleHtml = '';
-  if (lifecycle) {
-    const selected = lifecycle.selected;
-    const selectedText = selected
-      ? `${selected.lifecycle.kind} · ${selected.maintenance_mode} · ${selected.evaluation_schedule} · ${selected.output_representation}`
-      : 'No lifecycle selected';
-    const alternatives = (lifecycle.alternatives || []).map((alternative) => {
-      const status = alternative.rejection ? `rejected: ${alternative.rejection}` : `cost: ${alternative.total_cost}`;
-      const assumptions = (alternative.assumptions || []).join('; ') || 'none';
-      return `<div class="translationCard"><div class="translationStrategy">${escapeHtml(alternative.lifecycle.kind)}</div><div class="translationMeta">${escapeHtml(status)}</div><div class="translationReason">assumptions: ${escapeHtml(assumptions)}</div></div>`;
-    }).join('');
-    lifecycleHtml = `<div class="translationBlock"><h3>Summary maintenance lifecycle</h3><div><strong>Selected:</strong> ${escapeHtml(selectedText)}</div>${alternatives}</div>`;
-  }
   let translationHtml = '';
   if (decisions.length > 0) {
     const cards = decisions.map((entry) => `
@@ -1057,9 +988,7 @@ function showPrePostDetail(data) {
     <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(chipLabel)}</span>
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
-    ${planSummaryHtml}
     ${translationHtml}
-    ${lifecycleHtml}
     <h3 class="detailSubhead">IR node content</h3>
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
@@ -1181,7 +1110,7 @@ function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
   // One batch id for this whole document — see `sourceBatch`'s own doc above.
   const sourceBatch = nextSourceBatch++;
-  incoming.forEach((q) => queries.push({ name: q.name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch }));
+  incoming.forEach((q) => queries.push({ name: q.name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, sourceBatch }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
   if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }
