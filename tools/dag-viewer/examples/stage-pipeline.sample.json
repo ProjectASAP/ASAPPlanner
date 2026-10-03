@@ -1,0 +1,3552 @@
+{
+  "format": "asap-stage-pipeline/v1",
+  "workload": {
+    "queries": [
+      {
+        "id": "q2",
+        "language": "promql",
+        "text": "topk by (job) (10, sum_over_time(http_requests_total[1m]))"
+      }
+    ]
+  },
+  "stage0_logical": {
+    "dag": {
+      "nodes": [
+        {
+          "id": 0,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "scan",
+              "source": {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              },
+              "predicates": [],
+              "schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "output_schema": {
+            "fields": [
+              {
+                "name": "ts",
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "value",
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "job",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": true,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [],
+            "closed": false
+          },
+          "guarantee": null,
+          "coverage": null
+        },
+        {
+          "id": 1,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "time_range",
+              "range": {
+                "secs": 60,
+                "nanos": 0
+              },
+              "range_kind": "range"
+            }
+          },
+          "result_kind": "range_vector",
+          "output_schema": {
+            "fields": [
+              {
+                "name": "ts",
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "value",
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "job",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": true,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [],
+            "closed": false
+          },
+          "guarantee": null,
+          "coverage": null
+        },
+        {
+          "id": 2,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "aggregate",
+              "reduction": "PerEntity",
+              "measures": [
+                {
+                  "kind": "sum",
+                  "col": null
+                }
+              ],
+              "output_names": [
+                ""
+              ],
+              "filters": [],
+              "having": null
+            }
+          },
+          "result_kind": "instant_vector",
+          "output_schema": {
+            "fields": [
+              {
+                "name": "ts",
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "value",
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "job",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": true,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [],
+            "closed": false
+          },
+          "guarantee": null,
+          "coverage": null
+        },
+        {
+          "id": 3,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "aggregate",
+              "reduction": {
+                "Reduce": [
+                  2
+                ]
+              },
+              "measures": [
+                {
+                  "kind": "top_k",
+                  "k": 10,
+                  "accuracy": "Exact"
+                }
+              ],
+              "output_names": [],
+              "filters": [],
+              "having": null
+            }
+          },
+          "result_kind": "instant_vector",
+          "output_schema": {
+            "fields": [
+              {
+                "name": "job",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": true,
+                "table": null
+              },
+              {
+                "name": "topk_10",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ],
+            "closed": true
+          },
+          "guarantee": null,
+          "coverage": null
+        }
+      ],
+      "edges": [
+        {
+          "producer": 0,
+          "consumer": 1,
+          "role": "Input",
+          "intermediate_schema": {
+            "fields": [
+              {
+                "name": "ts",
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "value",
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "job",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": true,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [],
+            "closed": false
+          },
+          "grouping": "NotApplicable"
+        },
+        {
+          "producer": 1,
+          "consumer": 2,
+          "role": "Input",
+          "intermediate_schema": {
+            "fields": [
+              {
+                "name": "ts",
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "value",
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "job",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": true,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [],
+            "closed": false
+          },
+          "grouping": "NotApplicable"
+        },
+        {
+          "producer": 2,
+          "consumer": 3,
+          "role": "Input",
+          "intermediate_schema": {
+            "fields": [
+              {
+                "name": "ts",
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "value",
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "nullable": false,
+                "table": null
+              },
+              {
+                "name": "job",
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "nullable": true,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [],
+            "closed": false
+          },
+          "grouping": "NotApplicable"
+        }
+      ],
+      "root": {
+        "Operator": 3
+      }
+    }
+  },
+  "stage1_logical_asap": {
+    "candidates": [
+      {
+        "id": "L1",
+        "label": "Exact: per-series sum, sort + limit 10 per job",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan",
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  },
+                  "predicates": [],
+                  "schema": {
+                    "fields": [
+                      {
+                        "name": "ts",
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "value",
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "job",
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "nullable": true,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [],
+                    "closed": false
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range",
+                  "range": {
+                    "secs": 60,
+                    "nanos": 0
+                  },
+                  "range_kind": "range"
+                }
+              },
+              "result_kind": "range_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate",
+                  "reduction": "PerEntity",
+                  "measures": [
+                    {
+                      "kind": "sum",
+                      "col": null
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "filters": [],
+                  "having": null
+                }
+              },
+              "result_kind": "instant_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate",
+                  "reduction": {
+                    "Reduce": [
+                      2
+                    ]
+                  },
+                  "measures": [
+                    {
+                      "kind": "top_k",
+                      "k": 10,
+                      "accuracy": "Exact"
+                    }
+                  ],
+                  "output_names": [],
+                  "filters": [],
+                  "having": null
+                }
+              },
+              "result_kind": "instant_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "topk_10",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": {
+                "metric": "absolute_value",
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact per-series sum and sort within job"
+                  }
+                ]
+              },
+              "coverage": null
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "grouping": "NotApplicable"
+            },
+            {
+              "producer": 1,
+              "consumer": 2,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "grouping": "NotApplicable"
+            },
+            {
+              "producer": 2,
+              "consumer": 3,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "grouping": "NotApplicable"
+            }
+          ],
+          "root": {
+            "Operator": 3
+          }
+        }
+      },
+      {
+        "id": "L2",
+        "label": "Count-Min + top-10 heap per job",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan",
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  },
+                  "predicates": [],
+                  "schema": {
+                    "fields": [
+                      {
+                        "name": "ts",
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "value",
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "job",
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "nullable": true,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [],
+                    "closed": false
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range",
+                  "range": {
+                    "secs": 60,
+                    "nanos": 0
+                  },
+                  "range_kind": "range"
+                }
+              },
+              "result_kind": "range_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "summary_agg",
+                "family": {
+                  "Sketch": [
+                    {
+                      "category": "TopK",
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "width": 272,
+                          "depth": 7,
+                          "heap_size": 10
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "input": {
+                  "item": {
+                    "EntityIdentity": {
+                      "PromqlLabelSet": {
+                        "excluding": []
+                      }
+                    }
+                  },
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                },
+                "grouping": "PerSubpopulationInstance",
+                "filter": null
+              },
+              "result_kind": "state",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": null,
+              "coverage": {
+                "source": {
+                  "TimeSeries": {
+                    "metric": "http_requests_total"
+                  }
+                },
+                "regions": [
+                  {
+                    "time_ms": null,
+                    "population": {}
+                  }
+                ]
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "summary_estimate",
+                "query": {
+                  "TopK": {
+                    "k": 10
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "topk_10",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": {
+                "metric": "relative_value",
+                "bound": {
+                  "op": "constant",
+                  "value": 0.01
+                },
+                "failure_probability": {
+                  "op": "constant",
+                  "value": 0.001
+                },
+                "provenance": [
+                  {
+                    "kind": "sketch_readout",
+                    "algorithm": "CmsWithHeap",
+                    "contract": "eps-delta frequency bound on heap members",
+                    "params": {
+                      "width": 272,
+                      "depth": 7,
+                      "heap_size": 10
+                    },
+                    "query": "TopK { k: 10 }"
+                  }
+                ]
+              },
+              "coverage": null
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "grouping": "NotApplicable"
+            },
+            {
+              "producer": 1,
+              "consumer": 2,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "grouping": "NotApplicable"
+            },
+            {
+              "producer": 2,
+              "consumer": 3,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "grouping": "Identical"
+            }
+          ],
+          "root": {
+            "Operator": 3
+          }
+        }
+      },
+      {
+        "id": "L3",
+        "label": "Hydra over (job, series) + heap per job",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan",
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  },
+                  "predicates": [],
+                  "schema": {
+                    "fields": [
+                      {
+                        "name": "ts",
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "value",
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "job",
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "nullable": true,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [],
+                    "closed": false
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range",
+                  "range": {
+                    "secs": 60,
+                    "nanos": 0
+                  },
+                  "range_kind": "range"
+                }
+              },
+              "result_kind": "range_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "summary_agg",
+                "family": {
+                  "Sketch": [
+                    {
+                      "category": "TopK",
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "width": 272,
+                          "depth": 7,
+                          "heap_size": 10
+                        }
+                      }
+                    },
+                    {
+                      "SharedMultiSubpopulation": {
+                        "kind": "HydraCms",
+                        "params": {
+                          "HydraCms": {
+                            "width": 272,
+                            "depth": 7,
+                            "shared_rows": 5,
+                            "shared_columns": 65536
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "input": {
+                  "item": {
+                    "EntityIdentity": {
+                      "PromqlLabelSet": {
+                        "excluding": []
+                      }
+                    }
+                  },
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                },
+                "grouping": {
+                  "SharedMultiSubpopulation": {
+                    "kind": "HydraCms",
+                    "params": {
+                      "HydraCms": {
+                        "width": 272,
+                        "depth": 7,
+                        "shared_rows": 5,
+                        "shared_columns": 65536
+                      }
+                    }
+                  }
+                },
+                "filter": null
+              },
+              "result_kind": "state",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        {
+                          "SharedMultiSubpopulation": {
+                            "kind": "HydraCms",
+                            "params": {
+                              "HydraCms": {
+                                "width": 272,
+                                "depth": 7,
+                                "shared_rows": 5,
+                                "shared_columns": 65536
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": null,
+              "coverage": {
+                "source": {
+                  "TimeSeries": {
+                    "metric": "http_requests_total"
+                  }
+                },
+                "regions": [
+                  {
+                    "time_ms": null,
+                    "population": {}
+                  }
+                ]
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "summary_estimate",
+                "query": {
+                  "TopK": {
+                    "k": 10
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "topk_10",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": {
+                "metric": "relative_value",
+                "bound": {
+                  "op": "constant",
+                  "value": 0.01
+                },
+                "failure_probability": {
+                  "op": "constant",
+                  "value": 0.001
+                },
+                "provenance": [
+                  {
+                    "kind": "sketch_readout",
+                    "algorithm": "HydraCms",
+                    "contract": "eps-delta frequency bound on heap members",
+                    "params": {
+                      "width": 272,
+                      "depth": 7,
+                      "shared_rows": 5,
+                      "shared_columns": 65536
+                    },
+                    "query": "TopK { k: 10 }"
+                  }
+                ]
+              },
+              "coverage": null
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "grouping": "NotApplicable"
+            },
+            {
+              "producer": 1,
+              "consumer": 2,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "grouping": "NotApplicable"
+            },
+            {
+              "producer": 2,
+              "consumer": 3,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        {
+                          "SharedMultiSubpopulation": {
+                            "kind": "HydraCms",
+                            "params": {
+                              "HydraCms": {
+                                "width": 272,
+                                "depth": 7,
+                                "shared_rows": 5,
+                                "shared_columns": 65536
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "grouping": "Identical"
+            }
+          ],
+          "root": {
+            "Operator": 3
+          }
+        }
+      }
+    ]
+  },
+  "stage2_physical_asap": {
+    "candidates": [
+      {
+        "id": "P1",
+        "from_logical": "L1",
+        "label": "Exact, rebuilt from raw samples at query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan",
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  },
+                  "predicates": [],
+                  "schema": {
+                    "fields": [
+                      {
+                        "name": "ts",
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "value",
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "job",
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "nullable": true,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [],
+                    "closed": false
+                  }
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range",
+                  "range": {
+                    "secs": 60,
+                    "nanos": 0
+                  },
+                  "range_kind": "range"
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate",
+                  "reduction": "PerEntity",
+                  "measures": [
+                    {
+                      "kind": "sum",
+                      "col": null
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "filters": [],
+                  "having": null
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate",
+                  "reduction": {
+                    "Reduce": [
+                      2
+                    ]
+                  },
+                  "measures": [
+                    {
+                      "kind": "top_k",
+                      "k": 10,
+                      "accuracy": "Exact"
+                    }
+                  ],
+                  "output_names": [],
+                  "filters": [],
+                  "having": null
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "topk_10",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": {
+                "metric": "absolute_value",
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact per-series sum and sort within job"
+                  }
+                ]
+              },
+              "coverage": null
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 1,
+              "consumer": 2,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 2,
+              "consumer": 3,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            }
+          ],
+          "root": 3
+        },
+        "cost": {
+          "total": 412.0,
+          "unit": "cpu_ms_per_s",
+          "per_node": {
+            "0": {
+              "cost": 96.0,
+              "detail": "read 1 min of raw samples: 4.0M samples per refresh"
+            },
+            "1": {
+              "cost": 8.0,
+              "detail": "slice 1 min window"
+            },
+            "2": {
+              "cost": 180.0,
+              "detail": "sum per series: 1,000,000 hash-table entries"
+            },
+            "3": {
+              "cost": 128.0,
+              "detail": "sort 1,000,000 series within job, keep 10"
+            }
+          }
+        }
+      },
+      {
+        "id": "P2",
+        "from_logical": "L2",
+        "label": "Count-Min + heap, sketch at ingestion time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan",
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  },
+                  "predicates": [],
+                  "schema": {
+                    "fields": [
+                      {
+                        "name": "ts",
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "value",
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "job",
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "nullable": true,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [],
+                    "closed": false
+                  }
+                }
+              },
+              "output_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range",
+                  "range": {
+                    "secs": 60,
+                    "nanos": 0
+                  },
+                  "range_kind": "range"
+                }
+              },
+              "output_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "summary_agg",
+                "family": {
+                  "Sketch": [
+                    {
+                      "category": "TopK",
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "width": 272,
+                          "depth": 7,
+                          "heap_size": 10
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "input": {
+                  "item": {
+                    "EntityIdentity": {
+                      "PromqlLabelSet": {
+                        "excluding": []
+                      }
+                    }
+                  },
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                },
+                "grouping": "PerSubpopulationInstance",
+                "filter": null
+              },
+              "output_state": {
+                "timing": "ingestion_time",
+                "primitive": "SummaryState"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": null,
+              "coverage": {
+                "source": {
+                  "TimeSeries": {
+                    "metric": "http_requests_total"
+                  }
+                },
+                "regions": [
+                  {
+                    "time_ms": null,
+                    "population": {}
+                  }
+                ]
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "summary_estimate",
+                "query": {
+                  "TopK": {
+                    "k": 10
+                  }
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "topk_10",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": {
+                "metric": "relative_value",
+                "bound": {
+                  "op": "constant",
+                  "value": 0.01
+                },
+                "failure_probability": {
+                  "op": "constant",
+                  "value": 0.001
+                },
+                "provenance": [
+                  {
+                    "kind": "sketch_readout",
+                    "algorithm": "CmsWithHeap",
+                    "contract": "eps-delta frequency bound on heap members",
+                    "params": {
+                      "width": 272,
+                      "depth": 7,
+                      "heap_size": 10
+                    },
+                    "query": "TopK { k: 10 }"
+                  }
+                ]
+              },
+              "coverage": null
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 1,
+              "consumer": 2,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 2,
+              "consumer": 3,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "data_state": {
+                "timing": "ingestion_time",
+                "primitive": "SummaryState"
+              },
+              "grouping": "Identical",
+              "window": "NotApplicable"
+            }
+          ],
+          "root": 3
+        },
+        "cost": {
+          "total": 18.4,
+          "unit": "cpu_ms_per_s",
+          "per_node": {
+            "0": {
+              "cost": 0.0,
+              "detail": "no raw read at query time"
+            },
+            "1": {
+              "cost": 1.2,
+              "detail": "assign each sample to its 1 min window"
+            },
+            "2": {
+              "cost": 15.6,
+              "detail": "66,667 samples/s x 7 CMS rows, plus heap updates"
+            },
+            "3": {
+              "cost": 1.6,
+              "detail": "read 10 heap entries per job"
+            }
+          }
+        }
+      },
+      {
+        "id": "P3",
+        "from_logical": "L2",
+        "label": "Count-Min + heap, rebuilt at query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan",
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  },
+                  "predicates": [],
+                  "schema": {
+                    "fields": [
+                      {
+                        "name": "ts",
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "value",
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "job",
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "nullable": true,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [],
+                    "closed": false
+                  }
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range",
+                  "range": {
+                    "secs": 60,
+                    "nanos": 0
+                  },
+                  "range_kind": "range"
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "summary_agg",
+                "family": {
+                  "Sketch": [
+                    {
+                      "category": "TopK",
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "width": 272,
+                          "depth": 7,
+                          "heap_size": 10
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "input": {
+                  "item": {
+                    "EntityIdentity": {
+                      "PromqlLabelSet": {
+                        "excluding": []
+                      }
+                    }
+                  },
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                },
+                "grouping": "PerSubpopulationInstance",
+                "filter": null
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "SummaryState"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": null,
+              "coverage": {
+                "source": {
+                  "TimeSeries": {
+                    "metric": "http_requests_total"
+                  }
+                },
+                "regions": [
+                  {
+                    "time_ms": null,
+                    "population": {}
+                  }
+                ]
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "summary_estimate",
+                "query": {
+                  "TopK": {
+                    "k": 10
+                  }
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "topk_10",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": {
+                "metric": "relative_value",
+                "bound": {
+                  "op": "constant",
+                  "value": 0.01
+                },
+                "failure_probability": {
+                  "op": "constant",
+                  "value": 0.001
+                },
+                "provenance": [
+                  {
+                    "kind": "sketch_readout",
+                    "algorithm": "CmsWithHeap",
+                    "contract": "eps-delta frequency bound on heap members",
+                    "params": {
+                      "width": 272,
+                      "depth": 7,
+                      "heap_size": 10
+                    },
+                    "query": "TopK { k: 10 }"
+                  }
+                ]
+              },
+              "coverage": null
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 1,
+              "consumer": 2,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 2,
+              "consumer": 3,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        "PerSubpopulationInstance"
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "data_state": {
+                "timing": "query_time",
+                "primitive": "SummaryState"
+              },
+              "grouping": "Identical",
+              "window": "NotApplicable"
+            }
+          ],
+          "root": 3
+        },
+        "cost": {
+          "total": 96.4,
+          "unit": "cpu_ms_per_s",
+          "per_node": {
+            "0": {
+              "cost": 48.0,
+              "detail": "read 1 min of raw samples per refresh"
+            },
+            "1": {
+              "cost": 4.0,
+              "detail": "slice 1 min window"
+            },
+            "2": {
+              "cost": 42.8,
+              "detail": "insert 4.0M samples x 7 rows per refresh"
+            },
+            "3": {
+              "cost": 1.6,
+              "detail": "read 10 heap entries per job"
+            }
+          }
+        }
+      },
+      {
+        "id": "P4",
+        "from_logical": "L3",
+        "label": "Hydra, sketch at ingestion time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan",
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  },
+                  "predicates": [],
+                  "schema": {
+                    "fields": [
+                      {
+                        "name": "ts",
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "value",
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "name": "job",
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "nullable": true,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [],
+                    "closed": false
+                  }
+                }
+              },
+              "output_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range",
+                  "range": {
+                    "secs": 60,
+                    "nanos": 0
+                  },
+                  "range_kind": "range"
+                }
+              },
+              "output_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "guarantee": null,
+              "coverage": null
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "summary_agg",
+                "family": {
+                  "Sketch": [
+                    {
+                      "category": "TopK",
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "width": 272,
+                          "depth": 7,
+                          "heap_size": 10
+                        }
+                      }
+                    },
+                    {
+                      "SharedMultiSubpopulation": {
+                        "kind": "HydraCms",
+                        "params": {
+                          "HydraCms": {
+                            "width": 272,
+                            "depth": 7,
+                            "shared_rows": 5,
+                            "shared_columns": 65536
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "input": {
+                  "item": {
+                    "EntityIdentity": {
+                      "PromqlLabelSet": {
+                        "excluding": []
+                      }
+                    }
+                  },
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                },
+                "grouping": {
+                  "SharedMultiSubpopulation": {
+                    "kind": "HydraCms",
+                    "params": {
+                      "HydraCms": {
+                        "width": 272,
+                        "depth": 7,
+                        "shared_rows": 5,
+                        "shared_columns": 65536
+                      }
+                    }
+                  }
+                },
+                "filter": null
+              },
+              "output_state": {
+                "timing": "ingestion_time",
+                "primitive": "SummaryState"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        {
+                          "SharedMultiSubpopulation": {
+                            "kind": "HydraCms",
+                            "params": {
+                              "HydraCms": {
+                                "width": 272,
+                                "depth": 7,
+                                "shared_rows": 5,
+                                "shared_columns": 65536
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": null,
+              "coverage": {
+                "source": {
+                  "TimeSeries": {
+                    "metric": "http_requests_total"
+                  }
+                },
+                "regions": [
+                  {
+                    "time_ms": null,
+                    "population": {}
+                  }
+                ]
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "summary_estimate",
+                "query": {
+                  "TopK": {
+                    "k": 10
+                  }
+                }
+              },
+              "output_state": {
+                "timing": "query_time",
+                "primitive": "Raw"
+              },
+              "output_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "topk_10",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "guarantee": {
+                "metric": "relative_value",
+                "bound": {
+                  "op": "constant",
+                  "value": 0.01
+                },
+                "failure_probability": {
+                  "op": "constant",
+                  "value": 0.001
+                },
+                "provenance": [
+                  {
+                    "kind": "sketch_readout",
+                    "algorithm": "HydraCms",
+                    "contract": "eps-delta frequency bound on heap members",
+                    "params": {
+                      "width": 272,
+                      "depth": 7,
+                      "shared_rows": 5,
+                      "shared_columns": 65536
+                    },
+                    "query": "TopK { k: 10 }"
+                  }
+                ]
+              },
+              "coverage": null
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 1,
+              "consumer": 2,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [],
+                "closed": false
+              },
+              "data_state": {
+                "timing": "ingestion_time",
+                "primitive": "Raw"
+              },
+              "grouping": "NotApplicable",
+              "window": "NotApplicable"
+            },
+            {
+              "producer": 2,
+              "consumer": 3,
+              "role": "Input",
+              "intermediate_schema": {
+                "fields": [
+                  {
+                    "name": "job",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "name": "state",
+                    "dtype": {
+                      "Sketch": [
+                        {
+                          "category": "TopK",
+                          "algorithm": "CmsWithHeap",
+                          "params": {
+                            "CmsWithHeap": {
+                              "width": 272,
+                              "depth": 7,
+                              "heap_size": 10
+                            }
+                          }
+                        },
+                        {
+                          "SharedMultiSubpopulation": {
+                            "kind": "HydraCms",
+                            "params": {
+                              "HydraCms": {
+                                "width": 272,
+                                "depth": 7,
+                                "shared_rows": 5,
+                                "shared_columns": 65536
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ],
+                "closed": true
+              },
+              "data_state": {
+                "timing": "ingestion_time",
+                "primitive": "SummaryState"
+              },
+              "grouping": "Identical",
+              "window": "NotApplicable"
+            }
+          ],
+          "root": 3
+        },
+        "cost": {
+          "total": 11.2,
+          "unit": "cpu_ms_per_s",
+          "per_node": {
+            "0": {
+              "cost": 0.0,
+              "detail": "no raw read at query time"
+            },
+            "1": {
+              "cost": 1.2,
+              "detail": "assign each sample to its 1 min window"
+            },
+            "2": {
+              "cost": 8.1,
+              "detail": "66,667 samples/s x 5 shared rows, one structure for all jobs"
+            },
+            "3": {
+              "cost": 1.9,
+              "detail": "query shared grid and heap per job"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "stage3_selection": {
+    "selected": "P4",
+    "rejected": [
+      {
+        "id": "P1",
+        "reason": "Estimated 340 ms latency misses the 100 ms bound: exact top 10 is rebuilt from 1,000,000 series at every refresh."
+      },
+      {
+        "id": "P3",
+        "reason": "Valid but more expensive: 96.4 vs 11.2 cpu_ms_per_s for the selected plan."
+      }
+    ]
+  }
+}

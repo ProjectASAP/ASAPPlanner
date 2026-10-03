@@ -41,6 +41,13 @@ let participants = new Set();
 // dedups by `${sourceBatch}:${decision.id}`, never `decision.id` alone, so
 // two files that happen to reuse the same small integer id never collide.
 let nextSourceBatch = 0;
+// Stages view: one loaded `asap-stage-pipeline/v1` document (stages.js) and
+// the candidates currently shown in lanes 2 and 3. `viewMode` is 'stages'
+// only while such a document is loaded.
+let stageDoc = null;
+let viewMode = 'prepost';
+let stageLogicalId = null;
+let stagePhysicalId = null;
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -60,6 +67,9 @@ const detailSection = document.getElementById('detailSection');
 const viewTitleEl = document.getElementById('viewTitle');
 const zoomSlider = document.getElementById('zoomSlider');
 const zoomLabel = document.getElementById('zoomLabel');
+const tabsRowEl = document.getElementById('tabsRow');
+const modePrePostBtn = document.getElementById('modePrePost');
+const modeStagesBtn = document.getElementById('modeStages');
 
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
@@ -74,8 +84,12 @@ clearBtn.addEventListener('click', () => {
   queries = [];
   activeIndex = -1;
   participants = new Set();
+  stageDoc = null;
+  viewMode = 'prepost';
   render();
 });
+modePrePostBtn.addEventListener('click', () => { viewMode = 'prepost'; render(); });
+modeStagesBtn.addEventListener('click', () => { if (stageDoc) { viewMode = 'stages'; render(); } });
 // Selection only. `Clear all` above drops the loaded workload itself, which on
 // a render.py page cannot be undone — its embedded workload is parsed once, at
 // load — so the two stay separate controls rather than one overloaded button.
@@ -117,22 +131,19 @@ function loadFiles(fileList) {
   const files = Array.from(fileList || []);
   let pending = files.length;
   if (pending === 0) return;
+  let loadedStageDoc = false;
+  let loadedWorkload = false;
   files.forEach((file, fileIdx) => {
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
-        const incoming = parsed.queries || [];
-        const existingNames = new Set(queries.map((q) => q.name));
-        // One batch id per *file* — every query this one dag_export
-        // invocation produced shares its decision.id numbering.
-        const sourceBatch = nextSourceBatch++;
-        incoming.forEach((q) => {
-          let name = q.name;
-          if (existingNames.has(name)) name = `${q.name} (${file.name})`;
-          existingNames.add(name);
-          queries.push({ name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, sourceBatch });
-        });
+        if (isStagePipelineDocument(parsed)) {
+          loadedStageDoc = loadStageDocument(parsed, file.name) || loadedStageDoc;
+        } else {
+          addWorkloadFile(parsed, file.name);
+          loadedWorkload = true;
+        }
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
       }
@@ -140,6 +151,9 @@ function loadFiles(fileList) {
       if (pending === 0) {
         if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
         if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
+        // Open the view for what was just loaded; a stage document wins.
+        if (loadedStageDoc) viewMode = 'stages';
+        else if (loadedWorkload) viewMode = 'prepost';
         render();
       }
     };
@@ -148,6 +162,35 @@ function loadFiles(fileList) {
   fileInput.value = '';
 }
 
+function addWorkloadFile(parsed, fileName) {
+  const incoming = parsed.queries || [];
+  const existingNames = new Set(queries.map((q) => q.name));
+  // One batch id per *file* — every query this one dag_export
+  // invocation produced shares its decision.id numbering.
+  const sourceBatch = nextSourceBatch++;
+  incoming.forEach((q) => {
+    let name = q.name;
+    if (existingNames.has(name)) name = `${q.name} (${fileName})`;
+    existingNames.add(name);
+    queries.push({ name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, sourceBatch });
+  });
+}
+
+// Replaces any earlier stage document. Returns false (after telling the
+// user) when the document does not match the contract.
+function loadStageDocument(parsed, name) {
+  const errors = validateStagePipeline(parsed);
+  if (errors.length) {
+    alert(`${name} is not a valid ${STAGE_PIPELINE_FORMAT} document:\n${errors.slice(0, 10).join('\n')}`);
+    return false;
+  }
+  stageDoc = parsed;
+  stagePhysicalId = parsed.stage3_selection.selected;
+  stageLogicalId = physicalCandidate(stagePhysicalId).from_logical;
+  return true;
+}
+
+
 function getParticipants() {
   return Array.from(participants)
     .filter((i) => i >= 0 && i < queries.length)
@@ -155,6 +198,18 @@ function getParticipants() {
 }
 
 function render() {
+  renderModeToggle();
+  if (viewMode === 'stages' && stageDoc) {
+    tabsRowEl.style.display = 'none';
+    emptyEl.style.display = 'none';
+    cyOuterEl.style.display = 'block';
+    sidepanel.style.display = 'block';
+    sideResizeHandle.style.display = 'block';
+    renderStages();
+    renderLegend();
+    return;
+  }
+  tabsRowEl.style.display = '';
   renderTabs();
   if (queries.length === 0) {
     scopePickerEl.classList.remove('visible');
@@ -341,6 +396,27 @@ function buildCyStyle() {
         'color': textColor,
         'padding': '30px',
       },
+    },
+    {
+      // Stages view: physical operators that run at ingestion time.
+      selector: 'node.ingestionTime',
+      style: { 'border-style': 'double', 'border-width': 4 },
+    },
+    {
+      selector: 'node.laneParent.stageLane',
+      style: { 'text-wrap': 'wrap', 'text-max-width': 300 },
+    },
+    {
+      selector: 'node.laneParent.linkedLane',
+      style: { 'border-color': ringColor, 'border-width': 2 },
+    },
+    {
+      selector: 'node.laneParent.lane--selected',
+      style: { 'border-color': '#15803d', 'border-width': 2, 'border-style': 'solid' },
+    },
+    {
+      selector: 'node.laneParent.lane--rejected',
+      style: { 'border-color': '#b91c1c', 'border-width': 2 },
     },
     {
       selector: 'edge',
@@ -994,6 +1070,170 @@ function showPrePostDetail(data) {
   `;
 }
 
+// ── Stages: Logical / Logical ASAP / Physical ASAP lanes ─────────────────
+function renderModeToggle() {
+  modePrePostBtn.classList.toggle('active', viewMode !== 'stages' || !stageDoc);
+  modeStagesBtn.classList.toggle('active', viewMode === 'stages' && !!stageDoc);
+  modeStagesBtn.disabled = !stageDoc;
+}
+
+function logicalCandidate(id) {
+  return stageDoc.stage1_logical_asap.candidates.find((candidate) => candidate.id === id);
+}
+
+function physicalCandidate(id) {
+  return stageDoc.stage2_physical_asap.candidates.find((candidate) => candidate.id === id);
+}
+
+function selectPhysicalCandidate(id) {
+  stagePhysicalId = id;
+  // Lane 2 follows the logical candidate this physical plan implements.
+  stageLogicalId = physicalCandidate(id).from_logical;
+  render();
+}
+
+function stageStatusText(row) {
+  if (row.status === 'selected') return '✓ selected';
+  if (row.status === 'rejected') return '✗ rejected';
+  return 'not selected';
+}
+
+function renderStageScope(ranked) {
+  scopePickerEl.classList.add('visible');
+  const physical = physicalCandidate(stagePhysicalId);
+  const logicalButtons = stageDoc.stage1_logical_asap.candidates.map((candidate) => {
+    const linked = candidate.id === physical.from_logical;
+    return `<button type="button" class="scopeRow stageChoice${candidate.id === stageLogicalId ? ' active' : ''}${linked ? ' linked' : ''}" data-logical="${escapeHtml(candidate.id)}">
+      <span>${escapeHtml(candidate.id)} · ${escapeHtml(candidate.label || '')}</span>
+      ${linked ? `<span class="scopeMeta">source of ${escapeHtml(physical.id)}</span>` : ''}
+    </button>`;
+  }).join('');
+  const physicalRows = ranked.map((row) => `
+    <button type="button" class="scopeRow stageChoice stageRank stageRank--${row.status}${row.id === stagePhysicalId ? ' active' : ''}" data-physical="${escapeHtml(row.id)}">
+      <span class="stageRankNo">#${row.rank}</span>
+      <span>${escapeHtml(row.id)} · ${escapeHtml(row.label)}<span class="stageRankFrom"> from ${escapeHtml(row.from_logical)}</span>
+        ${row.reason ? `<span class="stageReason">${escapeHtml(row.reason)}</span>` : ''}</span>
+      <span class="scopeMeta">${escapeHtml(`${formatCostNumber(row.total)} ${row.unit}`)} · ${escapeHtml(stageStatusText(row))}</span>
+    </button>`).join('');
+  scopePickerEl.innerHTML = `
+    <div class="scopeGroup"><div class="scopeGroupLabel">Logical ASAP candidates (lane 2)</div>${logicalButtons}</div>
+    <div class="scopeGroup stageRankGroup"><div class="scopeGroupLabel">Physical ASAP candidates by total cost (lane 3)</div>${physicalRows}</div>`;
+  scopePickerEl.querySelectorAll('[data-logical]').forEach((button) => button.addEventListener('click', () => {
+    stageLogicalId = button.dataset.logical;
+    render();
+  }));
+  scopePickerEl.querySelectorAll('[data-physical]').forEach((button) => button.addEventListener('click', () => selectPhysicalCandidate(button.dataset.physical)));
+}
+
+function renderStages() {
+  const ranked = rankPhysicalCandidates(stageDoc);
+  renderStageScope(ranked);
+  renderStageSources();
+  hideModeHint();
+  const logical = logicalCandidate(stageLogicalId);
+  const physical = physicalCandidate(stagePhysicalId);
+  const row = ranked.find((entry) => entry.id === physical.id);
+  viewTitleEl.textContent = `Stages: ${physical.id} (${stageStatusText(row)})`;
+  const physicalHeader = [
+    `3 · Physical ASAP · ${physical.id}: ${physical.label || ''}`,
+    `total ${formatCostNumber(physical.cost.total)} ${physical.cost.unit} · rank ${row.rank}/${ranked.length} · ${stageStatusText(row)}`,
+  ].join('\n');
+  const lanes = [
+    stageLaneElements('stage0', '1 · Logical', stageDoc.stage0_logical.dag, { categoryFor: categoryOf }),
+    stageLaneElements('stage1', `2 · Logical ASAP · ${logical.id}: ${logical.label || ''}${logical.id === physical.from_logical ? `\nsource of ${physical.id}` : ''}`, logical.dag, { categoryFor: categoryOf }),
+    stageLaneElements('stage2', physicalHeader, physical.dag, { physical: true, costPerNode: physical.cost.per_node || {}, categoryFor: categoryOf }),
+  ];
+  buildCy(lanes.flat(), { name: 'null' });
+  cy.nodes('.laneParent').addClass('stageLane');
+  cy.getElementById('stage1').toggleClass('linkedLane', logical.id === physical.from_logical);
+  cy.getElementById('stage2').addClass(`lane--${row.status}`);
+  layoutLanesSideBySide(['stage0', 'stage1', 'stage2']);
+  cy.nodes('[?root]').addClass('root');
+  cy.on('tap', 'node', (evt) => { if (!evt.target.data('isLane')) showStageNodeDetail(evt.target.data()); });
+  cy.on('tap', 'edge', (evt) => showStageEdgeDetail(evt.target));
+  cy.on('tap', (evt) => { if (evt.target === cy) clearDetail(); });
+  clearDetail();
+  fitAndSyncZoom();
+}
+
+const STAGE_LANE_TITLE_WIDTH = 300;
+
+// dagre on the whole graph orders disconnected lanes arbitrarily, so each
+// lane is laid out on its own and then placed left to right.
+function layoutLanesSideBySide(laneIds) {
+  let nextLeft = 0;
+  laneIds.forEach((laneId) => {
+    const children = cy.getElementById(laneId).children();
+    children.union(children.edgesWith(children)).layout({ name: 'dagre', rankDir: 'TB', nodeSep: 30, rankSep: 60, fit: false, animate: false }).run();
+    const box = children.boundingBox();
+    // Reserve the wrapped header's width so a narrow lane's title cannot
+    // overlap its neighbour's.
+    const width = Math.max(box.w, STAGE_LANE_TITLE_WIDTH);
+    const left = nextLeft + (width - box.w) / 2;
+    children.positions((node) => ({ x: node.position('x') - box.x1 + left, y: node.position('y') - box.y1 }));
+    nextLeft += width + 120;
+  });
+}
+
+function renderStageSources() {
+  const sourceBox = document.getElementById('sourceBox');
+  const queriesText = ((stageDoc.workload && stageDoc.workload.queries) || [])
+    .map((query) => `— ${query.id} (${query.language}) —\n${query.text}`);
+  sourceBox.textContent = queriesText.join('\n\n') || 'No workload queries in this document.';
+  sourceBox.classList.toggle('placeholder', queriesText.length === 0);
+  const scans = stageDoc.stage0_logical.dag.nodes.filter((node) => node.payload && node.payload.operator && node.payload.operator.kind === 'scan');
+  const box = document.getElementById('tableSchemaBox');
+  box.textContent = scans.map((node) => `${wireSource(node.payload.operator.source)}\n${formatSchema(node.output_schema)}`).join('\n\n')
+    || 'No Scan in the logical DAG.';
+  box.classList.toggle('placeholder', scans.length === 0);
+}
+
+function jsonBlock(title, value) {
+  return `<h3 class="detailSubhead">${escapeHtml(title)}</h3><pre>${escapeHtml(value === null || value === undefined ? 'none' : JSON.stringify(value, null, 2))}</pre>`;
+}
+
+function showStageNodeDetail(data) {
+  const node = data.stageNode;
+  const catColors = categoryColors(data.category);
+  const timingHtml = data.physical
+    ? `<div class="translationBlock"><h3>Output state</h3><div><strong>Timing:</strong> ${escapeHtml(formatTiming(node.output_state.timing))}</div><div class="translationMeta">primitive: ${escapeHtml(node.output_state.primitive)}</div></div>`
+    : '';
+  const costHtml = data.nodeCost
+    ? `<div class="costBlock"><h4>Node cost</h4><div class="costRow"><span class="costLabel">Cost</span><span class="costValue">${escapeHtml(`${formatCostNumber(data.nodeCost.cost)} ${physicalCandidate(stagePhysicalId).cost.unit}`)}</span></div>${data.nodeCost.detail ? `<div class="costMeta">${escapeHtml(data.nodeCost.detail)}</div>` : ''}</div>`
+    : '';
+  detailSection.innerHTML = `
+    <h2>Selected node</h2>
+    <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(data.kind)}</span>
+    <div style="font-weight:650; margin:0.3rem 0 0.4rem">node ${escapeHtml(node.id)}${node.result_kind ? ` · ${escapeHtml(node.result_kind)}` : ''}</div>
+    ${data.root ? '<div class="rootNote">Root of this DAG.</div>' : ''}
+    ${timingHtml}
+    ${costHtml}
+    ${jsonBlock('Payload', node.payload)}
+    <h3 class="detailSubhead">Output schema</h3><pre>${escapeHtml(formatSchema(node.output_schema))}</pre>
+    ${jsonBlock('Guarantee', node.guarantee)}
+    ${jsonBlock('Coverage', node.coverage)}
+  `;
+}
+
+function showStageEdgeDetail(edge) {
+  const wire = edge.data('stageEdge');
+  const dataState = wire.data_state
+    ? `<div><strong>Data state:</strong> ${escapeHtml(formatTiming(wire.data_state.timing))} · ${escapeHtml(wire.data_state.primitive)}</div>`
+    : '';
+  detailSection.innerHTML = `
+    <h2>Selected edge</h2>
+    <div class="translationBlock">
+      <h3>Connection</h3>
+      <div><strong>From:</strong> node ${escapeHtml(wire.producer)} (${escapeHtml(edge.source().data('kind'))})</div>
+      <div><strong>To:</strong> node ${escapeHtml(wire.consumer)} (${escapeHtml(edge.target().data('kind'))})</div>
+      <div class="translationMeta">role ${escapeHtml(wire.role)} · grouping ${escapeHtml(wire.grouping)}${wire.window ? ` · window ${escapeHtml(wire.window)}` : ''}</div>
+      ${dataState}
+    </div>
+    <h3 class="detailSubhead">Intermediate schema</h3>
+    <pre>${escapeHtml(formatSchema(wire.intermediate_schema))}</pre>
+  `;
+}
+
 // ── Shared rendering bits ─────────────────────────────────────────────────
 
 function renderSourcePanel(qs) {
@@ -1082,6 +1322,11 @@ function renderLegend() {
     <span><span class="swatchLabel">Shared workload node</span><span class="swatchDesc">Explicitly identified by the exporter as shared across selected queries</span></span></div>`);
   rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${rootColor}"></span>
     <span><span class="swatchLabel">Query root</span><span class="swatchDesc">${escapeHtml(ROOT_BADGE.description)}</span></span></div>`);
+  if (viewMode === 'stages') {
+    const mutedColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
+    rows.push(`<div class="leg"><span class="swatch" style="border-color:${mutedColor}; border-style:double; border-width:4px"></span>
+      <span><span class="swatchLabel">Ingestion time</span><span class="swatchDesc">Physical operator whose output_state.timing is ingestion time; others run at query time</span></span></div>`);
+  }
   legendList.innerHTML = rows.join('');
 }
 
@@ -1143,6 +1388,24 @@ if (embeddedEl) {
   }
   if (queries.length > 0 && participants.size === 0) participants.add(0);
   render();
+} else if (new URLSearchParams(window.location.search).get('doc')) {
+  // `?doc=<path>` opens one served JSON file (relative to this page), e.g.
+  // `?doc=examples/stage-pipeline.sample.json`, instead of the example.
+  const docPath = new URLSearchParams(window.location.search).get('doc');
+  fetch(docPath, { cache: 'no-store' })
+    .then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then((parsed) => {
+      if (!isStagePipelineDocument(parsed)) {
+        loadWorkload(parsed);
+      } else if (loadStageDocument(parsed, docPath)) {
+        viewMode = 'stages';
+      }
+    })
+    .catch((err) => alert(`Failed to load ${docPath}: ${err.message}`))
+    .finally(render);
 } else {
   // Plain index.html starts with the committed, post-ASAP-generated example.
   // Do not silently prefer a leftover scratch dag.json: it may predate

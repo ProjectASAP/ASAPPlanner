@@ -8,6 +8,7 @@
 <script src="cytoscape.min.js"></script>
 <script src="cytoscape-dagre.js"></script>
 <script src="node-style.js"></script>
+<script src="stages.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -189,6 +190,16 @@
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
   }
   .scopeRow .scopeMeta { color: var(--muted); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
+  /* Stages view: candidate switchers and the ranked physical candidates. */
+  .stageChoice { cursor: pointer; }
+  .stageChoice.linked { border-style: dashed; border-color: var(--accent); }
+  .stageRankGroup { min-width: min(640px, 100%); }
+  .stageRank > span:nth-child(2) { display: flex; flex-direction: column; }
+  .stageRankNo { font-weight: 700; color: var(--muted); }
+  .stageRankFrom { color: var(--muted); font-size: 0.7rem; }
+  .stageReason { color: var(--muted); font-size: 0.7rem; white-space: normal; }
+  .stageRank--selected { border-left: 4px solid #15803d; }
+  .stageRank--rejected { border-left: 4px solid #b91c1c; }
   .costComparisonGroup { min-width: min(760px, 100%); }
   .costComparison { display: flex; align-items: stretch; gap: 0.45rem; flex-wrap: wrap; }
   .costStage, .costSaving {
@@ -447,10 +458,11 @@
 
 <header>
   <h1>ASAP query DAG viewer</h1>
-  <div id="dropzone">Drop WorkloadDAG JSON here, or click to choose file(s)</div>
+  <div id="dropzone">Drop WorkloadDAG or stage-pipeline JSON here, or click to choose file(s)</div>
   <input id="fileInput" type="file" accept="application/json" multiple />
   <div class="modeToggle" id="modeToggle">
-    <button class="btn active" type="button" disabled>Pre/Post-ASAP</button>
+    <button class="btn active" id="modePrePost" type="button">Pre/Post-ASAP</button>
+    <button class="btn" id="modeStages" type="button" disabled title="Load an asap-stage-pipeline/v1 document to enable">Stages</button>
   </div>
   <button class="btn" id="plannerToggle">Query editor</button>
   <button class="btn" id="clearBtn">Clear all</button>
