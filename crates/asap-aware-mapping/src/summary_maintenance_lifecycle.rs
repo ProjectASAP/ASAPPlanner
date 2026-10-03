@@ -138,6 +138,7 @@ pub enum SummaryMaintenanceLifecycleRejection {
     SummaryDoesNotSupportIncrementalUpdates,
     SummaryDoesNotSupportDeletion,
     MissingCostEvidence,
+    ExceedsLatencyBound,
 }
 
 /// One candidate lifecycle policy for a particular summary deployment.
@@ -559,6 +560,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
 #[derive(Debug)]
 struct SummaryMaintenanceWorkloadFacts {
     required_accuracy: Vec<AccuracyTarget>,
+    latency_bound_ms: Option<f64>,
     /// Total one-time and recurring reads inside the horizon. `None` means a
     /// recurrence or horizon was unknown, not zero reads.
     reads: Option<f64>,
@@ -706,13 +708,35 @@ fn enumerate_with_profile<'a>(
             } else {
                 capabilities
             };
-            let alternatives = alternatives_for(
+            let mut alternatives = alternatives_for(
                 &facts,
                 horizon,
                 capabilities,
                 cost_model.summary_maintenance_capabilities(&summary),
                 cost_model.summary_maintenance_lifecycle_cost_inputs_for_horizon(&summary, horizon),
             );
+            if let Some(bound_ms) = facts.latency_bound_ms {
+                for alternative in &mut alternatives {
+                    match cost_model.summary_read_latency_ms(
+                        &summary,
+                        &alternative.summary_maintenance_lifecycle,
+                    ) {
+                        Some(latency_ms) if latency_ms.is_finite() && latency_ms >= 0.0 => {
+                            if latency_ms > bound_ms && alternative.rejection.is_none() {
+                                alternative.rejection = Some(
+                                    SummaryMaintenanceLifecycleRejection::ExceedsLatencyBound,
+                                );
+                                alternative.assumptions.push(format!(
+                                    "estimated response latency {latency_ms} ms exceeds {bound_ms} ms bound"
+                                ));
+                            }
+                        }
+                        _ => alternative
+                            .assumptions
+                            .push(format!("latency bound {bound_ms} ms unchecked: no estimate")),
+                    }
+                }
+            }
             SummaryMaintenanceDeployment {
                 post_asap_node_id: timing_memo
                     .timed(&summary)
@@ -1055,6 +1079,7 @@ fn workload_facts(
     let mut prepared_eligible = true;
     let mut requires_deletion = false;
     let mut required_accuracy = Vec::new();
+    let mut latency_bound_ms: Option<f64> = None;
 
     let entries: Vec<_> = workload.entries().collect();
     if workload_entry_indices.is_empty() {
@@ -1072,6 +1097,11 @@ fn workload_facts(
             },
         )?;
         required_accuracy.push(entry.requirements.accuracy.target());
+        if let asap_types::workload::LatencyRequirement::ExplicitMaxMs(bound) =
+            entry.requirements.response_latency
+        {
+            latency_bound_ms = Some(latency_bound_ms.map_or(bound, |current| current.min(bound)));
+        }
         requires_deletion |= entry.time_selection.lookback.is_some()
             && entry.time_selection.as_of.is_none()
             && matches!(
@@ -1186,6 +1216,7 @@ fn workload_facts(
     };
     Ok(SummaryMaintenanceWorkloadFacts {
         required_accuracy,
+        latency_bound_ms,
         reads,
         one_time_invocations,
         evaluation_rate: has_evaluation_rate.then_some(EvaluationRate(evaluation_rate)),

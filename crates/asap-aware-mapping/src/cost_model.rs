@@ -52,7 +52,8 @@ use crate::exact_composition::ExactOperation;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
     FieldDataType, GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams,
-    SketchStatistic, SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
+    SketchStatistic, SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee,
+    SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -799,6 +800,17 @@ pub trait CostModel {
         _summary: &OperatorNode,
     ) -> SummaryMaintenanceCapabilities {
         SummaryMaintenanceCapabilities::default()
+    }
+
+    /// Estimated response latency for reading `summary` under one selected
+    /// physical lifecycle. `None` means the deployment has no estimate; it
+    /// does not make the alternative invalid.
+    fn summary_read_latency_ms(
+        &self,
+        _summary: &OperatorNode,
+        _lifecycle: &SummaryMaintenanceLifecycle,
+    ) -> Option<f64> {
+        None
     }
 
     /// Replace the sum of selected per-state lifecycle costs with a complete
