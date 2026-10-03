@@ -10,7 +10,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryCoverage {
-    /// Observation stream identity, including its time axis.
+    /// Observation data source identity: any table or stream, not necessarily
+    /// time series. Region time bounds refer to its time column.
     pub source: String,
     /// Must equal the producing `SummaryAgg.input`.
     pub input: SummaryUpdate,

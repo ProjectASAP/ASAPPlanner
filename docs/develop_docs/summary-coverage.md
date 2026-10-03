@@ -8,7 +8,8 @@ Rewriting a node's inputs clears it along with other assessed metadata.
 
 `SummaryCoverage` records:
 
-- `source`: the observation stream, including its time axis.
+- `source`: the observation data source. It can be any tabular data, not
+  necessarily a time series; region time bounds refer to its time column.
 - `input`, `reduction`: must equal the producing `SummaryAgg`'s fields of the same
   name. `with_coverage` checks this and requires state output.
 - `regions`: a union of `CoverageRegion`s. Each pairs half-open time bounds in
