@@ -2,11 +2,36 @@
 
 This document is the single source of truth for the schema, and column design for ASAP Primitives. This is used in the logical stage (LogicalASAPDAG), and physical stage (PhysicalASAPDAG). 
 
-## 1. Goal and problem
+## 1. Goal, problem, and requirements
 
-Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, 
+Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, it introduces new requirement when we design the schema and node definitions for LogicalASAPDAG and PhysicalASAPDAG.
 
-Once an [ASAP Operator](https://github.com/ProjectASAP/ASAPPlanner/blob/main/docs/design_docs/proposals/operator-sharing.md) is a summary state operator, the ASAP Operator node in LogicalASAPDAG and PhysicalASAPDAG should represent the following information: 
+Assuming we have the Logical DAG defined for a canonicalized representation for a batch of queries. [TODO: add links for this here. ]
+The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG [TODO: link PR 511's doc here], but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives: SummaryCreation?, SummaryUpdate, SummaryMerge, SummaryDelete, SummarySubtraction [TODO: check what is the complete list or discuss with others about the list]. 
+Each of the Summary operators also require the ASAP primitive information above to inter-operate correctly, preserving semantic correctness. 
+
+Basically, the following information should be represented to preserve the equivalent query semantics when we introduce ASAP Primitives to logical query representation, and following physical one. 
+
+- What type of the ASAP Primitive is
+- What is the ASAP Primitive parameters
+- What data sources a ASAP primitive summarizes
+- What query intent the summarized ASAP Primitive can support, e.g., statistical aggregation intents, time window aggregation intents
+
+
+
+And these information will be combined with relational or time series query operator information, such as group by/reduction, filtering, projection, join, time series selection, together. 
+
+Therefore, these requirements drive the following schema and metadata, node information, and column design. 
+
+
+
+
+
+
+
+
+
+--------don't read below-------------
 
 
 ## Schema Design
