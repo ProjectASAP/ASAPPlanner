@@ -870,6 +870,54 @@ pub trait CostModel {
         false
     }
 
+    /// Price one complete multi-root workload assignment. Deployments shared
+    /// by `Rc` identity carry costs for the union of their consumers. The
+    /// additive default charges such a producer once, retaining each root's
+    /// remaining complete-DAG cost. Models with interactions between roots
+    /// override this hook; unknown evidence never becomes a zero estimate.
+    fn complete_workload_candidate_cost(
+        &self,
+        plans: &[crate::summary_maintenance_lifecycle::SummaryMaintenanceLifecyclePlan],
+        scalar_roots: &[(usize, asap_types::ir::ScalarExpr)],
+    ) -> Option<Cost> {
+        // The additive legacy hooks price operator DAGs only. A workload model
+        // must supply scalar/subquery execution evidence rather than omit it.
+        if !scalar_roots.is_empty() {
+            return None;
+        }
+        let mut total = 0.0;
+        let mut seen = std::collections::HashSet::new();
+        for plan in plans {
+            let root_cost = if plan.selected_raw_recompute {
+                plan.raw_recompute_total_cost?
+            } else {
+                plan.summary_total_cost?
+            };
+            if !root_cost.0.is_finite() || root_cost.0 < 0.0 {
+                return None;
+            }
+            total += root_cost.0;
+            for deployment in &plan.deployments {
+                if seen.insert(std::rc::Rc::as_ptr(&deployment.summary)) {
+                    continue;
+                }
+                let guarantee = deployment
+                    .summary_maintenance_lifecycle_guarantee
+                    .as_ref()?;
+                let cost = deployment
+                    .alternatives
+                    .iter()
+                    .find(|alternative| {
+                        alternative.summary_maintenance_lifecycle
+                            == guarantee.summary_maintenance_lifecycle
+                    })?
+                    .total_cost?;
+                total -= cost.0;
+            }
+        }
+        (total.is_finite() && total >= 0.0).then_some(Cost(total))
+    }
+
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
     /// When known, lifecycle-aware materialization compares this fallback with
     /// the aggregate cost of the selected summary deployments.

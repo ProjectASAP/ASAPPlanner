@@ -12,6 +12,7 @@
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
+mod complete;
 mod major;
 
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ use crate::summary_maintenance_lifecycle::{
     SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleSelectionError,
 };
 
+pub use complete::{CompletePass, CompleteWorkloadInventory};
 pub use major::MajorPass;
 
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
@@ -196,6 +198,9 @@ pub struct PlanOutput {
     pub plans: Vec<QueryLifecyclePlan>,
     /// Exact scalar expressions, keyed by workload entry; embedded plan reads remain visible.
     pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
+    /// A certified comparison cost for the complete selected workload when
+    /// supplied by a complete-cost pass. Rank-only passes leave it unknown.
+    pub workload_total_cost: Option<crate::cost_model::Cost>,
 }
 
 impl PlanOutput {
@@ -203,6 +208,7 @@ impl PlanOutput {
         Self {
             plans,
             scalar_roots: Vec::new(),
+            workload_total_cost: None,
         }
     }
 
@@ -281,6 +287,8 @@ impl PlanOutput {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OptimizeError {
+    #[error("complete workload selection: {0}")]
+    CompleteSelection(String),
     #[error("optimization input: {0}")]
     Input(#[from] OptimizationInputError),
     #[error("entry {entry_index}: {source}")]
@@ -341,6 +349,12 @@ fn check_contract(
 ) -> Result<(), OptimizeError> {
     let violation = |detail: String| OptimizeError::ContractViolation { pass, detail };
 
+    if output
+        .workload_total_cost
+        .is_some_and(|cost| !cost.0.is_finite() || cost.0 < 0.0)
+    {
+        return Err(violation("invalid complete workload cost".into()));
+    }
     if output.len() != expected_len {
         return Err(violation(format!(
             "{} plan(s) for {expected_len} workload entry/entries",
@@ -378,12 +392,15 @@ impl PassRegistry {
         Self::default()
     }
 
-    /// Only [`MajorPass`], under the name `major`.
+    /// The rank-compatible `major` and strict complete-cost `complete` passes.
     pub fn with_builtin() -> Self {
         let mut registry = Self::new();
         registry
             .register(Box::new(MajorPass))
             .expect("empty registry cannot conflict");
+        registry
+            .register(Box::new(CompletePass::default()))
+            .expect("distinct built-in names");
         registry
     }
 
@@ -469,6 +486,9 @@ mod tests {
         registry.register(Box::new(Stub("alpha"))).unwrap();
         assert!(registry.get("major").is_some());
         assert!(registry.get("absent").is_none());
-        assert_eq!(registry.names().collect::<Vec<_>>(), vec!["alpha", "major"]);
+        assert_eq!(
+            registry.names().collect::<Vec<_>>(),
+            vec!["alpha", "complete", "major"]
+        );
     }
 }
