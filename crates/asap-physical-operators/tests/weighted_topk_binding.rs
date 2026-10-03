@@ -755,100 +755,54 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     }
 }
 
-/// Deployment-side lifecycle choice: every summary state of `candidate` is
-/// continuously maintained, and the chosen lifecycles set execution timing.
+/// Every summary state of `candidate` maintained at ingestion time, the
+/// materialization a deployment would assign for a continuously served query:
+/// each `SummaryAgg` and every input it consumes run at ingestion time, the
+/// rest at query time. The phases are assigned on the exported DAG because
+/// the candidate pins its finalize boundary to query time.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
-    use asap_aware_mapping::{
-        cost_model::{Cost, CostModel},
-        enumerate_summary_maintenance_lifecycles, CostRate, Horizon,
-        SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
-        SummaryMaintenanceLifecycleCostInputs, WorkloadDemand,
-    };
-    use planner_types::workload::{
-        DataArrival, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-    };
-    struct Costed;
-    impl CostModel for Costed {
-        fn rank_candidates(
-            &self,
-            _: &planner_types::pre_asap::agg_intent::AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            candidates.to_vec()
-        }
-        fn summary_maintenance_lifecycle_cost_inputs(
-            &self,
-            _: &planner_types::ir::OperatorNode,
-        ) -> SummaryMaintenanceLifecycleCostInputs {
-            SummaryMaintenanceLifecycleCostInputs {
-                build_cost: Some(Cost(10.)),
-                maintenance_cost_per_update: Some(Cost(1.)),
-                summary_read_cost: Some(Cost(1.)),
-                retention_cost_rate: Some(CostRate(0.1)),
-                retirement_cost: Some(Cost(1.)),
-            }
-        }
-        fn summary_maintenance_capabilities(
-            &self,
-            _: &planner_types::ir::OperatorNode,
-        ) -> SummaryMaintenanceCapabilities {
-            SummaryMaintenanceCapabilities {
-                incremental_update: true,
-                merge: true,
-                delete: true,
-            }
-        }
-    }
-    const NOW_MS: u64 = 1_000_000;
-    let queries = QueryWorkload {
-        language: QueryLanguage::PromQL,
-        query_batch: None,
-        repeating_queries: Some(vec![RepeatingEntry {
-            query: Query("topk by(job)(2, rate(m[1m]))".into()),
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
-            requirements: QueryRequirements::default(),
-            predictability: Predictability::Predictable { known_at: None },
-            time_selection: TimeSelection::default(),
-        }]),
-    };
-    let data = DataWorkload {
-        arrival: DataArrival::ContinuouslyIngesting,
-        ingestion_rate: WorkloadEvidence {
-            value: Some(Rate(1.)),
-            source: planner_types::workload::EvidenceSource::Observed,
-            observed_at_ms: Some(NOW_MS),
-            valid_for_ms: Some(60_000),
-        },
-        ..Default::default()
-    };
-    let lifecycles = enumerate_summary_maintenance_lifecycles(
-        Rc::clone(candidate),
-        WorkloadDemand::new_with_data(&queries, &data, &[0]),
-        NOW_MS,
-        Some(Horizon(100.)),
-        SummaryMaintenanceLifecycleCapabilities::ALL,
-        &Costed,
+    use planner_types::ir::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+    let timed = apply_lifecycle_timings(
+        candidate,
+        &LifecycleAssignment::default_maintained(),
+        &mut TimingMemo::new(),
     )
     .unwrap();
-    let choices = lifecycles
-        .deployments()
+    let dag = planner_types::ir::export::compile_physical_asap_dag(&timed).unwrap();
+    let mut pending: Vec<_> = dag
+        .nodes
         .iter()
-        .map(|deployment| {
-            (
-                deployment.post_asap_node_id,
-                SummaryMaintenanceLifecycle::ContinuouslyMaintained,
-            )
+        .filter(|node| matches!(node.payload, PhysicalASAPOperatorPayload::SummaryAgg { .. }))
+        .map(|node| node.id)
+        .collect();
+    let mut ingestion = std::collections::HashSet::new();
+    while let Some(id) = pending.pop() {
+        if ingestion.insert(id) {
+            pending.extend(
+                dag.edges
+                    .iter()
+                    .filter(|edge| edge.consumer == id)
+                    .map(|edge| edge.producer),
+            );
+        }
+    }
+    let phases = dag
+        .nodes
+        .iter()
+        .map(|node| {
+            let timing = if ingestion.contains(&node.id) {
+                ExecutionTiming::IngestionTime
+            } else {
+                ExecutionTiming::QueryTime
+            };
+            (node.id, timing)
         })
-        .collect::<Vec<_>>();
-    lifecycles
-        .select(&choices)
-        .unwrap()
-        .execution_timed_dag()
-        .unwrap()
+        .collect();
+    dag.with_execution_phases(&phases).unwrap()
 }
 
 // A maintained heap over finalized per-series Rate is the fixed-window
-// placement: lifecycle timing, not a separate candidate, puts it in precompute.
+// placement: materialization timing, not a separate candidate, puts it in precompute.
 #[test]
 fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
     use asap_physical_operators::physical_planner::{

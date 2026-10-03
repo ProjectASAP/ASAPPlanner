@@ -25,8 +25,8 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_aware_mapping::pass::{
-    optimize, LifecycleInput, MajorPass, OptimizationInput, OptimizationPass, OptimizeError,
-    PassRegistry, PlanOutput, PlanningModels, QueryLifecyclePlan,
+    optimize, MajorPass, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry,
+    PlanOutput, PlanningModels, QueryPlan,
 };
 
 // ── Input ────────────────────────────────────────────────────────────────
@@ -53,9 +53,6 @@ pub struct UserInput<'a> {
     pub workload: &'a PlanningWorkload,
     pub frontend_specific: FrontendInput<'a>,
     pub models: PlanningModels<'a>,
-    /// Planning clock and runtime capabilities for the
-    /// maintenance-versus-recomputation decision every plan carries.
-    pub lifecycle: LifecycleInput,
     /// `None` uses [`MajorPass`]. A black-box caller never sets this.
     pub pass: Option<&'a dyn OptimizationPass>,
 }
@@ -65,13 +62,11 @@ impl<'a> UserInput<'a> {
         workload: &'a PlanningWorkload,
         frontend_specific: FrontendInput<'a>,
         models: PlanningModels<'a>,
-        lifecycle: LifecycleInput,
     ) -> Self {
         Self {
             workload,
             frontend_specific,
             models,
-            lifecycle,
             pass: None,
         }
     }
@@ -101,21 +96,6 @@ impl<'a> UserInput<'a> {
             });
         }
 
-        if let Some(horizon) = self.lifecycle.horizon {
-            if !horizon.0.is_finite() || horizon.0 <= 0.0 {
-                return Err(UserInputError::InvalidHorizon(horizon.0));
-            }
-        }
-        // Two clocks would let the DAG be built for one instant and priced
-        // for another, with neither stage able to notice.
-        if let FrontendInput::Promql { now_ms, .. } = &self.frontend_specific {
-            if *now_ms != self.lifecycle.now_ms {
-                return Err(UserInputError::PlanningTimeMismatch {
-                    frontend: *now_ms,
-                    lifecycle: self.lifecycle.now_ms,
-                });
-            }
-        }
         Ok(())
     }
 }
@@ -142,10 +122,6 @@ pub enum UserInputError {
         language: String,
         frontend: &'static str,
     },
-    #[error("planning horizon must be finite and positive, got {0}")]
-    InvalidHorizon(f64),
-    #[error("frontend planning time {frontend} ms disagrees with lifecycle planning time {lifecycle} ms")]
-    PlanningTimeMismatch { frontend: u64, lifecycle: u64 },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -194,7 +170,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     let fallback = MajorPass;
     let pass: &dyn OptimizationPass = input.pass.unwrap_or(&fallback);
 
-    let optimization = OptimizationInput::new(&parsed, input.models, input.lifecycle);
+    let optimization = OptimizationInput::new(&parsed, input.models);
     optimize(pass, optimization).map_err(PlanError::Optimize)
 }
 
@@ -202,8 +178,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
 ///
 /// The SQL and MetricsQL frontends are driven one entry at a time rather than
 /// through `lower_sql_batch`, which walks `query_batch` alone and would drop
-/// every repeating query — exactly the entries whose recurrence the lifecycle
-/// stage needs.
+/// every repeating query, and the output must cover every entry.
 async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, PlanError> {
     let entries = || input.workload.query_workload.entries();
 
