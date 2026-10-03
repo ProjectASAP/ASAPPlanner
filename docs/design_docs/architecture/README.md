@@ -17,7 +17,7 @@ flowchart TD
     W["PlanningWorkload: query demand + optional data facts"]
     F["Frontend dependencies: SQL catalog or PromQL time"]
     E["Strategy, accuracy model, and applicable evidence"]
-    PRE["Frontend lowering → canonical Pre-ASAP QueryExpr roots"]
+    PRE["Frontend lowering → canonical Pre-ASAP OperatorNode roots"]
     SEARCH["Whole-workload candidate search: sharing, legality, accuracy"]
     SPACE["CandidateLogicalASAPDAGs: compact logical candidate DAG space"]
     RANK["Optional cost_sorted: ranked inspection view"]
@@ -58,7 +58,8 @@ an unsupported physical alternative into a deployable plan.
 
 | Area | Main crate or module | Responsibility |
 |---|---|---|
-| Shared IR | `asap-types` | Pre-ASAP and Post-ASAP expressions, schemas, workloads, guarantees, and exported plan data |
+| Shared IR | `asap-types` | The unified operator IR (`ir`: one `OperatorNode` before and after ASAP optimization), schemas, workloads, guarantees, and exported plan data |
+| Front-end common | `frontend-common` | Name-based `UnresolvedOp` tree shared by the front ends, and `resolve_root` into the operator IR |
 | Query frontends | `frontend-sql`, `frontend-promql`, `frontend-metricsql` | Parse source languages and produce canonical Pre-ASAP queries |
 | ASAP-aware mapping | `asap-aware-mapping` | Candidate generation, CSE, legality, accuracy propagation, lifecycle expansion, costing, and ranking |
 | Developer inspection | `devtools` | Expose planner DAGs, alternatives, decisions, and explanations for inspection |
