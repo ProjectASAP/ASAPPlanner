@@ -1,4 +1,4 @@
-//! Phase-free logical ASAP DAG transport (planner-layering stage 1).
+//! Logical ASAP DAG transport (planner-layering stage 1), with no execution timing assigned.
 //!
 //! This representation preserves operator semantics and summary state types.
 //! Timing is derived from materialization during physical planning;

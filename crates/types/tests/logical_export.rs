@@ -1,4 +1,4 @@
-//! Logical transport must accept phase-free plans before materialization.
+//! Logical transport must accept plans with no execution timing assigned, before materialization.
 use asap_types::{
     ir::{NonASAPOp, Operator, OperatorNode},
     pre_asap::Schema,
