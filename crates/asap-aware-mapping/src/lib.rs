@@ -222,14 +222,15 @@ pub use summary_maintenance_dag_export::{
 };
 pub use summary_maintenance_lifecycle::{
     assemble_selected_dag_with_summary_maintenance_lifecycles,
-    enumerate_summary_maintenance_lifecycles, global_selection_with_summary_maintenance_lifecycles,
-    plan_summary_maintenance_lifecycles, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleAlternative,
-    SummaryMaintenanceLifecycleAssemblyError, SummaryMaintenanceLifecycleCandidates,
-    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleChoiceError,
-    SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecyclePlan,
-    SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceLifecycleRejection,
-    SummaryMaintenanceLifecycleSelectionError, SummaryMaintenanceTimingError, WorkloadDemand,
+    enumerate_summary_maintenance_lifecycles, execution_timed_workload_dag,
+    global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
+    SummaryMaintenanceCapabilities, SummaryMaintenanceDeployment,
+    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleAssemblyError,
+    SummaryMaintenanceLifecycleCandidates, SummaryMaintenanceLifecycleCapabilities,
+    SummaryMaintenanceLifecycleChoiceError, SummaryMaintenanceLifecycleCostInputs,
+    SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError,
+    SummaryMaintenanceLifecycleRejection, SummaryMaintenanceLifecycleSelectionError,
+    SummaryMaintenanceTimingError, WorkloadDemand,
 };
 pub use topk_reuse::TopKLimitReuseStrategy;
 
