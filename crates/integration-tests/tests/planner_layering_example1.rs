@@ -1,0 +1,926 @@
+//! Acceptance tests for #509 "Example 1: Aggregation over dimensions", MVP scope.
+//!
+//! Spec: `docs/design_docs/proposals/planner-layering-example1-acceptance.md`.
+//! Written by the test designer before the Phase C stage APIs existed; the
+//! implementer replaced the stubs in [`stages`] with adapters over the real
+//! stages. Tests that still fail because the implementation differs from the
+//! spec stay `#[ignore]`d with the difference as the reason.
+//!
+//! MVP scope: Stage 1 = Pass 1 + the identical-expression rule only (no
+//! window-composition variants); Stage 2 = physical operator implementation
+//! only (no materialization). Expected counts are 1 → 6 → 6 → 1, a subset of
+//! the doc's 1 → 54 → 156 → 1.
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+use asap_aware_mapping::PlanningModels;
+use asap_types::ir::export::{LogicalASAPDAG, LogicalASAPNodeId, LogicalASAPOperatorPayload};
+use asap_types::post_asap::sketch::{GroupingStrategy, HydraKind, SketchAlgorithm};
+use asap_types::pre_asap::schema::FieldDataType;
+use asap_types::types::AccuracyTarget;
+use asap_types::workload::{
+    AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence,
+    EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage,
+    QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
+    RepetitionInterval, TimeSelection,
+};
+
+/// Adapters from the Phase C stage APIs to the shapes these tests were written
+/// against. They only convert; every decision is the real stage's.
+#[allow(dead_code)]
+mod stages {
+    use std::rc::Rc;
+
+    use super::*;
+    use asap_aware_mapping::logical_candidates::{
+        compose_logical_candidate, enumerate_local_logical_candidates,
+    };
+    use asap_types::ir::export::{compile_logical_asap_workload, LogicalASAPQueryRoot};
+    use asap_types::ir::{OperatorNode, QueryRoot};
+
+    /// One whole-workload candidate. `query_roots` holds one root per
+    /// workload entry, in `QueryWorkload::entries()` order (`[q1, q2]`).
+    /// `roots` are the in-memory roots the next stage consumes.
+    #[derive(Debug, Clone)]
+    pub struct LogicalCandidate {
+        pub id: String,
+        pub label: String,
+        pub dag: LogicalASAPDAG,
+        pub query_roots: Vec<LogicalASAPNodeId>,
+        pub roots: Vec<Rc<OperatorNode>>,
+    }
+
+    pub type PhysicalASAPDAG = asap_types::ir::export::PhysicalASAPDAG;
+
+    /// One Stage 2 candidate, derived from exactly one Stage 1 candidate.
+    #[derive(Debug, Clone)]
+    pub struct PhysicalCandidate {
+        pub id: String,
+        pub from_logical: String,
+        pub label: String,
+        pub dag: PhysicalASAPDAG,
+        pub query_roots: Vec<LogicalASAPNodeId>,
+        pub stage2: asap_aware_mapping::physical_candidates::PhysicalCandidate,
+    }
+
+    /// Whole-workload cost of one physical candidate; `per_node` has one
+    /// entry per DAG node, so a shared node is charged once.
+    #[derive(Debug, Clone)]
+    pub struct CandidateCost {
+        pub total: f64,
+        pub per_node: BTreeMap<LogicalASAPNodeId, f64>,
+    }
+
+    /// A candidate Stage 3 did not select. `valid == false` means it failed
+    /// an accuracy, latency or capability check; `true` means it lost on cost.
+    #[derive(Debug, Clone)]
+    pub struct Rejection {
+        pub id: String,
+        pub valid: bool,
+        pub reason: String,
+    }
+
+    /// Stage 3 output. Costs are keyed by physical candidate id.
+    #[derive(Debug, Clone)]
+    pub struct Selection {
+        pub selected: String,
+        pub costs: BTreeMap<String, CandidateCost>,
+        pub rejected: Vec<Rejection>,
+    }
+
+    /// The frontend DAG with each PromQL series' full identity as a column,
+    /// the row representation per-series state needs at runtime.
+    fn lower(workload: &PlanningWorkload) -> Vec<QueryRoot> {
+        asap_frontend_promql::lower_promql_query_workload(workload, 0)
+            .expect("Example 1 lowers")
+            .into_iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(
+                    asap_types::ir::schema_support::with_promql_series_identity(&node)
+                        .expect("series identity"),
+                ),
+                QueryRoot::Scalar(_) => panic!("Example 1 has operator roots"),
+            })
+            .collect()
+    }
+
+    fn candidate(id: String, label: String, roots: Vec<QueryRoot>) -> LogicalCandidate {
+        let dag = compile_logical_asap_workload(&roots).expect("logical export");
+        let query_roots = dag
+            .roots
+            .iter()
+            .map(|root| match root {
+                LogicalASAPQueryRoot::Operator(id) => *id,
+                LogicalASAPQueryRoot::Scalar(_) => panic!("Example 1 has operator roots"),
+            })
+            .collect();
+        let roots = roots
+            .into_iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => node,
+                QueryRoot::Scalar(_) => panic!("Example 1 has operator roots"),
+            })
+            .collect();
+        LogicalCandidate {
+            id,
+            label,
+            dag,
+            query_roots,
+            roots,
+        }
+    }
+
+    /// Stage 0: frontends lower every query into one summary-free workload DAG.
+    pub fn stage0_logical(workload: &PlanningWorkload) -> LogicalCandidate {
+        candidate("S0".into(), "frontend".into(), lower(workload))
+    }
+
+    /// Stage 1: every combination of Pass 1 local alternatives (Pass 2 is
+    /// not implemented). Lowers `workload` again: Pass 1 reads the in-memory
+    /// DAG, not the Stage 0 export.
+    pub fn stage1_logical_asap(
+        workload: &PlanningWorkload,
+        _logical: &LogicalCandidate,
+    ) -> Vec<LogicalCandidate> {
+        let inventory =
+            enumerate_local_logical_candidates(lower(workload).into_iter().enumerate().collect())
+                .expect("Pass 1");
+        let mut choices = vec![vec![]];
+        for target in &inventory.targets {
+            choices = choices
+                .into_iter()
+                .flat_map(|prefix: Vec<usize>| {
+                    (0..target.alternatives.len()).map(move |i| {
+                        let mut choice = prefix.clone();
+                        choice.push(i);
+                        choice
+                    })
+                })
+                .collect();
+        }
+        choices
+            .into_iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                let roots = compose_logical_candidate(&inventory, &choice)
+                    .expect("composes")
+                    .into_iter()
+                    .map(|(_, root)| root)
+                    .collect();
+                candidate(format!("L{}", index + 1), format!("{choice:?}"), roots)
+            })
+            .collect()
+    }
+
+    /// Stage 2: physical operator implementation of every logical candidate
+    /// (no materialization in the MVP).
+    pub fn stage2_physical(
+        _workload: &PlanningWorkload,
+        logical: &[LogicalCandidate],
+    ) -> Vec<PhysicalCandidate> {
+        logical
+            .iter()
+            .enumerate()
+            .map(|(index, l)| {
+                let mut stage2 =
+                    asap_aware_mapping::physical_candidates::stage2_physical(&l.id, &l.roots)
+                        .unwrap_or_else(|e| panic!("{}: {e}", l.id));
+                stage2.id = format!("P{}", index + 1);
+                stage2.label = l.label.clone();
+                PhysicalCandidate {
+                    id: stage2.id.clone(),
+                    from_logical: stage2.from_logical.clone(),
+                    label: stage2.label.clone(),
+                    dag: stage2.dag.clone(),
+                    query_roots: stage2.dag.roots.clone(),
+                    stage2,
+                }
+            })
+            .collect()
+    }
+
+    /// Stage 3: reject invalid candidates, cost the rest for the whole
+    /// workload, select the cheapest.
+    pub fn stage3_select(
+        workload: &PlanningWorkload,
+        physical: &[PhysicalCandidate],
+        models: PlanningModels<'_>,
+    ) -> Selection {
+        let targets: Vec<_> = workload
+            .query_workload
+            .entries()
+            .map(|entry| Some(entry.requirements.accuracy.target()))
+            .collect();
+        let candidates: Vec<_> = physical.iter().map(|p| p.stage2.clone()).collect();
+        let selection = asap_aware_mapping::plan_selection::stage3_select(
+            &candidates,
+            &targets,
+            workload.data_workload.as_ref().expect("data workload"),
+            models,
+        )
+        .expect("Stage 3 selects");
+        Selection {
+            selected: selection.selected,
+            costs: selection
+                .costs
+                .into_iter()
+                .map(|(id, cost)| {
+                    let per_node = cost
+                        .per_node
+                        .into_iter()
+                        .map(|(node, c)| (node, c.cost))
+                        .collect();
+                    (
+                        id,
+                        CandidateCost {
+                            total: cost.total,
+                            per_node,
+                        },
+                    )
+                })
+                .collect(),
+            rejected: selection
+                .rejected
+                .into_iter()
+                .map(|r| Rejection {
+                    id: r.id,
+                    valid: r.valid,
+                    reason: r.reason,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn runs_at_ingestion(candidate: &PhysicalCandidate, node: LogicalASAPNodeId) -> bool {
+        candidate
+            .dag
+            .nodes
+            .iter()
+            .find(|n| n.id == node)
+            .expect("node")
+            .output_state
+            .timing
+            == asap_types::post_asap::ExecutionTiming::IngestionTime
+    }
+}
+
+use stages::*;
+
+// ── Example 1 workload ───────────────────────────────────────────────────
+
+const Q1: &str = "sum by (job) (rate(http_requests_total[1m]))";
+const Q2: &str = "topk by (job) (10, sum_over_time(http_requests_total[1m]))";
+
+fn declared<T>(value: T) -> Evidence<T> {
+    Evidence {
+        value: Some(value),
+        source: EvidenceSource::Declared,
+        ..Default::default()
+    }
+}
+
+fn dashboard_panel(query: &str, requirements: QueryRequirements) -> RepeatingEntry {
+    RepeatingEntry {
+        query: Query(query.into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+        requirements,
+        predictability: Predictability::Predictable { known_at: None },
+        time_selection: TimeSelection {
+            scope: QueryTimeScope::RealTime,
+            lookback: Some(DurationMs(60_000)),
+            as_of: None,
+        },
+    }
+}
+
+/// Example 1 queries over the shared data workload of #509.
+fn example1_workload() -> PlanningWorkload {
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(vec![
+                dashboard_panel(
+                    Q1,
+                    QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                        response_latency: LatencyRequirement::Unspecified,
+                    },
+                ),
+                dashboard_panel(
+                    Q2,
+                    QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                            epsilon: 0.01,
+                            delta: 0.001,
+                        }),
+                        response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
+                    },
+                ),
+            ]),
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+            data_ingestion_interval: declared(DurationMs(15_000)),
+            ingestion_volume: Evidence::default(),
+            ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
+            input_cardinality: declared(1_000_000),
+            distribution: declared(DataDistribution::Zipf),
+        }),
+    }
+}
+
+// ── DAG helpers ──────────────────────────────────────────────────────────
+
+/// Q2's local option, read off its summary build node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Q2Option {
+    Exact,
+    CountMinHeapPerJob,
+    Hydra,
+}
+
+/// The logical and physical exports share node ids, payloads and edge
+/// endpoints; the helpers below read only those.
+trait ExportedDag {
+    fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId>;
+    fn node_payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload;
+}
+
+impl ExportedDag for LogicalASAPDAG {
+    fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId> {
+        let edges = self.edges.iter().filter(|e| e.consumer == consumer);
+        edges.map(|e| e.producer).collect()
+    }
+    fn node_payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload {
+        &self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("node")
+            .payload
+    }
+}
+
+impl ExportedDag for PhysicalASAPDAG {
+    fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId> {
+        let edges = self.edges.iter().filter(|e| e.consumer == consumer);
+        edges.map(|e| e.producer).collect()
+    }
+    fn node_payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload {
+        &self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("node")
+            .payload
+    }
+}
+
+/// Every node `root` depends on, including itself.
+fn closure(dag: &impl ExportedDag, root: LogicalASAPNodeId) -> HashSet<LogicalASAPNodeId> {
+    let mut seen = HashSet::from([root]);
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        for producer in dag.producers(node) {
+            if seen.insert(producer) {
+                stack.push(producer);
+            }
+        }
+    }
+    seen
+}
+
+fn payload(dag: &impl ExportedDag, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload {
+    dag.node_payload(id)
+}
+
+fn is_summary(payload: &LogicalASAPOperatorPayload) -> bool {
+    matches!(
+        payload,
+        LogicalASAPOperatorPayload::SummaryAgg {
+            family: FieldDataType::Sketch(..),
+            ..
+        } | LogicalASAPOperatorPayload::SummaryEstimate { .. }
+            | LogicalASAPOperatorPayload::SummaryMerge
+    )
+}
+
+/// Sketch families built in `nodes`, as Example 1's Q2 options.
+fn sketch_options(
+    dag: &impl ExportedDag,
+    nodes: &HashSet<LogicalASAPNodeId>,
+) -> BTreeSet<Q2Option> {
+    nodes
+        .iter()
+        .filter_map(|&id| match payload(dag, id) {
+            LogicalASAPOperatorPayload::SummaryAgg {
+                family: FieldDataType::Sketch(kind, grouping),
+                ..
+            } => Some(match grouping {
+                GroupingStrategy::SharedMultiSubpopulation {
+                    kind: HydraKind::HydraCms,
+                    ..
+                } => Q2Option::Hydra,
+                GroupingStrategy::PerSubpopulationInstance
+                    if *kind.algorithm() == SketchAlgorithm::CmsWithHeap =>
+                {
+                    Q2Option::CountMinHeapPerJob
+                }
+                other => panic!("summary family outside Example 1: {kind:?} {other:?}"),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn roots(query_roots: &[LogicalASAPNodeId]) -> (LogicalASAPNodeId, LogicalASAPNodeId) {
+    assert_eq!(query_roots.len(), 2, "every candidate covers Q1 and Q2");
+    (query_roots[0], query_roots[1])
+}
+
+/// Q2's option and whether Q1 and Q2 share any node, for one candidate.
+fn classify(dag: &impl ExportedDag, query_roots: &[LogicalASAPNodeId]) -> (Q2Option, bool) {
+    let (q1, q2) = roots(query_roots);
+    let (c1, c2) = (closure(dag, q1), closure(dag, q2));
+    let options = sketch_options(dag, &c2);
+    assert!(options.len() <= 1, "Q2 uses one local option: {options:?}");
+    let option = options.into_iter().next().unwrap_or(Q2Option::Exact);
+    (option, !c1.is_disjoint(&c2))
+}
+
+/// The relational operator's wire `kind` (`"scan"`, `"sort"`, …); the
+/// operator enum itself is not public outside `asap-types`.
+fn relational(payload: &LogicalASAPOperatorPayload) -> Option<String> {
+    match payload {
+        LogicalASAPOperatorPayload::Relational { .. } => {
+            let json = serde_json::to_value(payload).expect("payload serializes");
+            json["operator"]["kind"].as_str().map(str::to_owned)
+        }
+        _ => None,
+    }
+}
+
+fn pipeline() -> (
+    PlanningWorkload,
+    Vec<LogicalCandidate>,
+    Vec<PhysicalCandidate>,
+) {
+    let workload = example1_workload();
+    let logical = stage1_logical_asap(&workload, &stage0_logical(&workload));
+    let physical = stage2_physical(&workload, &logical);
+    (workload, logical, physical)
+}
+
+/// The six Example 1 MVP combinations: three Q2 options × separate/shared input.
+fn expected_combinations() -> BTreeSet<(Q2Option, bool)> {
+    [
+        Q2Option::Exact,
+        Q2Option::CountMinHeapPerJob,
+        Q2Option::Hydra,
+    ]
+    .into_iter()
+    .flat_map(|o| [(o, false), (o, true)])
+    .collect()
+}
+
+// ── Workload ─────────────────────────────────────────────────────────────
+
+/// The encoded workload is valid and normalizes to Q1 then Q2.
+#[test]
+fn workload_encodes_example1() {
+    let workload = example1_workload();
+    workload.validate().expect("valid workload");
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].query.0, Q1);
+    assert_eq!(entries[1].query.0, Q2);
+}
+
+// ── Stage 0 ──────────────────────────────────────────────────────────────
+
+/// Today's PromQL frontend already lowers each query to the doc's Stage 0 chain.
+#[test]
+fn stage0_frontend_lowers_each_query_to_doc_chain() {
+    let roots = asap_frontend_promql::lower_promql_query_workload(&example1_workload(), 0)
+        .expect("Example 1 lowers");
+    let chains: Vec<Vec<String>> = roots
+        .iter()
+        .map(|root| {
+            let dag = asap_types::ir::export::compile_logical_asap_query(root).expect("compiles");
+            let json = serde_json::to_value(&dag).expect("serializes");
+            let mut ops: Vec<String> = json["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| {
+                    let op = &n["payload"]["operator"];
+                    match op["measures"][0]["kind"].as_str() {
+                        Some(measure) => format!("aggregate:{measure}"),
+                        None => op["kind"].as_str().unwrap_or("?").to_owned(),
+                    }
+                })
+                .collect();
+            ops.sort(); // node ids are assigned in post-order; compare as a set of operations
+            ops
+        })
+        .collect();
+    assert_eq!(
+        chains,
+        [
+            ["aggregate:rate", "aggregate:sum", "scan", "time_range"],
+            ["aggregate:sum", "aggregate:top_k", "scan", "time_range"],
+        ]
+    );
+}
+
+/// Stage 0 yields one workload DAG with one root per query and no summaries.
+#[test]
+fn stage0_one_summary_free_workload_dag() {
+    let stage0 = stage0_logical(&example1_workload());
+    stage0.dag.validate().expect("valid DAG");
+    roots(&stage0.query_roots);
+    assert!(stage0.dag.nodes.iter().all(|n| !is_summary(&n.payload)));
+}
+
+/// Stage 0 keeps Q1 and Q2 separate; sharing is a Stage 1 decision.
+#[test]
+fn stage0_queries_do_not_share_nodes() {
+    let stage0 = stage0_logical(&example1_workload());
+    let (q1, q2) = roots(&stage0.query_roots);
+    assert!(closure(&stage0.dag, q1).is_disjoint(&closure(&stage0.dag, q2)));
+}
+
+// ── Stage 1 ──────────────────────────────────────────────────────────────
+
+/// Stage 1 outputs exactly the 3 Q2 options × {separate, shared input} = 6 candidates.
+#[test]
+#[ignore = "Pass 1 yields 24 candidates (exact-accumulator alternatives for Q1's rate and sum and Q2's sum, and CountSketch+heap for Q2), there is no Hydra and no Pass 2 shared-input variant"]
+fn stage1_has_six_candidates_covering_every_combination() {
+    let (_, logical, _) = pipeline();
+    assert_eq!(logical.len(), 6);
+    let found: BTreeSet<_> = logical
+        .iter()
+        .map(|c| classify(&c.dag, &c.query_roots))
+        .collect();
+    assert_eq!(
+        found,
+        expected_combinations(),
+        "each combination exactly once"
+    );
+}
+
+/// Q1 is exact in every Stage 1 candidate: no summary is reachable from its root.
+#[test]
+fn stage1_q1_is_always_exact() {
+    let (_, logical, _) = pipeline();
+    for c in &logical {
+        let (q1, _) = roots(&c.query_roots);
+        let reach = closure(&c.dag, q1);
+        assert!(
+            reach.iter().all(|&id| !is_summary(payload(&c.dag, id))),
+            "{}: Q1 reaches a summary",
+            c.id
+        );
+    }
+}
+
+/// Q2's summary families are exactly Count-Min + heap per job and Hydra over all jobs.
+#[test]
+#[ignore = "Pass 1 also offers CountSketchWithHeap for Q2, which sketch_options rejects as outside Example 1 (spec ambiguity 8); Pass 1 has no Hydra alternative"]
+fn stage1_q2_summary_families_are_count_min_heap_and_hydra() {
+    let (_, logical, _) = pipeline();
+    let families: BTreeSet<_> = logical
+        .iter()
+        .flat_map(|c| {
+            let (_, q2) = roots(&c.query_roots);
+            sketch_options(&c.dag, &closure(&c.dag, q2))
+        })
+        .collect();
+    assert_eq!(
+        families,
+        BTreeSet::from([Q2Option::CountMinHeapPerJob, Q2Option::Hydra])
+    );
+}
+
+/// Sharing adds a variant and keeps the independent one, for every Q2 option.
+#[test]
+#[ignore = "Pass 1 also offers CountSketchWithHeap for Q2, which sketch_options rejects as outside Example 1 (spec ambiguity 8); Pass 2 (identical-expression sharing) is not implemented, so there is no shared variant"]
+fn stage1_keeps_independent_and_shared_variants() {
+    let (_, logical, _) = pipeline();
+    let found: Vec<_> = logical
+        .iter()
+        .map(|c| classify(&c.dag, &c.query_roots))
+        .collect();
+    for option in [
+        Q2Option::Exact,
+        Q2Option::CountMinHeapPerJob,
+        Q2Option::Hydra,
+    ] {
+        assert!(
+            found.contains(&(option, false)),
+            "{option:?} independent missing"
+        );
+        assert!(found.contains(&(option, true)), "{option:?} shared missing");
+    }
+}
+
+/// Only the raw input is shared between Q1 and Q2; no summary is shared.
+#[test]
+fn stage1_shares_input_but_never_a_summary() {
+    let (_, logical, _) = pipeline();
+    for c in &logical {
+        let (q1, q2) = roots(&c.query_roots);
+        let shared = &closure(&c.dag, q1) & &closure(&c.dag, q2);
+        for id in shared {
+            let p = payload(&c.dag, id);
+            assert!(
+                matches!(relational(p).as_deref(), Some("scan" | "time_range")),
+                "{}: shared node {id:?} is not the range selector input: {p:?}",
+                c.id
+            );
+        }
+    }
+}
+
+/// Stage 1 candidates are valid DAGs with unique ids.
+#[test]
+fn stage1_candidates_are_valid_and_uniquely_named() {
+    let (_, logical, _) = pipeline();
+    let ids: BTreeSet<_> = logical.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids.len(), logical.len());
+    for c in &logical {
+        c.dag.validate().unwrap_or_else(|e| panic!("{}: {e}", c.id));
+    }
+}
+
+// ── Stage 2 ──────────────────────────────────────────────────────────────
+
+/// No candidate is discarded before Stage 3: Stage 2 maps the 6 logical candidates one-to-one.
+#[test]
+#[ignore = "Stage 2 maps the 24 Pass 1 candidates one-to-one (from_logical is a bijection), but the spec expects 6"]
+fn stage2_keeps_every_logical_candidate() {
+    let (_, logical, physical) = pipeline();
+    assert_eq!(physical.len(), 6);
+    let sources: BTreeSet<_> = physical.iter().map(|p| p.from_logical.as_str()).collect();
+    let logical_ids: BTreeSet<_> = logical.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(sources, logical_ids);
+    let ids: BTreeSet<_> = physical.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids.len(), physical.len());
+}
+
+/// Stage 2 preserves each logical candidate's Q2 option and input sharing.
+#[test]
+#[ignore = "Pass 1 also offers CountSketchWithHeap for Q2, which sketch_options rejects as outside Example 1 (spec ambiguity 8)"]
+fn stage2_preserves_logical_choices() {
+    let (_, logical, physical) = pipeline();
+    for p in &physical {
+        let source = logical.iter().find(|c| c.id == p.from_logical).unwrap();
+        assert_eq!(
+            classify(&p.dag, &p.query_roots),
+            classify(&source.dag, &source.query_roots),
+            "{} vs {}",
+            p.id,
+            source.id
+        );
+    }
+}
+
+/// Exact TopK is implemented as a sort followed by a limit.
+#[test]
+#[ignore = "Pass 1 also offers CountSketchWithHeap for Q2, which sketch_options rejects as outside Example 1 (spec ambiguity 8); also 8, not 2, candidates have an exact Q2"]
+fn stage2_exact_topk_is_sort_then_limit() {
+    let (_, _, physical) = pipeline();
+    let exact: Vec<_> = physical
+        .iter()
+        .filter(|p| classify(&p.dag, &p.query_roots).0 == Q2Option::Exact)
+        .collect();
+    assert_eq!(exact.len(), 2);
+    for p in exact {
+        let sort_then_limit = p.dag.edges.iter().any(|e| {
+            relational(payload(&p.dag, e.producer)).as_deref() == Some("sort")
+                && relational(payload(&p.dag, e.consumer)).as_deref() == Some("limit")
+        });
+        assert!(sort_then_limit, "{}: no sort → limit", p.id);
+    }
+}
+
+/// A summary Q2 is a build node feeding a top-10 estimation node, with no merge.
+#[test]
+#[ignore = "Pass 1 also offers CountSketchWithHeap for Q2, which sketch_options rejects as outside Example 1 (spec ambiguity 8)"]
+fn stage2_summary_topk_is_build_then_estimate() {
+    let (_, _, physical) = pipeline();
+    for p in &physical {
+        if classify(&p.dag, &p.query_roots).0 == Q2Option::Exact {
+            continue;
+        }
+        let kinds: Vec<_> = p.dag.nodes.iter().map(|n| &n.payload).collect();
+        assert!(
+            !kinds
+                .iter()
+                .any(|k| matches!(k, LogicalASAPOperatorPayload::SummaryMerge)),
+            "{}: no window summaries in the MVP, so no merge",
+            p.id
+        );
+        let build_to_estimate = p.dag.edges.iter().any(|e| {
+            matches!(
+                payload(&p.dag, e.producer),
+                LogicalASAPOperatorPayload::SummaryAgg {
+                    family: FieldDataType::Sketch(..),
+                    ..
+                }
+            ) && matches!(
+                payload(&p.dag, e.consumer),
+                LogicalASAPOperatorPayload::SummaryEstimate { .. }
+            )
+        });
+        assert!(build_to_estimate, "{}: no build → estimate", p.id);
+    }
+}
+
+/// With no materialization in the MVP, every node runs at query time.
+#[test]
+fn stage2_everything_runs_at_query_time() {
+    let (_, _, physical) = pipeline();
+    for p in &physical {
+        for n in &p.dag.nodes {
+            assert!(
+                !runs_at_ingestion(p, n.id),
+                "{}: {:?} at ingestion",
+                p.id,
+                n.id
+            );
+        }
+    }
+}
+
+/// Compile `p` in the physical planner (the runtime capability check). Inputs
+/// are what a deployment supplies: raw series for each sub-DAG the planner
+/// runs as a retained PromQL expression, and the samples of each time range a
+/// native operator reads.
+fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
+    use asap_physical_operators::physical_planner::{compile, promql_fallback, InputContract};
+    use asap_types::ir::export::compile_physical_asap_workload_with_node_ids;
+    use std::sync::Arc;
+    let ids = compile_physical_asap_workload_with_node_ids(&p.stage2.roots)
+        .expect("re-export")
+        .node_ids;
+    let mut inputs = BTreeMap::new();
+    let mut pending = p.dag.roots.clone();
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let node = ids.operator_node(id).expect("node");
+        let time_range = relational(payload(&p.dag, id)).as_deref() == Some("time_range");
+        // Raw samples a summary reads are an input, not a retained expression.
+        let summary_input = time_range
+            && p.dag.edges.iter().any(|e| {
+                e.producer == id
+                    && matches!(
+                        payload(&p.dag, e.consumer),
+                        LogicalASAPOperatorPayload::SummaryAgg { .. }
+                    )
+            });
+        let fallback = (!node.contains_asap() && !summary_input)
+            .then(|| promql_fallback::raw_series(node).ok())
+            .flatten();
+        if let Some(selectors) = fallback {
+            for (i, (_, schema)) in selectors.into_iter().enumerate() {
+                let slot = promql_fallback::raw_series_input(u64::from(id.0), i);
+                inputs.insert(slot, InputContract::bounded(schema));
+            }
+        } else if time_range {
+            let schema = p.dag.nodes.iter().find(|n| n.id == id).unwrap();
+            let schema = Arc::new(schema.output_schema.clone());
+            inputs.insert(u64::from(id.0), InputContract::bounded(schema));
+        } else {
+            pending.extend(p.dag.producers(id));
+        }
+    }
+    let roots: Vec<u64> = p.dag.roots.iter().map(|id| u64::from(id.0)).collect();
+    compile(&p.dag, inputs, &roots)
+        .map(|_| ())
+        .map_err(|e| format!("{} ({}): {e}", p.id, p.label))
+}
+
+/// Runtime capability check (added by the implementer, not part of the
+/// spec): the physical planner compiles every Stage 2 candidate.
+#[test]
+#[ignore = "runtime gaps: the physical planner rejects CMS+heap without a non-negative \
+            weight contract (Stage 3 rejects these as invalid too), and rejects every \
+            CountSketch+heap top-k because the IR's SummaryEstimate{TopK} output schema \
+            (partition keys + one encoded top-k column) is not the keyed-evaluation shape \
+            it builds (input columns + item + Float64 score); 8 of 24 compile, all exact-Q2"]
+fn stage2_every_candidate_compiles_in_the_physical_planner() {
+    let (_, _, physical) = pipeline();
+    let failures: Vec<_> = physical
+        .iter()
+        .filter_map(|p| compile_in_runtime(p).err())
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The plan Stage 3 selects compiles in the physical planner (added by the
+/// implementer, not part of the spec).
+#[test]
+fn stage3_selected_plan_compiles_in_the_physical_planner() {
+    let (workload, _, physical) = pipeline();
+    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selected = physical
+        .iter()
+        .find(|p| p.id == selection.selected)
+        .unwrap();
+    compile_in_runtime(selected).unwrap();
+}
+
+// ── Stage 3 ──────────────────────────────────────────────────────────────
+
+/// Stage 3 selects one candidate and gives every other one a reason.
+#[test]
+fn stage3_selects_one_and_explains_the_rest() {
+    let (workload, _, physical) = pipeline();
+    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let all: BTreeSet<_> = physical.iter().map(|p| p.id.clone()).collect();
+    let mut accounted: BTreeSet<_> = selection.rejected.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(
+        accounted.len(),
+        selection.rejected.len(),
+        "rejected once each"
+    );
+    assert!(selection.rejected.iter().all(|r| !r.reason.is_empty()));
+    assert!(
+        accounted.insert(selection.selected.clone()),
+        "selected is not rejected"
+    );
+    assert_eq!(accounted, all);
+}
+
+/// The selected plan is the cheapest valid candidate for the whole workload.
+#[test]
+fn stage3_selects_cheapest_valid() {
+    let (workload, _, physical) = pipeline();
+    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let invalid: BTreeSet<_> = selection
+        .rejected
+        .iter()
+        .filter(|r| !r.valid)
+        .map(|r| r.id.as_str())
+        .collect();
+    let best = selection.costs[&selection.selected].total;
+    for p in physical.iter().filter(|p| !invalid.contains(p.id.as_str())) {
+        assert!(best <= selection.costs[&p.id].total, "{} is cheaper", p.id);
+    }
+}
+
+/// Every node is charged exactly once, so a shared input is costed once for both queries.
+#[test]
+#[ignore = "Stage 3 prices valid candidates only (user decision); the 8 CMS+heap candidates are rejected as invalid (weights not proven non-negative) and have no cost"]
+fn stage3_charges_each_node_once() {
+    let (workload, _, physical) = pipeline();
+    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    for p in &physical {
+        let cost = &selection.costs[&p.id];
+        let nodes: BTreeSet<_> = p.dag.nodes.iter().map(|n| n.id).collect();
+        let charged: BTreeSet<_> = cost.per_node.keys().copied().collect();
+        assert_eq!(
+            charged, nodes,
+            "{}: per-node costs cover each node once",
+            p.id
+        );
+        let sum: f64 = cost.per_node.values().sum();
+        assert!(
+            (cost.total - sum).abs() <= 1e-9 * sum.abs().max(1.0),
+            "{}",
+            p.id
+        );
+    }
+}
+
+/// Sharing the input never costs more than reading it separately.
+#[test]
+#[ignore = "Pass 1 also offers CountSketchWithHeap for Q2, which sketch_options rejects as outside Example 1 (spec ambiguity 8); there are no shared-input variants to compare"]
+fn stage3_shared_input_is_not_costlier() {
+    let (workload, _, physical) = pipeline();
+    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let by_combo: BTreeMap<_, _> = physical
+        .iter()
+        .map(|p| {
+            (
+                classify(&p.dag, &p.query_roots),
+                selection.costs[&p.id].total,
+            )
+        })
+        .collect();
+    for option in [
+        Q2Option::Exact,
+        Q2Option::CountMinHeapPerJob,
+        Q2Option::Hydra,
+    ] {
+        assert!(
+            by_combo[&(option, true)] <= by_combo[&(option, false)],
+            "{option:?}"
+        );
+    }
+}
