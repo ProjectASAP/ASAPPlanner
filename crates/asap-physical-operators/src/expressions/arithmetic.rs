@@ -20,12 +20,13 @@ pub fn evaluate_float64_arithmetic(
 
 /// Execute the Planner binary contract after a deployment has resolved matching rows.
 pub fn evaluate_binary(
-    operator: &planner_types::post_asap::BinaryOperator,
+    operator: &crate::expressions::binary::BinaryOperator,
     left: f64,
     right: f64,
 ) -> Result<crate::values::Value, crate::Error> {
+    use crate::expressions::binary::BinaryOpKind;
     use crate::{values::Value, Error};
-    use planner_types::pre_asap::{ArithmeticOpKind, BinaryOpKind};
+    use planner_types::pre_asap::ArithmeticOpKind;
     let invalid =
         || Error::Invalid("unsupported binary operation or invalid checked-division domain".into());
     if operator.vector_match.is_some() {

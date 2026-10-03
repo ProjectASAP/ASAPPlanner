@@ -1,10 +1,10 @@
 //! DataFusion planning adapters. Types come from the canonical signature rules;
 //! physical evaluation deliberately remains the query engine's responsibility.
 use super::types::{arrow_to_dtype, dtype_to_arrow, scalar_value_to_asap};
-use asap_types::pre_asap::scalar_type_rules::{
-    element_access_type, struct_field_type, MapScalarFunction,
-};
-use asap_types::pre_asap::{Field, QueryExpr, Schema};
+use asap_types::ir::scalar::{element_access_type, struct_field_type};
+use asap_types::ir::ScalarExpr;
+use asap_types::pre_asap::scalar_type_rules::MapScalarFunction;
+use asap_types::pre_asap::{Field, Schema};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DataFusionError, ExprSchema, Result};
 use datafusion::logical_expr::{
@@ -91,10 +91,10 @@ impl CollectionPlanningFunction {
                     if let Some(Expr::Literal(value)) = expressions.and_then(|args| args.get(index))
                     {
                         scalar_value_to_asap(value)
-                            .map(QueryExpr::Literal)
+                            .map(ScalarExpr::Literal)
                             .map_err(|error| DataFusionError::Plan(error.to_string()))
                     } else {
-                        Ok(QueryExpr::Column(index))
+                        Ok(ScalarExpr::Column(index))
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;

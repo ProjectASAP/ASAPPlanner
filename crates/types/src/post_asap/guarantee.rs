@@ -16,9 +16,9 @@
 //! ## What a guarantee says
 //!
 //! [`ResultGuarantee`] is attached to a finalized, caller-visible value —
-//! [`super::SummaryNode::guarantee`] on a `SummaryEstimate` readout, an
+//! [`crate::ir::OperatorNode::guarantee`] on a `SummaryEstimate` evaluation, an
 //! exact accumulator, or a kept pre-ASAP sub-DAG — never to raw summary
-//! state (a `SummaryAgg` sketch node carries `None`; its readout carries the
+//! state (a `SummaryAgg` sketch node carries `None`; its evaluation carries the
 //! guarantee). Its statement is:
 //!
 //! ```text
@@ -325,13 +325,13 @@ pub enum GuaranteeSource {
     /// Deterministic exact computation — zero error by construction.
     Exact {
         /// What made it exact (e.g. `"ExactAggregate(Sum)"`,
-        /// `"KeepPreAsap"`).
+        /// `"RetainedExact"`).
         reason: String,
     },
-    /// The target this readout's sketch was sized against.
+    /// The target this evaluation's sketch was sized against.
     AccuracyTarget { target: AccuracyTarget },
-    /// The concrete sketch a readout's local guarantee was derived from.
-    SketchReadout {
+    /// The concrete sketch a evaluation's local guarantee was derived from.
+    SketchEvaluation {
         algorithm: String,
         /// Stable estimator/analysis contract used to derive this guarantee.
         #[serde(default)]
@@ -421,8 +421,8 @@ impl ResultGuarantee {
         self.bound.is_zero() && self.failure_probability.is_zero()
     }
 
-    /// How many approximate sketch readouts contributed to this value —
-    /// `1` for a plain readout, `0` for an exact value, and the transitive
+    /// How many approximate sketch evaluations contributed to this value —
+    /// `1` for a plain evaluation, `0` for an exact value, and the transitive
     /// count through every [`GuaranteeSource::ChildGuarantee`] for a
     /// composition. An `AccuracyBudgetAllocator` uses this as the number
     /// of layers a budget must be split across.
@@ -430,7 +430,7 @@ impl ResultGuarantee {
         self.provenance
             .iter()
             .map(|source| match source {
-                GuaranteeSource::SketchReadout { .. } => 1,
+                GuaranteeSource::SketchEvaluation { .. } => 1,
                 GuaranteeSource::ChildGuarantee { guarantee, .. } => {
                     guarantee.approximate_layer_count()
                 }

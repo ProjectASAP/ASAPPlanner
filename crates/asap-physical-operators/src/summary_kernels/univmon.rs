@@ -1,4 +1,4 @@
-//! One frequency state shared by count, distinct, L2 and entropy readouts.
+//! One frequency state shared by count, distinct, L2 and entropy evaluations.
 
 use crate::AggregateCore;
 use asap_sketchlib::{DataInput, UnivMon};
@@ -169,10 +169,10 @@ mod tests {
         }
     }
 
-    // Count, distinct, L2 and entropy readouts count each non-NaN sample once;
+    // Count, distinct, L2 and entropy evaluations count each non-NaN sample once;
     // signed zero is one identity.
     #[test]
-    fn frequency_readouts() {
+    fn frequency_evaluations() {
         let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
         for value in [0.0, -0.0, 2.0, 2.0, f64::NAN] {
             state.insert_sample(value).unwrap();
@@ -187,9 +187,9 @@ mod tests {
             .is_err());
     }
 
-    // A sketch taken out and adopted back answers the same readouts.
+    // A sketch taken out and adopted back answers the same evaluations.
     #[test]
-    fn adopted_sketch_keeps_readouts() {
+    fn adopted_sketch_keeps_evaluations() {
         let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
         for value in [1.0, 2.0, 2.0] {
             state.insert_sample(value).unwrap();

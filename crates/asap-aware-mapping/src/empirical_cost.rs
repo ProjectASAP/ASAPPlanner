@@ -2,9 +2,8 @@
 //! configuration and environment; they are neither runtime feedback nor proofs
 //! of an accuracy guarantee. CPU quantities are nanoseconds, never CPU operations.
 
-use asap_types::post_asap::{
-    FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams, SummaryExpr, SummaryNode,
-};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
+use asap_types::post_asap::{FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::AggIntent;
 use serde::{Deserialize, Serialize};
 
@@ -214,13 +213,13 @@ impl EmpiricalEvidenceProvider {
     /// mixed with an existing deployment's unitless or CPU-operation costs.
     pub fn lifecycle_cost_inputs(
         &self,
-        summary: &SummaryNode,
+        summary: &OperatorNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
-        let SummaryExpr::SummaryAgg {
+        let Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance),
             grouping: GroupingStrategy::PerSubpopulationInstance,
             ..
-        } = &summary.expr
+        }) = &summary.operator
         else {
             return SummaryMaintenanceLifecycleCostInputs::default();
         };
@@ -280,7 +279,7 @@ impl CostModel for EmpiricalCostModel {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        summary: &SummaryNode,
+        summary: &OperatorNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         self.provider.lifecycle_cost_inputs(summary)
     }

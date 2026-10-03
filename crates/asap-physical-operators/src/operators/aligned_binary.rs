@@ -1,6 +1,8 @@
 //! Arithmetic on complete, aligned population/window rows used by precomputation.
 use super::*;
-use planner_types::{post_asap::BinaryOperator, pre_asap::BinaryOpKind};
+use crate::expressions::binary::BinaryOpKind;
+use crate::expressions::binary::BinaryOperator;
+
 use std::collections::BTreeSet;
 
 impl Operator {
@@ -22,11 +24,9 @@ impl Operator {
             ));
         }
         for (input, value) in [(&left, values.0), (&right, values.1)] {
-            if input
-                .fields
-                .get(value)
-                .is_none_or(|f| f.nullable || f.dtype != FieldDataType::Plain(DataType::Float64))
-            {
+            if input.fields.get(value).is_none_or(|f| {
+                f.nullable || f.dtype != SummaryFamilyType::Plain(DataType::Float64)
+            }) {
                 return Err(invalid(
                     "aligned arithmetic requires non-null Float64 values",
                 ));

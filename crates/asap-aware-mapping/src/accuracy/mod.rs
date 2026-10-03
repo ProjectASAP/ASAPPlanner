@@ -20,18 +20,20 @@ pub use evidence::{
     QuantileInputDomain, WorkloadAccuracyEvidence,
 };
 
+use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ExactOperation, FieldDataType,
-    GuaranteeSource, ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams,
-    SketchStatistic,
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
+    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::types::AccuracyTarget;
+
+use crate::exact_composition::ExactOperation;
 
 /// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
 /// default rejects (a registered cross-metric conversion, say) implements
 /// this trait and passes it to
-/// [`crate::replacement::SketchAlgorithmStrategy::new_with_planning_inputs`].
+/// [`crate::replacement::ASAPStrategies::new_with_planning_inputs`].
 pub trait AccuracyModel {
     /// The definition-registered rule for applying `operation` to an
     /// approximate input. `None` means the function is exact only over exact
@@ -78,7 +80,7 @@ pub struct DefaultAccuracyModel;
 const SATISFACTION_TOLERANCE: f64 = 1e-9;
 
 impl DefaultAccuracyModel {
-    /// Derive the guarantee for the committed estimator parameters and readout.
+    /// Derive the guarantee for the committed estimator parameters and evaluation.
     pub fn sketch_guarantee(
         algorithm: &SketchAlgorithm,
         params: &SketchParams,

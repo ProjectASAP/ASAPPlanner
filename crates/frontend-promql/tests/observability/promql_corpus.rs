@@ -15,37 +15,35 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{keep_pre_asap, RealizationError};
+use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::post_asap::{SummaryExpr, SummaryNode};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
-/// This crate has no "bind me one DAG" public API any more —
-/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
+/// This crate has no "bind me one dag" public API any more —
+/// `ASAPStrategies::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
 /// gets one representative `Result` per query, matching what a totality
 /// check over the whole corpus wants.
-fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
-    let root = Rc::new(expr.clone());
-    let target = TargetSubDAG::new(&root);
-    match SketchAlgorithmStrategy::default_cost_model()
+fn bind(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+    let target = TargetSubDAG::new(root);
+    match ASAPStrategies::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
+            replacement: Replacement::SubDAG(node),
             ..
         }) => Ok(node),
-        _ => keep_pre_asap(&root),
+        _ => retain_exact(root),
     }
 }
 
@@ -77,7 +75,10 @@ impl Tally {
 fn tally(corpus: &str) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match lower_promql(q, AccuracyTarget::Exact) {
+        match asap_frontend_promql::lower_promql_query_workload(
+            &support::workload(q, AccuracyTarget::Exact),
+            0,
+        ) {
             Ok(_) => t.lowered += 1,
             Err(LoweringError::Parse(_)) => t.unparseable += 1,
             Err(_) => t.rejected += 1,
@@ -93,9 +94,10 @@ fn tally(corpus: &str) -> Tally {
 /// arm).
 #[derive(Default, Debug)]
 struct BindTally {
-    /// Root bound to `SummaryAgg`/`SummaryEstimate` — the pass did something.
+    /// An ASAP operator was bound somewhere below the root — the pass did
+    /// something.
     transformed: usize,
-    /// Root stayed `KeepPreAsap` — the pass left the query untouched.
+    /// The kept pre-ASAP dag — the pass left the query untouched.
     unchanged: usize,
     /// [`bind`] returned `Err` (schema derivation failed).
     errored: usize,
@@ -108,7 +110,7 @@ fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
             continue;
         };
         match bind(&dag) {
-            Ok(bound) if matches!(bound.expr, SummaryExpr::KeepPreAsap(_)) => t.unchanged += 1,
+            Ok(bound) if !bound.contains_asap() => t.unchanged += 1,
             Ok(_) => t.transformed += 1,
             Err(_) => t.errored += 1,
         }
@@ -148,23 +150,17 @@ fn lowering_is_total_over_the_entire_corpus() {
         "testdata corpus unexpectedly small: {td:?}"
     );
 
-    // Coverage tripwire: a code change that breaks lowering for a large slice of
-    // real PromQL trips this. Current numbers on the private promql-parser `asap`
-    // branch: docs 48 lowered / 1 rejected, testdata 1512 lowered / 76 rejected /
-    // 235 unparseable. The floors sit ~1% under those, so they guard regressions
-    // rather than pin an exact count — ratchet them up as coverage lands.
-    //
-    // The 235 unparseable are parser-fork gaps (issue #108); the rejections are
-    // lowering gaps (#109). Both shrink over time, so these floors normally only
-    // rise. Exception: the testdata floor was lowered to the measured 1485 when
-    // the 44 `fill` vector-matching queries became rejected rather than
-    // silently lowered without their fill semantics.
+    // Coverage tripwire after rejecting unrepresented native histogram samples:
+    // docs 48 lowered / 1 rejected; testdata 1121 lowered / 469 rejected /
+    // 233 parser gaps. Earlier coverage counted native histogram operations
+    // incorrectly treated as float quantiles. Keep the rejection cases in the
+    // corpus: accepting them requires a native histogram sample representation.
     assert!(
         docs.lowered >= 47,
         "docs lowering coverage regressed: {docs:?}"
     );
     assert!(
-        td.lowered >= 1485,
+        td.lowered >= 1121,
         "testdata lowering coverage regressed: {td:?}"
     );
 }

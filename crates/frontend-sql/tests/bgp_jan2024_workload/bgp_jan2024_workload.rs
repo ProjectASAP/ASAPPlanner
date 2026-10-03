@@ -70,7 +70,7 @@ fn catalog() -> SqlCatalog {
         .with_table("bgp.bgp_updates", updates)
 }
 
-async fn lower(q: &str) -> Result<asap_types::pre_asap::QueryExpr, SqlError> {
+async fn lower(q: &str) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, SqlError> {
     lower_sql_dialect(
         q,
         &catalog(),
@@ -91,6 +91,8 @@ async fn lower(q: &str) -> Result<asap_types::pre_asap::QueryExpr, SqlError> {
 /// is that signal, ratcheted so a category shifting size is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Category {
+    /// A planned expression lacks a faithful registered IR type contract.
+    InvalidRepresentation,
     Lowered,
     /// `DataFusionError::Plan` -- almost entirely "unknown function" for a
     /// ClickHouse-only builtin (`uniqExact`, `countIf`, `splitByChar`, ...).
@@ -119,6 +121,7 @@ fn categorize(err: &SqlError) -> Category {
         SqlError::DataFusion(DataFusionError::SQL(_, _)) => Category::Parse,
         SqlError::DataFusion(DataFusionError::NotImplemented(_)) => Category::NotImplemented,
         SqlError::UnsupportedFeature(_) => Category::UnsupportedFeature,
+        SqlError::Convert(_) => Category::InvalidRepresentation,
         _ => Category::Other,
     }
 }
@@ -194,8 +197,11 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // 152 -> 154: `ScalarValue::Interval` (this branch) converts the
     // `INTERVAL x unit` literal the two `toStartOfInterval(...)` queries
     // carry.
-    expect(Category::Lowered, 154);
-    expect(Category::Plan, 40);
+    // Previously admitted ClickHouse stubs used placeholder Float64 types.
+    // Unregistered functions and incompatible operands now fail closed.
+    expect(Category::Lowered, 105);
+    expect(Category::InvalidRepresentation, 53);
+    expect(Category::Plan, 41);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
     // One query that used to fail at `uniqExact` (`Plan`) now clears that
@@ -207,7 +213,7 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // Typed Map access lowers one prior gap; six array accesses now fail
     // during typed planning because the Map adapter rejects array inputs.
     expect(Category::NotImplemented, 0);
-    expect(Category::UnsupportedFeature, 6);
+    expect(Category::UnsupportedFeature, 1);
     // Was 2: the two `toStartOfInterval(...)` queries whose `INTERVAL`-literal
     // conversion gap the `toStartOfInterval` note above describes. Both now
     // lower end to end and are counted in `Lowered`.

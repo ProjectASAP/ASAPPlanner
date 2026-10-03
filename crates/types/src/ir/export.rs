@@ -14,7 +14,7 @@ pub use super::wire::NonASAPOpKind;
 use super::wire::{grouping_compatibility, input_edges, payload_of};
 pub use super::wire::{
     EdgeRole, GroupingEdgeCompatibility, LogicalASAPNodeId, LogicalASAPOperatorPayload,
-    WireScalarExpr,
+    WirePredicate, WireProjectItem, WireScalarExpr, WireSortKey,
 };
 use super::{ASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, SchemaDerivationError};
 use crate::post_asap::guarantee::ResultGuarantee;
