@@ -167,7 +167,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     match family {
         SummaryFamilyType::ExactAggregate(..) => {}
         SummaryFamilyType::Sketch(kind, _)
-            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll) => {}
+            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll | A::UnivMon) => {}
         _ => {
             return Err(Error::Invalid(
                 "summary family has no native DAG state implementation".into(),
@@ -207,6 +207,10 @@ pub fn validate_sketch_evaluation(
             (A::DDSketch, _) => bare_count,
             (A::Hll, SketchStatistic::Cardinality) => true,
             (A::Hll, _) => bare_count,
+            (A::UnivMon, SketchStatistic::PointCount { value: None, .. })
+            | (A::UnivMon, SketchStatistic::Cardinality)
+            | (A::UnivMon, SketchStatistic::FrequencyL2)
+            | (A::UnivMon, SketchStatistic::FrequencyEntropy) => true,
             // Only count intents read a Count-Min bare count, and their
             // updates have unit weight; the evaluation is typed Int64 on that basis.
             (A::Cms, _) => bare_count,
