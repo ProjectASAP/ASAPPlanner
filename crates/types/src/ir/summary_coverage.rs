@@ -43,6 +43,10 @@ pub enum CoverageError {
     NotState,
     #[error("summary node requires coverage")]
     Missing,
+    #[error("summary merge requires known coverage on every input")]
+    UnknownInput,
+    #[error("retained merge coverage disagrees with input union")]
+    MergeOutputMismatch,
 }
 
 impl SummaryCoverage {

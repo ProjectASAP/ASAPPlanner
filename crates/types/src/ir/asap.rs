@@ -6,6 +6,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
+use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::operator_properties::Reduction;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
@@ -207,10 +208,8 @@ impl ASAPOp {
         }
     }
 
-    /// Derive joint observation coverage; unknown or overlapping inputs fail closed.
-    pub fn merged_extent(
-        &self,
-    ) -> Result<super::observation_extent::ObservationExtent, SchemaDerivationError> {
+    /// Derive the merged node's coverage; unknown or overlapping inputs fail closed.
+    pub fn merged_coverage(&self) -> Result<SummaryCoverage, SchemaDerivationError> {
         let ASAPOp::SummaryMerge { children } = self else {
             return Err(SchemaDerivationError::InvalidScalarSignature(
                 "coverage merge requires SummaryMerge".into(),
@@ -218,16 +217,9 @@ impl ASAPOp {
         };
         let inputs = children
             .iter()
-            .map(|child| {
-                child.observation_extent.clone().ok_or_else(|| {
-                    SchemaDerivationError::InvalidScalarSignature(
-                        "summary merge requires known observation coverage".into(),
-                    )
-                })
-            })
+            .map(|child| child.coverage.clone().ok_or(CoverageError::UnknownInput))
             .collect::<Result<Vec<_>, _>>()?;
-        super::observation_extent::ObservationExtent::merge_disjoint(&inputs)
-            .map_err(|error| SchemaDerivationError::InvalidScalarSignature(error.to_string()))
+        Ok(SummaryCoverage::merge_disjoint(&inputs)?)
     }
 
     /// Output schema derived from the operator and its children. Summary
@@ -500,7 +492,7 @@ impl ASAPOp {
                         ));
                     }
                 }
-                self.merged_extent()?;
+                self.merged_coverage()?;
                 Ok(())
             }
             SummaryEstimate {
