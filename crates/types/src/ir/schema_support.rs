@@ -1,5 +1,14 @@
 //! Series-identity realization for the unified dag.
 use crate::pre_asap::schema::*;
+/// Resolve a PromQL root to rows carrying [`PROMQL_SERIES_IDENTITY`] before
+/// candidate search. `closed` describes physical columns here: the final
+/// column contains every dynamic source label. It does not assert that the
+/// query's projected labels are the full label set.
+///
+/// This realization supports explicit `by` grouping and per-series computation.
+/// Operators that rewrite or implicitly match dynamic label sets require their
+/// own realization; they must not accidentally treat the opaque identity as a
+/// user label or silently discard it.
 pub fn with_promql_series_identity(
     root: &std::rc::Rc<crate::ir::OperatorNode>,
 ) -> Result<std::rc::Rc<crate::ir::OperatorNode>, String> {

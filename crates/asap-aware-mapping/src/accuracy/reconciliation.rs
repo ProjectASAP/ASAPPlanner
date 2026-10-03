@@ -3,7 +3,7 @@
 //!
 //! ## The gap this closes
 //!
-//! `asap_types::pre_asap::cse::share_common_sub_dags` (pre-ASAP CSE) only
+//! `asap_types::ir::cse::share_common_sub_dags` (pre-ASAP CSE) only
 //! ever merges two sub-DAGs that are *exactly* [`PartialEq`]-equal,
 //! including their [`AggIntent`]'s `accuracy: AccuracyTarget` field. Two
 //! otherwise-identical aggregates that differ *only* in how tight an
@@ -303,7 +303,7 @@ impl AccuracyReconciliationStrategy {
     ///
     /// Also requires the candidate's own *output* schema to carry a provable
     /// unique key ([`Schema::has_unique_key`]) — the exact legality gate
-    /// `pre_asap::cse::share_common_sub_dags` already applies to its own
+    /// `ir::cse::share_common_sub_dags` already applies to its own
     /// sharing decisions, and [`crate::rollup::RollupStrategy`] already
     /// reuses verbatim for the identical reason (see that module's
     /// `is_legal_rollup_source` doc, point 4): a producer's output is only
