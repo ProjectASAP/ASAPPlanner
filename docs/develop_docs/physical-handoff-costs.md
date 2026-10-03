@@ -88,8 +88,8 @@ traffic is inferred from logical edges, operator buffers, or scan bytes.
 Unknown endpoints, mismatched payloads, absent node evidence, duplicate IDs,
 stale evidence, invalid coefficients, and integer overflow return typed errors;
 ranking/export report the comparison as unavailable. This extends the physical
-plan adapter; lifecycle-specific summary-maintenance costing and caching are
-separate follow-up integration points.
+plan adapter; summary-maintenance costing for Stage 2 materialization (#509) is
+a separate follow-up integration point.
 
 Verification:
 

@@ -257,8 +257,8 @@ contract consistent and preserves the full choice set for other callers.
 
 `CandidateLogicalASAPDAGs::global_selection` optionally coordinates cross-target sharing and
 composition choices. `GlobalSelection::assemble_selected_dag` constructs the selected
-semantic DAG. These plain APIs do not establish lifecycle or physical deployment
-feasibility. Recurrence and lifecycle-aware variants require the corresponding
+semantic DAG. These APIs do not decide materialization or establish physical
+deployment feasibility. Recurrence-aware variants require the corresponding
 workload and evidence inputs; downstream owns physical commitment and execution.
 See the [library workflow](library-api.md#optional-whole-plan-selection-and-dag-assembly).
 

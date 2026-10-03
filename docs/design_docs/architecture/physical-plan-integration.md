@@ -122,26 +122,10 @@ already exists. Until lowering introduces an explicit physical operator,
 statistics contract, validation rule, and resource formula for an operation,
 a candidate containing it is unavailable.
 
-The streaming integration can consume a complete binding through
-`SummaryNodeEvidence`. That binding is keyed to exact `OperatorNode`
-identities and uses structured evidence for aggregate state, join, merge,
-subtract, delete, evaluation, and retained pre-ASAP work. It is a physical
-evidence boundary, not automatic physical lowering: a deployment must still
-select each concrete implementation and provide all edges, resource facts,
-multiplicities, source ownership, and stable physical identities. The planner
-fails closed when any reachable ASAP node lacks that binding.
-
-The raw/query portion of a streaming comparison remains a `PhysicalDAG` using
-the canonical `PhysicalOperator` and `OperatorStatistics` pairing. Summary
-evidence is kept separate only where lifecycle-driven update, retention, and
-expiration multiplicities require facts beyond the query-DAG
-`Once`/`PerEvaluation` schedule. It must not redefine workload, lifecycle, or
-summary-family semantics.
-
-Lifecycle choice affects the physical DAG but does not replace it. Ephemeral,
-prepared, shared, and continuously maintained alternatives determine when
-build, update, evaluation, merge, subtract, or delete nodes execute. The physical
-operators still determine how each execution consumes CPU, memory, and I/O.
+Materialization choice (Stage 2, #509) affects the physical DAG but does not
+replace it: it determines when build, update, evaluation, merge, subtract, or
+delete nodes execute. The physical operators still determine how each execution
+consumes CPU, memory, and I/O.
 
 ## Statistics contract
 
@@ -470,39 +454,8 @@ a numeric entity key is not a score. Exact accumulator inputs are explicitly
 finalized before row operators consume them. None of these operations proves
 candidate completeness; that evidence belongs to the semi-join's pruning step.
 
-The logical DAG carries no execution layout: `apply_lifecycle_timings` writes
-each node's timing from the lifecycle assignment before export. Uniform phase
+The logical DAG carries no execution layout: `apply_materialization_timings`
+writes each node's timing from a `MaterializationAssignment` before export (all
+query time by default). Uniform phase
 assignment applies to the exported post-ASAP DAG;
 it is not a claim that every deployment has implemented every placement.
-
-
-## Summary cost evidence across data-arrival modes
-
-`SummaryMaintenanceCostModel` binds `SummaryNodeEvidence` and
-`SummaryOperatorEvidence` independently of data-arrival mode. `ComparisonScope`
-and the canonical `DataWorkload` determine arrival semantics; individual operator
-resource records do not define another workload model.
-
-`SummaryMaintenanceInputs::from_workload` requires fresh snapshot cardinality.
-For `AtRest`, it derives zero arrivals without requiring ingestion-rate evidence;
-a fresh nonzero or invalid rate contradicts that declaration and is rejected.
-For `ContinuouslyIngesting`, fresh, finite, nonnegative rate evidence remains
-mandatory. Missing continuous rate evidence is never treated as zero.
-Raw and summary evidence supplied directly by a provider obey the same arrival
-invariant. Their source lineage, horizon, evaluation count, and snapshot dimensions
-must still match. The existing lifecycle planner selects direct builds for a fixed
-snapshot and charges bootstrap work, result evaluation, and retention; it charges
-no arrival updates. This does not add computation-placement policy.
-
-`Mixed` and `Unknown` remain unsupported for analytical comparisons: the current
-workload schema cannot identify separate backlog and arrival populations. The
-adapter fails explicitly rather than guessing a split. The estimator version is
-`summary-maintenance-resource-v2`; evidence type names drop the `Streaming` prefix
-(`SummaryMaintenanceInputs`, `SummaryPhysicalInputEvidence`, `SummaryAggregateEvidence`,
-`RetainedSubDAGEvidence`, `RawInputEvidence`, and the summary window/alternative
-types). Update source imports; no legacy-name aliases are provided.
-
-Regressions cover a fixed snapshot with no rate evidence, contradictory arrival
-rates, scope mismatches, missing continuous-rate/cardinality evidence, and actual
-lifecycle selection of a completely costed at-rest summary against its raw scan.
-The existing continuous-ingestion and mixed-arrival rejection tests remain.

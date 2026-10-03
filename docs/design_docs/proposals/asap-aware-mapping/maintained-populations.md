@@ -70,7 +70,7 @@ columns and multi-measure aggregates need additional rules.
 
 ```text
 KeepPreAsap(input)
-  -> MaintainPopulation { input, max_k, quantiles }  [lifecycle-timed]
+  -> MaintainPopulation { input, max_k, quantiles }  [ingestion time]
        -> ReadPopulation { Quantile(q1) }           [read]
        -> ReadPopulation { Quantile(q2) }           [read]
        -> ReadPopulation { TopK(k1) }               [read]
@@ -116,8 +116,7 @@ because their source names or numeric values happen to agree.
 ## Validation, selection and execution responsibilities
 
 Planner validates the declared input, the query-time readout and readout
-compatibility; the population's lifecycle decides whether it is maintained at
-ingestion or rebuilt per query. Its intended guarantee is exact membership and exact readout;
+compatibility; `MaintainPopulation` always runs at ingestion time. Its intended guarantee is exact membership and exact readout;
 a physical implementation still must preserve the language's numeric and empty-input
 semantics. In particular, SQL global COUNT over an empty population returns a row
 with zero, while PromQL COUNT over an empty vector returns an empty vector.

@@ -71,8 +71,7 @@ estimate and storage request estimate remain independently inspectable.
 Missing entries, expired/future evidence, incompatible node snapshots, zero
 request sizes, invalid calibration, and overflow return typed analytical
 errors. When used by plan ranking/export they make that comparison unavailable.
-This profile extends the physical-plan adapter; the separate summary-maintenance
-lifecycle estimator retains its existing dimensions. Combined physical-plan
+This profile extends the physical-plan adapter. Combined physical-plan
 ranking currently supports storage profiles only with an explicit `NoCache`
 profile. `CacheProfile::Evidence` together with storage evidence makes the
 comparison unavailable: aggregate cache hit ratios cannot identify which
