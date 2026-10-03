@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use asap_types::ir::physical_export::compile_physical_asap_workload;
-use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+use asap_types::ir::timing::{
+    apply_materialization_timings, MaterializationAssignment, TimingMemo,
+};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::parsed_workload::ParsedWorkload;
 use asap_types::post_asap::ExecutionDataStateError;
@@ -232,7 +234,7 @@ impl PlanOutput {
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
         // One memo, so a node shared by several roots is timed and exported once.
         let mut memo = TimingMemo::new();
-        let assignment = LifecycleAssignment::default_maintained();
+        let assignment = MaterializationAssignment::all_query_time();
         let timed = self
             .roots()
             .iter()
@@ -254,16 +256,16 @@ impl PlanOutput {
 /// timing each operator it references and rebuilding it over the timed nodes.
 fn time_query_root(
     root: &QueryRoot,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     memo: &mut TimingMemo,
 ) -> Result<QueryRoot, ExecutionDataStateError> {
     Ok(match root {
         QueryRoot::Operator(node) => {
-            QueryRoot::Operator(apply_lifecycle_timings(node, assignment, memo)?)
+            QueryRoot::Operator(apply_materialization_timings(node, assignment, memo)?)
         }
         QueryRoot::Scalar(expr) => {
             for node in expr.operator_refs() {
-                apply_lifecycle_timings(node, assignment, memo)?;
+                apply_materialization_timings(node, assignment, memo)?;
             }
             QueryRoot::Scalar(expr.map_operator_refs(&mut |node| {
                 Rc::clone(memo.timed(node).expect("scalar reference was timed"))

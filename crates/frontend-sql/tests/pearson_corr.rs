@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::{
-    apply_lifecycle_timings, physical_export::compile_physical_asap_dag, LifecycleAssignment,
-    NonASAPOp, OperatorNode, ScalarExpr, TimingMemo,
+    apply_materialization_timings, physical_export::compile_physical_asap_dag,
+    MaterializationAssignment, NonASAPOp, OperatorNode, ScalarExpr, TimingMemo,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
@@ -152,9 +152,9 @@ async fn corr_survives_exact_plan_compilation() {
     // The exact fallback is the query's own operator DAG, no ASAP node added.
     assert!(!plan.contains_asap(), "expected exact fallback");
     assert_eq!(aggregate(&plan).0, aggregate(&query).0);
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         &plan,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_query_time(),
         &mut TimingMemo::new(),
     )
     .unwrap();

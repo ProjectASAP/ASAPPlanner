@@ -137,9 +137,11 @@ pub enum ExecutionDataStateError {
     /// and `Extension`.
     #[error("{operator} has no execution timing contract yet")]
     UnimplementedOperator { operator: &'static str },
-    /// A node reached by export without a timing: the lifecycle timing pass
+    /// A node reached by export without a timing: the materialization timing pass
     /// was not applied to the DAG first.
-    #[error("{operator} node has no execution timing; apply lifecycle timings before export")]
+    #[error(
+        "{operator} node has no execution timing; apply materialization timings before export"
+    )]
     UntimedNode { operator: &'static str },
     /// The exported physical DAG failed its own validation, e.g. an empty
     /// batch or a hand-timed plan the timing pass would have rejected.
