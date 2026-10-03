@@ -8,16 +8,24 @@ function isStagePipelineDocument(doc) {
   return !!doc && typeof doc === 'object' && doc.format === STAGE_PIPELINE_FORMAT;
 }
 
-// LogicalASAPDAG roots are `{"Operator": id}` or `{"Scalar": expr}`;
-// PhysicalASAPDAG roots are a bare node id. A scalar root has no single
-// operator node to mark, so it contributes none.
-function stageRootIds(root) {
-  if (typeof root === 'number') return [root];
-  if (root && typeof root === 'object' && typeof root.Operator === 'number') return [root.Operator];
-  return [];
+// A DAG has one root per batch query, in workload order (`roots`); a
+// single `root` is accepted for documents written before that. Logical
+// roots are `{"Operator": id}` or `{"Scalar": expr}`; physical roots are
+// bare node ids.
+function stageDagRoots(dag) {
+  if (Array.isArray(dag.roots)) return dag.roots;
+  return dag.root === undefined ? [] : [dag.root];
 }
 
-function validateStageDag(dag, where, physical) {
+// The operator node a root names, or null for a scalar root (it has no
+// single operator node to mark).
+function stageRootNodeId(root) {
+  if (typeof root === 'number') return root;
+  if (root && typeof root === 'object' && typeof root.Operator === 'number') return root.Operator;
+  return null;
+}
+
+function validateStageDag(dag, where, physical, queryCount) {
   const errors = [];
   if (!dag || typeof dag !== 'object') return [`${where}: dag is missing`];
   if (!Array.isArray(dag.nodes) || dag.nodes.length === 0) errors.push(`${where}: dag.nodes must be a non-empty array`);
@@ -35,13 +43,22 @@ function validateStageDag(dag, where, physical) {
     if (!edge || !ids.has(edge.producer) || !ids.has(edge.consumer)) errors.push(`${where}: edge #${index} names a missing producer/consumer`);
     else if (physical && !edge.data_state) errors.push(`${where}: edge ${edge.producer}->${edge.consumer} has no data_state`);
   });
-  const isLogicalRoot = dag.root && typeof dag.root === 'object' && ('Operator' in dag.root || 'Scalar' in dag.root);
-  if (physical ? typeof dag.root !== 'number' : !isLogicalRoot) errors.push(`${where}: malformed root`);
-  stageRootIds(dag.root).forEach((id) => { if (!ids.has(id)) errors.push(`${where}: root ${id} does not name a node`); });
+  if (dag.roots !== undefined && !Array.isArray(dag.roots)) errors.push(`${where}: roots must be an array`);
+  const roots = stageDagRoots(dag);
+  if (roots.length === 0) errors.push(`${where}: no roots`);
+  if (queryCount && Array.isArray(dag.roots) && roots.length !== queryCount) {
+    errors.push(`${where}: ${roots.length} roots for ${queryCount} workload queries`);
+  }
+  roots.forEach((root, index) => {
+    const isLogical = root && typeof root === 'object' && ('Operator' in root || 'Scalar' in root);
+    if (physical ? typeof root !== 'number' : !isLogical) errors.push(`${where}: root #${index} is malformed`);
+    const id = stageRootNodeId(root);
+    if (id !== null && !ids.has(id)) errors.push(`${where}: root ${id} does not name a node`);
+  });
   return errors;
 }
 
-function validateCandidates(list, where, physical, logicalIds) {
+function validateCandidates(list, where, physical, logicalIds, queryCount) {
   const errors = [];
   if (!Array.isArray(list) || list.length === 0) return [`${where}.candidates must be a non-empty array`];
   const ids = new Set();
@@ -50,15 +67,37 @@ function validateCandidates(list, where, physical, logicalIds) {
     if (!candidate || typeof candidate.id !== 'string' || !candidate.id) { errors.push(`${at}: id must be a non-empty string`); return; }
     if (ids.has(candidate.id)) errors.push(`${at}: duplicate candidate id ${candidate.id}`);
     ids.add(candidate.id);
-    errors.push(...validateStageDag(candidate.dag, `${where} ${candidate.id}`, physical));
-    if (!physical) return;
-    if (!logicalIds.has(candidate.from_logical)) errors.push(`${at}: from_logical ${JSON.stringify(candidate.from_logical)} is not a stage-1 candidate`);
-    const cost = candidate.cost;
-    if (!cost || typeof cost.total !== 'number' || !Number.isFinite(cost.total)) errors.push(`${at}: cost.total must be a number`);
-    if (!cost || typeof cost.unit !== 'string') errors.push(`${at}: cost.unit must be a string`);
-    const nodeIds = new Set(((candidate.dag && candidate.dag.nodes) || []).map((node) => String(node.id)));
+    errors.push(...validateStageDag(candidate.dag, `${where} ${candidate.id}`, physical, queryCount));
+    if (physical && !logicalIds.has(candidate.from_logical)) errors.push(`${at}: from_logical ${JSON.stringify(candidate.from_logical)} is not a stage-1 candidate`);
+  });
+  return errors;
+}
+
+function validateSelection(selection, physicalCandidates) {
+  const errors = [];
+  const byId = new Map(physicalCandidates.map((candidate) => [candidate && candidate.id, candidate]));
+  if (!byId.has(selection.selected)) errors.push('stage3_selection.selected must name a stage-2 candidate');
+  const accounted = new Set([selection.selected]);
+  if (!Array.isArray(selection.rejected)) errors.push('stage3_selection.rejected must be an array');
+  (Array.isArray(selection.rejected) ? selection.rejected : []).forEach((entry, index) => {
+    const at = `stage3_selection.rejected[${index}]`;
+    const id = entry && entry.id;
+    if (!byId.has(id)) errors.push(`${at}: ${JSON.stringify(id)} is not a stage-2 candidate`);
+    else if (accounted.has(id)) errors.push(`${at}: ${id} is already selected or rejected`);
+    if (!entry || typeof entry.valid !== 'boolean') errors.push(`${at}: valid must be true or false`);
+    accounted.add(id);
+  });
+  byId.forEach((_, id) => { if (!accounted.has(id)) errors.push(`stage3_selection: ${id} is neither selected nor rejected`); });
+  const costs = selection.costs === undefined ? {} : selection.costs;
+  if (!costs || typeof costs !== 'object' || Array.isArray(costs)) return errors.concat('stage3_selection.costs must be an object');
+  Object.entries(costs).forEach(([id, cost]) => {
+    const at = `stage3_selection.costs.${id}`;
+    if (!byId.has(id)) { errors.push(`${at}: not a stage-2 candidate`); return; }
+    if (!cost || typeof cost.total !== 'number' || !Number.isFinite(cost.total)) errors.push(`${at}: total must be a number`);
+    if (!cost || typeof cost.unit !== 'string') errors.push(`${at}: unit must be a string`);
+    const nodeIds = new Set(((byId.get(id).dag || {}).nodes || []).map((node) => String(node.id)));
     Object.keys((cost && cost.per_node) || {}).forEach((key) => {
-      if (!nodeIds.has(key)) errors.push(`${at}: cost.per_node names missing node ${key}`);
+      if (!nodeIds.has(key)) errors.push(`${at}.per_node names missing node ${key}`);
     });
   });
   return errors;
@@ -66,52 +105,62 @@ function validateCandidates(list, where, physical, logicalIds) {
 
 // Every shape problem, as readable strings; empty means the document can be
 // rendered. The viewer refuses a document with errors rather than guessing.
+// Later stages may be absent (a partial run), but never without the
+// earlier stages they refer to.
 function validateStagePipeline(doc) {
   if (!isStagePipelineDocument(doc)) return [`format must be ${JSON.stringify(STAGE_PIPELINE_FORMAT)}`];
   const errors = [];
-  errors.push(...validateStageDag(doc.stage0_logical && doc.stage0_logical.dag, 'stage0_logical', false));
-  const logical = (doc.stage1_logical_asap && doc.stage1_logical_asap.candidates) || [];
-  errors.push(...validateCandidates(doc.stage1_logical_asap && doc.stage1_logical_asap.candidates, 'stage1_logical_asap', false));
-  const logicalIds = new Set(logical.map((candidate) => candidate && candidate.id));
-  const physical = (doc.stage2_physical_asap && doc.stage2_physical_asap.candidates) || [];
-  errors.push(...validateCandidates(doc.stage2_physical_asap && doc.stage2_physical_asap.candidates, 'stage2_physical_asap', true, logicalIds));
-  const physicalIds = new Set(physical.map((candidate) => candidate && candidate.id));
-  const selection = doc.stage3_selection;
-  if (!selection || !physicalIds.has(selection.selected)) {
-    errors.push('stage3_selection.selected must name a stage-2 candidate');
-  } else {
-    const rejected = new Set();
-    (Array.isArray(selection.rejected) ? selection.rejected : []).forEach((entry, index) => {
-      const id = entry && entry.id;
-      if (!physicalIds.has(id)) errors.push(`stage3_selection.rejected[${index}]: ${JSON.stringify(id)} is not a stage-2 candidate`);
-      if (id === selection.selected) errors.push(`stage3_selection.rejected[${index}]: ${id} is also selected`);
-      if (rejected.has(id)) errors.push(`stage3_selection.rejected[${index}]: ${id} is rejected twice`);
-      rejected.add(id);
-    });
-    if (selection.rejected !== undefined && !Array.isArray(selection.rejected)) errors.push('stage3_selection.rejected must be an array');
+  const queries = doc.workload && doc.workload.queries;
+  if (!Array.isArray(queries) || queries.length === 0) errors.push('workload.queries must be a non-empty array');
+  const queryCount = Array.isArray(queries) ? queries.length : 0;
+  errors.push(...validateStageDag(doc.stage0_logical && doc.stage0_logical.dag, 'stage0_logical', false, queryCount));
+  const stage1 = doc.stage1_logical_asap;
+  const stage2 = doc.stage2_physical_asap;
+  const stage3 = doc.stage3_selection;
+  if (stage1 !== undefined) errors.push(...validateCandidates(stage1 && stage1.candidates, 'stage1_logical_asap', false, null, queryCount));
+  if (stage2 !== undefined) {
+    if (stage1 === undefined) errors.push('stage2_physical_asap needs stage1_logical_asap');
+    const logicalIds = new Set(((stage1 && stage1.candidates) || []).map((candidate) => candidate && candidate.id));
+    errors.push(...validateCandidates(stage2 && stage2.candidates, 'stage2_physical_asap', true, logicalIds, queryCount));
+  }
+  if (stage3 !== undefined) {
+    if (stage2 === undefined || !stage2 || !Array.isArray(stage2.candidates)) errors.push('stage3_selection needs stage2_physical_asap');
+    else if (!stage3 || typeof stage3 !== 'object') errors.push('stage3_selection must be an object');
+    else errors.push(...validateSelection(stage3, stage2.candidates));
   }
   return errors;
 }
 
-// Physical candidates cheapest first. Status comes only from
-// stage3_selection; a candidate it neither selects nor rejects is
-// reported as such, not assumed rejected.
+// Physical candidates with their Stage 3 outcome, cheapest first; a
+// candidate Stage 3 did not cost sorts last. Costs come only from
+// `stage3_selection.costs`, so without Stage 3 every row has no cost and
+// status 'no_selection', in document order.
 function rankPhysicalCandidates(doc) {
-  const selection = doc.stage3_selection || {};
-  const reasons = new Map((selection.rejected || []).map((entry) => [entry.id, entry.reason || '']));
-  return doc.stage2_physical_asap.candidates
+  const selection = doc.stage3_selection;
+  const costs = (selection && selection.costs) || {};
+  const rejected = new Map(((selection && selection.rejected) || []).map((entry) => [entry.id, entry]));
+  const totalOf = (candidate) => (costs[candidate.id] ? costs[candidate.id].total : Infinity);
+  let rank = 0;
+  return ((doc.stage2_physical_asap && doc.stage2_physical_asap.candidates) || [])
     .map((candidate, order) => ({ candidate, order }))
-    .sort((a, b) => a.candidate.cost.total - b.candidate.cost.total || a.order - b.order)
-    .map(({ candidate }, index) => ({
-      id: candidate.id,
-      label: candidate.label || candidate.id,
-      from_logical: candidate.from_logical,
-      total: candidate.cost.total,
-      unit: candidate.cost.unit,
-      rank: index + 1,
-      status: candidate.id === selection.selected ? 'selected' : reasons.has(candidate.id) ? 'rejected' : 'not_selected',
-      reason: reasons.get(candidate.id),
-    }));
+    .sort((a, b) => (totalOf(a.candidate) - totalOf(b.candidate)) || a.order - b.order)
+    .map(({ candidate }) => {
+      const cost = costs[candidate.id];
+      const entry = rejected.get(candidate.id);
+      let status = 'no_selection';
+      if (selection) status = candidate.id === selection.selected ? 'selected' : entry && entry.valid ? 'rejected_valid' : 'rejected_invalid';
+      return {
+        id: candidate.id,
+        label: candidate.label || candidate.id,
+        from_logical: candidate.from_logical,
+        total: cost ? cost.total : null,
+        unit: cost ? cost.unit : null,
+        source: cost ? cost.source || null : null,
+        rank: cost ? ++rank : null,
+        status,
+        reason: entry ? entry.reason || '' : null,
+      };
+    });
 }
 
 function snakeToPascal(text) {
@@ -157,6 +206,11 @@ function wireGrouping(reduction, schema) {
   return reduction === undefined ? null : `reduction: ${compactWire(reduction)}`;
 }
 
+function wirePartition(keys, schema) {
+  if (!keys || !Array.isArray(keys.keys) || keys.keys.length === 0) return null;
+  return `${keys.without ? 'per group without' : 'per'} ${keys.keys.map((key) => wireColumn(key, schema)).join(', ')}`;
+}
+
 function formatTiming(timing) {
   const normalized = String(timing || '').replace(/_/g, '').toLowerCase();
   if (normalized === 'ingestiontime') return 'ingestion time';
@@ -182,7 +236,14 @@ function stageNodeLines(node, inputSchema) {
       if (wireGrouping(op.reduction, inputSchema)) lines.push(wireGrouping(op.reduction, inputSchema));
       break;
     case 'filter': lines.push(`where: ${compactWire(op.pred)}`); break;
-    case 'limit': lines.push(`rows: ${op.n}`); break;
+    case 'sort':
+      lines.push(`sort: ${(op.keys || []).map((key) => `${key.expr && typeof key.expr.Column === 'number' ? wireColumn(key.expr.Column, inputSchema) : compactWire(key.expr)} ${key.ascending ? 'asc' : 'desc'}`).join(', ')}`);
+      if (wirePartition(op.partition_by, inputSchema)) lines.push(wirePartition(op.partition_by, inputSchema));
+      break;
+    case 'limit':
+      lines.push(`rows: ${op.n === null || op.n === undefined ? 'all' : op.n}${op.offset ? `, offset ${op.offset}` : ''}`);
+      if (wirePartition(op.partition_by, inputSchema)) lines.push(wirePartition(op.partition_by, inputSchema));
+      break;
     case 'summary_agg': {
       const sketch = op.family && Array.isArray(op.family.Sketch) ? op.family.Sketch : null;
       lines.push(`family: ${sketch ? sketch[0].algorithm : compactWire(op.family)}`);
@@ -198,14 +259,22 @@ function stageNodeLines(node, inputSchema) {
 }
 
 // One lane as cytoscape elements. `costPerNode` is the physical candidate's
-// `cost.per_node` map (absent for logical lanes). `categoryFor` maps a kind
-// name to a node-style.js category.
+// Stage 3 `per_node` map (absent for logical lanes and before Stage 3).
+// `categoryFor` maps a kind name to a node-style.js category; `queryIds`
+// names the workload queries, in root order.
 function stageLaneElements(laneId, laneLabel, dag, options) {
-  const { physical = false, costPerNode = null, categoryFor = () => 'unknown' } = options || {};
+  const { physical = false, costPerNode = null, categoryFor = () => 'unknown', queryIds = [] } = options || {};
   const byId = new Map(dag.nodes.map((node) => [node.id, node]));
   const inputOf = new Map();
   dag.edges.forEach((edge) => { if (!inputOf.has(edge.consumer)) inputOf.set(edge.consumer, byId.get(edge.producer)); });
-  const roots = new Set(stageRootIds(dag.root));
+  // node id -> ids of the workload queries it is the root of
+  const rootFor = new Map();
+  stageDagRoots(dag).forEach((root, index) => {
+    const id = stageRootNodeId(root);
+    if (id === null) return;
+    if (!rootFor.has(id)) rootFor.set(id, []);
+    rootFor.get(id).push(queryIds[index] || `query #${index + 1}`);
+  });
   const elements = [
     { data: { id: laneId, label: laneLabel, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
   ];
@@ -217,6 +286,7 @@ function stageLaneElements(laneId, laneLabel, dag, options) {
     const cost = costPerNode ? costPerNode[String(node.id)] : undefined;
     if (timing !== undefined) lines.push(`⏱ ${formatTiming(timing)}`);
     if (cost && typeof cost.cost === 'number') lines.push(`cost ${Number(cost.cost.toFixed(3))}`);
+    if (rootFor.has(node.id)) lines.push(`root of ${rootFor.get(node.id).join(', ')}`);
     elements.push({
       data: {
         id: `${laneId}-n${node.id}`,
@@ -225,7 +295,8 @@ function stageLaneElements(laneId, laneLabel, dag, options) {
         stageNode: node,
         kind,
         category: categoryFor(kind),
-        root: roots.has(node.id),
+        root: rootFor.has(node.id),
+        rootFor: rootFor.get(node.id) || [],
         laneId,
         physical,
         timing,
