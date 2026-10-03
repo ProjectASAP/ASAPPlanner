@@ -138,9 +138,11 @@ pub enum ExecutionDataStateError {
     /// `SummaryDelete`, `SummaryJoin`, `Extension`) in an executable plan.
     #[error("{operator} is a reserved operator with no execution contract yet")]
     UnimplementedOperator { operator: &'static str },
-    /// A node reached by export without a timing: the lifecycle timing pass
+    /// A node reached by export without a timing: the materialization timing pass
     /// was not applied to the DAG first.
-    #[error("{operator} node has no execution timing; apply lifecycle timings before export")]
+    #[error(
+        "{operator} node has no execution timing; apply materialization timings before export"
+    )]
     UntimedNode { operator: &'static str },
 }
 

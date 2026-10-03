@@ -92,7 +92,7 @@ impl Operator {
 /// `schema` and `result_kind` are derived from `operator` and its children
 /// at construction and retained. `guarantee` is `None` until accuracy
 /// assessment establishes one (`None` never means exact). `timing` is `None`
-/// until a lifecycle assignment is applied; export rejects an executable
+/// until a materialization assignment is applied; export rejects an executable
 /// node without one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorNode {
