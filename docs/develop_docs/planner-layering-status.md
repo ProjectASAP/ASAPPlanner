@@ -6,7 +6,7 @@ is a target contract, not a statement that its examples execute today.
 
 | Proposal contract | Evidence at #557 | Remaining scope |
 | --- | --- | --- |
-| Language frontends and common logical IR | SQL/PromQL/MetricsQL lower to unified operators and scalars. | Example 2 SQL frequency L2 and entropy idioms are not recognized. Preserve alias lineage, filters, NULL groups, empty inputs, count overflow and entropy units when adding recognition. |
+| Language frontends and common logical IR | SQL/PromQL/MetricsQL lower to unified operators and scalars. | Floating-point SQL frequency L2 products now have a conservative logical rewrite. Integer products and the entropy idiom remain unrecognized. Preserve alias lineage, filters, NULL groups, empty inputs, count overflow and entropy units when adding recognition. |
 | Local exact and summary alternatives | `replacement::summary_candidates`, realization rules and candidate inventory exist; supplied accuracy models reach Pass 1. | Specialized entropy/norm families in Example 2 are illustrative, not registered families. UnivMon certifies only unit-update total count; L2, entropy and cardinality epsilon/delta bounds need verified evidence or a deployment model. |
 | Summary-capability sharing | CSE interns structurally identical producers, including states with different readers. | It does not enumerate all partial sharing partitions or resize compatible states to the strictest consumer. Example 2's 37 candidates are not an acceptance result. |
 | Window composition | Mergeable state IR/native merge exists; physical pane compatibility and reuse cost helpers exist. | Automatic logical sliding/tumbling/EH alternatives over differing windows, boundary coverage and error proofs are absent. A merge kernel alone does not implement Examples 1/3. |
@@ -45,3 +45,19 @@ is a target contract, not a statement that its examples execute today.
 
 The examples' numerical candidate counts depend on their stated rule sets.
 Tests should establish those rule sets explicitly before asserting the counts.
+
+## SQL L2 follow-up acceptance
+
+`SemanticEquivalentRewriteStrategy` recognizes a single `SQRT(SUM(c*c))`
+output when `c` is a grouped unit count and the product is already Float64.
+It follows positional projection lineage, keeps the input predicates, inherits
+count accuracy, and restores SQL's NULL result for an empty population. It
+retains the original exact candidate. Recognition requires one nonnullable
+Boolean, Int64 or Utf8 grouping key, no measure filters/HAVING and no
+intervening operators that change the grouped population. The uncast integer
+product in Example 2 remains a gap because SQL overflow is observable.
+
+`frontend-sql/tests/frequency_l2.rs` covers recognition, refusal boundaries,
+accuracy propagation and candidate retention; `integration-tests/tests/sql_frequency_l2.rs`
+executes both SQL and the rewrite through raw connectors and wire compilation.
+This step does not supply an L2 accuracy certificate or all sharing partitions.

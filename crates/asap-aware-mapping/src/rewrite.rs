@@ -26,6 +26,14 @@
 //! that reshaping — see "Non-goals" below for why it does not also decide
 //! whether the reshaping is worth it.
 //!
+//! ## SQL frequency recognition
+//!
+//! A floating-point `SQRT(SUM(c*c))` over grouped unit counts exposes a
+//! frequency L2 alternative through the same semantic strategy. Projection
+//! lineage, predicates, accuracy and empty-input NULL are preserved. Integer
+//! products and nullable grouping keys are excluded because overflow and NULL
+//! groups have observable SQL behavior. See `frequency_rewrite` for the rule.
+//!
 //! ## Scope
 //!
 //! Ordinary `by(...)` averages use a schema-preserving projection. Temporal
@@ -399,9 +407,18 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         avg_rewrite_target(target.root).is_some()
             || composed_aggregate_rewrite(target.root).is_some()
+            || crate::frequency_rewrite::frequency_l2_rewrite(target.root).is_some()
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
+        if let Some(rewritten) = crate::frequency_rewrite::frequency_l2_rewrite(target.root) {
+            return vec![ReplacementSubDAG {
+                strategy: "SemanticEquivalentRewriteStrategy",
+                replacement: Replacement::SubDAG(rewritten),
+                provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
+                rationale: "recognize a floating SQL frequency L2 product while preserving empty-input NULL and the original exact candidate".into(),
+            }];
+        }
         if let Some(rewritten) = composed_aggregate_rewrite(target.root) {
             return vec![ReplacementSubDAG {
                 strategy: "SemanticEquivalentRewriteStrategy",
