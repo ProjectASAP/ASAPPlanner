@@ -345,6 +345,9 @@ impl ASAPOp {
                 for f in &mut out.fields {
                     if let FieldDataType::ExactAggregate(kind, _) = &f.dtype {
                         if let Some(result) = &value_result {
+                            // The finalized value replaces the aggregate it
+                            // realizes, so it takes that aggregate's column.
+                            f.name = result.name.clone();
                             f.dtype = result.dtype.clone();
                             f.nullable = result.nullable;
                         } else {
