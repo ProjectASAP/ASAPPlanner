@@ -113,8 +113,8 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
 mod tests {
     use super::*;
     use crate::test_support::scan;
-    use asap_types::ir::operator_properties::GroupKeys;
-    use asap_types::pre_asap::Schema;
+    use asap_types::ir::operator::operator_properties::GroupKeys;
+    use asap_types::ir::schema::Schema;
 
     fn scan_named(metric: &str) -> Rc<OperatorNode> {
         scan(metric, Schema::with_time_index(vec![], 0, vec![]))

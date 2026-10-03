@@ -1,7 +1,7 @@
 //! KLL quantile summary over `asap_sketchlib::KllSketch`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::KllSketch;
-use planner_types::post_asap::SketchStatistic;
+use planner_types::ir::schema::SketchStatistic;
 
 #[derive(Clone)]
 pub struct DatasketchesKLLAccumulator {

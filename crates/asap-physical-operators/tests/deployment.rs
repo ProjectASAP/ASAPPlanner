@@ -1,9 +1,9 @@
 //! Exercise the public library without a backend server, store, or scheduler.
-use asap_physical_operators::planner::{
-    post_asap::{
+use asap_physical_operators::planner::ir::{
+    scalar::ColumnRef,
+    schema::{
         FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     },
-    pre_asap::ColumnRef,
 };
 use asap_physical_operators::{factory::create_planner_accumulator, AggregateCore};
 
@@ -29,7 +29,7 @@ fn build(values: &[f64]) -> Box<dyn AggregateCore> {
 fn read(state: &dyn AggregateCore) -> f64 {
     state
         .estimate(
-            &asap_physical_operators::planner::post_asap::SketchStatistic::Quantile { q: 0.5 },
+            &asap_physical_operators::planner::ir::schema::SketchStatistic::Quantile { q: 0.5 },
         )
         .unwrap()
 }
@@ -64,7 +64,7 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 // a packed-wire column-bit budget must not be imposed on this constructor.
 #[test]
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
-    use asap_physical_operators::planner::post_asap::SummaryInputExpr;
+    use asap_physical_operators::planner::ir::schema::SummaryInputExpr;
     use asap_physical_operators::KeyByLabelValues;
     let family = FieldDataType::Sketch(
         SketchKind::new(

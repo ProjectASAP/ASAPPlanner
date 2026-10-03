@@ -14,12 +14,13 @@ use asap_frontend_common::{UnresolvedOp, UnresolvedScalar};
 use asap_frontend_sql::{
     lower_sql, lower_sql_dialect, SqlCatalog, SqlError as LoweringError, SqlLowerer,
 };
-use asap_types::ir::{ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr};
-use asap_types::pre_asap::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, GroupKeys, JoinKind, Reduction, ScalarValue, Source,
-    WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
+use asap_types::ir::operator::{
+    AggIntent, GroupKeys, JoinKind, Reduction, Source, WindowFrameBound, WindowFrameOffset,
+    WindowFrameUnits, WindowFuncKind,
 };
+use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::{ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 

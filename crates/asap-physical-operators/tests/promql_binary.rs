@@ -10,15 +10,15 @@ use planner_types::ir::export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::operator::BinaryOpKind;
+use planner_types::ir::properties::ExecutionDataState;
+use planner_types::ir::scalar::ArithmeticOpKind;
+use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::BinaryOperator;
-use planner_types::{
-    post_asap::{ExecutionDataState, Field, FieldDataType},
-    pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
-};
 use std::{collections::BTreeMap, sync::Arc};
 
 fn schema() -> SchemaRef {
-    Arc::new(planner_types::pre_asap::Schema {
+    Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![
@@ -164,7 +164,7 @@ fn duplicate_matching_identity_is_rejected() {
 #[test]
 fn scalar_broadcast_and_bool_comparison_are_distinct() {
     use asap_physical_operators::physical_planner::promql_values;
-    use planner_types::pre_asap::CompareOpKind;
+    use planner_types::ir::scalar::CompareOpKind;
     for return_bool in [false, true] {
         let physical_dag = promql_values::compile_binary(
             &asap_physical_operators::expressions::binary::BinaryOperator::from_logical(
@@ -301,7 +301,7 @@ fn binary_obeys_memory_and_cancellation() {
 fn label_map_bool_comparison_drops_the_name() {
     let program = program_for_bool(
         BinaryOperator {
-            kind: BinaryOpKind::Compare(planner_types::pre_asap::CompareOpKind::Gt),
+            kind: BinaryOpKind::Compare(planner_types::ir::scalar::CompareOpKind::Gt),
             vector_match: None,
             checked_relative_division: false,
             checked_finite_division: false,
@@ -332,17 +332,17 @@ fn stored_series_evaluations_support_filters_and_sets() {
     use asap_physical_operators::{
         physical_planner::compile, summary_kernels::exact::ExactAccumulator,
     };
-    use planner_types::post_asap::*;
-    use planner_types::pre_asap::{
-        schema::PROMQL_SERIES_IDENTITY, CompareOpKind, PromQLVectorSetOpKind,
-    };
+    use planner_types::ir::operator::PromQLVectorSetOpKind;
+    use planner_types::ir::scalar::CompareOpKind;
+    use planner_types::ir::schema::PROMQL_SERIES_IDENTITY;
+    use planner_types::{ir::properties::*, ir::schema::*};
 
     for (exact_kind, params) in [
         (ExactKind::Sum, ExactParams::Sum),
         (ExactKind::Count, ExactParams::Count),
     ] {
         let family = FieldDataType::ExactAggregate(exact_kind.clone(), params);
-        let state_schema = Arc::new(planner_types::pre_asap::Schema {
+        let state_schema = Arc::new(planner_types::ir::schema::Schema {
             unique_keys: vec![],
             closed: false,
             fields: vec![

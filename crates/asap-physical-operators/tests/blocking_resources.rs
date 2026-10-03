@@ -7,16 +7,15 @@ use asap_physical_operators::{
     Error,
 };
 use futures::{executor::block_on, FutureExt, StreamExt};
+use planner_types::ir::operator::JoinKind;
+use planner_types::ir::scalar::ScalarValue;
+use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::Predicate;
 use planner_types::ir::ScalarExpr;
-use planner_types::{
-    post_asap::{Field, FieldDataType},
-    pre_asap::{DataType, JoinKind, ScalarValue},
-};
 use std::sync::Arc;
 
 fn schema(width: usize) -> SchemaRef {
-    Arc::new(planner_types::pre_asap::Schema {
+    Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: (0..width)
@@ -188,9 +187,9 @@ fn cooperative_sort_preserves_ties_across_chunks() {
 // The integrated weighted-summary path obeys the same cooperative cancellation contract.
 #[test]
 fn weighted_summary_build_yields_within_a_batch() {
-    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
 
-    let input = Arc::new(planner_types::pre_asap::Schema {
+    let input = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![

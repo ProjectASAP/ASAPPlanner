@@ -12,18 +12,18 @@ use planner_types::ir::export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::operator::{BinaryOpKind, GroupKeys, Reduction};
+use planner_types::ir::properties::*;
+use planner_types::ir::scalar::{ArithmeticOpKind, ColumnRef};
+use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::BinaryOperator;
-use planner_types::{
-    post_asap::*,
-    pre_asap::{ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, GroupKeys, Reduction},
-};
 use std::{collections::BTreeMap, sync::Arc};
 
 // Typed series identity survives finalization and derived precompute through population metadata.
 #[test]
 fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = |dtype| planner_types::pre_asap::Schema {
+    let schema = |dtype| planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
@@ -45,7 +45,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     value_schema.time_index = Some(1);
     value_schema.fields.push(Field {
         table: None,
-        name: planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
+        name: planner_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
         dtype: FieldDataType::Plain(DataType::Utf8),
         nullable: false,
     });
@@ -230,7 +230,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
 }
 
 fn logical_schema(family: FieldDataType) -> Schema {
-    planner_types::pre_asap::Schema {
+    planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
@@ -360,9 +360,9 @@ fn ingestion_context(limits: Limits) -> RunContext {
 }
 fn sum_state(value: f64) -> Arc<dyn asap_physical_operators::AggregateCore> {
     let mut state = asap_physical_operators::summary_kernels::exact::ExactAccumulator::new(
-        planner_types::post_asap::FieldDataType::ExactAggregate(
-            planner_types::post_asap::ExactKind::Sum,
-            planner_types::post_asap::ExactParams::Sum,
+        planner_types::ir::schema::FieldDataType::ExactAggregate(
+            planner_types::ir::schema::ExactKind::Sum,
+            planner_types::ir::schema::ExactParams::Sum,
         ),
         false,
     )

@@ -1,7 +1,7 @@
 //! Joint time/population coverage for summary composition, independent of schema.
 //! Equality predicates are a deliberately narrow proof vocabulary. Unsupported
 //! predicates cannot be declared disjoint merely by giving them different names.
-use crate::pre_asap::Source;
+use crate::ir::operator::Source;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ops::Range;

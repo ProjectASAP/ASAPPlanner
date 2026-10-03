@@ -13,10 +13,9 @@ use planner_types::ir::export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
-use planner_types::{
-    post_asap::*,
-    pre_asap::{ColumnRef, DataType},
-};
+use planner_types::ir::properties::*;
+use planner_types::ir::scalar::ColumnRef;
+use planner_types::ir::schema::{DataType, *};
 use std::{collections::BTreeMap, sync::Arc};
 
 // A Post-ASAP projection may reorder/rename summary columns; recovery must retain
@@ -24,7 +23,7 @@ use std::{collections::BTreeMap, sync::Arc};
 #[test]
 fn post_asap_summary_projection_survives_recovery() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = Arc::new(planner_types::pre_asap::Schema {
+    let schema = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![
@@ -43,7 +42,7 @@ fn post_asap_summary_projection_survives_recovery() {
         ],
         time_index: None,
     });
-    let output = planner_types::pre_asap::Schema {
+    let output = planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![

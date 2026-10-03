@@ -3,20 +3,26 @@
 //!
 //! A [`ScalarExpr`] never produces a table. It is owned by value by an operator
 //! field (`Filter.pred`, `ProjectItem.expr`, `SortKey.expr`, `HAVING`, window
-//! arguments, relabel values) or by a [`super::QueryRoot::Scalar`] query root.
+//! arguments, relabel values) or by a [`crate::ir::QueryRoot::Scalar`] query root.
 //! The only operator references inside a scalar tree are the explicit
 //! plan-reading variants (`PromqlScalarFromVector`, `ScalarSubquery`, `Exists`,
 //! `InSubquery`); every traversal of the operator DAG follows them.
+
+pub mod column_resolution;
+mod expr_ir;
+pub mod scalar_type_rules;
+
+pub use column_resolution::{resolve_column_ref, resolve_column_refs, ResolveError};
+pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::node::OperatorNode;
+use crate::ir::operator::node::OperatorNode;
+use crate::ir::scalar::scalar_type_rules::MapScalarFunction;
+use crate::ir::schema::{ColumnId, DataType, Schema};
 use crate::ir::SchemaDerivationError;
-use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use crate::pre_asap::scalar_type_rules::MapScalarFunction;
-use crate::pre_asap::schema::{ColumnId, DataType, Schema};
 
 /// Which language's numeric and comparison rules an expression follows.
 /// Both languages use `Float64`, so a result type alone does not preserve
@@ -489,7 +495,8 @@ impl ScalarExpr {
                 (to.clone(), *try_cast || nullable)
             }
             ScalarExpr::FunctionCall { name, args } => {
-                if let Some(arity) = crate::pre_asap::scalar_type_rules::promql_function_arity(name)
+                if let Some(arity) =
+                    crate::ir::scalar::scalar_type_rules::promql_function_arity(name)
                 {
                     if args.len() != arity
                         || args
@@ -559,7 +566,7 @@ impl ScalarExpr {
             // `scalar(v)` is one float sample (NaN when the vector is not
             // exactly one series); a scalar subquery is its single column.
             ScalarExpr::PromqlScalarFromVector(node) => {
-                if node.result_kind != super::OperatorResultKind::InstantVector {
+                if node.result_kind != crate::ir::OperatorResultKind::InstantVector {
                     return Err(signature("scalar() requires an instant vector"));
                 }
                 (DataType::Float64, false)
@@ -603,7 +610,7 @@ fn common_scalar_type(a: &DataType, b: &DataType) -> Result<DataType, SchemaDeri
     }
 }
 fn relation(node: &OperatorNode) -> Result<(), SchemaDerivationError> {
-    if node.result_kind == super::OperatorResultKind::Relation {
+    if node.result_kind == crate::ir::OperatorResultKind::Relation {
         Ok(())
     } else {
         Err(signature("SQL subquery requires a relation"))
@@ -611,7 +618,7 @@ fn relation(node: &OperatorNode) -> Result<(), SchemaDerivationError> {
 }
 fn scalar_subquery_field(
     node: &OperatorNode,
-) -> Result<&crate::pre_asap::Field, SchemaDerivationError> {
+) -> Result<&crate::ir::schema::Field, SchemaDerivationError> {
     relation(node)?;
     match node.schema.fields.as_slice() {
         [field] => Ok(field),
@@ -747,9 +754,9 @@ pub fn element_access_type(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator_properties::Source;
+    use crate::ir::operator::operator_properties::Source;
+    use crate::ir::schema::{Field, FieldDataType};
     use crate::ir::{NonASAPOp, OperatorNode};
-    use crate::pre_asap::schema::{Field, FieldDataType};
 
     fn call(name: &str, args: Vec<ScalarExpr>) -> ScalarExpr {
         ScalarExpr::FunctionCall {

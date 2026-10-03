@@ -56,8 +56,8 @@ mod tests {
     #[test]
     fn count_sketch_uses_an_l2_guarantee() {
         use crate::replacement::default_size_params;
-        use asap_types::post_asap::{GroupingStrategy, SketchKind};
-        use asap_types::pre_asap::agg_intent::default_cardinality;
+        use asap_types::ir::operator::agg_intent::default_cardinality;
+        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let intent = default_cardinality();
         let count_sketch = default_size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
         let guarantee = DefaultAccuracyModel
@@ -67,7 +67,7 @@ mod tests {
                     GroupingStrategy::default(),
                 ),
                 &SketchStatistic::PointCount {
-                    key: asap_types::pre_asap::expr_ir::ColumnRef::SampleValue,
+                    key: asap_types::ir::scalar::ColumnRef::SampleValue,
                     value: None,
                 },
             )

@@ -1,8 +1,6 @@
 //! Logical transport must accept plans with no execution timing assigned, before materialization.
-use asap_types::{
-    ir::{NonASAPOp, Operator, OperatorNode},
-    pre_asap::Schema,
-};
+use asap_types::ir::schema::Schema;
+use asap_types::ir::{NonASAPOp, Operator, OperatorNode};
 
 #[test]
 fn logical_export_accepts_unassigned_timing() {
@@ -15,16 +13,18 @@ fn logical_export_accepts_unassigned_timing() {
     assert!(asap_types::ir::export::compile_logical_asap_dag(&root).is_ok());
 }
 
-use asap_types::{
-    ir::export::{
-        compile_logical_asap_dag_with_node_ids, EdgeRole, LogicalASAPDAGDocument,
-        LogicalASAPDAGValidationError, LogicalASAPNodeId, LogicalASAPOperatorPayload,
-    },
-    ir::operator_properties::Reduction,
-    ir::{ASAPOp, OperatorResultKind, ProjectItem, ScalarExpr},
-    post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
-    pre_asap::{ColumnRef, DataType, Field, FieldDataType, ScalarValue, Source},
+use asap_types::ir::export::{
+    compile_logical_asap_dag_with_node_ids, EdgeRole, LogicalASAPDAGDocument,
+    LogicalASAPDAGValidationError, LogicalASAPNodeId, LogicalASAPOperatorPayload,
 };
+use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::operator::Source;
+use asap_types::ir::scalar::{ColumnRef, ScalarValue};
+use asap_types::ir::schema::{
+    DataType, Field, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
+    SummaryUpdate,
+};
+use asap_types::ir::{ASAPOp, OperatorResultKind, ProjectItem, ScalarExpr};
 use std::rc::Rc;
 
 fn values() -> Rc<OperatorNode> {
@@ -99,14 +99,16 @@ fn merged_summary_preserves_typed_state() {
     let root = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: (0..2)
             .map(|start| {
-                let coverage = asap_types::ir::summary_coverage::SummaryCoverage {
+                let coverage = asap_types::ir::properties::summary_coverage::SummaryCoverage {
                     source: Source::Table {
                         table_ref: "values".into(),
                     },
-                    regions: vec![asap_types::ir::summary_coverage::CoverageRegion {
-                        time_ms: Some(start..start + 1),
-                        population: Default::default(),
-                    }],
+                    regions: vec![
+                        asap_types::ir::properties::summary_coverage::CoverageRegion {
+                            time_ms: Some(start..start + 1),
+                            population: Default::default(),
+                        },
+                    ],
                 };
                 std::rc::Rc::new((*state).clone().with_coverage(coverage).unwrap())
             })

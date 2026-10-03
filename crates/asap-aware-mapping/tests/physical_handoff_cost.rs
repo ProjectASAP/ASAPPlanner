@@ -5,7 +5,7 @@ use asap_aware_mapping::analytical_cost::{
 use asap_aware_mapping::physical_operator_statistics::{
     ComparisonScope, EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
 };
-use asap_types::ir::operator_properties::Source;
+use asap_types::ir::operator::operator_properties::Source;
 use asap_types::workload::{
     DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
 };
@@ -141,7 +141,7 @@ use asap_aware_mapping::physical_handoff_cost::*;
 // Legacy mapping imports and the shared resource API are the very same Rust types.
 #[test]
 fn mapping_resource_reexports_are_wire_compatible_shared_types() {
-    let shared = asap_types::resources::PhysicalHandoffBytes {
+    let shared = asap_types::workload::resources::PhysicalHandoffBytes {
         network_bytes: 480,
         materialization_bytes: 40,
     };
@@ -150,7 +150,7 @@ fn mapping_resource_reexports_are_wire_compatible_shared_types() {
         serde_json::to_value(legacy).unwrap(),
         serde_json::json!({"network_bytes": 480, "materialization_bytes": 40})
     );
-    let shared_kind = asap_types::resources::PhysicalHandoffKind::Materialization;
+    let shared_kind = asap_types::workload::resources::PhysicalHandoffKind::Materialization;
     let mut handoff = transfer("persist", None);
     handoff.kind = shared_kind;
     let json = serde_json::to_value(&handoff).unwrap();

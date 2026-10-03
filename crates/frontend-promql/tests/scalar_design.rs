@@ -1,7 +1,7 @@
 //! Scalar expressions never become constant-wrapper operators.
 mod support;
+use asap_types::ir::scalar::{ArithmeticOpKind, ScalarValue};
 use asap_types::ir::{NonASAPOp, QueryRoot, ScalarExpr};
-use asap_types::pre_asap::{ArithmeticOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 
 fn root(query: &str) -> QueryRoot {

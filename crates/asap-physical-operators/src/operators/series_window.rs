@@ -1,6 +1,6 @@
 //! PromQL per-series evaluation over the samples before an evaluation instant.
 use super::*;
-use planner_types::pre_asap::{AggIntent, AtModifier};
+use planner_types::ir::operator::{AggIntent, AtModifier};
 
 /// A PromQL subquery grid: every multiple of `step_ms` in
 /// `(T - offset_ms - range_ms, T - offset_ms]`. `T` is `at_ms` (the subquery's

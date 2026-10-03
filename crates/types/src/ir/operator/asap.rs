@@ -5,13 +5,13 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::node::{OperatorNode, OperatorResultKind};
-use super::summary_coverage::{CoverageError, SummaryCoverage};
-use crate::ir::operator_properties::Reduction;
+use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
+use crate::ir::operator::node::{OperatorNode, OperatorResultKind};
+use crate::ir::operator::operator_properties::Reduction;
+use crate::ir::properties::summary_coverage::{CoverageError, SummaryCoverage};
+use crate::ir::schema::state_type::{GroupingStrategy, SketchStatistic, SummaryUpdate};
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
-use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
-use crate::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
-use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -30,7 +30,7 @@ pub enum ASAPOp {
         reduction: Reduction,
         grouping: GroupingStrategy,
         #[serde(default)]
-        filter: Option<super::scalar::Predicate>,
+        filter: Option<crate::ir::scalar::Predicate>,
     },
     /// Read out a query result from built summary state. Output is a
     /// row-shaped schema.
@@ -116,7 +116,7 @@ impl ASAPOp {
                 grouping: grouping.clone(),
                 filter: filter
                     .as_ref()
-                    .map(|p| super::scalar::Predicate(p.0.map_operator_refs(&mut f))),
+                    .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
             },
             SummaryEstimate {
                 summary_input,
@@ -235,15 +235,15 @@ impl ASAPOp {
                 reduction,
                 ..
             } => {
-                let mut schema = crate::ir::aggregate_schema::aggregate_output_schema(
+                let mut schema = crate::ir::schema::aggregate_schema::aggregate_output_schema(
                     &child.schema,
                     reduction,
-                    &[crate::pre_asap::AggIntent::Sum { col: None }],
+                    &[crate::ir::operator::AggIntent::Sum { col: None }],
                     &[],
                 )?;
                 let index = match reduction {
-                    Reduction::PerEntity => crate::pre_asap::resolve_column_ref(
-                        &crate::pre_asap::ColumnRef::SampleValue,
+                    Reduction::PerEntity => crate::ir::scalar::resolve_column_ref(
+                        &crate::ir::scalar::ColumnRef::SampleValue,
                         &schema,
                     )
                     .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
@@ -293,11 +293,11 @@ impl ASAPOp {
                 }) = child.asap()
                 {
                     {
-                        use crate::post_asap::{ExactKind, SummaryInputExpr};
-                        use crate::pre_asap::AggIntent;
+                        use crate::ir::operator::AggIntent;
+                        use crate::ir::schema::{ExactKind, SummaryInputExpr};
                         let column = match &input.weight {
                             SummaryInputExpr::Column(col) => Some(
-                                crate::pre_asap::column_resolution::resolve_column_ref(
+                                crate::ir::scalar::column_resolution::resolve_column_ref(
                                     col,
                                     &source.schema,
                                 )
@@ -320,7 +320,7 @@ impl ASAPOp {
                         };
                         measure
                             .map(|measure| {
-                                super::NonASAPOp::Aggregate {
+                                crate::ir::NonASAPOp::Aggregate {
                                     child: Rc::clone(source),
                                     reduction: reduction.clone(),
                                     measures: vec![measure],
@@ -359,8 +359,8 @@ impl ASAPOp {
             }
             MaintainPopulation { child, .. } => child.schema.clone(),
             EvaluatePopulation { child, evaluation } => {
-                use crate::post_asap::maintained_population::PopulationInput;
-                use crate::pre_asap::{AggIntent, GroupKeys};
+                use crate::ir::operator::maintained_population::PopulationInput;
+                use crate::ir::operator::{AggIntent, GroupKeys};
                 let Some(MaintainPopulation {
                     child: source,
                     population,
@@ -413,7 +413,7 @@ impl ASAPOp {
                         PopulationStatistic::Average => AggIntent::Avg { col: column },
                         PopulationStatistic::TopK { .. } => unreachable!(),
                     };
-                    super::NonASAPOp::Aggregate {
+                    crate::ir::NonASAPOp::Aggregate {
                         child: source.clone(),
                         reduction: Reduction::Reduce(keys),
                         measures: vec![measure],
@@ -511,7 +511,7 @@ impl ASAPOp {
                 query,
             } => {
                 needs_state(summary_input, "SummaryEstimate")?;
-                use crate::post_asap::sketch::SketchCategory as C;
+                use crate::ir::schema::state_type::SketchCategory as C;
                 let states: Vec<_> = summary_input
                     .schema
                     .fields
@@ -583,13 +583,13 @@ impl ASAPOp {
                     ));
                 }
                 fn check(
-                    expr: &crate::post_asap::SummaryInputExpr,
+                    expr: &crate::ir::schema::SummaryInputExpr,
                     schema: &Schema,
                 ) -> Result<(), SchemaDerivationError> {
-                    use crate::post_asap::SummaryInputExpr;
+                    use crate::ir::schema::SummaryInputExpr;
                     match expr {
                         SummaryInputExpr::Column(col) => {
-                            crate::pre_asap::resolve_column_ref(col, schema).map_err(|e| {
+                            crate::ir::scalar::resolve_column_ref(col, schema).map_err(|e| {
                                 SchemaDerivationError::InvalidScalarSignature(e.to_string())
                             })?;
                         }
@@ -629,8 +629,8 @@ impl ASAPOp {
 }
 
 /// The plain value an exact accumulator finalizes to.
-fn finalized_data_type(kind: &crate::post_asap::sketch::ExactKind) -> DataType {
-    use crate::post_asap::sketch::ExactKind;
+fn finalized_data_type(kind: &crate::ir::schema::state_type::ExactKind) -> DataType {
+    use crate::ir::schema::state_type::ExactKind;
     match kind {
         ExactKind::Count => DataType::Int64,
         _ => DataType::Float64,
@@ -641,11 +641,11 @@ fn finalized_data_type(kind: &crate::post_asap::sketch::ExactKind) -> DataType {
 /// of the relational input the state was built from.
 fn source_kind(node: &OperatorNode) -> OperatorResultKind {
     match &node.operator {
-        super::node::Operator::ASAP(op) => match op.children().first() {
+        crate::ir::operator::node::Operator::ASAP(op) => match op.children().first() {
             Some(child) => source_kind(child),
             None => OperatorResultKind::Relation,
         },
-        super::node::Operator::NonASAP(_) => match node.result_kind {
+        crate::ir::operator::node::Operator::NonASAP(_) => match node.result_kind {
             OperatorResultKind::RangeVector => OperatorResultKind::InstantVector,
             OperatorResultKind::State => OperatorResultKind::Relation,
             other => other,

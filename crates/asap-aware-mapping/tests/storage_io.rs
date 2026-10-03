@@ -5,7 +5,7 @@ use asap_aware_mapping::analytical_cost::{
 use asap_aware_mapping::physical_operator_statistics::{
     ComparisonScope, EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
 };
-use asap_types::ir::operator_properties::Source;
+use asap_types::ir::operator::operator_properties::Source;
 use asap_types::workload::{
     DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
 };
@@ -143,7 +143,7 @@ use asap_aware_mapping::storage_io::*;
 fn storage_estimates_use_the_shared_resource_type_without_wire_changes() {
     let (dag, scope) = fixture();
     let estimate = estimate_storage_io(&dag, &scope, &profile(&dag), "evidence-v1").unwrap();
-    let shared: asap_types::resources::StorageResources = estimate.total;
+    let shared: asap_types::workload::resources::StorageResources = estimate.total;
     let legacy: asap_aware_mapping::storage_io::StorageResources = shared;
     assert_eq!(shared, legacy);
     let wire = serde_json::to_value(&estimate).unwrap();

@@ -55,13 +55,13 @@ impl Operator {
     }
     pub fn window(
         input: SchemaRef,
-        intent: planner_types::pre_asap::AggIntent<ColumnRef>,
+        intent: planner_types::ir::operator::AggIntent<ColumnRef>,
         coordinate: usize,
         value: usize,
         groups: Vec<usize>,
         window: Option<(i64, i64)>,
     ) -> Result<Self, Error> {
-        use planner_types::pre_asap::AggIntent;
+        use planner_types::ir::operator::AggIntent;
         validate_groups(&input, &groups)?;
         let histogram = matches!(intent, AggIntent::HistogramQuantile { .. });
         if !matches!(

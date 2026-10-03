@@ -4,12 +4,12 @@ use super::*;
 use planner_types::ir::export::{
     compile_physical_asap_dag, compile_physical_asap_dag_with_node_ids,
 };
-use planner_types::post_asap::FieldDataType as SummaryFamilyType;
-use planner_types::pre_asap::DataType;
+use planner_types::ir::schema::DataType;
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
 use std::rc::Rc;
 
 /// Not a legal PromQL label name, so it cannot shadow a user label.
-pub use planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY as SERIES_IDENTITY_COLUMN;
+pub use planner_types::ir::schema::PROMQL_SERIES_IDENTITY as SERIES_IDENTITY_COLUMN;
 
 /// Canonical, reversible identity. JSON object encoding preserves label names,
 /// empty values and escaping; sorting makes ingestion order irrelevant.
@@ -85,9 +85,8 @@ pub fn series_row(
 pub fn compile_current_series_evaluation(
     selected: &Rc<OperatorNode>,
 ) -> Result<CompiledPhysicalDAG, Error> {
-    use planner_types::post_asap::{
-        maintained_population::PopulationStatistic, Field as SummaryField,
-    };
+    use planner_types::ir::operator::maintained_population::PopulationStatistic;
+    use planner_types::ir::schema::Field as SummaryField;
     // This compiler emits maintained precompute: every summary at ingestion time.
     let selected = planner_types::ir::apply_materialization_timings(
         selected,
@@ -101,7 +100,7 @@ pub fn compile_current_series_evaluation(
     // Cut at the population output, preserving all selected heap/evaluation nodes.
     let populations = dag.nodes.iter().filter(|node| matches!(&node.payload,
         Payload::MaintainPopulation { population }
-            if matches!(population.input, planner_types::post_asap::maintained_population::PopulationInput::CurrentSeries(_))
+            if matches!(population.input, planner_types::ir::operator::maintained_population::PopulationInput::CurrentSeries(_))
     )).collect::<Vec<_>>();
     if let [population] = populations.as_slice() {
         if population
@@ -190,12 +189,12 @@ pub fn compile_current_series_evaluation(
 pub fn compile_rate_ranking(
     selected: &Rc<OperatorNode>,
 ) -> Result<(Rc<OperatorNode>, CompiledPhysicalDAG), Error> {
-    use planner_types::post_asap::ExactKind;
+    use planner_types::ir::schema::ExactKind;
     fn frontier(node: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
         if matches!(&node.operator, LogicalOperator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
             if matches!(&child.operator, LogicalOperator::ASAP(ASAPOp::SummaryAgg {
                 family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
-                reduction: planner_types::pre_asap::Reduction::PerEntity, child: raw, ..
+                reduction: planner_types::ir::operator::Reduction::PerEntity, child: raw, ..
             }) if matches!(raw.non_asap(), Some(NonASAPOp::TimeRange { .. }))))
         {
             return Some(Rc::clone(node));
@@ -247,7 +246,8 @@ pub fn compile_rate_ranking(
 pub fn compile_fixed_window_rate_aggregation(
     dag: &planner_types::ir::export::PhysicalASAPDAG,
 ) -> Result<CompiledPhysicalPlan, Error> {
-    use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
+    use planner_types::ir::properties::ExecutionTiming;
+    use planner_types::ir::schema::{ExactKind, SketchAlgorithm};
     let sources = dag
         .nodes
         .iter()
@@ -256,7 +256,7 @@ pub fn compile_fixed_window_rate_aggregation(
                 &n.payload,
                 Payload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
-                    reduction: planner_types::pre_asap::Reduction::PerEntity,
+                    reduction: planner_types::ir::operator::Reduction::PerEntity,
                     ..
                 }
             )

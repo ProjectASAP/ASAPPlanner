@@ -7,10 +7,8 @@ use asap_physical_operators::{
     values::{Batch, SchemaRef},
     Error,
 };
-use planner_types::{
-    post_asap::{Field, FieldDataType},
-    pre_asap::{DataType, Schema, Source},
-};
+use planner_types::ir::operator::Source;
+use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -35,7 +33,7 @@ impl RawSource for DeclaredSource {
 // A blocking parent must reject unknown and unbounded Scan inputs without opening a reader.
 #[test]
 fn blocking_inputs_require_an_explicit_finite_source() {
-    let schema = Arc::new(planner_types::pre_asap::Schema {
+    let schema = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
@@ -71,7 +69,7 @@ fn blocking_inputs_require_an_explicit_finite_source() {
                 &planner_types::ir::OperatorNode::new_shared(planner_types::ir::Operator::NonASAP(
                     planner_types::ir::NonASAPOp::Scan {
                         source: identity,
-                        schema: Schema::new(vec![planner_types::pre_asap::Field::plain(
+                        schema: Schema::new(vec![planner_types::ir::schema::Field::plain(
                             "v",
                             DataType::Int64,
                             false,
@@ -126,11 +124,11 @@ fn blocking_inputs_require_an_explicit_finite_source() {
 fn summary_capability_levels_are_distinct() {
     use asap_physical_operators::{
         capability::{validate_native_family, validate_sketch_evaluation, validate_summary_kernel},
-        planner::post_asap::SketchStatistic,
+        planner::ir::schema::SketchStatistic,
     };
-    use planner_types::{
-        post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
-        pre_asap::ColumnRef,
+    use planner_types::ir::scalar::ColumnRef;
+    use planner_types::ir::schema::{
+        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     };
     let grouping = GroupingStrategy::default();
     let cms = FieldDataType::Sketch(
@@ -144,10 +142,10 @@ fn summary_capability_levels_are_distinct() {
         grouping.clone(),
     );
     let update = SummaryUpdate {
-        item: Some(planner_types::post_asap::SummaryInputExpr::Column(
+        item: Some(planner_types::ir::schema::SummaryInputExpr::Column(
             ColumnRef::Named("host".into()),
         )),
-        weight: planner_types::post_asap::SummaryInputExpr::Constant(1.0),
+        weight: planner_types::ir::schema::SummaryInputExpr::Constant(1.0),
         weight_domain: Default::default(),
     };
     assert!(validate_summary_kernel(&cms, &update, &grouping).is_ok());

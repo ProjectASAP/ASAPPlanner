@@ -7,11 +7,11 @@ use asap_aware_mapping::{
 };
 mod support;
 use asap_types::ir::export::PhysicalASAPOperatorPayload;
-use asap_types::ir::{ASAPOp, Operator};
-use asap_types::post_asap::{
+use asap_types::ir::schema::{
     ExactKind, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
     WeightDomain,
 };
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, post_asap_dag};
 
@@ -136,8 +136,8 @@ fn frequency_count_candidates_use_unit_weights() {
 // This narrow test oracle interprets the emitted aggregate, not Prometheus ingestion,
 // staleness, or scrape scheduling. Unsupported plan shapes fail explicitly.
 fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
+    use asap_types::ir::operator::{AggIntent, Reduction};
     use asap_types::ir::NonASAPOp;
-    use asap_types::pre_asap::{AggIntent, Reduction};
     let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
     let NonASAPOp::Aggregate {
         reduction,
@@ -226,7 +226,7 @@ fn count_over_time_counts_scrapes_not_sample_values() {
 // This checks the planner's numerical update contract, not a sketch-library runtime.
 #[test]
 fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
-    use asap_types::pre_asap::ColumnRef;
+    use asap_types::ir::scalar::ColumnRef;
     let root = lower_promql("count_over_time(up[5m])", AccuracyTarget::Epsilon(0.02)).unwrap();
     let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
     let dag = candidates
