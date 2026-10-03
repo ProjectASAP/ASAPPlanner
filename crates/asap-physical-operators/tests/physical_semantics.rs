@@ -714,3 +714,120 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         assert!(matches!(rows[0][0], Value::Null));
     }
 }
+
+// Exact frequency intents bind to native reducers without a sketch or numeric key conversion.
+#[test]
+fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
+    use asap_physical_operators::physical_planner::compile_node;
+    use planner_types::{
+        post_asap::ExecutionDataState,
+        pre_asap::{AggIntent, GroupKeys, Reduction as PlanReduction},
+        types::AccuracyTarget,
+    };
+    for (dtype, values) in [
+        (
+            DataType::Utf8,
+            vec![Value::Utf8("a".into()), Value::Utf8("b".into())],
+        ),
+        (
+            DataType::Int64,
+            vec![
+                Value::Int64(9_007_199_254_740_992),
+                Value::Int64(9_007_199_254_740_993),
+            ],
+        ),
+        (DataType::Bool, vec![Value::Bool(false), Value::Bool(true)]),
+        (
+            DataType::Float64,
+            vec![Value::Float64(-0.0), Value::Float64(1.0)],
+        ),
+    ] {
+        let input = schema(&[("key", dtype, true)]);
+        for (measure, name, expected) in [
+            (
+                AggIntent::FrequencyL2 {
+                    col: Some(0),
+                    accuracy: AccuracyTarget::Exact,
+                },
+                "frequency_l2",
+                8.0_f64.sqrt(),
+            ),
+            (
+                AggIntent::FrequencyEntropy {
+                    col: Some(0),
+                    accuracy: AccuracyTarget::Exact,
+                },
+                "frequency_entropy",
+                1.0,
+            ),
+        ] {
+            let node = PostAsapDAGNode {
+                id: PostAsapNodeId(1),
+                payload: PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Aggregate {
+                        reduction: PlanReduction::Reduce(GroupKeys::none()),
+                        measures: vec![measure],
+                        output_names: vec![name.into()],
+                        filters: vec![],
+                        having: None,
+                    },
+                },
+                output_state: ExecutionDataState::QUERY_ROWS,
+                output_schema: (*schema(&[(name, DataType::Float64, false)])).clone(),
+                guarantee: None,
+            };
+            let operator = compile_node(&node, std::slice::from_ref(&input))
+                .expect("exact frequency intent binds");
+            let rows = values
+                .iter()
+                .flat_map(|v| [vec![v.clone()], vec![v.clone()]])
+                .chain([vec![Value::Null]])
+                .collect();
+            let result = unary(input.clone(), vec![rows], operator.clone());
+            assert!(matches!(result[0][0], Value::Float64(v) if (v - expected).abs() < 1e-12));
+            for batches in [vec![], vec![vec![vec![Value::Null]]]] {
+                let result = unary(input.clone(), batches, operator.clone());
+                assert!(matches!(result[0][0], Value::Float64(0.0)));
+            }
+        }
+    }
+}
+
+// Each group gets its own frequency population, including one canonical signed-zero identity.
+#[test]
+fn exact_frequency_grouping_and_entropy_bits() {
+    let input = schema(&[
+        ("group", DataType::Int64, false),
+        ("key", DataType::Float64, true),
+    ]);
+    let operator = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![
+            ("l2".into(), Reduction::FrequencyL2(1)),
+            ("entropy".into(), Reduction::FrequencyEntropy(1)),
+        ],
+    )
+    .unwrap();
+    let rows = vec![
+        vec![Value::Int64(1), Value::Float64(-0.0)],
+        vec![Value::Int64(1), Value::Float64(0.0)],
+        vec![Value::Int64(1), Value::Float64(0.0)],
+        vec![Value::Int64(1), Value::Float64(1.0)],
+        vec![Value::Int64(2), Value::Float64(2.0)],
+        vec![Value::Int64(2), Value::Null],
+        vec![Value::Int64(3), Value::Null],
+    ];
+    let result = unary(input.clone(), vec![rows], operator.clone());
+    assert_eq!(result.len(), 3);
+    let expected_entropy = -0.75_f64 * 0.75_f64.log2() - 0.25_f64 * 0.25_f64.log2();
+    for (row, l2, entropy) in [
+        (&result[0], 10.0_f64.sqrt(), expected_entropy),
+        (&result[1], 1.0, 0.0),
+        (&result[2], 0.0, 0.0),
+    ] {
+        assert!(matches!(row[1], Value::Float64(v) if (v - l2).abs() < 1e-12));
+        assert!(matches!(row[2], Value::Float64(v) if (v - entropy).abs() < 1e-12));
+    }
+    assert!(unary(input, vec![], operator).is_empty());
+}

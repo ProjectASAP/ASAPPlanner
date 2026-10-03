@@ -828,6 +828,12 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                             AggIntent::Count { .. } => Reduction::Count,
                             AggIntent::Sum { col } => Reduction::Sum(column(*col)?),
                             AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
+                            AggIntent::FrequencyL2 { col, .. } => {
+                                Reduction::FrequencyL2(column(*col)?)
+                            }
+                            AggIntent::FrequencyEntropy { col, .. } => {
+                                Reduction::FrequencyEntropy(column(*col)?)
+                            }
                             AggIntent::Min { col } => Reduction::Min(column(*col)?),
                             AggIntent::Max { col } => Reduction::Max(column(*col)?),
                             _ => {

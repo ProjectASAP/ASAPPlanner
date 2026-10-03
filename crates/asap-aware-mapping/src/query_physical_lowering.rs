@@ -1203,6 +1203,8 @@ fn supports_hash_aggregate(
                     | AggIntent::PearsonCorr { .. }
                     | AggIntent::Group
                     | AggIntent::CountValues { .. }
+                    | AggIntent::FrequencyL2 { .. }
+                    | AggIntent::FrequencyEntropy { .. }
             )
         })
 }
