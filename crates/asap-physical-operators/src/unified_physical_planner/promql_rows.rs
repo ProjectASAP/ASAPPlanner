@@ -115,7 +115,7 @@ pub fn compile_current_series_evaluation(
                     u64::from(population.id.0),
                     InputContract::bounded(Arc::new(population.output_schema.clone())),
                 )]),
-                &[u64::from(dag.root.0)],
+                &dag.roots.iter().map(|r| u64::from(r.0)).collect::<Vec<_>>(),
             );
         }
     }
@@ -178,7 +178,7 @@ pub fn compile_current_series_evaluation(
     compile(
         &dag,
         BTreeMap::from([(frontier, InputContract::bounded(schema))]),
-        &[u64::from(dag.root.0)],
+        &dag.roots.iter().map(|r| u64::from(r.0)).collect::<Vec<_>>(),
     )
 }
 
@@ -229,7 +229,12 @@ pub fn compile_rate_ranking(
     let program = compile(
         &compiled.dag,
         BTreeMap::from([(id, InputContract::bounded(Arc::new(source.schema.clone())))]),
-        &[u64::from(compiled.dag.root.0)],
+        &compiled
+            .dag
+            .roots
+            .iter()
+            .map(|r| u64::from(r.0))
+            .collect::<Vec<_>>(),
     )?;
     Ok((source, program))
 }
@@ -297,7 +302,7 @@ pub fn compile_fixed_window_rate_aggregation(
             u64::from(source.id.0),
             InputContract::bounded(Arc::new(source.output_schema.clone())),
         )]),
-        &[u64::from(dag.root.0)],
+        &dag.roots.iter().map(|r| u64::from(r.0)).collect::<Vec<_>>(),
         &[u64::from(heap.id.0)],
     )
 }
