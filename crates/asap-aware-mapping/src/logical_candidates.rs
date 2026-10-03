@@ -263,14 +263,14 @@ fn realize(
         }],
     };
     let state = Rc::new(state.with_coverage(coverage)?);
-    let readout = match query {
+    let evaluation = match query {
         Some(query) => ASAPOp::SummaryEstimate {
             summary_input: state,
             query,
         },
         None => ASAPOp::FinalizeExactAccumulator { child: state },
     };
-    Ok(OperatorNode::new_shared(Operator::ASAP(readout))?)
+    Ok(OperatorNode::new_shared(Operator::ASAP(evaluation))?)
 }
 
 fn single_source(
@@ -365,7 +365,7 @@ fn statistic(intent: &AggIntent) -> Result<SketchStatistic, LogicalCandidateErro
             key: ColumnRef::SampleValue,
             value: None,
         },
-        _ => return Err(LogicalCandidateError::Unsupported("sketch readout")),
+        _ => return Err(LogicalCandidateError::Unsupported("sketch evaluation")),
     })
 }
 
