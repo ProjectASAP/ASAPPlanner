@@ -185,8 +185,14 @@ function loadStageDocument(parsed, name) {
     return false;
   }
   stageDoc = parsed;
-  stagePhysicalId = parsed.stage3_selection.selected;
-  stageLogicalId = physicalCandidate(stagePhysicalId).from_logical;
+  // Open on the Stage 3 choice; a partial document opens on its first
+  // candidates, and a missing stage leaves its id null.
+  const physical = parsed.stage3_selection
+    ? physicalCandidate(parsed.stage3_selection.selected)
+    : stageCandidates('stage2_physical_asap')[0];
+  stagePhysicalId = physical ? physical.id : null;
+  const firstLogical = stageCandidates('stage1_logical_asap')[0];
+  stageLogicalId = physical ? physical.from_logical : firstLogical ? firstLogical.id : null;
   return true;
 }
 
@@ -407,6 +413,10 @@ function buildCyStyle() {
       style: { 'text-wrap': 'wrap', 'text-max-width': 300 },
     },
     {
+      selector: 'node.notProduced',
+      style: { 'border-style': 'dashed', 'background-opacity': 0, 'color': edgeColor },
+    },
+    {
       selector: 'node.laneParent.linkedLane',
       style: { 'border-color': ringColor, 'border-width': 2 },
     },
@@ -415,7 +425,7 @@ function buildCyStyle() {
       style: { 'border-color': '#15803d', 'border-width': 2, 'border-style': 'solid' },
     },
     {
-      selector: 'node.laneParent.lane--rejected',
+      selector: 'node.laneParent.lane--rejected_invalid',
       style: { 'border-color': '#b91c1c', 'border-width': 2 },
     },
     {
@@ -1077,12 +1087,25 @@ function renderModeToggle() {
   modeStagesBtn.disabled = !stageDoc;
 }
 
+function stageCandidates(stage) {
+  return (stageDoc[stage] && stageDoc[stage].candidates) || [];
+}
+
 function logicalCandidate(id) {
-  return stageDoc.stage1_logical_asap.candidates.find((candidate) => candidate.id === id);
+  return stageCandidates('stage1_logical_asap').find((candidate) => candidate.id === id);
 }
 
 function physicalCandidate(id) {
-  return stageDoc.stage2_physical_asap.candidates.find((candidate) => candidate.id === id);
+  return stageCandidates('stage2_physical_asap').find((candidate) => candidate.id === id);
+}
+
+function stageQueryIds() {
+  return stageDoc.workload.queries.map((query, index) => query.id || `query #${index + 1}`);
+}
+
+function stageCostOf(id) {
+  const selection = stageDoc.stage3_selection;
+  return (selection && selection.costs && selection.costs[id]) || null;
 }
 
 function selectPhysicalCandidate(id) {
@@ -1093,31 +1116,58 @@ function selectPhysicalCandidate(id) {
 }
 
 function stageStatusText(row) {
-  if (row.status === 'selected') return '✓ selected';
-  if (row.status === 'rejected') return '✗ rejected';
-  return 'not selected';
+  switch (row.status) {
+    case 'selected': return '✓ selected';
+    case 'rejected_valid': return 'valid, not selected';
+    case 'rejected_invalid': return '✗ invalid';
+    default: return 'no Stage 3 result';
+  }
+}
+
+function stageCostText(row) {
+  return row.total === null ? 'not costed' : `${formatCostNumber(row.total)} ${row.unit}`;
+}
+
+function formatRequirements(requirements) {
+  if (!requirements) return 'none stated';
+  const parts = [];
+  if (requirements.accuracy !== undefined) {
+    parts.push(`accuracy ${typeof requirements.accuracy === 'string' ? requirements.accuracy : compactWire(requirements.accuracy)}`);
+  }
+  if (requirements.latency_ms !== undefined) parts.push(`latency ≤ ${requirements.latency_ms} ms`);
+  if (requirements.repeat_interval_ms !== undefined) parts.push(`repeats every ${requirements.repeat_interval_ms / 1000} s`);
+  return parts.join(' · ') || 'none stated';
 }
 
 function renderStageScope(ranked) {
   scopePickerEl.classList.add('visible');
   const physical = physicalCandidate(stagePhysicalId);
-  const logicalButtons = stageDoc.stage1_logical_asap.candidates.map((candidate) => {
-    const linked = candidate.id === physical.from_logical;
+  const queryRows = stageDoc.workload.queries.map((query, index) => `
+    <div class="scopeRow"><span><strong>${escapeHtml(stageQueryIds()[index])}</strong> <code>${escapeHtml(query.text)}</code></span>
+      <span class="scopeMeta">${escapeHtml(formatRequirements(query.requirements))}</span></div>`).join('');
+  const logical = stageCandidates('stage1_logical_asap');
+  const logicalButtons = logical.length ? logical.map((candidate) => {
+    const linked = physical && candidate.id === physical.from_logical;
     return `<button type="button" class="scopeRow stageChoice${candidate.id === stageLogicalId ? ' active' : ''}${linked ? ' linked' : ''}" data-logical="${escapeHtml(candidate.id)}">
       <span>${escapeHtml(candidate.id)} · ${escapeHtml(candidate.label || '')}</span>
       ${linked ? `<span class="scopeMeta">source of ${escapeHtml(physical.id)}</span>` : ''}
     </button>`;
-  }).join('');
-  const physicalRows = ranked.map((row) => `
+  }).join('') : '<div class="scopeRow">Not produced</div>';
+  const hasStage3 = !!stageDoc.stage3_selection;
+  const physicalRows = ranked.length ? ranked.map((row) => `
     <button type="button" class="scopeRow stageChoice stageRank stageRank--${row.status}${row.id === stagePhysicalId ? ' active' : ''}" data-physical="${escapeHtml(row.id)}">
-      <span class="stageRankNo">#${row.rank}</span>
+      <span class="stageRankNo">${row.rank === null ? '–' : `#${row.rank}`}</span>
       <span>${escapeHtml(row.id)} · ${escapeHtml(row.label)}<span class="stageRankFrom"> from ${escapeHtml(row.from_logical)}</span>
         ${row.reason ? `<span class="stageReason">${escapeHtml(row.reason)}</span>` : ''}</span>
-      <span class="scopeMeta">${escapeHtml(`${formatCostNumber(row.total)} ${row.unit}`)} · ${escapeHtml(stageStatusText(row))}</span>
-    </button>`).join('');
+      <span class="scopeMeta">${hasStage3 ? `${escapeHtml(stageCostText(row))} · ` : ''}${escapeHtml(stageStatusText(row))}</span>
+    </button>`).join('') : '<div class="scopeRow">Not produced</div>';
+  const physicalTitle = hasStage3
+    ? 'Physical ASAP candidates · Stage 3 result, by total cost (lane 3)'
+    : 'Physical ASAP candidates (lane 3) · Stage 3 not produced, no costs';
   scopePickerEl.innerHTML = `
+    <div class="scopeGroup stageQueryGroup"><div class="scopeGroupLabel">Workload queries and requirements</div>${queryRows}</div>
     <div class="scopeGroup"><div class="scopeGroupLabel">Logical ASAP candidates (lane 2)</div>${logicalButtons}</div>
-    <div class="scopeGroup stageRankGroup"><div class="scopeGroupLabel">Physical ASAP candidates by total cost (lane 3)</div>${physicalRows}</div>`;
+    <div class="scopeGroup stageRankGroup"><div class="scopeGroupLabel">${escapeHtml(physicalTitle)}</div>${physicalRows}</div>`;
   scopePickerEl.querySelectorAll('[data-logical]').forEach((button) => button.addEventListener('click', () => {
     stageLogicalId = button.dataset.logical;
     render();
@@ -1125,31 +1175,51 @@ function renderStageScope(ranked) {
   scopePickerEl.querySelectorAll('[data-physical]').forEach((button) => button.addEventListener('click', () => selectPhysicalCandidate(button.dataset.physical)));
 }
 
+// A lane for a stage the document does not contain.
+function notProducedLane(laneId, label) {
+  return [
+    { data: { id: laneId, label, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
+    { data: { id: `${laneId}-missing`, parent: laneId, label: 'not produced', isPlaceholder: true }, classes: 'notProduced', selectable: false },
+  ];
+}
+
 function renderStages() {
   const ranked = rankPhysicalCandidates(stageDoc);
   renderStageScope(ranked);
   renderStageSources();
   hideModeHint();
+  const queryIds = stageQueryIds();
   const logical = logicalCandidate(stageLogicalId);
   const physical = physicalCandidate(stagePhysicalId);
-  const row = ranked.find((entry) => entry.id === physical.id);
-  viewTitleEl.textContent = `Stages: ${physical.id} (${stageStatusText(row)})`;
-  const physicalHeader = [
-    `3 · Physical ASAP · ${physical.id}: ${physical.label || ''}`,
-    `total ${formatCostNumber(physical.cost.total)} ${physical.cost.unit} · rank ${row.rank}/${ranked.length} · ${stageStatusText(row)}`,
-  ].join('\n');
-  const lanes = [
-    stageLaneElements('stage0', '1 · Logical', stageDoc.stage0_logical.dag, { categoryFor: categoryOf }),
-    stageLaneElements('stage1', `2 · Logical ASAP · ${logical.id}: ${logical.label || ''}${logical.id === physical.from_logical ? `\nsource of ${physical.id}` : ''}`, logical.dag, { categoryFor: categoryOf }),
-    stageLaneElements('stage2', physicalHeader, physical.dag, { physical: true, costPerNode: physical.cost.per_node || {}, categoryFor: categoryOf }),
-  ];
+  const row = physical && ranked.find((entry) => entry.id === physical.id);
+  const lanes = [stageLaneElements('stage0', '1 · Logical', stageDoc.stage0_logical.dag, { categoryFor: categoryOf, queryIds })];
+  lanes.push(logical
+    ? stageLaneElements('stage1', `2 · Logical ASAP · ${logical.id}: ${logical.label || ''}${physical && logical.id === physical.from_logical ? `\nsource of ${physical.id}` : ''}`, logical.dag, { categoryFor: categoryOf, queryIds })
+    : notProducedLane('stage1', '2 · Logical ASAP'));
+  if (physical) {
+    const cost = stageCostOf(physical.id);
+    const header = [`3 · Physical ASAP · ${physical.id}: ${physical.label || ''}`];
+    if (stageDoc.stage3_selection) {
+      header.push(`Stage 3: ${stageCostText(row)}${row.rank === null ? '' : ` · rank ${row.rank}/${ranked.filter((entry) => entry.rank !== null).length}`} · ${stageStatusText(row)}`);
+      if (cost && cost.source) header.push(`cost source: ${cost.source}`);
+    }
+    lanes.push(stageLaneElements('stage2', header.join('\n'), physical.dag, {
+      physical: true, costPerNode: cost ? cost.per_node || {} : null, categoryFor: categoryOf, queryIds,
+    }));
+  } else {
+    lanes.push(notProducedLane('stage2', '3 · Physical ASAP'));
+  }
+  viewTitleEl.textContent = physical ? `Stages: ${physical.id} (${stageStatusText(row)})` : 'Stages';
   buildCy(lanes.flat(), { name: 'null' });
   cy.nodes('.laneParent').addClass('stageLane');
-  cy.getElementById('stage1').toggleClass('linkedLane', logical.id === physical.from_logical);
-  cy.getElementById('stage2').addClass(`lane--${row.status}`);
+  cy.getElementById('stage1').toggleClass('linkedLane', !!(logical && physical && logical.id === physical.from_logical));
+  if (row) cy.getElementById('stage2').addClass(`lane--${row.status}`);
   layoutLanesSideBySide(['stage0', 'stage1', 'stage2']);
   cy.nodes('[?root]').addClass('root');
-  cy.on('tap', 'node', (evt) => { if (!evt.target.data('isLane')) showStageNodeDetail(evt.target.data()); });
+  cy.on('tap', 'node', (evt) => {
+    const data = evt.target.data();
+    if (!data.isLane && !data.isPlaceholder) showStageNodeDetail(data);
+  });
   cy.on('tap', 'edge', (evt) => showStageEdgeDetail(evt.target));
   cy.on('tap', (evt) => { if (evt.target === cy) clearDetail(); });
   clearDetail();
@@ -1177,15 +1247,18 @@ function layoutLanesSideBySide(laneIds) {
 
 function renderStageSources() {
   const sourceBox = document.getElementById('sourceBox');
-  const queriesText = ((stageDoc.workload && stageDoc.workload.queries) || [])
-    .map((query) => `— ${query.id} (${query.language}) —\n${query.text}`);
-  sourceBox.textContent = queriesText.join('\n\n') || 'No workload queries in this document.';
-  sourceBox.classList.toggle('placeholder', queriesText.length === 0);
+  const ids = stageQueryIds();
+  const queriesText = stageDoc.workload.queries
+    .map((query, index) => `— ${ids[index]} (${query.language}) —\n${query.text}\nrequirements: ${formatRequirements(query.requirements)}`);
+  sourceBox.textContent = queriesText.join('\n\n');
+  sourceBox.classList.remove('placeholder');
   const scans = stageDoc.stage0_logical.dag.nodes.filter((node) => node.payload && node.payload.operator && node.payload.operator.kind === 'scan');
+  const seen = new Set();
+  const blocks = scans.map((node) => `${wireSource(node.payload.operator.source)}\n${formatSchema(node.output_schema)}`)
+    .filter((block) => !seen.has(block) && seen.add(block));
   const box = document.getElementById('tableSchemaBox');
-  box.textContent = scans.map((node) => `${wireSource(node.payload.operator.source)}\n${formatSchema(node.output_schema)}`).join('\n\n')
-    || 'No Scan in the logical DAG.';
-  box.classList.toggle('placeholder', scans.length === 0);
+  box.textContent = blocks.join('\n\n') || 'No Scan in the logical DAG.';
+  box.classList.toggle('placeholder', blocks.length === 0);
 }
 
 function jsonBlock(title, value) {
@@ -1195,17 +1268,23 @@ function jsonBlock(title, value) {
 function showStageNodeDetail(data) {
   const node = data.stageNode;
   const catColors = categoryColors(data.category);
+  const ids = stageQueryIds();
+  const rootHtml = data.rootFor.map((queryId) => {
+    const query = stageDoc.workload.queries[ids.indexOf(queryId)];
+    return `<div class="rootNote">Root of ${escapeHtml(queryId)}${query ? ` · requirements: ${escapeHtml(formatRequirements(query.requirements))}` : ''}</div>`;
+  }).join('');
   const timingHtml = data.physical
     ? `<div class="translationBlock"><h3>Output state</h3><div><strong>Timing:</strong> ${escapeHtml(formatTiming(node.output_state.timing))}</div><div class="translationMeta">primitive: ${escapeHtml(node.output_state.primitive)}</div></div>`
     : '';
+  const candidateCost = data.physical ? stageCostOf(stagePhysicalId) : null;
   const costHtml = data.nodeCost
-    ? `<div class="costBlock"><h4>Node cost</h4><div class="costRow"><span class="costLabel">Cost</span><span class="costValue">${escapeHtml(`${formatCostNumber(data.nodeCost.cost)} ${physicalCandidate(stagePhysicalId).cost.unit}`)}</span></div>${data.nodeCost.detail ? `<div class="costMeta">${escapeHtml(data.nodeCost.detail)}</div>` : ''}</div>`
+    ? `<div class="costBlock"><h4>Node cost · Stage 3</h4><div class="costRow"><span class="costLabel">Cost</span><span class="costValue">${escapeHtml(`${formatCostNumber(data.nodeCost.cost)} ${candidateCost.unit}`)}</span></div>${data.nodeCost.detail ? `<div class="costMeta">${escapeHtml(data.nodeCost.detail)}</div>` : ''}${candidateCost.source ? `<div class="costMeta">source ${escapeHtml(candidateCost.source)}</div>` : ''}</div>`
     : '';
   detailSection.innerHTML = `
     <h2>Selected node</h2>
     <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(data.kind)}</span>
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">node ${escapeHtml(node.id)}${node.result_kind ? ` · ${escapeHtml(node.result_kind)}` : ''}</div>
-    ${data.root ? '<div class="rootNote">Root of this DAG.</div>' : ''}
+    ${rootHtml}
     ${timingHtml}
     ${costHtml}
     ${jsonBlock('Payload', node.payload)}
