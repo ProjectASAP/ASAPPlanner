@@ -211,3 +211,7 @@ pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use topk_reuse::TopKLimitReuseStrategy;
 
 pub mod maintained_population;
+
+/// Local candidate generation over the unified IR. No execution timing is
+/// assigned: that is a Stage 2 materialization decision.
+pub mod logical_candidates;
