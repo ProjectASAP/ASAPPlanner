@@ -321,7 +321,7 @@ A summary-based candidate uses three kinds of summary nodes:
   summaries into a coarser one.
 * A **summary estimation node** computes an answer from a summary, for example
   the p99 estimate from a KLL, or the entropy estimate from a UnivMon.
-* **summary subtract node** and **summary delete node** design is TODO. 
+* **summary subtract node** and **summary delete node** design is TODO.
 
 One summary build node can feed several estimation nodes, which is what Pass 2
 exploits.

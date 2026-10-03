@@ -12,16 +12,18 @@ Only semantics that affect correctness, summary applicability, or cost become fi
 
 ### Time
 
-- TimeRange — a PromQL range-vector lookback such as [5m].
+- TimeRange — PromQL sample selection: an instant selector's lookback, or a range selector such as [5m].
 - TimeShift — moves when a selector is evaluated (offset or @).
 - PromqlSubquery — re-evaluates an instant-vector expression over a range.
 
 ### Relational
 
 - Scan — identifies a logical data source.
+- Values — literal rows; one empty row is the input of a `SELECT` without `FROM`.
+- ScalarBridge — a scalar expression at an operator position: a bare scalar query, or the scalar operand of `<vector> op <scalar>`.
 - Filter — restricts rows using a predicate.
 - Project — selects or derives output columns.
-- BinaryOp — composes two inputs with arithmetic, comparison, or boolean logic.
+- BinaryOp — composes two inputs with arithmetic, comparison, or boolean logic. A PromQL `bool` comparison returns 0/1 instead of filtering.
 - Sort — orders rows without expressing a heavy-hitter intent.
 - Limit — caps a row count, optionally after an offset.
 - Dedup — removes duplicate rows.
@@ -31,10 +33,7 @@ Only semantics that affect correctness, summary applicability, or cost become fi
 
 ### PromQL-specific
 
-- PromqlScalarBridge — holds a scalar sub-expression at an operator-DAG position.
-- EvalTimestamp — provides the evaluation timestamp as a scalar.
-- PromqlVectorFromScalar — promotes a scalar to a label-less instant vector.
-- PromqlScalarFromVector — collapses a single-series vector to a scalar.
+- PromqlVectorFromScalar — promotes a scalar to a label-less instant vector. Its inverse, PromQL `scalar(v)`, is a scalar expression that reads `v`.
 - PromqlRelabel — rewrites labels on each series.
 - PromqlInfoEnrich — enriches labels from an info metric.
 - PromqlSeriesSample — selects whole series without reducing them.

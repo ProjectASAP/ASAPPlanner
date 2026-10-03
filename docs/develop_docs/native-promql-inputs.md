@@ -23,7 +23,7 @@ operator's metric-name/result-label rules. Source selection, complete window
 coverage and revision admission remain deployment responsibilities.
 
 Planner's maintained-population candidate recognizes this explicit identity
-representation. Its TopK readout compiles automatically to `CurrentSeries`,
+representation. Its TopK evaluation compiles automatically to `CurrentSeries`,
 `Sort`, and `Limit`; deployment supplies the raw boundary or an already maintained
 population boundary. Compilation does not open either source.
 

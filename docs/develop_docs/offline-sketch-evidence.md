@@ -91,7 +91,7 @@ hooks. The provider's lifecycle helper returns available build/update CPU costs
 for a single independently instantiated state. It deliberately leaves retention,
 retirement and read costs unknown. In particular, a point-frequency benchmark
 read does not price a total-count read, even when both use CMS. A deployment must
-match readout semantics and supply the missing lifecycle and raw-query evidence
+match evaluation semantics and supply the missing lifecycle and raw-query evidence
 before selecting and pricing a complete physical plan. Never combine these
 nanosecond costs with CPU operation counts without explicit calibration.
 
@@ -116,7 +116,7 @@ not be passed as these disjoint phase measurements.
 
 `MeasurementQueryBinding` is the producer's explicit assertion identifying the
 read/error probe population. The consumer checks that binding and the error
-record's readout kind/value type; it cannot recover or certify the original
+record's evaluation kind/value type; it cannot recover or certify the original
 probe set from an aggregate error number alone.
 
 The supported workload is an immutable i64 point-frequency snapshot, fully
@@ -131,7 +131,7 @@ post-merge error and an exact merge baseline exist.
 
 The caller supplies an `EmpiricalAccuracyRequirement`: the exact observed error
 metric, maximum accepted mean, and minimum number of offline trials. This is
-separate from `AccuracyTarget`. Every candidate must match the readout descriptor,
+separate from `AccuracyTarget`. Every candidate must match the evaluation descriptor,
 error metric, trial count and all ordinary distribution/configuration/environment
 checks. A zero observed error is neither proof of exactness nor a per-key bound.
 
