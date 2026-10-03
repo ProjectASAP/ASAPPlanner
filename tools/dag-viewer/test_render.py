@@ -155,7 +155,7 @@ class RenderTests(unittest.TestCase):
         page too -- `grabbable: false` alone made it a dead zone."""
         html = render({"queries": [named_dag("q1")]})
         lanes = re.findall(r"classes: 'laneParent'[^}]*}", html)
-        self.assertEqual(len(lanes), 2, "expected the union and single-query lanes")
+        self.assertEqual(len(lanes), 4, "expected the union, single-query, stage, and not-produced lanes")
         for lane in lanes:
             self.assertIn("pannable: true", lane)
 
@@ -388,7 +388,9 @@ class ViewerCacheTests(unittest.TestCase):
                 return {style: {}, classList: {remove() {}, toggle() {}}};
             }
             let queries = [], participants = new Set(), cy = null;
-            const tabsEl = element(), scopePickerEl = element(),
+            let viewMode = 'prepost', stageDoc = null;
+            function renderModeToggle() {}
+            const tabsRowEl = element(), tabsEl = element(), scopePickerEl = element(),
                 emptyEl = element(), cyOuterEl = element(),
                 sidepanel = element(), sideResizeHandle = element(),
                 selectAllTab = element(), selectAllToggle = element();
@@ -446,6 +448,200 @@ class ViewerCacheTests(unittest.TestCase):
                     self.assertIsNone(annotation["value"])
                     self.assertEqual(annotation["source"], "Unavailable")
 
+
+STAGE_FIXTURE = HERE / "examples" / "stage-pipeline.sample.json"
+
+
+class StageFixtureTests(unittest.TestCase):
+    """Pure-Python checks of the committed asap-stage-pipeline/v1 fixture,
+    so its cross-references hold even where no JS engine is installed."""
+
+    def test_fixture_cross_references_resolve(self):
+        """Roots match the workload, costs live only in Stage 3, and every
+        physical candidate is selected or rejected exactly once."""
+        doc = json.loads(STAGE_FIXTURE.read_text())
+        self.assertEqual(doc["format"], "asap-stage-pipeline/v1")
+        query_count = len(doc["workload"]["queries"])
+        self.assertEqual(query_count, 2)
+        dags = [doc["stage0_logical"]["dag"]]
+        dags += [c["dag"] for c in doc["stage1_logical_asap"]["candidates"]]
+        dags += [c["dag"] for c in doc["stage2_physical_asap"]["candidates"]]
+        for dag in dags:
+            self.assertEqual(len(dag["roots"]), query_count)
+        logical = {c["id"] for c in doc["stage1_logical_asap"]["candidates"]}
+        physical = {c["id"]: c for c in doc["stage2_physical_asap"]["candidates"]}
+        for candidate in physical.values():
+            self.assertIn(candidate["from_logical"], logical)
+            self.assertNotIn("cost", candidate)
+        selection = doc["stage3_selection"]
+        for pid, cost in selection["costs"].items():
+            node_ids = {str(node["id"]) for node in physical[pid]["dag"]["nodes"]}
+            self.assertLessEqual(set(cost["per_node"]), node_ids)
+            self.assertAlmostEqual(sum(e["cost"] for e in cost["per_node"].values()), cost["total"])
+        accounted = [selection["selected"]] + [e["id"] for e in selection["rejected"]]
+        self.assertCountEqual(accounted, physical)
+        self.assertEqual({e["valid"] for e in selection["rejected"]}, {True, False})
+
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class StagePipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.js = py_mini_racer.MiniRacer()
+        self.js.eval((HERE / "stages.js").read_text())
+        self.doc = json.loads(STAGE_FIXTURE.read_text())
+
+    def copy(self):
+        return json.loads(json.dumps(self.doc))
+
+    def validate(self, doc):
+        return self.js.call("validateStagePipeline", doc)
+
+    def test_fixture_is_a_valid_document(self):
+        """The committed sample passes the viewer's own shape validation."""
+        self.assertEqual(self.validate(self.doc), [])
+
+    def test_partial_documents_are_valid(self):
+        """A run that stopped after Stage 1 or Stage 2 still loads."""
+        through_stage1 = self.copy()
+        del through_stage1["stage2_physical_asap"], through_stage1["stage3_selection"]
+        self.assertEqual(self.validate(through_stage1), [])
+        through_stage2 = self.copy()
+        del through_stage2["stage3_selection"]
+        self.assertEqual(self.validate(through_stage2), [])
+
+    def test_legacy_single_root_is_accepted(self):
+        """A one-query document written with `root` instead of `roots` loads."""
+        doc = self.copy()
+        doc["workload"]["queries"] = doc["workload"]["queries"][:1]
+        dag = doc["stage0_logical"]["dag"]
+        dag["root"] = dag.pop("roots")[0]
+        del doc["stage1_logical_asap"], doc["stage2_physical_asap"], doc["stage3_selection"]
+        self.assertEqual(self.validate(doc), [])
+
+    def test_validation_rejects_contract_violations(self):
+        """Broken references, missing physical fields, root/query mismatches,
+        and unaccounted candidates are reported, not rendered."""
+        physical = lambda d: d["stage2_physical_asap"]["candidates"][0]
+        selection = lambda d: d["stage3_selection"]
+        cases = {
+            "format": lambda d: d.update(format="asap-stage-pipeline/v0"),
+            "from_logical": lambda d: physical(d).update(from_logical="L9"),
+            "selected": lambda d: selection(d).update(selected="P9"),
+            "rejected also selected": lambda d: selection(d)["rejected"].append({"id": selection(d)["selected"], "valid": True, "reason": "x"}),
+            "unaccounted candidate": lambda d: selection(d)["rejected"].pop(),
+            "valid flag": lambda d: selection(d)["rejected"][0].pop("valid"),
+            "per_node": lambda d: selection(d)["costs"]["P1"]["per_node"].update({"99": {"cost": 1}}),
+            "cost total": lambda d: selection(d)["costs"]["P1"].pop("total"),
+            "cost for unknown candidate": lambda d: selection(d)["costs"].update({"P9": {"total": 1, "unit": "u"}}),
+            "timing": lambda d: physical(d)["dag"]["nodes"][0].pop("output_state"),
+            "data_state": lambda d: physical(d)["dag"]["edges"][0].pop("data_state"),
+            "edge endpoint": lambda d: d["stage0_logical"]["dag"]["edges"][0].update(producer=42),
+            "logical root shape": lambda d: d["stage0_logical"]["dag"]["roots"].__setitem__(0, 3),
+            "physical root shape": lambda d: physical(d)["dag"]["roots"].__setitem__(0, {"Operator": 3}),
+            "roots per query": lambda d: d["stage0_logical"]["dag"]["roots"].pop(),
+            "stage 2 without stage 1": lambda d: d.pop("stage1_logical_asap"),
+            "stage 3 without stage 2": lambda d: d.pop("stage2_physical_asap"),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name):
+                doc = self.copy()
+                mutate(doc)
+                self.assertNotEqual(self.validate(doc), [])
+
+    def test_ranking_uses_stage3_costs_and_outcomes(self):
+        """Candidates rank cheapest first from stage3_selection.costs, with
+        selected, valid-but-costlier, and invalid kept apart."""
+        ranked = self.js.call("rankPhysicalCandidates", self.doc)
+        totals = [row["total"] for row in ranked]
+        self.assertEqual(totals, sorted(totals))
+        self.assertEqual([row["rank"] for row in ranked], list(range(1, len(ranked) + 1)))
+        by_id = {row["id"]: row for row in ranked}
+        selection = self.doc["stage3_selection"]
+        self.assertEqual(by_id[selection["selected"]]["status"], "selected")
+        for entry in selection["rejected"]:
+            row = by_id[entry["id"]]
+            self.assertEqual(row["status"], "rejected_valid" if entry["valid"] else "rejected_invalid")
+            self.assertEqual(row["reason"], entry["reason"])
+            self.assertEqual(row["source"], selection["costs"][entry["id"]]["source"])
+
+    def test_ranking_without_stage3_has_no_costs(self):
+        """Stage 2 alone carries no cost, so nothing is ranked."""
+        doc = self.copy()
+        del doc["stage3_selection"]
+        ranked = self.js.call("rankPhysicalCandidates", doc)
+        self.assertEqual([row["id"] for row in ranked], [c["id"] for c in doc["stage2_physical_asap"]["candidates"]])
+        for row in ranked:
+            self.assertEqual((row["total"], row["rank"], row["status"]), (None, None, "no_selection"))
+
+    def test_ranking_puts_uncosted_candidates_last_and_keeps_ties_in_order(self):
+        """Ties keep document order; a candidate Stage 3 did not cost is unranked."""
+        doc = self.copy()
+        costs = doc["stage3_selection"]["costs"]
+        for cost in costs.values():
+            cost["total"] = 5
+        del costs["P1"]
+        ranked = self.js.call("rankPhysicalCandidates", doc)
+        self.assertEqual([row["id"] for row in ranked], ["P2", "P3", "P4", "P1"])
+        self.assertEqual([row["rank"] for row in ranked], [1, 2, 3, None])
+
+    def test_lane_construction_for_each_stage(self):
+        """Each lane has one parent, one element per node and edge, edges run
+        producer -> consumer, and every root is labelled with its query."""
+        query_ids = [q["id"] for q in self.doc["workload"]["queries"]]
+        logical_dag = self.doc["stage0_logical"]["dag"]
+        lane = self.js.call("stageLaneElements", "stage0", "Logical", logical_dag, {"queryIds": query_ids})
+        parent, *rest = lane
+        self.assertTrue(parent["data"]["isLane"])
+        nodes = [e for e in rest if "source" not in e["data"]]
+        edges = [e for e in rest if "source" in e["data"]]
+        self.assertEqual(len(nodes), len(logical_dag["nodes"]))
+        self.assertEqual(len(edges), len(logical_dag["edges"]))
+        first = logical_dag["edges"][0]
+        self.assertEqual((edges[0]["data"]["source"], edges[0]["data"]["target"]),
+                         (f"stage0-n{first['producer']}", f"stage0-n{first['consumer']}"))
+        roots = {n["data"]["stageNode"]["id"]: n["data"]["rootFor"] for n in nodes if n["data"]["root"]}
+        self.assertEqual(roots, {r["Operator"]: [qid] for r, qid in zip(logical_dag["roots"], query_ids)})
+        for node in nodes:
+            if node["data"]["root"]:
+                self.assertIn(f"root of {node['data']['rootFor'][0]}", node["data"]["label"])
+        self.assertEqual(nodes[0]["data"]["kind"], "Scan")
+        self.assertEqual(nodes[0]["data"]["label"], "Scan\nsource: http_requests_total")
+
+        selected = self.doc["stage3_selection"]["selected"]
+        candidate = next(c for c in self.doc["stage2_physical_asap"]["candidates"] if c["id"] == selected)
+        cost = self.doc["stage3_selection"]["costs"][selected]
+        lane = self.js.call("stageLaneElements", "stage2", "Physical", candidate["dag"],
+                            {"physical": True, "costPerNode": cost["per_node"], "queryIds": query_ids})
+        nodes = [e for e in lane[1:] if "source" not in e["data"]]
+        for node in nodes:
+            label = node["data"]["label"]
+            self.assertIn("⏱ query time", label)
+            self.assertIn(f"cost {cost['per_node'][str(node['data']['stageNode']['id'])]['cost']:g}", label)
+        self.assertEqual([n["data"]["stageNode"]["id"] for n in nodes if n["data"]["root"]],
+                         candidate["dag"]["roots"])
+
+    def test_physical_lane_without_stage3_has_no_cost(self):
+        """Without Stage 3 costs, physical nodes show timing but no cost."""
+        candidate = self.doc["stage2_physical_asap"]["candidates"][0]
+        lane = self.js.call("stageLaneElements", "stage2", "Physical", candidate["dag"], {"physical": True})
+        for node in lane[1:]:
+            if "source" not in node["data"]:
+                self.assertNotIn("cost", node["data"]["label"])
+
+    def test_payload_kinds_map_onto_node_style_names(self):
+        """Wire payload kinds reuse node-style.js categories."""
+        cases = {
+            "Scan": {"kind": "relational", "operator": {"kind": "scan"}},
+            "TimeRange": {"kind": "relational", "operator": {"kind": "time_range"}},
+            "SQLWindowFunc": {"kind": "relational", "operator": {"kind": "sql_window_func"}},
+            "SummaryAgg": {"kind": "summary_agg"},
+            "FinalizeExactAccumulator": {"kind": "finalize_exact_accumulator"},
+        }
+        style = (HERE / "node-style.js").read_text()
+        for expected, payload in cases.items():
+            with self.subTest(expected):
+                self.assertEqual(self.js.call("stagePayloadKind", payload), expected)
+                self.assertIn(f'"{expected}":', style)
 
 if __name__ == "__main__":
     unittest.main()

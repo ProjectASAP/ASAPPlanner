@@ -1,6 +1,9 @@
 # ASAP Pre/Post-ASAP DAG viewer
 
-The viewer has one visualization mode: **Pre/Post-ASAP**.
+The viewer has two visualization modes, chosen with the header switch:
+**Pre/Post-ASAP** (below) and **Stages** (see "Stages view"). Stages is
+enabled, and opens by default, only when an `asap-stage-pipeline/v1`
+document is loaded.
 
 - Select one query to see that query's complete pre-ASAP and post-ASAP DAGs.
 - Select multiple queries to see two workload-union DAGs: one pre-ASAP union
@@ -25,6 +28,116 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
   benefit annotations" below.
 
 There are no separate Single, Compare, or Union modes.
+
+## Stages view
+
+The Stages view shows one planner run through the stages of
+[planner layering](../../docs/design_docs/proposals/planner-layering.md),
+as three lanes side by side:
+
+1. **Logical**: the stage-0 logical DAG for the whole workload.
+2. **Logical ASAP**: one stage-1 candidate. Pick it in the **Logical ASAP
+   candidates** list above the canvas, which shows each candidate's label.
+3. **Physical ASAP**: one stage-2 candidate. Each node shows its timing
+   (`⏱ query time` or `⏱ ingestion time`; ingestion-time nodes also have a
+   double border).
+
+A DAG has one root per workload query. Each root is marked and labelled
+`root of <query id>`.
+
+Costs come only from Stage 3. When the document has a Stage 3 result, the
+physical lane's nodes show their cost. The lane header shows the
+candidate's total cost, unit, cost source, rank, and outcome. The
+**Physical ASAP candidates** list ranks every candidate cheapest first and
+shows each outcome:
+
+- **✓ selected**: the plan Stage 3 chose.
+- **valid, not selected**: a valid plan that costs more.
+- **✗ invalid**: a plan that fails a requirement, for example a latency
+  bound.
+
+Rejected plans also show Stage 3's reason. Without a Stage 3 result, the
+physical lane and the list show no costs.
+
+Clicking a physical candidate shows it in lane 3, and shows the logical
+candidate it implements in lane 2. That logical candidate is outlined in
+the list and in the lane.
+
+The **Workload queries** list shows each query and its requirements
+(accuracy, latency, repeat interval) when the document gives them.
+
+A document from a run that stopped early still loads. The lanes for the
+stages it doesn't contain show **not produced**.
+
+Click a node to see its payload, output schema, guarantee and coverage. A
+root also shows its query's requirements. Physical nodes also show their
+output timing and Stage 3 cost. Click an edge to see its intermediate
+schema, and for physical edges, its data state.
+
+To open the sample document, start the server (see "Interactive query
+editor") and go to
+<http://127.0.0.1:8000/?doc=examples/stage-pipeline.sample.json>. The `doc`
+parameter takes any JSON file path served next to `index.html`. You can also
+load a stage document with the file picker.
+
+The sample, `examples/stage-pipeline.sample.json`, is hand-written. It
+follows #509's Example 1 with both queries:
+
+- Q1, `sum by (job) (rate(http_requests_total[1m]))`, exact;
+- Q2, `topk by (job) (10, sum_over_time(http_requests_total[1m]))`,
+  ε = 0.01, δ = 0.001, at most 100 ms.
+
+It has four logical candidates:
+
+- exact;
+- Count-Min with a heap for Q2;
+- Hydra for Q2;
+- exact with one input shared by both queries.
+
+It also has four physical candidates, all at query time. In the exact
+candidates, Q2's top 10 runs as sort → limit per job. In the summary
+candidates, it runs as build → estimate. The costs are illustrative, not
+planner output.
+
+### Document format
+
+```json
+{
+  "format": "asap-stage-pipeline/v1",
+  "workload": { "queries": [{ "id": "Q1", "language": "promql", "text": "...",
+                "requirements": { "accuracy": "exact", "latency_ms": 100, "repeat_interval_ms": 10000 } }] },
+  "stage0_logical": { "dag": "<LogicalASAPDAG>" },
+  "stage1_logical_asap": { "candidates": [{ "id": "L1", "label": "...", "dag": "<LogicalASAPDAG>" }] },
+  "stage2_physical_asap": { "candidates": [{ "id": "P1", "from_logical": "L1", "label": "...", "dag": "<PhysicalASAPDAG>" }] },
+  "stage3_selection": {
+    "costs": { "P1": { "total": 12.5, "unit": "cpu_ms_per_s", "source": "analytical-cost-v1",
+                       "per_node": { "<node id>": { "cost": 3.2, "detail": "..." } } } },
+    "selected": "P1",
+    "rejected": [{ "id": "P2", "valid": true, "reason": "costlier" }]
+  }
+}
+```
+
+DAGs use the serde JSON of `LogicalASAPDAG` and `PhysicalASAPDAG`:
+
+- `roots` lists one root per workload query, in workload order. A logical
+  root is `{"Operator": id}` or `{"Scalar": expr}`; a physical root is a node
+  id. A single `root` is still accepted.
+- `requirements`, and the stages after stage 0, are optional.
+- Every stage-2 candidate must be either `selected` or listed in
+  `rejected`.
+
+The viewer checks the document before rendering it:
+
+- node, edge and root references;
+- one root per query;
+- `from_logical`;
+- physical `output_state.timing` and `data_state`;
+- Stage 3 ids, costs and `per_node` keys;
+- that a later stage never appears without the stage before it.
+
+If any check fails, the viewer lists the problems and doesn't load the
+document.
 
 ## Interactive query editor
 
@@ -199,3 +312,7 @@ All of this is additive and optional: an export with none of these fields
 python3 -m unittest discover -s tools/dag-viewer -p test_render.py
 cargo test -p asap-devtools --bin dag_export
 ```
+
+The JavaScript tests, including the Stages validation, lane, and ranking
+tests, need `py_mini_racer` (`pip install py-mini-racer`). Without it they
+are skipped.
