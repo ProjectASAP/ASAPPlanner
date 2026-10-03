@@ -15,7 +15,7 @@ use planner_types::ir::physical_export::{
 use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
 use planner_types::ir::NonASAPOp;
-use planner_types::ir::ScalarExpr as QueryExpr;
+use planner_types::ir::ScalarExpr;
 use planner_types::{
     post_asap::{ExactKind, ExactParams, Field, FieldDataType},
     pre_asap::DataType,
@@ -886,11 +886,11 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
         },
         false,
     )]);
-    let access = QueryExpr::FunctionCall {
+    let access = ScalarExpr::FunctionCall {
         name: "asap_element_access".into(),
         args: vec![
-            QueryExpr::Column(0),
-            QueryExpr::Literal(ScalarValue::Utf8("count".into())),
+            ScalarExpr::Column(0),
+            ScalarExpr::Literal(ScalarValue::Utf8("count".into())),
         ],
     };
     let project = Operator::project(
@@ -923,11 +923,11 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
     .unwrap();
     let projected = project.schema();
     dag.add(1, vec![0], project).unwrap();
-    let predicate = QueryExpr::Compare {
+    let predicate = ScalarExpr::Compare {
         semantics: planner_types::ir::ExprSemantics::Sql,
-        left: Box::new(QueryExpr::Column(0)),
+        left: Box::new(ScalarExpr::Column(0)),
         op: CompareOpKind::Ge,
-        right: Box::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+        right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(1))),
     };
     dag.add(
         2,
@@ -941,9 +941,9 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
     .unwrap();
     let rows = run(&dag, 2, query());
     assert!(matches!(rows.as_slice(),[row] if matches!(row.as_slice(),[Value::Int64(7)])));
-    let unknown = QueryExpr::FunctionCall {
+    let unknown = ScalarExpr::FunctionCall {
         name: "unregistered_function".into(),
-        args: vec![QueryExpr::Column(0)],
+        args: vec![ScalarExpr::Column(0)],
     };
     assert!(CompiledExpression::compile(&unknown, &input_schema).is_err());
 }
@@ -955,11 +955,11 @@ fn native_relational_join_kinds_preserve_unmatched_rows() {
     use planner_types::pre_asap::{CompareOpKind, JoinKind};
 
     let input = schema(&[("key", DataType::Int64, true)]);
-    let predicate = Predicate(QueryExpr::Compare {
+    let predicate = Predicate(ScalarExpr::Compare {
         semantics: planner_types::ir::ExprSemantics::Sql,
-        left: Box::new(QueryExpr::Column(0)),
+        left: Box::new(ScalarExpr::Column(0)),
         op: CompareOpKind::Eq,
-        right: Box::new(QueryExpr::Column(1)),
+        right: Box::new(ScalarExpr::Column(1)),
     });
     for (kind, count) in [
         (JoinKind::Inner, 1),

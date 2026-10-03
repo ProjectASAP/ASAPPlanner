@@ -4,7 +4,7 @@
 //! ranking, or workload Cartesian expansion. Placement variants are not listed.
 mod common;
 use common::compile_physical_asap_dag;
-use planner_types::ir::OperatorNode as QueryExpr;
+use planner_types::ir::OperatorNode;
 
 use asap_aware_mapping::{
     accuracy::{AccuracyEvidenceProvider, DefaultAccuracyModel, PropagationStats},
@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 struct Evidence;
 impl AccuracyEvidenceProvider for Evidence {
-    fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+    fn topk_max_distinct_items(&self, _: &OperatorNode) -> Option<u64> {
         Some(1000)
     }
     fn propagation_stats(
@@ -67,7 +67,7 @@ impl ReplacementStrategy for LogicalOnly {
     }
 }
 
-fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<QueryExpr> {
+fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,

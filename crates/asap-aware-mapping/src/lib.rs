@@ -22,9 +22,9 @@
 //! It depends only on the IR crate, never on a front end — the layering
 //! invariant (arrows point up) holds here too.
 //!
-//! Post-lowering **canonicalization** is *not* here: it landed in
-//! `asap_types::pre_asap::canonicalize`, run inside the shared `resolve_root`
-//! so every front end normalizes before the pre-ASAP IR leaves resolution
+//! Post-lowering **canonicalization** is *not* here: it lives in
+//! `asap_types::ir::canonicalize`, run inside `asap_frontend_common`'s shared
+//! `resolve_root` so every front end normalizes before the IR leaves resolution
 //! (issue #34, closed).
 //!
 //! ## Planning workflows
@@ -83,7 +83,7 @@
 //!   re-deriving it from an already-computed, strictly finer sibling
 //!   `Aggregate` over identical child IR instead of an independent pass
 //!   over the raw source — the cross-aggregate sibling of
-//!   `pre_asap::cse::share_common_sub_dags`'s identical-sub-DAG sharing.
+//!   `ir::cse::share_common_sub_dags`'s identical-sub-DAG sharing.
 //!   [`rollup::is_legal_rollup_source`] is the standalone legality predicate
 //!   other axes (e.g. issue #256's `GroupingStrategy`) are expected to
 //!   consult directly, so it and this module's `RollupStrategy` can never
@@ -115,7 +115,7 @@
 //!
 //! | Term | Meaning | Entry point |
 //! |---|---|---|
-//! | Schema resolution | Derive input schemas and resolve column names to positions | `asap_types::pre_asap::SchemaResolver::resolve_schema`, `resolve_root` |
+//! | Schema resolution | Derive input schemas and resolve column names to positions | `asap_frontend_common::schema_resolver::SchemaResolver::resolve_schema`, `asap_frontend_common::resolve::resolve_root` |
 //! | Realization | Enumerate ranked physical forms for one aggregate intent | `replacement::realizations_for_intent` |
 //! | Replacement | Construct each candidate summary sub-DAG | [`replacement::ASAPStrategies`] |
 //! | Search | Enumerate and compare alternatives across a workload | [`replacement::search_workload`] |

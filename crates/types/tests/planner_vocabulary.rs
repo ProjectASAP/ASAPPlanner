@@ -1,6 +1,5 @@
 use asap_types::ir::physical_export::WindowEdgeCompatibility;
 use asap_types::post_asap::{validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
-use asap_types::pre_asap::{SchemaResolver, Source, UnresolvedQueryExpr};
 use asap_types::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
 
 // Renamed pane APIs still read and emit the deployed wire contract.
@@ -29,18 +28,11 @@ fn window_edge_names_preserve_wire_values() {
     );
 }
 
-// External consumers can use the new resolver and resource names without changing behavior.
+// External consumers can use the new resource names without changing behavior.
+// (The schema-resolver half moved with the resolver to `asap-frontend-common`;
+// `schema_resolver::tests::bare_source_yields_ts_value_floor` covers it.)
 #[test]
-fn renamed_schema_and_handoff_apis_are_public() {
-    let dag = UnresolvedQueryExpr::Scan {
-        source: Source::TimeSeries {
-            metric: "requests".into(),
-        },
-        predicates: vec![],
-        schema: None,
-    };
-    let schema = SchemaResolver::new().resolve_schema(&dag);
-    assert!(schema.column_id("value").is_some());
+fn renamed_handoff_apis_are_public() {
     let bytes = PhysicalHandoffBytes {
         network_bytes: 12,
         materialization_bytes: 4,
