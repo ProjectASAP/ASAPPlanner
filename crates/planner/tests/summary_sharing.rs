@@ -10,7 +10,7 @@ use asap_aware_mapping::pass::{PlanOutput, PlanningModels};
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_aware_mapping::{
     CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
+    SummaryMaintenanceLifecycleCostInputs,
 };
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
@@ -103,8 +103,7 @@ fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
 }
 
 fn lifecycle() -> LifecycleInput {
-    LifecycleInput::new(NOW_MS, SummaryMaintenanceLifecycleCapabilities::default())
-        .with_horizon(Horizon(HORIZON_S))
+    LifecycleInput::new(NOW_MS).with_horizon(Horizon(HORIZON_S))
 }
 
 fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {

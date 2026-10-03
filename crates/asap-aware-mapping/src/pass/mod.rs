@@ -48,6 +48,7 @@ pub struct PlanningModels<'a> {
     pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
+    pub capabilities: SummaryMaintenanceLifecycleCapabilities,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -60,6 +61,7 @@ impl<'a> PlanningModels<'a> {
             cost,
             accuracy,
             evidence,
+            capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
         }
     }
 
@@ -71,6 +73,7 @@ impl<'a> PlanningModels<'a> {
             cost: &DEFAULT_COST_MODEL,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
+            capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
         }
     }
 
@@ -88,6 +91,14 @@ impl<'a> PlanningModels<'a> {
         self.evidence = evidence;
         self
     }
+
+    pub fn with_capabilities(
+        mut self,
+        capabilities: SummaryMaintenanceLifecycleCapabilities,
+    ) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
 }
 
 /// Supplying this asks the pass to also decide summary maintenance versus raw
@@ -99,15 +110,13 @@ pub struct LifecycleInput {
     pub now_ms: u64,
     /// Seconds. Required to turn recurring demand into a finite total.
     pub horizon: Option<Horizon>,
-    pub capabilities: SummaryMaintenanceLifecycleCapabilities,
 }
 
 impl LifecycleInput {
-    pub fn new(now_ms: u64, capabilities: SummaryMaintenanceLifecycleCapabilities) -> Self {
+    pub fn new(now_ms: u64) -> Self {
         Self {
             now_ms,
             horizon: None,
-            capabilities,
         }
     }
 
@@ -123,7 +132,8 @@ pub struct OptimizationInput<'a> {
     pub workload: &'a ParsedWorkload,
     pub models: PlanningModels<'a>,
     /// Every plan carries the maintenance-versus-recomputation decision, so
-    /// the planning clock and runtime capabilities are always required.
+    /// the planning clock is always required. Runtime capabilities are in
+    /// `models` with the deployment's cost and accuracy models.
     pub lifecycle: LifecycleInput,
 }
 

@@ -53,8 +53,8 @@ pub struct UserInput<'a> {
     pub workload: &'a PlanningWorkload,
     pub frontend_specific: FrontendInput<'a>,
     pub models: PlanningModels<'a>,
-    /// Planning clock and runtime capabilities for the
-    /// maintenance-versus-recomputation decision every plan carries.
+    /// Planning clock for the maintenance-versus-recomputation decision every
+    /// plan carries. Runtime capabilities are supplied with `models`.
     pub lifecycle: LifecycleInput,
     /// `None` uses [`MajorPass`]. A black-box caller never sets this.
     pub pass: Option<&'a dyn OptimizationPass>,
