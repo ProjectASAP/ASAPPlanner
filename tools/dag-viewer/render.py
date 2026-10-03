@@ -54,7 +54,7 @@ HERE = Path(__file__).resolve().parent
 # embedded data and mode override must land immediately before it in
 # document order (its startup code reads both synchronously as soon as it
 # runs) — see viewer.js's header comment.
-_INLINE_LIBS = ("dagre.min.js", "cytoscape.min.js", "cytoscape-dagre.js", "node-style.js", "planner-ui.js")
+_INLINE_LIBS = ("dagre.min.js", "cytoscape.min.js", "cytoscape-dagre.js", "node-style.js", "stages.js", "planner-ui.js")
 
 
 def _compact(value: object) -> str:
