@@ -1,4 +1,4 @@
-//! The examples in docs/design_docs/proposals/summary-coverage.md, built as real
+//! The examples in docs/design_docs/proposals/asap-primitive-schema.md, built as real
 //! SummaryAgg -> SummaryMerge plans. Every input has the same schema
 //! `(job: Utf8, state: KLL{k=200})`; only coverage differs.
 use asap_types::ir::summary_coverage::{CoverageError, CoverageRegion, SummaryCoverage};
