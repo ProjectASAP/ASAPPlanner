@@ -309,8 +309,9 @@ fn summary_update(
         .map_err(|_| LogicalCandidateError::Unsupported("input column outside child schema"))?;
     Ok(match (intent, algorithm) {
         (AggIntent::TopK { .. }, Some(_)) => {
-            // SQL rows carry no implicit series identity to rank.
-            if child.closed {
+            // SQL rows carry no implicit series identity to rank; closed
+            // PromQL rows carry it as a column.
+            if child.closed && !child.has_promql_series_identity() {
                 return Err(LogicalCandidateError::Unsupported(
                     "Top-K item identity for closed schemas",
                 ));
@@ -327,10 +328,17 @@ fn summary_update(
                 .filter_map(|&index| child.fields.get(index))
                 .map(crate::replacement::column_ref)
                 .collect();
+            // Rows that carry the full series identity rank it as a column,
+            // the item form the runtime builds keyed summaries from.
+            let item = if child.has_promql_series_identity() {
+                SummaryInputExpr::Column(ColumnRef::Named(
+                    asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
+                ))
+            } else {
+                SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
+            };
             SummaryUpdate {
-                item: Some(SummaryInputExpr::EntityIdentity(
-                    EntityIdentity::PromqlLabelSet { excluding },
-                )),
+                item: Some(item),
                 weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
                 // Not proven non-negative; selection decides whether CMS is admissible.
                 weight_domain: WeightDomain::UnknownOrSigned,
