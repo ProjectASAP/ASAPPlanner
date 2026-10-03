@@ -101,8 +101,10 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
         .map(|node| (node.id, node.output_state.timing))
         .collect::<BTreeMap<_, _>>();
     let mut frontier = BTreeSet::new();
-    if timing.get(&dag.root) == Some(&IngestionTime) {
-        frontier.insert(u64::from(dag.root.0));
+    for root in &dag.roots {
+        if timing.get(root) == Some(&IngestionTime) {
+            frontier.insert(u64::from(root.0));
+        }
     }
     for edge in &dag.edges {
         let (Some(&producer), Some(&consumer)) =
