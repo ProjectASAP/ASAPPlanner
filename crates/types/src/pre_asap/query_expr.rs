@@ -1811,13 +1811,13 @@ fn infer_expr_type(
         }
         QueryExpr::FunctionCall { name, args } => {
             if name == "asap_element_access" {
-                super::scalar_signature::element_access_type(args, schema)
+                super::scalar_type_rules::element_access_type(args, schema)
                     .map_err(QueryExprError::InvalidScalarSignature)?
             } else if name == "asap_struct_field" {
-                super::scalar_signature::struct_field_type(args, schema)
+                super::scalar_type_rules::struct_field_type(args, schema)
                     .map_err(QueryExprError::InvalidScalarSignature)?
             } else if let Some(function) =
-                super::scalar_signature::MapScalarFunction::from_name(name)
+                super::scalar_type_rules::MapScalarFunction::from_name(name)
             {
                 let arguments = args
                     .iter()

@@ -28,3 +28,5 @@ pub mod resources;
 pub mod serde_f64;
 pub mod types;
 pub mod workload;
+
+pub mod ir;
