@@ -1,7 +1,5 @@
 # Schema and Physical Data for ASAP Primitives
 
-> Status: design. `SummaryCoverage` and its rules are implemented in [#567](https://github.com/ProjectASAP/ASAPPlanner/pull/567); `SummaryMerge` in [#560](https://github.com/ProjectASAP/ASAPPlanner/pull/560) (both open). Audience: designers and architects.
-
 This document is the single source of truth for the schema, and column design for ASAP Primitives. This is used in the logical stage (LogicalASAPDAG), and physical stage (PhysicalASAPDAG). 
 
 ## 1. Goal, problem, and requirements
@@ -9,7 +7,7 @@ This document is the single source of truth for the schema, and column design fo
 Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, it introduces new requirement when we design the schema and node definitions for LogicalASAPDAG and PhysicalASAPDAG.
 
 Assuming we have the Logical DAG defined for a canonicalized representation for a batch of queries. [TODO: add links for this here. ]
-The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG [TODO: link PR 511's doc here], but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives. The complete list is `ASAPOp` in `crates/types/src/ir/asap.rs`: `SummaryAgg` (creates and updates state; there is no separate SummaryCreation or SummaryUpdate operator, and `SummaryUpdate` is `SummaryAgg`'s update-expression parameter), `SummaryEstimate`, `FinalizeExactAccumulator`, `MaintainPopulation` and `EvaluatePopulation` (implemented); `SummaryMerge` (reserved here, enabled by #560); and `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension` (reserved). See §5. 
+The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG [TODO: link PR 511's doc here], but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives: SummaryCreation?, SummaryUpdate, SummaryMerge, SummaryDelete, SummarySubtraction, SummaryEstimate [TODO: check what is the complete list or discuss with others about the list]. 
 Each of the Summary operators also require the ASAP primitive information above to inter-operate correctly, preserving semantic correctness. 
 
 Basically, the following information should be represented to preserve the equivalent query semantics when we introduce ASAP Primitives to logical query representation, and following physical one. 
@@ -35,77 +33,17 @@ Schema represents the **metadata** of information flow along an **edge** between
 
 Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
 Based on our requirement, each field should contain the following information.
-1. **What type of the ASAP Primitive is** A state column can be a raw data type (e.g., numerical number, string). It can also be a summary type (§6.1, §6.2), e.g., the summary **family** is sketch (`FieldDataType::Sketch`), its **category** is quantile (`SketchCategory::Quantile`), its **algorithm** is KLL (`SketchAlgorithm::Kll`), and its **parameters** are `SketchParams::Kll { k: 200 }`. A sketch field also records its `GroupingStrategy` (one instance per group, or one shared Hydra structure). Non-sketch families (`ExactAggregate`, `Sample`, `Wavelet`, `StatModel`) have a kind and parameters but no category. 
-2. **What query intent the summarized ASAP Primitive can support, e.g., statistical aggregation intents, time window aggregation intents** This information is being mapped based on the primitive type: it is not stored in the field. `SummaryEstimate::validate_inputs` accepts a readout only when the `SketchStatistic` matches the state's `SketchCategory` (Quantile→`Quantile`; Cardinality→`Cardinality`/`Universal`; PointCount→`Frequency`/`Universal`; FrequencyL2/FrequencyEntropy→`Universal`; TopK→`TopK`/`Universal`). Exact accumulators are read by `FinalizeExactAccumulator` instead. `Sample`, `Wavelet` and `StatModel` state has no readout operator yet.
+1. **What type of the ASAP Primitive is** A state column can be a raw data type (e.g., numerical number, string). It can also be a [summary type](TODO: add link), e.g., the summary family is sketch, and the sketch type is quantile KLL sketch algorithm, and KLL sketch has K  as parameter as the schema. (TODO: confirm the terminology with corresponding code/doc)  It has a family, an algorithm and parameters. 
+2. **What query intent the summarized ASAP Primitive can support, e.g., statistical aggregation intents, time window aggregation intents** This information is being mapped based on the primitive type. 
 
-Whether an edge carries **state or values** is recorded on the producing node as `OperatorResultKind`, not inferred from field types. Usually they agree: a `SummaryAgg` output has exactly one non-plain field and kind `State`. They can differ, though. `MaintainPopulation` keeps an all-plain schema but its kind is `State`, and a `Project` that passes a state column through keeps kind `State`. Consumers check `result_kind` (`validate_inputs` requires `State` for every readout).
 
 ## 4. Proposed Node field design 
 
 A node in the physical data will represent the data or summary instance, so a node has a field for **What data sources a ASAP primitive summarizes**.
 
-In code this field is `OperatorNode::coverage`. It records *which observations* a summary state covers: a source plus a union of joint (time × population) regions. It sits beside the schema, not inside a field, because two states with identical schemas can cover different data, and only disjoint coverage can be merged once-per-observation.
-
-Based on the above the proposed OperatorNode interface is as below (`crates/types/src/ir/node.rs`, `ir/summary_coverage.rs`):
+Based on the above the proposed OperatorNode interface is as below:
 ```rust
-pub enum OperatorResultKind { Relation, InstantVector, RangeVector, /** unfinalized summary/accumulator state */ State }
-
-pub enum Operator { NonASAP(NonASAPOp), ASAP(ASAPOp) }
-
-pub struct OperatorNode {
-    pub operator: Operator,
-    pub result_kind: OperatorResultKind,       // derived from operator + children
-    pub schema: Schema,                        // derived; may override names/qualifiers only
-    pub guarantee: Option<ResultGuarantee>,    // None until accuracy assessment; None != exact
-    pub timing: Option<ExecutionTiming>,       // IngestionTime | QueryTime; None until assigned
-    #[serde(default)]
-    pub coverage: Option<SummaryCoverage>,     // observations a State output summarizes
-}
-
-impl OperatorNode {
-    pub fn new(op: Operator) -> Result<Self, SchemaDerivationError>;      // derives schema + kind; coverage = None
-    pub fn with_schema(op: Operator, schema: Schema) -> Self;             // caller-supplied names
-    pub fn new_shared(op: Operator) -> Result<Rc<Self>, SchemaDerivationError>;
-    pub fn with_guarantee(self, g: Option<ResultGuarantee>) -> Self;
-    pub fn with_timing(self, t: Option<ExecutionTiming>) -> Self;
-    /// Validates the coverage, then rejects a non-State node (CoverageError::NotState).
-    pub fn with_coverage(self, c: SummaryCoverage) -> Result<Self, SchemaDerivationError>;
-    /// This branch: true only for SummaryAgg. #560: SummaryAgg | SummaryMerge.
-    pub fn requires_coverage(&self) -> bool;
-    /// #560: (update expression, reduction) of a SummaryAgg, or shared by a SummaryMerge's inputs.
-    pub fn summary_update(&self) -> Option<(&SummaryUpdate, &Reduction)>;
-    /// Rebuilds with new inputs; re-derives schema; clears guarantee, timing and coverage.
-    pub fn map_children(&self, f: impl FnMut(&Rc<Self>) -> Rc<Self>) -> Result<Self, SchemaDerivationError>;
-    /// Per node: coverage well-formed (and present if required), validate_inputs,
-    /// result_kind and schema structure agree with derivation.
-    pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError>;
-    pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), SchemaDerivationError>;
-    // also: asap(), non_asap(), is_asap(), children(), contains_asap(), reachable()
-}
-
-pub struct SummaryCoverage {
-    pub source: Source,                 // Source::Table { table_ref } | Source::TimeSeries { metric }
-    pub regions: Vec<CoverageRegion>,   // union of joint regions, never a Cartesian product
-}
-pub struct CoverageRegion {
-    pub time_ms: Option<Range<i64>>,             // half-open, on the source's time column; None = unrestricted
-    pub population: BTreeMap<String, String>,    // conjunction of equality predicates; empty = unrestricted
-}
-impl SummaryCoverage {
-    /// Intervals non-empty, dimension names non-empty, regions pairwise provably disjoint.
-    pub fn validate(&self) -> Result<(), CoverageError>;
-    /// Union of provably disjoint inputs from one source; coalesces adjacent
-    /// intervals with identical populations and keeps gaps.
-    pub fn merge_disjoint(inputs: &[Self]) -> Result<Self, CoverageError>;
-}
-pub enum CoverageError {
-    InvalidInterval, InvalidPopulation, SourceMismatch, PossibleOverlap, EmptyMerge, NotState, Missing,
-    UnknownInput,          // #560: a merge input has no coverage
-    MergeOutputMismatch,   // #560: retained merge coverage differs from the input union
-}
 ```
-
-Two regions are provably disjoint only if their time ranges do not intersect or they bind the same population dimension to different values. A region without time bounds overlaps any region it is not population-disjoint from. Coverage is caller-established: `validate` checks that it is well-formed, not that it matches the child's predicates. Any rewrite through `map_children` drops it, so the rewriter must declare it again. `#537` adds export and CSE of the logical DAG (`ir/export.rs`, `ir/cse.rs`); no interface in this document depends on it.
 
 ## 5. Examples on how OperatorNode, schema, and physical data information are being used with Summary operators
 
