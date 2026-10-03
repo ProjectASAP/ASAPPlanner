@@ -1,0 +1,34 @@
+# Official Prometheus 3.5.0 oracle: AVG remains finite when SUM overflows.
+# Run: promtool test rules crates/integration-tests/tests/fixtures/avg_over_time_overflow.test.yml
+evaluation_interval: 1m
+tests:
+- interval: 1m
+  input_series:
+  - series: 'latency{job="api"}'
+    values: '1e308 1e308'
+  promql_expr_test:
+  - expr: 'avg_over_time(latency[5m])'
+    eval_time: 1m
+    exp_samples:
+    - labels: '{job="api"}'
+      value: 1e308
+  - expr: 'sum_over_time(latency[5m]) / count_over_time(latency[5m])'
+    eval_time: 1m
+    exp_samples:
+    - labels: '{job="api"}'
+      value: .inf
+- interval: 1m
+  input_series:
+  - series: 'latency{job="api"}'
+    values: '-1e308 -1e308'
+  promql_expr_test:
+  - expr: 'avg_over_time(latency[5m])'
+    eval_time: 1m
+    exp_samples:
+    - labels: '{job="api"}'
+      value: -1e308
+  - expr: 'sum_over_time(latency[5m]) / count_over_time(latency[5m])'
+    eval_time: 1m
+    exp_samples:
+    - labels: '{job="api"}'
+      value: -.inf
