@@ -117,26 +117,14 @@ operators from logical candidates has not completed this integration.
 
 ### Input semantics and summary semantics
 
-`source`, `filter`, `grouping` and `window` describe input-data semantics:
-where records originate, which records qualify, how they are grouped and which
-time interval applies. They are not a complete description of arbitrary summary
-computation. In particular, the same four fields can summarize different value
-expressions or produce different states.
+`source`, `filter`, `grouping` and `window` describe input-data semantics but not
+a complete summary computation: the same four fields can summarize different
+value expressions or produce different states. The semantic information a summary
+depends on, and where the IR records each part (field type, producing operator,
+or coverage), is specified in
+[Schema and physical data for ASAP primitives](proposals/asap-primitive-schema.md#23-consideration-3-the-metadata-preserves-summary-semantics).
 
-| Concern | Required semantic information |
-| --- | --- |
-| Input computation | Source identities and schemas, filters, joins/transforms and their order, or a reference to the canonical input sub-DAG |
-| Values and grouping | Value expressions, item identities and weights where applicable, group keys and types, and operation-defined null/duplicate handling |
-| Time | Time column and interpretation, interval bounds, evaluation alignment, and distinction between query range and maintained panes |
-| Summary computation | Exact operation or sketch family, algorithm and parameters, and supported build/merge behavior |
-| Output | State versus finalized value, output schema/type, and readout parameters when part of the output computation |
-
-For example, KLL over `latency_seconds` and KLL over `log(latency_seconds)` differ
-even with identical source, filter, grouping and window. Likewise, weighted
-frequency state needs both item and weight expressions. More complex inputs
-must retain their computation DAG; four descriptive fields cannot replace it.
-
-The canonical selected computation is authoritative. These categories describe
+The canonical selected computation is authoritative. Those categories describe
 what must be preserved, not a new flat IR or a second expression language.
 Operator-defined behavior should be referenced through its canonical contract,
 not independently configured in deployment metadata. Unsupported or unresolved
