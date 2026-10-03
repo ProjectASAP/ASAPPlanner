@@ -1,0 +1,1603 @@
+{
+  "format": "asap-stage-pipeline/v1",
+  "expected_only": true,
+  "_notes": [
+    "Shape reference for planner-layering Example 1 (MVP): see docs/design_docs/proposals/planner-layering-example1-acceptance.md.",
+    "Nodes carry only payload kinds and a label, not full schemas. Real documents have the full LogicalASAPDAG/PhysicalASAPDAG nodes.",
+    "query_roots stands in for root: one workload DAG serves both queries, and LogicalASAPDAG has a single root.",
+    "Costs are null: the cost model decides them. The selection is illustrative (the doc's 'Raw with a shared input' winner); tests only require the cheapest valid candidate."
+  ],
+  "workload": {
+    "queries": [
+      {
+        "id": "q1",
+        "language": "promql",
+        "text": "sum by (job) (rate(http_requests_total[1m]))",
+        "repeat_every_s": 10,
+        "lookback_s": 60,
+        "accuracy": "exact"
+      },
+      {
+        "id": "q2",
+        "language": "promql",
+        "text": "topk by (job) (10, sum_over_time(http_requests_total[1m]))",
+        "repeat_every_s": 10,
+        "lookback_s": 60,
+        "accuracy": {
+          "epsilon": 0.01,
+          "delta": 0.001
+        },
+        "max_latency_ms": 100
+      }
+    ]
+  },
+  "stage0_logical": {
+    "dag": {
+      "nodes": [
+        {
+          "id": 0,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "scan"
+            }
+          },
+          "label": "http_requests_total"
+        },
+        {
+          "id": 1,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "time_range"
+            }
+          },
+          "label": "range 1m"
+        },
+        {
+          "id": 2,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "aggregate"
+            }
+          },
+          "label": "rate (per series)"
+        },
+        {
+          "id": 3,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "aggregate"
+            }
+          },
+          "label": "sum by (job)"
+        },
+        {
+          "id": 4,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "scan"
+            }
+          },
+          "label": "http_requests_total"
+        },
+        {
+          "id": 5,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "time_range"
+            }
+          },
+          "label": "range 1m"
+        },
+        {
+          "id": 6,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "aggregate"
+            }
+          },
+          "label": "sum_over_time (per series)"
+        },
+        {
+          "id": 7,
+          "payload": {
+            "kind": "relational",
+            "operator": {
+              "kind": "aggregate"
+            }
+          },
+          "label": "topk by (job) (10)"
+        }
+      ],
+      "edges": [
+        {
+          "producer": 0,
+          "consumer": 1
+        },
+        {
+          "producer": 1,
+          "consumer": 2
+        },
+        {
+          "producer": 2,
+          "consumer": 3
+        },
+        {
+          "producer": 4,
+          "consumer": 5
+        },
+        {
+          "producer": 5,
+          "consumer": 6
+        },
+        {
+          "producer": 6,
+          "consumer": 7
+        }
+      ],
+      "query_roots": {
+        "q1": 3,
+        "q2": 7
+      }
+    }
+  },
+  "stage1_logical_asap": {
+    "candidates": [
+      {
+        "id": "L1",
+        "label": "Q1 exact · Q2 exact · separate input",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)"
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)"
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 6,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum_over_time (per series)"
+            },
+            {
+              "id": 7,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "topk by (job) (10)"
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            },
+            {
+              "producer": 5,
+              "consumer": 6
+            },
+            {
+              "producer": 6,
+              "consumer": 7
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 7
+          }
+        }
+      },
+      {
+        "id": "L2",
+        "label": "Q1 exact · Q2 exact · shared input",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)"
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)"
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum_over_time (per series)"
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "topk by (job) (10)"
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 1,
+              "consumer": 4
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 5
+          }
+        }
+      },
+      {
+        "id": "L3",
+        "label": "Q1 exact · Q2 Count-Min + heap · separate input",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)"
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)"
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 6,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Count-Min + top-k heap, one per job"
+            },
+            {
+              "id": 7,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job"
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            },
+            {
+              "producer": 5,
+              "consumer": 6
+            },
+            {
+              "producer": 6,
+              "consumer": 7
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 7
+          }
+        }
+      },
+      {
+        "id": "L4",
+        "label": "Q1 exact · Q2 Count-Min + heap · shared input",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)"
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)"
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Count-Min + top-k heap, one per job"
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job"
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 1,
+              "consumer": 4
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 5
+          }
+        }
+      },
+      {
+        "id": "L5",
+        "label": "Q1 exact · Q2 Hydra · separate input",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)"
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)"
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 6,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Hydra (CMS) over all (job, series) keys + heap per job"
+            },
+            {
+              "id": 7,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job"
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            },
+            {
+              "producer": 5,
+              "consumer": 6
+            },
+            {
+              "producer": 6,
+              "consumer": 7
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 7
+          }
+        }
+      },
+      {
+        "id": "L6",
+        "label": "Q1 exact · Q2 Hydra · shared input",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total"
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m"
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)"
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)"
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Hydra (CMS) over all (job, series) keys + heap per job"
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job"
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 1,
+              "consumer": 4
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 5
+          }
+        }
+      }
+    ]
+  },
+  "stage2_physical_asap": {
+    "candidates": [
+      {
+        "id": "P1",
+        "from_logical": "L1",
+        "label": "Q1 exact · Q2 exact · separate input · sort + limit · query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 6,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum_over_time (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 7,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "sort"
+                }
+              },
+              "label": "sort by value, partition by job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 8,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "limit"
+                }
+              },
+              "label": "limit 10",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            },
+            {
+              "producer": 5,
+              "consumer": 6
+            },
+            {
+              "producer": 6,
+              "consumer": 7
+            },
+            {
+              "producer": 7,
+              "consumer": 8
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 8
+          }
+        },
+        "cost": {
+          "total": null,
+          "unit": "cpu_ms_per_s",
+          "per_node": {}
+        }
+      },
+      {
+        "id": "P2",
+        "from_logical": "L2",
+        "label": "Q1 exact · Q2 exact · shared input · sort + limit · query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum_over_time (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "sort"
+                }
+              },
+              "label": "sort by value, partition by job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 6,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "limit"
+                }
+              },
+              "label": "limit 10",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 1,
+              "consumer": 4
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            },
+            {
+              "producer": 5,
+              "consumer": 6
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 6
+          }
+        },
+        "cost": {
+          "total": null,
+          "unit": "cpu_ms_per_s",
+          "per_node": {}
+        }
+      },
+      {
+        "id": "P3",
+        "from_logical": "L3",
+        "label": "Q1 exact · Q2 Count-Min + heap · separate input · build + estimate · query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 6,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Count-Min + top-k heap, one per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 7,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            },
+            {
+              "producer": 5,
+              "consumer": 6
+            },
+            {
+              "producer": 6,
+              "consumer": 7
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 7
+          }
+        },
+        "cost": {
+          "total": null,
+          "unit": "cpu_ms_per_s",
+          "per_node": {}
+        }
+      },
+      {
+        "id": "P4",
+        "from_logical": "L4",
+        "label": "Q1 exact · Q2 Count-Min + heap · shared input · build + estimate · query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Count-Min + top-k heap, one per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 1,
+              "consumer": 4
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 5
+          }
+        },
+        "cost": {
+          "total": null,
+          "unit": "cpu_ms_per_s",
+          "per_node": {}
+        }
+      },
+      {
+        "id": "P5",
+        "from_logical": "L5",
+        "label": "Q1 exact · Q2 Hydra · separate input · build + estimate · query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 6,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Hydra (CMS) over all (job, series) keys + heap per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 7,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            },
+            {
+              "producer": 5,
+              "consumer": 6
+            },
+            {
+              "producer": 6,
+              "consumer": 7
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 7
+          }
+        },
+        "cost": {
+          "total": null,
+          "unit": "cpu_ms_per_s",
+          "per_node": {}
+        }
+      },
+      {
+        "id": "P6",
+        "from_logical": "L6",
+        "label": "Q1 exact · Q2 Hydra · shared input · build + estimate · query time",
+        "dag": {
+          "nodes": [
+            {
+              "id": 0,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "scan"
+                }
+              },
+              "label": "http_requests_total",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 1,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "time_range"
+                }
+              },
+              "label": "range 1m",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 2,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "rate (per series)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 3,
+              "payload": {
+                "kind": "relational",
+                "operator": {
+                  "kind": "aggregate"
+                }
+              },
+              "label": "sum by (job)",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 4,
+              "payload": {
+                "kind": "summary_agg"
+              },
+              "label": "Hydra (CMS) over all (job, series) keys + heap per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            },
+            {
+              "id": 5,
+              "payload": {
+                "kind": "summary_estimate"
+              },
+              "label": "top 10 per job",
+              "output_state": {
+                "timing": "QueryTime"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "producer": 0,
+              "consumer": 1
+            },
+            {
+              "producer": 1,
+              "consumer": 2
+            },
+            {
+              "producer": 2,
+              "consumer": 3
+            },
+            {
+              "producer": 1,
+              "consumer": 4
+            },
+            {
+              "producer": 4,
+              "consumer": 5
+            }
+          ],
+          "query_roots": {
+            "q1": 3,
+            "q2": 5
+          }
+        },
+        "cost": {
+          "total": null,
+          "unit": "cpu_ms_per_s",
+          "per_node": {}
+        }
+      }
+    ]
+  },
+  "stage3_selection": {
+    "selected": "P6",
+    "rejected": [
+      {
+        "id": "P1",
+        "reason": "valid; costlier than P6 (illustrative)"
+      },
+      {
+        "id": "P2",
+        "reason": "valid; costlier than P6 (illustrative)"
+      },
+      {
+        "id": "P3",
+        "reason": "valid; costlier than P6 (illustrative)"
+      },
+      {
+        "id": "P4",
+        "reason": "valid; costlier than P6 (illustrative)"
+      },
+      {
+        "id": "P5",
+        "reason": "valid; costlier than P6 (illustrative)"
+      }
+    ]
+  }
+}
