@@ -1,8 +1,14 @@
-# CSE sharing: rule-based vs. cost-based framework (issue #237)
+# Common sub-DAG sharing: rule-based vs. cost-based framework (issue #237)
 
 > Status: accepted decision for the implementation described here.
 
 ## Context
+
+Sub-DAG sharing means multiple consumers reference one operator and its
+upstream dependencies. Common sub-DAG sharing uses CSE (common subexpression
+elimination) to identify eligible, structurally identical computations. A
+shared logical node records an opportunity for reuse; selecting maintained
+state or independent execution is a separate planning decision.
 
 [`asap_types::pre_asap::cse::share_common_sub_dags`](../../../crates/types/src/pre_asap/cse.rs)
 (issue #223 stages 1-2, PR #235) already *detects* every structurally-identical,

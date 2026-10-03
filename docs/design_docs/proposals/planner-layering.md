@@ -261,7 +261,10 @@ exploits.
 
 #### Pass 2: ASAP-aware common-subexpression elimination
 
-ASAP-aware CSE extends traditional CSE with summary-specific sharing rules.
+**Sub-DAG sharing** means several consumers reference one operator and its
+upstream dependencies. Traditional CSE provides common sub-DAG sharing for
+eligible, structurally identical computations. ASAP-aware CSE extends it with
+summary-specific sharing rules.
 Computations can share work when they use identical expressions, when one
 summary build node supports several estimates, or when one window summary can answer
 their overlapping windows.
