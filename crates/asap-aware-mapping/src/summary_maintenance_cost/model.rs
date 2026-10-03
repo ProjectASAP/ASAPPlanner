@@ -2635,9 +2635,9 @@ mod tests {
     }
 
     #[test]
-    fn state_only_needs_no_evaluation_and_summary_merge_child_fails_closed() {
+    fn state_only_needs_no_evaluation_and_summary_subtract_child_fails_closed() {
         // A state-only root is costable without evaluation evidence; a
-        // SummaryAgg over a reserved SummaryMerge is rejected at planning.
+        // SummaryAgg over a reserved SummarySubtract is rejected at planning.
         let workload = streaming_workload();
         let target = streaming_sum_query();
         let estimated = summary_with_operations(false, false, false);
@@ -2666,7 +2666,7 @@ mod tests {
         let nested = std::rc::Rc::new(
             OperatorNode::with_schema(
                 asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-                    child: evaluation_state(&summary_with_operations(true, false, false)),
+                    child: evaluation_state(&summary_with_operations(false, true, false)),
                     family: FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
                     input: SummaryUpdate {
                         item: None,
@@ -2694,7 +2694,7 @@ mod tests {
         assert!(matches!(
             streaming_planning_error(nested, &nested_model),
             asap_types::post_asap::ExecutionDataStateError::UnimplementedOperator {
-                operator: "SummaryMerge"
+                operator: "SummarySubtract"
             }
         ));
     }

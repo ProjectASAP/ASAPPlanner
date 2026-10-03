@@ -396,8 +396,21 @@ fn validate_asap(
             }
             Ok(())
         }
-        ASAPOp::SummaryMerge { .. }
-        | ASAPOp::SummarySubtract { .. }
+        ASAPOp::SummaryMerge { children } => {
+            for child in children {
+                let state = state_of(child);
+                if state.primitive != DataPrimitive::SummaryState
+                    || (timing == ExecutionTiming::IngestionTime && state.timing != timing)
+                {
+                    return Err(ExecutionDataStateError::IllegalChildDataState {
+                        edge: "SummaryMerge.children",
+                        child: state,
+                    });
+                }
+            }
+            Ok(())
+        }
+        ASAPOp::SummarySubtract { .. }
         | ASAPOp::SummaryDelete { .. }
         | ASAPOp::SummaryJoin { .. }
         | ASAPOp::Extension { .. } => Err(ExecutionDataStateError::UnimplementedOperator {
