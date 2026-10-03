@@ -119,3 +119,15 @@ skipped because Node.js is unavailable in this environment). The vendored Metric
 verifying its existing 21 library and 3 doctest failures. Rust 1.98 changes one
 compiler-diagnostic fingerprint; no baseline hashes or vendored sources were
 changed to accommodate that older toolchain. Formatting and clippy pass on 1.99.
+
+## Planner-layering follow-up: mergeable state
+
+`ASAPOp::SummaryMerge` now derives and checks its shared schema, preserves the
+state family and parameters, and validates dependencies at either execution
+phase. Empty merges, raw inputs and differing state/grouping schemas fail.
+`types/tests/summary_merge.rs` checks these contracts and executable export.
+`integration-tests/tests/planner_layering_merge.rs` builds five one-minute KLL
+states, merges them through unified export/native compilation, and checks p99
+for both rebuilding raw inputs and reading materialized panes (Examples 3B/4B).
+This proves the merge building block; automatic window candidate generation and
+Exponential Histogram construction remain separate work.

@@ -134,8 +134,8 @@ pub enum ExecutionDataStateError {
     /// declared data_state.
     #[error("exact operator consumes non-plain column {column:?} ({dtype})")]
     NonPlainOperand { column: String, dtype: String },
-    /// A reserved ASAP operator (`SummaryMerge`, `SummarySubtract`,
-    /// `SummaryDelete`, `SummaryJoin`, `Extension`) in an executable plan.
+    /// A reserved ASAP operator (`SummarySubtract`, `SummaryDelete`,
+    /// `SummaryJoin`, `Extension`) in an executable plan.
     #[error("{operator} is a reserved operator with no execution contract yet")]
     UnimplementedOperator { operator: &'static str },
     /// A node reached by export without a timing: the lifecycle timing pass
