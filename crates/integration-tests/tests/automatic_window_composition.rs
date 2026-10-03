@@ -18,6 +18,16 @@ use std::{collections::BTreeMap, sync::Arc};
 /// Generate panes from one five-minute state and find its producer/reader split automatically.
 #[test]
 fn automatic_panes_and_materialization_preserve_quantile() {
+    execute_generated_panes(false);
+}
+
+/// Per-series PromQL panes preserve temporal metadata through the native wire compiler.
+#[test]
+fn automatic_per_series_panes_preserve_quantile() {
+    execute_generated_panes(true);
+}
+
+fn execute_generated_panes(per_series: bool) {
     let family = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
         Default::default(),
@@ -27,7 +37,17 @@ fn automatic_panes_and_materialization_preserve_quantile() {
             metric: "events".into(),
         },
         predicates: vec![],
-        schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
+        schema: if per_series {
+            Schema::lifted(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                Some(0),
+            )
+        } else {
+            Schema::new(vec![Field::plain("value", DataType::Float64, false)])
+        },
     }))
     .unwrap();
     let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
@@ -40,7 +60,11 @@ fn automatic_panes_and_materialization_preserve_quantile() {
         child: range,
         family,
         input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::by(vec![]),
+        reduction: if per_series {
+            Reduction::PerEntity
+        } else {
+            Reduction::by(vec![])
+        },
         grouping: GroupingStrategy::default(),
         filter: None,
     }))
@@ -92,7 +116,16 @@ fn automatic_panes_and_materialization_preserve_quantile() {
             Batch::try_new(
                 schema,
                 (0..20)
-                    .map(|i| vec![Value::Float64((pane * 20 + i) as f64)])
+                    .map(|i| {
+                        if per_series {
+                            vec![
+                                Value::Timestamp((pane * 20 + i) as i64 * 1000),
+                                Value::Float64((pane * 20 + i) as f64),
+                            ]
+                        } else {
+                            vec![Value::Float64((pane * 20 + i) as f64)]
+                        }
+                    })
                     .collect(),
             )
             .unwrap(),
@@ -161,9 +194,21 @@ fn automatic_panes_and_materialization_preserve_quantile() {
         .iter()
         .copied()
         .zip(stored)
-        .map(|(id, mut batches)| {
+        .enumerate()
+        .map(|(pane, (id, mut batches))| {
             assert_eq!(batches.len(), 1);
-            (id, batches.remove(0))
+            let mut batch = batches.remove(0);
+            if per_series {
+                // Retained panes can have different build timestamps; the
+                // merged answer must carry the query's evaluation timestamp.
+                let mut rows = batch.rows().to_vec();
+                let time = batch.schema().time_index.unwrap();
+                for row in &mut rows {
+                    row[time] = Value::Timestamp((pane as i64 + 1) * 60_000);
+                }
+                batch = Batch::try_new(batch.schema().clone(), rows).unwrap();
+            }
+            (id, batch)
         })
         .collect();
     let retained_outputs = physical_common::execute(
@@ -174,13 +219,25 @@ fn automatic_panes_and_materialization_preserve_quantile() {
             revision: 1,
         },
     );
+    if per_series {
+        assert!(matches!(
+            retained_outputs[0][0].rows()[0][0],
+            Value::Timestamp(300_000)
+        ));
+        assert!(matches!(
+            outputs[0][0].rows()[0][0],
+            Value::Timestamp(300_000)
+        ));
+    }
     assert_eq!(retained_outputs[0][0].rows().len(), 1);
-    assert!(
-        matches!(retained_outputs[0][0].rows()[0].as_slice(), [Value::Float64(value)] if *value == 98.0)
-    );
+    assert!(retained_outputs[0][0].rows()[0]
+        .iter()
+        .any(|value| matches!(value, Value::Float64(value) if *value == 98.0)));
     assert_eq!(outputs[0][0].rows().len(), 1);
     assert!(
-        matches!(outputs[0][0].rows()[0].as_slice(), [Value::Float64(value)] if *value == 98.0),
+        outputs[0][0].rows()[0]
+            .iter()
+            .any(|value| matches!(value, Value::Float64(value) if *value == 98.0)),
         "{:?}",
         outputs[0][0].rows()
     );
