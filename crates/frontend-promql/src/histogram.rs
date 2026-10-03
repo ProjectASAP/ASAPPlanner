@@ -1,18 +1,10 @@
 //! Sample-type metadata for the `histogram_quantile` discrimination (issue #79).
 //!
-//! `histogram_quantile(φ, m)` has two lowerings: exact interpolation over
-//! classic cumulative `le` buckets (`AggIntent::HistogramQuantile`, **not**
-//! sketch-able) versus the generic sketch-able `Quantile` (native histograms /
-//! raw samples, which post-ASAP binding can approximate to an accuracy
-//! target). The true
-//! signal is the argument's **sample type**, which query structure only
-//! *proxies* — see the structural `is_classic_bucket_arg` heuristic, whose
-//! false-positive (`…_bucket`-named non-histogram) and false-negative
-//! (suffix-less classic histogram) cases this metadata fixes.
-//!
-//! A client that knows its sample types supplies a [`HistogramCatalog`]; it is
-//! consulted first, and the structural heuristic remains the fallback when a
-//! metric is undeclared.
+//! Classic cumulative buckets use exact interpolation. The explicitly declared
+//! `RawSamples` extension permits generic quantile sketches; it is not standard
+//! PromQL histogram semantics. Native samples are rejected until the IR has a
+//! native histogram sample type. Undeclared metrics require classic bucket
+//! evidence (`by (le)`, a `_bucket` metric, or an `le` matcher).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,7 +17,7 @@ pub enum HistogramKind {
     /// distribution can't be reconstructed from them, so it is **not**
     /// sketch-able: `histogram_quantile` is exact bucket interpolation.
     ClassicBucket,
-    /// Native (exponential) histogram — sketch-able to an accuracy target.
+    /// Native histogram samples; currently rejected because the IR lacks their type.
     Native,
     /// Raw float samples the client retains — sketch-able. This is the case the
     /// generic `Quantile` lowering exists for (a client holding raw samples can
@@ -37,7 +29,7 @@ impl HistogramKind {
     /// Whether `histogram_quantile` over this kind lowers to the sketch-able
     /// generic `Quantile` (`true`) rather than exact bucket interpolation.
     pub fn is_sketchable(self) -> bool {
-        !matches!(self, HistogramKind::ClassicBucket)
+        matches!(self, HistogramKind::RawSamples)
     }
 }
 
@@ -106,9 +98,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_classic_buckets_are_not_sketchable() {
+    fn only_explicit_raw_samples_are_sketchable() {
         assert!(!HistogramKind::ClassicBucket.is_sketchable());
-        assert!(HistogramKind::Native.is_sketchable());
+        assert!(!HistogramKind::Native.is_sketchable());
         assert!(HistogramKind::RawSamples.is_sketchable());
     }
 

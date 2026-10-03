@@ -24,7 +24,8 @@ impl Operator {
                         } else {
                             t.clone()
                         },
-                        false,
+                        !input.has_promql_series_identity()
+                            && (groups.is_empty() || plain(&input, *i)?.1),
                     )
                 }
                 Reduction::Quantile { column, q } => {
@@ -183,7 +184,8 @@ async fn reduce(
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     let mut grouped = BTreeMap::<Vec<Vec<u8>>, Vec<Vec<Value>>>::new();
-    if rows.is_empty() && groups.is_empty() {
+    // PromQL sums over an empty vector emit no sample.
+    if rows.is_empty() && groups.is_empty() && !input.has_promql_series_identity() {
         grouped.insert(vec![], vec![]);
     }
     for row in rows {
@@ -318,6 +320,9 @@ async fn reduce_one(
                 .ok_or_else(|| invalid("integer aggregate overflow"))?;
             count += 1;
         }
+        if count == 0 && !input.has_promql_series_identity() {
+            return Ok(Value::Null);
+        }
         return if matches!(measure, Reduction::Avg(_)) {
             Ok(Value::Float64(sum as f64 / count as f64))
         } else {
@@ -333,6 +338,9 @@ async fn reduce_one(
             return Err(invalid("floating aggregate value required"));
         };
         floats.push(*v);
+    }
+    if floats.is_empty() && !input.has_promql_series_identity() {
+        return Ok(Value::Null);
     }
     Ok(Value::Float64(if matches!(measure, Reduction::Avg(_)) {
         promql_avg(&floats)

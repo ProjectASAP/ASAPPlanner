@@ -7,16 +7,18 @@ use asap_physical_operators::{
     Error,
 };
 use futures::{executor::block_on, FutureExt, StreamExt};
+use planner_types::ir::Predicate;
+use planner_types::ir::ScalarExpr as QueryExpr;
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema},
-    pre_asap::{DataType, JoinKind, Predicate, QueryExpr, ScalarValue},
+    post_asap::{Field, FieldDataType},
+    pre_asap::{DataType, JoinKind, ScalarValue},
 };
 use std::sync::Arc;
 
 fn schema(width: usize) -> SchemaRef {
-    Arc::new(Schema {
-        closed: true,
+    Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: (0..width)
             .map(|i| Field {
                 table: None,
@@ -60,9 +62,7 @@ fn cross_join() -> Operator {
         schema(1),
         schema(1),
         JoinKind::Cross,
-        &Predicate(std::rc::Rc::new(QueryExpr::Literal(ScalarValue::Boolean(
-            true,
-        )))),
+        &Predicate(QueryExpr::Literal(ScalarValue::Boolean(true))),
         schema(2),
     )
     .unwrap()
@@ -189,9 +189,10 @@ fn cooperative_sort_preserves_ties_across_chunks() {
 #[test]
 fn weighted_summary_build_yields_within_a_batch() {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
-    let input = Arc::new(Schema {
-        closed: true,
+
+    let input = Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![
             Field {
                 table: None,

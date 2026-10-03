@@ -2,7 +2,7 @@
 use super::increase::IncreaseAccumulator;
 use crate::Statistic;
 use crate::{AggregateCore, KeyByLabelValues, Measurement};
-use planner_types::post_asap::{ExactKind, ExactParams, FieldDataType};
+use planner_types::post_asap::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -10,7 +10,11 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ScalarState {
-    Sum { sum: f64, compensation: f64 },
+    Sum {
+        sum: f64,
+        compensation: f64,
+        seen: bool,
+    },
     Count(u64),
     Min(Option<f64>),
     Max(Option<f64>),
@@ -18,7 +22,7 @@ enum ScalarState {
 }
 
 /// Both the family and population layout survive persistence. Sharing counter
-/// arithmetic never authorizes a Rate state to answer an Increase readout.
+/// arithmetic never authorizes a Rate state to answer an Increase evaluation.
 ///
 /// Deserialization validates the payload against its declared family, so
 /// deployments can persist this state with any serde format without mirroring
@@ -26,14 +30,14 @@ enum ScalarState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "ExactPayload")]
 pub struct ExactAccumulator {
-    family: FieldDataType,
+    family: SummaryFamilyType,
     scalar: ScalarState,
     keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
 }
 
 #[derive(Deserialize)]
 struct ExactPayload {
-    family: FieldDataType,
+    family: SummaryFamilyType,
     scalar: ScalarState,
     keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
 }
@@ -63,10 +67,10 @@ impl TryFrom<ExactPayload> for ExactAccumulator {
     }
 }
 
-/// Planned readout of an exact summary. `lookback_ms` is the logical PromQL
+/// Planned evaluation of an exact summary. `lookback_ms` is the logical PromQL
 /// counter window; the evaluation range is resolved from it at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ExactReadout {
+pub struct ExactEvaluation {
     pub statistic: Statistic,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookback_ms: Option<i64>,
@@ -75,22 +79,24 @@ pub struct ExactReadout {
 impl ExactAccumulator {
     /// Read one population. An empty MIN/MAX population reads as `None`.
     /// `range_ms` extrapolates a counter Rate/Increase to that evaluation range.
-    pub fn readout(
+    pub fn evaluation(
         &self,
         statistic: Statistic,
         range_ms: Option<(i64, i64)>,
         key: Option<&KeyByLabelValues>,
     ) -> Result<Option<f64>, Error> {
         if statistic != self.statistic() {
-            return Err("readout differs from Planner exact family".into());
+            return Err("evaluation differs from Planner exact family".into());
         }
         let state = match (&self.keyed, key) {
             (Some(states), Some(key)) => states.get(key).ok_or("unknown exact population")?,
             (None, None) => &self.scalar,
-            _ => return Err("readout population differs from installed layout".into()),
+            _ => return Err("evaluation population differs from installed layout".into()),
         };
         match state {
-            ScalarState::Sum { sum, compensation } => Ok(Some(sum + compensation)),
+            ScalarState::Sum {
+                sum, compensation, ..
+            } => Ok(Some(sum + compensation)),
             ScalarState::Count(count) => Ok(Some(*count as f64)),
             ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
             ScalarState::Counter(Some(counter)) => counter
@@ -98,6 +104,11 @@ impl ExactAccumulator {
                 .map(Some),
             ScalarState::Counter(None) => Err("empty counter population".into()),
         }
+    }
+
+    /// SQL SUM distinguishes an empty/all-NULL input from an observed zero.
+    pub(crate) fn is_empty_sum(&self) -> bool {
+        self.keyed.is_none() && matches!(self.scalar, ScalarState::Sum { seen: false, .. })
     }
 
     /// Exact integer count of an unkeyed Count state.
@@ -128,19 +139,22 @@ impl ExactAccumulator {
         Ok(())
     }
 
-    pub fn new(family: FieldDataType, keyed: bool) -> Result<Self, String> {
+    pub fn new(family: SummaryFamilyType, keyed: bool) -> Result<Self, String> {
         use ExactKind as K;
         use ExactParams as P;
         let scalar = match &family {
-            FieldDataType::ExactAggregate(K::Sum, P::Sum) => ScalarState::Sum {
+            SummaryFamilyType::ExactAggregate(K::Sum, P::Sum) => ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,
+                seen: false,
             },
-            FieldDataType::ExactAggregate(K::Count, P::Count) => ScalarState::Count(0),
-            FieldDataType::ExactAggregate(K::Min, P::Min) => ScalarState::Min(None),
-            FieldDataType::ExactAggregate(K::Max, P::Max) => ScalarState::Max(None),
-            FieldDataType::ExactAggregate(K::Rate, P::Rate)
-            | FieldDataType::ExactAggregate(K::Increase, P::Increase) => ScalarState::Counter(None),
+            SummaryFamilyType::ExactAggregate(K::Count, P::Count) => ScalarState::Count(0),
+            SummaryFamilyType::ExactAggregate(K::Min, P::Min) => ScalarState::Min(None),
+            SummaryFamilyType::ExactAggregate(K::Max, P::Max) => ScalarState::Max(None),
+            SummaryFamilyType::ExactAggregate(K::Rate, P::Rate)
+            | SummaryFamilyType::ExactAggregate(K::Increase, P::Increase) => {
+                ScalarState::Counter(None)
+            }
             _ => return Err(format!("unsupported exact Planner family: {family:?}")),
         };
         Ok(Self {
@@ -150,7 +164,7 @@ impl ExactAccumulator {
         })
     }
 
-    pub fn family(&self) -> &FieldDataType {
+    pub fn family(&self) -> &SummaryFamilyType {
         &self.family
     }
     pub(crate) fn insufficient_counter_samples(
@@ -188,7 +202,14 @@ impl ExactAccumulator {
             _ => panic!("exact update population layout differs from installed DAG"),
         };
         match state {
-            ScalarState::Sum { sum, compensation } => compensated_add(sum, compensation, value),
+            ScalarState::Sum {
+                sum,
+                compensation,
+                seen,
+            } => {
+                compensated_add(sum, compensation, value);
+                *seen = true;
+            }
             ScalarState::Count(count) => {
                 *count = count.checked_add(1).expect("exact count overflow")
             }
@@ -214,12 +235,12 @@ impl ExactAccumulator {
 
     fn statistic(&self) -> Statistic {
         match self.family {
-            FieldDataType::ExactAggregate(ExactKind::Sum, _) => Statistic::Sum,
-            FieldDataType::ExactAggregate(ExactKind::Count, _) => Statistic::Count,
-            FieldDataType::ExactAggregate(ExactKind::Min, _) => Statistic::Min,
-            FieldDataType::ExactAggregate(ExactKind::Max, _) => Statistic::Max,
-            FieldDataType::ExactAggregate(ExactKind::Rate, _) => Statistic::Rate,
-            FieldDataType::ExactAggregate(ExactKind::Increase, _) => Statistic::Increase,
+            SummaryFamilyType::ExactAggregate(ExactKind::Sum, _) => Statistic::Sum,
+            SummaryFamilyType::ExactAggregate(ExactKind::Count, _) => Statistic::Count,
+            SummaryFamilyType::ExactAggregate(ExactKind::Min, _) => Statistic::Min,
+            SummaryFamilyType::ExactAggregate(ExactKind::Max, _) => Statistic::Max,
+            SummaryFamilyType::ExactAggregate(ExactKind::Rate, _) => Statistic::Rate,
+            SummaryFamilyType::ExactAggregate(ExactKind::Increase, _) => Statistic::Increase,
             _ => unreachable!("validated exact family"),
         }
     }
@@ -244,16 +265,22 @@ fn merge_scalar(left: &ScalarState, right: &ScalarState) -> Result<ScalarState, 
             ScalarState::Sum {
                 sum: a,
                 compensation: ac,
+                seen: a_seen,
             },
             ScalarState::Sum {
                 sum: b,
                 compensation: bc,
+                seen: b_seen,
             },
         ) => {
             let (mut sum, mut compensation) = (*a, *ac);
             compensated_add(&mut sum, &mut compensation, *b);
             compensated_add(&mut sum, &mut compensation, *bc);
-            ScalarState::Sum { sum, compensation }
+            ScalarState::Sum {
+                sum,
+                compensation,
+                seen: *a_seen || *b_seen,
+            }
         }
         (ScalarState::Count(a), ScalarState::Count(b)) => {
             ScalarState::Count(a.checked_add(*b).ok_or("exact count overflow")?)
@@ -311,7 +338,7 @@ mod tests {
 
     #[derive(Serialize)]
     struct Payload {
-        family: FieldDataType,
+        family: SummaryFamilyType,
         scalar: ScalarState,
         keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
     }
@@ -320,8 +347,8 @@ mod tests {
         rmp_serde::from_slice(&rmp_serde::to_vec_named(payload).unwrap())
     }
 
-    fn sum() -> FieldDataType {
-        FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+    fn sum() -> SummaryFamilyType {
+        SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
     }
 
     // Stored Sum preserves low-order increments across updates, persistence and pane merge.
@@ -337,7 +364,7 @@ mod tests {
         negative.update(None, -1e16, 1);
         restored.merge_from(&negative).unwrap();
         assert_eq!(
-            restored.readout(Statistic::Sum, None, None).unwrap(),
+            restored.evaluation(Statistic::Sum, None, None).unwrap(),
             Some(1.0)
         );
     }
@@ -349,18 +376,18 @@ mod tests {
         state.update(None, f64::INFINITY, 0);
         state.update(None, 1.0, 0);
         assert_eq!(
-            state.readout(Statistic::Sum, None, None).unwrap(),
+            state.evaluation(Statistic::Sum, None, None).unwrap(),
             Some(f64::INFINITY)
         );
         state.update(None, f64::NEG_INFINITY, 0);
         assert!(state
-            .readout(Statistic::Sum, None, None)
+            .evaluation(Statistic::Sum, None, None)
             .unwrap()
             .unwrap()
             .is_nan());
     }
 
-    // A persisted exact state decodes back to the same family, layout and readout.
+    // A persisted exact state decodes back to the same family, layout and evaluation.
     #[test]
     fn serialized_state_round_trips() {
         let mut state = ExactAccumulator::new(sum(), true).unwrap();
@@ -370,7 +397,9 @@ mod tests {
         let restored: ExactAccumulator = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(restored.family(), &sum());
         assert_eq!(
-            restored.readout(Statistic::Sum, None, Some(&key)).unwrap(),
+            restored
+                .evaluation(Statistic::Sum, None, Some(&key))
+                .unwrap(),
             Some(2.5)
         );
     }
@@ -390,6 +419,7 @@ mod tests {
             scalar: ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,
+                seen: false,
             },
             keyed: Some(HashMap::from([(key, ScalarState::Max(Some(1.0)))])),
         };
@@ -400,10 +430,11 @@ mod tests {
     #[test]
     fn decode_rejects_unsupported_family() {
         let payload = Payload {
-            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Count),
+            family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Count),
             scalar: ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,
+                seen: false,
             },
             keyed: None,
         };

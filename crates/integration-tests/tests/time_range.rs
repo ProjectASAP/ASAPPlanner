@@ -1,46 +1,53 @@
-//! `QueryExpr::TimeRange` — range / streaming function tests.
+//! `NonASAPOp::TimeRange` — range / streaming function tests.
 //!
-//! All range functions lower to `Aggregate { child: TimeRange { range, child: Scan } }`.
+//! All range functions lower to `Aggregate { child: TimeRange { range, kind: Range, child: Scan } }`.
 //! The temporal range lives on the `TimeRange` node, not in the `AggIntent`.
 //! `rate` / `increase` use `AggIntent::Rate` / `AggIntent::Increase` (no window field).
 //! `*_over_time` functions reuse the corresponding cross-series intents
-//! (`Count`, `Sum`, `Quantile`, …) — the `TimeRange` child is what marks them
-//! as per-series reductions.
+//! (`Count`, `Sum`, `Quantile`, …) — the `Range` selector child is what marks
+//! them as per-series reductions.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
+use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
+use asap_types::pre_asap::{AggIntent, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> QueryExpr {
+fn lower(q: &str) -> Rc<OperatorNode> {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
-fn scan(metric: &str) -> QueryExpr {
-    QueryExpr::Scan {
+fn node(op: NonASAPOp) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(op))
+        .expect("fixture node derives its schema")
+}
+
+fn scan(metric: &str) -> Rc<OperatorNode> {
+    node(NonASAPOp::Scan {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
         predicates: vec![],
         schema: metric_schema(&[]),
-    }
+    })
 }
 
-fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> QueryExpr {
-    QueryExpr::Aggregate {
+fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> Rc<OperatorNode> {
+    node(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec!["".into()],
         filters: vec![],
         having: None,
-        child: Rc::new(QueryExpr::TimeRange {
+        child: node(NonASAPOp::TimeRange {
             range: Duration::from_secs(range_secs),
-            child: Rc::new(scan(metric)),
+            kind: TimeRangeKind::Range,
+            child: scan(metric),
         }),
-    }
+    })
 }
 
 // #13 — rate: counter-reset-aware per-second rate; range on TimeRange node

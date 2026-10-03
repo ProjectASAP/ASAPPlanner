@@ -1,10 +1,9 @@
 //! PromQL label-set rewriting and binary operators over rows that carry a
 //! series identity or plain label columns.
 use super::*;
-use planner_types::{
-    post_asap::BinaryOperator,
-    pre_asap::{schema::PROMQL_SERIES_IDENTITY, BinaryOpKind, VectorMatchKind},
-};
+use crate::expressions::binary::BinaryOpKind;
+use crate::expressions::binary::BinaryOperator;
+use planner_types::pre_asap::{schema::PROMQL_SERIES_IDENTITY, VectorMatchKind};
 
 type Labels = BTreeMap<String, String>;
 
