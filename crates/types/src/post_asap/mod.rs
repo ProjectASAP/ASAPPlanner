@@ -20,7 +20,7 @@
 //! sketch-valued edge types.
 //!
 //! The rest: accuracy guarantees ([`guarantee`]), maintained populations,
-//! summary windows and maintenance lifecycle, and the execution timing /
+//! summary-window panes, and the execution timing /
 //! data-state vocabulary ([`execution_data_state`]).
 
 pub mod execution_data_state;
@@ -28,8 +28,6 @@ pub mod guarantee;
 pub mod maintained_population;
 pub mod query_time;
 pub mod sketch;
-pub mod summary_maintenance;
-pub mod summary_maintenance_lifecycle;
 pub mod summary_window;
 
 pub use crate::pre_asap::schema::{Field, FieldDataType, Schema};
@@ -51,12 +49,6 @@ pub use sketch::{
     SketchCategory, SketchKind, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
     SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
 };
-pub use summary_maintenance::SummaryMaintenanceMode;
-pub use summary_maintenance_lifecycle::{
-    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee,
-};
 pub use summary_window::{
-    plan_pane_phase, validate_pane_coverage, PaneCoverageError, PaneLayout, SummaryWindowFramework,
-    WindowEdgeCoverage,
+    plan_pane_phase, validate_pane_coverage, PaneCoverageError, PaneLayout, WindowEdgeCoverage,
 };

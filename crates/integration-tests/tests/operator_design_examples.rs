@@ -270,46 +270,15 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// and executes both selected plans. No replacement dag is constructed by the test.
 #[tokio::test]
 async fn batch_planning_replaces_and_shares_summary_operators() {
-    use asap_aware_mapping::cost_model::{Cost, DefaultCostModel};
     use asap_aware_mapping::pass::PlanningModels;
-    use asap_aware_mapping::{
-        CostModel, CostRate, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
-        SummaryMaintenanceLifecycleCostInputs,
-    };
     use asap_physical_operators::{
         physical_planner::{compile, InputContract},
         runtime::Scope,
         values::{Batch, Value},
     };
     use asap_planner::{e2e_plan, FrontendInput, UserInput};
-    use asap_types::post_asap::SketchAlgorithm;
     use asap_types::workload::*;
     use std::{collections::BTreeMap, sync::Arc};
-    struct Costs;
-    impl CostModel for Costs {
-        fn rank_candidates(
-            &self,
-            intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            DefaultCostModel.rank_candidates(intent, candidates)
-        }
-        fn summary_maintenance_lifecycle_cost_inputs(
-            &self,
-            _: &OperatorNode,
-        ) -> SummaryMaintenanceLifecycleCostInputs {
-            SummaryMaintenanceLifecycleCostInputs {
-                build_cost: Some(Cost(1.0)),
-                maintenance_cost_per_update: Some(Cost::ZERO),
-                summary_read_cost: Some(Cost::ZERO),
-                retention_cost_rate: Some(CostRate(0.0)),
-                retirement_cost: Some(Cost::ZERO),
-            }
-        }
-        fn raw_query_recompute_cost(&self, _: &OperatorNode) -> Option<Cost> {
-            Some(Cost(1000.0))
-        }
-    }
     let queries = [
         "SELECT SUM(bytes) + 1 AS result FROM requests",
         "SELECT SUM(bytes) * 2 AS result FROM requests",
@@ -347,8 +316,7 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
     let output = e2e_plan(UserInput::new(
         &workload,
         FrontendInput::Sql { catalog: &catalog },
-        PlanningModels::builtin().with_cost(&Costs),
-        LifecycleInput::new(0, SummaryMaintenanceLifecycleCapabilities::default()),
+        PlanningModels::builtin(),
     ))
     .await
     .unwrap();
@@ -361,8 +329,7 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
         .collect();
     assert_eq!(states.len(), 1, "the batch owns one shared SUM state");
     for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
-        assert!(!plan.plan.selected_raw_recompute);
-        let root = &plan.plan.root;
+        let root = &plan.root;
         root.validate_structure().unwrap();
         assert!(OperatorNode::reachable(root)
             .iter()
