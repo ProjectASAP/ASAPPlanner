@@ -50,6 +50,10 @@
 //!   values containing DAG roots and maintenance decisions; callers do not need
 //!   to run ordinary selection/assembly first.
 //!
+//! - Choose [`pass::CompletePass`] for bounded exhaustive workload search,
+//!   including exact pane composition, partial sharing and lifecycle assignments.
+//!   It requires complete workload costs and never falls back to a heuristic.
+//!
 //! Models and evidence determine which choices the helpers can justify.
 //! Physical operator binding, placement, storage, deployment, and execution
 //! remain downstream responsibilities. Neither taking the first candidate nor

@@ -25,8 +25,9 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_aware_mapping::pass::{
-    optimize, LifecycleInput, MajorPass, OptimizationInput, OptimizationPass, OptimizeError,
-    PassRegistry, PlanOutput, PlanningModels, QueryLifecyclePlan,
+    optimize, CompletePass, CompleteWorkloadInventory, LifecycleInput, MajorPass,
+    OptimizationInput, OptimizationPass, OptimizeError, PassRegistry, PlanOutput, PlanningModels,
+    QueryLifecyclePlan,
 };
 
 // ── Input ────────────────────────────────────────────────────────────────

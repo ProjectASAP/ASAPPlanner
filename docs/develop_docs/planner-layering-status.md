@@ -8,10 +8,10 @@ is a target contract, not a statement that its examples execute today.
 | --- | --- | --- |
 | Language frontends and common logical IR | SQL/PromQL/MetricsQL lower to unified operators and scalars. | Floating-point SQL frequency L2 products and the normalized natural-log entropy idiom now have conservative logical rewrites. Integer L2 products remain unrecognized. Preserve alias lineage, filters, NULL groups, empty inputs, count overflow and entropy units when adding recognition. |
 | Local exact and summary alternatives | `replacement::summary_candidates`, realization rules and candidate inventory exist; supplied accuracy models reach Pass 1. | Specialized entropy/norm families in Example 2 are illustrative, not registered families. UnivMon certifies only unit-update total count; L2, entropy and cardinality epsilon/delta bounds need verified evidence or a deployment model. |
-| Summary-capability sharing | CSE interns structurally identical producers, including states with different readers. | It does not enumerate all partial sharing partitions or resize compatible states to the strictest consumer. Example 2's 37 candidates are not an acceptance result. |
+| Summary-capability sharing | CSE interns structurally identical producers, including states with different readers. | The strict complete pass enumerates partial sharing partitions for identical admitted producers. It does not resize different state parameters to the strictest consumer. Example 2's 37 candidates are not an acceptance result. |
 | Window composition | Mergeable state IR/native merge exists; physical pane compatibility and reuse cost helpers exist. | Cadence-based disjoint pane composition and automatic native materialization-frontier enumeration are available (acceptance below). Retained rotating panes, historical EH buckets and boundary-error certificates remain separate runtime work. |
 | Physical materialization | Ephemeral/prepared/shared/continuously maintained lifecycle alternatives, costing, capabilities and latency checks exist. | Incremental query-time pane retention, historical backfill and the complete Example 4 matrix need executable implementations and explicit state/input contracts. |
-| Whole-workload selection | One unified selected DAG; shared states are interned and costed across their consumers. | `replacement.rs` documents its selection as non-exhaustive over interacting choices. The proposal's cheapest complete candidate guarantee and 54/156 inventories need a complete workload search/selection path. |
+| Whole-workload selection | One unified selected DAG; shared states are interned and costed across their consumers. | `MajorPass` remains non-exhaustive and rank-compatible. `CompletePass` supplies an exhaustive complete-cost path (acceptance below); the illustrative 54/156 counts are not asserted without their rule sets. |
 | Deployment inputs and execution | `PlanningModels` bundles cost, accuracy, evidence and capabilities; native typed UnivMon supports one build with three readouts. | At #557 native exact distinct/L2/entropy fallback is absent; the follow-ups supply those native bindings. End-to-end SQL Example 2 is not established by the native UnivMon fixture. |
 | Subtract/delete, parallelism, partitioning and resource planning | Some runtime memory/cancellation limits and maintenance capability flags exist. | These remain proposal TODOs; capability flags do not supply missing IR operators or a physical resource search. |
 
@@ -126,3 +126,35 @@ panes execute identically with and without retained outputs. The deployment
 still supplies each selector's exact raw window and binds retained outputs to
 that window/revision. This does not introduce a rotating pane cache or claim
 that cadence alone certifies compatibility with a catalog's pane origin.
+
+## Complete workload selection acceptance
+
+`pass::CompletePass` is registered as `complete` and re-exported by the planner
+facade. Choose it with `UserInput::with_pass(&CompletePass::default())`, or call
+`optimize` on an existing `ParsedWorkload`. It is opt-in because the default
+`major` pass accepts rank-only models; a rank cannot certify a complete cost.
+
+The pass enumerates the registered logical inventory, cadence-derived pane
+compositions, every partial partition of identical sharing-legal producers,
+and every legal lifecycle assignment. It checks shared lifecycle/window
+consistency and executable phase contracts before comparing complete workload
+quotes. Each state is bound to the union of precisely its consumers; a shared
+producer is charged once by the additive cost hook. Nonadditive deployments
+override `CostModel::complete_workload_candidate_cost`, including interactions
+between roots and their physical implementation choices. Scalar workloads need
+a complete-workload override because the legacy per-root hooks do not price
+scalar execution. Missing/invalid quotes are retained as rejection reasons.
+
+`CompletePass::enumerate` exposes priced full assignments and rejection reasons;
+selection returns the cheapest quote in that inventory and records
+`PlanOutput::workload_total_cost`. An exceeded logical, pane, partition or
+lifecycle budget is an error even if a priced candidate was already found.
+There is no heuristic fallback. This guarantee is over registered alternatives
+with valid complete evidence; it does not invent missing sketch certificates,
+physical implementations or additional parameter-sizing rules.
+
+`integration-tests/tests/complete_workload_selection.rs` executes a winner that
+local ranking would miss, finds a winning partial partition, checks union-demand
+retention and single producer charging, and rejects budget exhaustion/unknown
+costs. Native `compile_materialization_candidates` supplies the executable
+frontier inventory to deployment models that compare physical placements.

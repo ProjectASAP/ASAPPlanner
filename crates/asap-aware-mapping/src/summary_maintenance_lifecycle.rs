@@ -391,6 +391,7 @@ pub enum SummaryMaintenanceLifecycleSelectionError {
 /// Planner selection ([`plan_summary_maintenance_lifecycles`]) and a
 /// deployment's explicit choice ([`Self::select`]) both finish from this value,
 /// so they produce the same [`SummaryMaintenanceLifecyclePlan`] shape.
+#[derive(Clone)]
 pub struct SummaryMaintenanceLifecycleCandidates<'a> {
     /// Unselected plan: deployments carry alternatives but no guarantee or
     /// window framework.
@@ -405,6 +406,8 @@ pub struct SummaryMaintenanceLifecycleCandidates<'a> {
 /// Why an explicit per-state lifecycle choice cannot be bound.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SummaryMaintenanceLifecycleChoiceError {
+    #[error("lifecycle enumeration exceeds candidate budget; no partial inventory returned")]
+    BudgetExceeded,
     #[error("summary {0:?} is not a deployment of this root")]
     UnknownSummary(PostAsapNodeId),
     #[error("summary {0:?} is chosen more than once")]
@@ -425,6 +428,58 @@ pub enum SummaryMaintenanceLifecycleChoiceError {
 }
 
 impl SummaryMaintenanceLifecycleCandidates<'_> {
+    /// Every fully costed, legal lifecycle assignment, rather than only the
+    /// per-root cheapest assignment. Whole-workload selection needs this
+    /// inventory because sharing can change which assignment wins.
+    pub fn enumerate_plans(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleChoiceError> {
+        use SummaryMaintenanceLifecycleChoiceError as E;
+        if limit == 0 {
+            return Err(E::BudgetExceeded);
+        }
+        let options: Vec<Vec<_>> = self
+            .plan
+            .deployments
+            .iter()
+            .map(|deployment| {
+                deployment
+                    .alternatives
+                    .iter()
+                    .filter(|alternative| self.context().eligible(alternative))
+                    .map(|alternative| {
+                        (
+                            deployment.post_asap_node_id,
+                            alternative.summary_maintenance_lifecycle.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let count = options
+            .iter()
+            .try_fold(1usize, |count, options| count.checked_mul(options.len()))
+            .filter(|count| *count <= limit)
+            .ok_or(E::BudgetExceeded)?;
+        let mut plans = Vec::new();
+        for mut ordinal in 0..count {
+            let choices: Vec<_> = options
+                .iter()
+                .map(|options| {
+                    let choice = options[ordinal % options.len()].clone();
+                    ordinal /= options.len();
+                    choice
+                })
+                .collect();
+            match self.clone().select(&choices) {
+                Ok(plan) => plans.push(plan),
+                Err(E::NoCompleteEstimate | E::IncompatibleEvaluationSchedules) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(plans)
+    }
     /// One entry per unique retained state (see
     /// [`SummaryMaintenanceLifecyclePlan::deployments`]), with every
     /// alternative and its rejection; no lifecycle or window framework is
@@ -636,7 +691,7 @@ pub fn enumerate_summary_maintenance_lifecycles<'a>(
 /// eligibility and data-arrival facts; `profile` supplies effective uses after
 /// DAG path multiplicity has been propagated by `CandidateLogicalASAPDAGs`.
 #[expect(clippy::too_many_arguments, reason = "internal bound planning context")]
-fn enumerate_with_profile<'a>(
+pub(crate) fn enumerate_with_profile<'a>(
     root: Rc<OperatorNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
@@ -1087,6 +1142,75 @@ pub(crate) fn plan_assembled_dag(
         plan.window_accuracy_guarantee = None;
     }
     Ok(plan)
+}
+
+/// Enumerate assignments without replacing a summary candidate by raw fallback.
+/// Each shared state is priced against exactly the entries consuming that state.
+#[expect(clippy::too_many_arguments, reason = "bound workload planning context")]
+pub(crate) fn enumerate_assembled_plans(
+    root: Rc<OperatorNode>,
+    target: &Rc<OperatorNode>,
+    demand: WorkloadDemand<'_>,
+    state_entries: &HashMap<*const OperatorNode, Vec<usize>>,
+    now_ms: u64,
+    horizon: Option<Horizon>,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    cost_model: &dyn CostModel,
+    limit: usize,
+) -> Result<Vec<SummaryMaintenanceLifecyclePlan>, String> {
+    if !root.contains_asap() {
+        return plan_assembled_dag(
+            Rc::clone(&root),
+            &root,
+            demand,
+            now_ms,
+            horizon,
+            capabilities,
+            cost_model,
+        )
+        .map(|plan| vec![plan])
+        .map_err(|error| error.to_string());
+    }
+    let mut candidates = enumerate_with_profile(
+        root,
+        demand,
+        now_ms,
+        horizon,
+        capabilities,
+        cost_model,
+        None,
+        Some(target),
+    )
+    .map_err(|error| error.to_string())?;
+    for deployment in &mut candidates.plan.deployments {
+        let entries = &state_entries[&Rc::as_ptr(&deployment.summary)];
+        let state = enumerate_with_profile(
+            Rc::clone(&deployment.summary),
+            WorkloadDemand {
+                entry_indices: entries,
+                ..demand
+            },
+            now_ms,
+            horizon,
+            capabilities,
+            cost_model,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let alternatives = state
+            .plan
+            .deployments
+            .iter()
+            .find(|state| Rc::ptr_eq(&state.summary, &deployment.summary))
+            .expect("a collected state is its own deployment");
+        deployment
+            .alternatives
+            .clone_from(&alternatives.alternatives);
+    }
+    candidates
+        .enumerate_plans(limit)
+        .map_err(|error| error.to_string())
 }
 
 /// A quote is per execution, so every consumer's bound applies even when
