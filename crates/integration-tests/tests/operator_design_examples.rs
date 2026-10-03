@@ -1,10 +1,12 @@
 //! #511 examples: source text → unified dag → summary rewrite → flat export.
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
-use asap_types::post_asap::{
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{
     ExactKind, ExactParams, FieldDataType, GroupingStrategy, SummaryUpdate,
 };
-use asap_types::pre_asap::{AggIntent, ColumnRef, DataType, Field, Schema};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 mod physical_common;

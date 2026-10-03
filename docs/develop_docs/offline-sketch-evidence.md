@@ -12,7 +12,7 @@ wire format. `crates/asap-aware-mapping/tests/data/offline-evidence-synthetic.js
 is an explicitly fabricated format fixture, never benchmark evidence. Runtime
 validation additionally checks cross-field constraints and matching context.
 
-Resource values share the internal `asap_types::resources::PhysicalResources<Cpu,
+Resource values share the internal `asap_types::workload::resources::PhysicalResources<Cpu,
 Bytes>` container. Its CPU payload preserves units: `ModeledCpu { cpu_ops: f64 }`
 represents modeled operations, while `MeasuredCpu` contains optional measured
 `build_cpu_ns`, `update_cpu_ns`, `merge_cpu_ns`, `prepare_cpu_ns`, and `read_cpu_ns`

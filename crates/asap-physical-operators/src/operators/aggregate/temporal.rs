@@ -10,7 +10,8 @@ use crate::{
     values::{group_key, Value},
     Error,
 };
-use planner_types::pre_asap::{AggIntent, ColumnRef};
+use planner_types::ir::operator::AggIntent;
+use planner_types::ir::scalar::ColumnRef;
 use std::collections::BTreeMap;
 
 pub(in crate::operators) async fn reduce(
@@ -307,11 +308,10 @@ mod tests {
         runtime::{batch_execution::evaluate_batch, Limits, RunContext, Scope},
         values::Batch,
     };
-    use planner_types::{
-        post_asap::{Field as SummaryField, FieldDataType as SummaryFamilyType, Schema},
-        pre_asap::DataType,
-        types::AccuracyTarget,
+    use planner_types::ir::schema::{
+        DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
     };
+    use planner_types::types::AccuracyTarget;
     use std::sync::Arc;
 
     // The same window operator must give the same answer in either engine phase.

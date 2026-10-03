@@ -2,7 +2,7 @@
 //!
 //! The flattened operators of [`super::flat`], plus the execution timing
 //! (data state) of every node and edge. The input must already be timed
-//! ([`super::timing::apply_materialization_timings`]); export reads each node's
+//! ([`super::properties::timing::apply_materialization_timings`]); export reads each node's
 //! timing and does not re-run data-state validation.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -11,18 +11,16 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::asap::ASAPOp;
 use super::flat::{flatten, NodeId};
-use super::node::{Operator, OperatorNode};
-use super::non_asap::NonASAPOp;
-use super::operator_properties::Reduction;
+use super::operator::asap::ASAPOp;
+use super::operator::node::{Operator, OperatorNode};
+use super::operator::non_asap::NonASAPOp;
+use super::operator::operator_properties::Reduction;
+use super::properties::timing::data_state;
 use super::query::QueryRoot;
-use super::timing::data_state;
-use crate::post_asap::execution_data_state::{
-    ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
-};
-use crate::post_asap::guarantee::ResultGuarantee;
-use crate::pre_asap::schema::{FieldDataType, Schema};
+use crate::ir::properties::ResultGuarantee;
+use crate::ir::properties::{ExecutionDataState, ExecutionDataStateError, ExecutionTiming};
+use crate::ir::schema::{FieldDataType, Schema};
 
 pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 8;
 
@@ -351,7 +349,7 @@ pub fn compile_physical_asap_dag(
 }
 
 /// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`super::timing::apply_materialization_timings`]); the data-state
+/// timing (see [`super::properties::timing::apply_materialization_timings`]); the data-state
 /// rules were checked by that pass and are not re-run here.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,

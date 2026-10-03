@@ -1,6 +1,6 @@
 use asap_types::ir::physical_export::WindowEdgeCompatibility;
-use asap_types::post_asap::{validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
-use asap_types::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
+use asap_types::physical::{validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
+use asap_types::workload::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
 
 // Renamed pane APIs still read and emit the deployed wire contract.
 #[test]

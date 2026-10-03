@@ -7,14 +7,15 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, SchemaDerivationError};
-use asap_types::post_asap::{
+use asap_types::ir::operator::{AggIntent, Reduction};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::Schema;
+use asap_types::ir::schema::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
     NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchStatistic, SummaryInputExpr,
     SummaryUpdate, WeightDomain,
 };
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::{AggIntent, Reduction, Schema};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
@@ -303,7 +304,7 @@ fn summary_update(
             // the item form the runtime builds keyed summaries from.
             let item = if child.has_promql_series_identity() {
                 SummaryInputExpr::Column(ColumnRef::Named(
-                    asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
+                    asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
                 ))
             } else {
                 SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
@@ -371,6 +372,6 @@ mod tests {
                 ..
             }
         )));
-        assert!(choices.iter().any(|choice| matches!(choice, Realization::Sketch(kind) if *kind.algorithm() == asap_types::post_asap::SketchAlgorithm::UnivMon)));
+        assert!(choices.iter().any(|choice| matches!(choice, Realization::Sketch(kind) if *kind.algorithm() == asap_types::ir::schema::SketchAlgorithm::UnivMon)));
     }
 }

@@ -98,11 +98,12 @@ use asap_types::dag_export::{
     TargetReplacement, TargetReplacementAfter, WorkloadDAG,
 };
 use asap_types::ir::cse::{structural_hash, HashCache};
+use asap_types::ir::properties::CompositionOperator;
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{FieldDataType, SketchStatistic};
 use asap_types::ir::OperatorNode;
-use asap_types::post_asap::{CompositionOperator, FieldDataType, SketchStatistic};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::resources::CacheProfile;
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::resources::CacheProfile;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -659,9 +660,9 @@ impl CostModel for ExportPlannerCostModel<'_> {
 
     fn rank_candidates(
         &self,
-        _intent: &asap_types::pre_asap::AggIntent,
-        candidates: &[asap_types::post_asap::SketchAlgorithm],
-    ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
+        _intent: &asap_types::ir::operator::AggIntent,
+        candidates: &[asap_types::ir::schema::SketchAlgorithm],
+    ) -> Vec<asap_types::ir::schema::SketchAlgorithm> {
         // Candidate generation must not reintroduce the legacy structural
         // cost model before complete physical alternatives are compared.
         candidates.to_vec()
@@ -1705,8 +1706,9 @@ mod tests {
     };
     use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
     use asap_devtools::PromqlError;
+    use asap_types::ir::operator::{Reduction, Source};
+    use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::NonASAPOp;
-    use asap_types::pre_asap::{DataType, Field, Reduction, Schema, Source};
 
     fn lower_promql(
         query: &str,
@@ -1726,7 +1728,7 @@ mod tests {
         .expect("scan leaf derives its schema");
         OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
-            measures: vec![asap_types::pre_asap::AggIntent::Count {
+            measures: vec![asap_types::ir::operator::AggIntent::Count {
                 accuracy: AccuracyTarget::Epsilon(0.1),
             }],
             output_names: vec![],

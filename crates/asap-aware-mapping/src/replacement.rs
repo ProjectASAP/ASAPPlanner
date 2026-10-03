@@ -152,7 +152,7 @@
 //!    sharing every other node in the workload by construction (they *are*
 //!    the same `Rc`s — nothing was copied to make a second "plan").
 //! 2. **Dedup by structural hash + `PartialEq`, reusing `pre_asap::cse`'s own
-//!    discipline.** [`asap_types::pre_asap::cse::structural_hash`] (made
+//!    discipline.** [`asap_types::ir::cse::structural_hash`] (made
 //!    `pub` for exactly this reuse) is only ever a candidate-narrowing
 //!    filter; [`TargetSubDAGCandidates::add_candidate`]'s actual duplicate check is
 //!    `OperatorNode`'s derived `PartialEq` — the same "hash is a filter,
@@ -343,30 +343,33 @@ use crate::accuracy::estimators::{
     cms::{cms_depth, cms_width},
     saturating_ceil,
 };
-use asap_types::ir::non_asap::any_measure_filtered;
-use asap_types::pre_asap::resolve_column_ref;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
+use asap_types::ir::scalar::resolve_column_ref;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
-use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
-use asap_types::ir::timing::validate_maintained;
+use asap_types::ir::operator::{agg_is_mergeable, AggIntent};
+use asap_types::ir::operator::{BinaryOpKind, JoinKind, Reduction};
+use asap_types::ir::properties::{
+    AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee,
+};
+use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef};
+use asap_types::ir::schema::ColumnId;
+use asap_types::ir::schema::{
+    EntityIdentity, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy,
+    NonNegativeWeightProof, SamplingKind, SamplingParams, Schema, SketchAlgorithm, SketchKind,
+    SketchParams, SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams,
+    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
+};
+use asap_types::ir::validate_maintained;
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
     SortKey,
 };
-use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
-use asap_types::post_asap::{
-    EntityIdentity, ExactKind, ExactOperationSchemaError, ExactParams, ExecutionDataStateError,
-    ExecutionTiming, Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SamplingKind,
-    SamplingParams, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams, SummaryInputExpr,
-    SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
-};
-use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
-use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
-use asap_types::pre_asap::schema::ColumnId;
+use asap_types::physical::ExactOperationSchemaError;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::{Rc, Weak};
@@ -1400,10 +1403,10 @@ impl<'a> ASAPStrategies<'a> {
         }
         // Legal only if the candidate stays executable with its states maintained.
         let timed = |node: &Rc<OperatorNode>| {
-            asap_types::ir::timing::apply_materialization_timings(
+            asap_types::ir::apply_materialization_timings(
                 node,
-                &asap_types::ir::timing::MaterializationAssignment::all_ingestion_time(),
-                &mut asap_types::ir::timing::TimingMemo::new(),
+                &asap_types::ir::MaterializationAssignment::all_ingestion_time(),
+                &mut asap_types::ir::TimingMemo::new(),
             )
             .ok()
             .and_then(|timed| {
@@ -2741,7 +2744,7 @@ fn is_current_series_source(child: &OperatorNode) -> bool {
         _ => child,
     };
     matches!(source.non_asap(), Some(NonASAPOp::Scan {
-        source: asap_types::pre_asap::Source::TimeSeries { .. }, schema, ..
+        source: asap_types::ir::operator::Source::TimeSeries { .. }, schema, ..
     }) if schema.has_promql_series_identity())
 }
 
@@ -3150,7 +3153,7 @@ fn construct_summary_agg(
     )?;
 
     if snapshot_weighted {
-        use asap_types::post_asap::{BoundExpr, ProbabilityExpr};
+        use asap_types::ir::properties::{BoundExpr, ProbabilityExpr};
         let target = accuracy_target(intent).expect("TopK target");
         guarantee = if let Some(mut score) =
             estimator.local_guarantee(&family, query.as_ref().unwrap())
@@ -3328,7 +3331,7 @@ fn keyed_heap_evaluation_schema(
         source,
         &mut refs,
     )?;
-    let mut fields = Vec::<asap_types::post_asap::Field>::new();
+    let mut fields = Vec::<asap_types::ir::schema::Field>::new();
     for reference in refs {
         let matches: Vec<_> = source
             .fields
@@ -3366,7 +3369,7 @@ fn keyed_heap_evaluation_schema(
     }
     fields.push(Field::new(
         "__asap_estimate",
-        FieldDataType::Plain(asap_types::pre_asap::DataType::Float64),
+        FieldDataType::Plain(asap_types::ir::schema::DataType::Float64),
         false,
     ));
     Ok(Schema::lifted(fields, None))
@@ -3379,7 +3382,8 @@ fn ranking_score_index(logical: &OperatorNode, values: &Schema) -> Result<usize,
             .iter()
             .position(|field| {
                 field.name == "value"
-                    && field.dtype == FieldDataType::Plain(asap_types::pre_asap::DataType::Float64)
+                    && field.dtype
+                        == FieldDataType::Plain(asap_types::ir::schema::DataType::Float64)
             })
             .ok_or(RealizationError::PhysicalRealization(
                 "snapshot ranking requires the sample value column",
@@ -3420,7 +3424,8 @@ fn ranking_score_index(logical: &OperatorNode, values: &Schema) -> Result<usize,
             matches!(
                 field.dtype,
                 FieldDataType::Plain(
-                    asap_types::pre_asap::DataType::Int64 | asap_types::pre_asap::DataType::Float64
+                    asap_types::ir::schema::DataType::Int64
+                        | asap_types::ir::schema::DataType::Float64
                 )
             )
         })
@@ -5109,7 +5114,7 @@ fn normalize_cross_input_equi_predicate(
 ) -> Option<Predicate> {
     let ScalarExpr::Compare {
         left,
-        op: asap_types::pre_asap::CompareOpKind::Eq,
+        op: asap_types::ir::scalar::CompareOpKind::Eq,
         right,
         semantics,
     } = &pred.0
@@ -5132,7 +5137,7 @@ fn normalize_cross_input_equi_predicate(
     };
     Some(Predicate(ScalarExpr::Compare {
         left: Box::new(ScalarExpr::Column(left_id)),
-        op: asap_types::pre_asap::CompareOpKind::Eq,
+        op: asap_types::ir::scalar::CompareOpKind::Eq,
         right: Box::new(ScalarExpr::Column(right_id)),
         semantics: *semantics,
     }))
@@ -6466,12 +6471,12 @@ pub fn search_workload_with_targets<'s, Id>(
                         )
                     })
                     .unwrap_or((
-                        asap_types::post_asap::ErrorMetric::AbsoluteValue,
+                        asap_types::ir::properties::ErrorMetric::AbsoluteValue,
                         None,
                         None,
                     )),
                 Replacement::ExactComposition(_) => (
-                    asap_types::post_asap::ErrorMetric::AbsoluteValue,
+                    asap_types::ir::properties::ErrorMetric::AbsoluteValue,
                     None,
                     None,
                 ),
@@ -6875,12 +6880,12 @@ mod tests {
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
     use crate::test_support::{agg, agg_per_entity, lower_promql, maintained, metric_scan, timed};
-    use asap_types::ir::operator_properties::{Reduction as ReductionTy, Source};
-    use asap_types::ir::TimeRangeKind;
-    use asap_types::pre_asap::agg_intent::{
+    use asap_types::ir::operator::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
-    use asap_types::pre_asap::schema::{DataType, Field, Schema as SchemaTy};
+    use asap_types::ir::operator::{Reduction as ReductionTy, Source};
+    use asap_types::ir::schema::{DataType, Field, Schema as SchemaTy};
+    use asap_types::ir::TimeRangeKind;
 
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
@@ -7099,7 +7104,7 @@ mod tests {
     fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
         Predicate(ScalarExpr::Compare {
             left: Box::new(ScalarExpr::Column(left)),
-            op: asap_types::pre_asap::CompareOpKind::Eq,
+            op: asap_types::ir::scalar::CompareOpKind::Eq,
             right: Box::new(ScalarExpr::Column(right)),
             semantics: asap_types::ir::ExprSemantics::Sql,
         })
@@ -7282,7 +7287,7 @@ mod tests {
                 crate::test_support::scan("n", metric_scan(&["job"]).schema.clone()),
             );
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Join {
-                kind: asap_types::ir::operator_properties::JoinKind::Inner,
+                kind: asap_types::ir::operator::JoinKind::Inner,
                 pred: equi_pred(0, 2),
                 left,
                 right,
@@ -7913,7 +7918,7 @@ mod tests {
             vec![default_quantile(0.99)],
             vec![],
             Some(asap_types::ir::Predicate(ScalarExpr::Literal(
-                asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true),
+                asap_types::ir::scalar::ScalarValue::Boolean(true),
             ))),
             metric_scan(&["job"]),
         );
@@ -8158,7 +8163,7 @@ mod tests {
                 summary_family_algorithm(summary_input)
             }
             Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => match family {
-                asap_types::post_asap::FieldDataType::Sketch(kind, _) => kind.algorithm().clone(),
+                asap_types::ir::schema::FieldDataType::Sketch(kind, _) => kind.algorithm().clone(),
                 other => panic!("expected a Sketch family, got {other:?}"),
             },
             other => panic!("expected SummaryAgg/SummaryEstimate, got {other:?}"),
@@ -8488,8 +8493,8 @@ mod tests {
         // walking the whole DAG, not just root-level pointer identity
         // (a naive whole-root-only consumer-count pass would miss this;
         // this module's discover_targets must not).
+        use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
 
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         // Different predicates so the two Filter *parents* stay distinct
@@ -9055,8 +9060,8 @@ mod tests {
         // which flips its own decision to Share. Only global_selection,
         // which folds `a`'s decision into `c`'s effective_consumer_count
         // before deciding `c`, gets this right.
+        use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
 
         let c = || {
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Dedup {
@@ -9205,8 +9210,8 @@ mod tests {
 
     #[test]
     fn effective_repetition_materializes_a_cse_choice_for_a_single_edge_child() {
+        use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
 
         let c = || {
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Dedup {
@@ -9239,8 +9244,8 @@ mod tests {
 
     #[test]
     fn shared_ancestor_keeps_a_single_use_cse_descendant_selected() {
+        use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
 
         struct AlwaysShare;
         impl CostModel for AlwaysShare {
@@ -9303,8 +9308,8 @@ mod tests {
 
     #[test]
     fn global_selection_propagates_uses_through_the_selected_rewrite() {
+        use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
 
         struct ReplaceFilterChild;
         impl ReplacementStrategy for ReplaceFilterChild {
@@ -9542,8 +9547,8 @@ mod tests {
         // discover_targets's own order" DP would see root_b's child edge
         // after already processing `shared` — topological_order must not
         // make that mistake.
+        use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
 
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let root_a =
@@ -9646,8 +9651,8 @@ mod tests {
         fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
             let n = self.next.get();
             self.next.set(n + 1);
+            use asap_types::ir::scalar::ScalarValue;
             use asap_types::ir::Predicate;
-            use asap_types::pre_asap::expr_ir::ScalarValue;
             let fresh_inner_layer =
                 OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
                     pred: Predicate(ScalarExpr::Literal(ScalarValue::Int64(n))),
@@ -10157,8 +10162,8 @@ mod tests {
         // Filter over a bindable quantile: a kept non-ASAP sub-DAG has no
         // summary children, so the conservative fallback keeps the whole sub-DAG
         // logical.
+        use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
         let q = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
             pred: Predicate(ScalarExpr::Compare {
                 left: Box::new(ScalarExpr::Column(0)),
@@ -10178,8 +10183,8 @@ mod tests {
 
     #[test]
     fn having_and_multi_intent_stay_logical() {
+        use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::Predicate;
-        use asap_types::pre_asap::expr_ir::ScalarValue;
         let q = crate::test_support::aggregate(
             ReductionTy::by(vec![2]),
             vec![default_quantile(0.99)],
@@ -10206,7 +10211,7 @@ mod tests {
     // aggregate is retained exactly rather than bound to a summary.
     #[test]
     fn filtered_measure_stays_logical() {
-        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::ir::scalar::ScalarValue;
         let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         if let Operator::NonASAP(NonASAPOp::Aggregate { filters, .. }) =
             &mut Rc::make_mut(&mut q).operator
@@ -10656,7 +10661,7 @@ mod tests {
 
     // ── Accuracy guarantees and fail-closed composition (issue #172) ─────
 
-    use asap_types::post_asap::ErrorMetric;
+    use asap_types::ir::properties::ErrorMetric;
 
     /// A test-only `AccuracyModel` that *registers* a rule the default
     /// deliberately lacks — a sketch over rank-bounded inputs composes

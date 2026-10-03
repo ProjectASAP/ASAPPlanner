@@ -1,12 +1,12 @@
 //! Measured resource payloads and compatibility with the v1 benchmark wire format.
 //!
-//! Physical dimensions live in `asap_types::resources`; flat wire structs below
+//! Physical dimensions live in `asap_types::workload::resources`; flat wire structs below
 //! exist only to keep archived artifacts readable and preserve their field names.
 
-use asap_types::resources::PhysicalResources;
+use asap_types::workload::resources::PhysicalResources;
 use serde::{Deserialize, Serialize};
 
-pub use asap_types::resources::{MeasuredCpu, MeasuredResources, Measurement};
+pub use asap_types::workload::resources::{MeasuredCpu, MeasuredResources, Measurement};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "SketchWire", into = "SketchWire")]

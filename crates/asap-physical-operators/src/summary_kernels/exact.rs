@@ -2,7 +2,7 @@
 use super::increase::IncreaseAccumulator;
 use crate::Statistic;
 use crate::{AggregateCore, KeyByLabelValues, Measurement};
-use planner_types::post_asap::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
+use planner_types::ir::schema::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

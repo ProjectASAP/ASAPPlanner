@@ -11,7 +11,7 @@
 //! and a catalog — skips this crate and calls
 //! [`asap_aware_mapping::optimize`] directly.
 
-use asap_types::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
+use asap_types::workload::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
 use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
 
 use asap_frontend_metricsql::{lower_metricsql_query, MetricsqlError};

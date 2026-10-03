@@ -57,18 +57,16 @@ use asap_frontend_common::{
     UnresolvedProjectItem as ProjectItem, UnresolvedScalar as Scalar, UnresolvedSortKey as SortKey,
 };
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
-use asap_types::ir::operator_properties::{
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::operator_properties::{
     GroupKeys, Reduction, Source, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits,
 };
+use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::ir::TimeRangeKind;
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::schema::{DataType, FieldDataType, Schema};
 
-use asap_types::pre_asap::{
-    resolve_column_ref, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue,
-    WindowFuncKind,
-};
+use asap_types::ir::operator::{JoinKind, RelationalSetOpKind, WindowFuncKind};
+use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
@@ -510,7 +508,7 @@ impl<'a> SqlLowerer<'a> {
             .fields()
             .iter()
             .map(|f| {
-                Ok(asap_types::pre_asap::Field::plain(
+                Ok(asap_types::ir::schema::Field::plain(
                     f.name().clone(),
                     arrow_to_dtype(f.data_type())?,
                     f.is_nullable(),

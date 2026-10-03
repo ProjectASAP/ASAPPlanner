@@ -43,7 +43,7 @@ pub enum PopulationInput<N = crate::ir::OperatorNode> {
     Rows {
         input: std::rc::Rc<N>,
         value_column: usize,
-        grouping: crate::pre_asap::GroupKeys,
+        grouping: crate::ir::operator::GroupKeys,
     },
 }
 
@@ -57,8 +57,10 @@ pub struct MaintainedPopulation<N = crate::ir::OperatorNode> {
 impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
     pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+        use crate::ir::operator::Source;
+        use crate::ir::scalar::{CompareOpKind, ScalarValue};
+        use crate::ir::schema::DataType;
         use crate::ir::{NonASAPOp, Operator, ScalarExpr, TimeRangeKind};
-        use crate::pre_asap::{CompareOpKind, DataType, ScalarValue, Source};
         let input = match &input.operator {
             Operator::NonASAP(NonASAPOp::TimeRange {
                 range,
@@ -137,8 +139,9 @@ impl CurrentSeriesInput {
 impl MaintainedPopulation<crate::ir::OperatorNode> {
     /// Whether `input` is the maintenance input this population declares.
     pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+        use crate::ir::operator::Source;
+        use crate::ir::schema::DataType;
         use crate::ir::{NonASAPOp, Operator};
-        use crate::pre_asap::{DataType, Source};
         match &self.input {
             PopulationInput::CurrentSeries(spec) => spec.matches_node(input),
             PopulationInput::Rows {

@@ -36,13 +36,14 @@ use std::time::Duration;
 
 use asap_frontend_promql::PromqlError as LoweringError;
 mod support;
+use asap_types::ir::operator::{
+    AggIntent, AtModifier, BinaryOpKind, PromQLVectorSetOpKind, Reduction, SampleKind, Source,
+    TimeFunc,
+};
+use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+use asap_types::ir::schema::DataType;
 use asap_types::ir::{
     BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind,
-};
-use asap_types::pre_asap::schema::DataType;
-use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, PromQLVectorSetOpKind,
-    Reduction, SampleKind, ScalarValue, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, promql_scalar};

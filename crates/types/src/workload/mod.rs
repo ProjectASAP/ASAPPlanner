@@ -1,3 +1,6 @@
+pub mod parsed_workload;
+pub mod resources;
+
 use crate::types::AccuracyTarget;
 use serde::{Deserialize, Serialize};
 

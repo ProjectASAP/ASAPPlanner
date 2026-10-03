@@ -27,15 +27,14 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{maintained, post_asap_dag, timed};
 use asap_types::dag_export;
-use asap_types::ir::operator_properties::{Reduction, Source};
+use asap_types::ir::data_state;
+use asap_types::ir::operator::{default_quantile, AggIntent};
+use asap_types::ir::operator::{Reduction, Source};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::timing::data_state;
+use asap_types::ir::properties::{ExecutionDataState, ExecutionTiming};
+use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
-use asap_types::post_asap::{
-    ExactKind, ExecutionDataState, ExecutionTiming, FieldDataType, SketchAlgorithm, SummaryUpdate,
-};
-use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
 
 use asap_types::types::AccuracyTarget;
 
@@ -105,9 +104,8 @@ struct StatsModel;
 #[test]
 fn custom_accuracy_rule_survives_root_target_and_materialization() {
     use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
-    use asap_types::post_asap::{
-        AccuracyError, CompositionOperator, ResultGuarantee, SketchStatistic,
-    };
+    use asap_types::ir::properties::{AccuracyError, CompositionOperator, ResultGuarantee};
+    use asap_types::ir::schema::SketchStatistic;
     struct Model;
     impl AccuracyModel for Model {
         fn exact_operation_rule(&self, _: &ExactOperation) -> Option<CompositionOperator> {
@@ -708,9 +706,9 @@ fn summary_construction_follows_its_value_input_phase() {
                 child: post,
                 family: FieldDataType::ExactAggregate(
                     ExactKind::Max,
-                    asap_types::post_asap::ExactParams::Max,
+                    asap_types::ir::schema::ExactParams::Max,
                 ),
-                input: SummaryUpdate::column(asap_types::pre_asap::ColumnRef::SampleValue),
+                input: SummaryUpdate::column(asap_types::ir::scalar::ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: Default::default(),
                 filter: None,

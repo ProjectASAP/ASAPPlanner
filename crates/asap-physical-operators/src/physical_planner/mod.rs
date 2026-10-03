@@ -8,17 +8,15 @@ use crate::{
     values::{Batch, SchemaRef},
     Error,
 };
+use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlannerReduction};
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
+use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
+use planner_types::ir::schema::DataType;
+use planner_types::ir::schema::{FieldDataType, SketchStatistic, SummaryInputExpr};
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr};
-use planner_types::{
-    post_asap::{FieldDataType, SketchStatistic, SummaryInputExpr},
-    pre_asap::{
-        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, Reduction as PlannerReduction,
-    },
-};
 mod logical;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -293,7 +291,7 @@ fn compile_internal(
                 continue;
             }
             if let Payload::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &node.payload {
-                use planner_types::post_asap::maintained_population::PopulationInput;
+                use planner_types::ir::operator::maintained_population::PopulationInput;
                 let PopulationInput::CurrentSeries(spec) = &population.input else {
                     return Err(invalid(
                         "native maintained population requires a current-series input",
@@ -326,7 +324,7 @@ fn compile_internal(
                 continue;
             }
             if let Payload::ASAP(ASAPOp::EvaluatePopulation { evaluation, .. }) = &node.payload {
-                use planner_types::post_asap::maintained_population::{
+                use planner_types::ir::operator::maintained_population::{
                     PopulationInput, PopulationStatistic,
                 };
                 let [producer] = inputs.as_slice() else {
@@ -456,7 +454,7 @@ fn compile_internal(
                     *return_bool,
                 );
                 let query_time = node.output_state.timing
-                    == planner_types::post_asap::ExecutionTiming::QueryTime;
+                    == planner_types::ir::properties::ExecutionTiming::QueryTime;
                 if let Some(&(value, left)) = literals.get(&id) {
                     let [input] = schemas.as_slice() else {
                         return Err(invalid("scalar binary requires one row input"));
@@ -633,7 +631,8 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
         };
-        if node.output_state.timing == planner_types::post_asap::ExecutionTiming::IngestionTime {
+        if node.output_state.timing == planner_types::ir::properties::ExecutionTiming::IngestionTime
+        {
             let value = |schema: &SchemaRef| -> Result<usize, Error> {
                 let columns = schema
                     .fields
@@ -641,7 +640,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                     .enumerate()
                     .filter(|(_, field)| {
                         field.dtype
-                            == FieldDataType::Plain(planner_types::pre_asap::DataType::Float64)
+                            == FieldDataType::Plain(planner_types::ir::schema::DataType::Float64)
                     })
                     .map(|(i, _)| i)
                     .collect::<Vec<_>>();
@@ -685,7 +684,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             return Err(invalid("join requires two inputs"));
         };
         let pred = planner_types::ir::Predicate(local_scalar(&pred.0)?);
-        if *join_kind == planner_types::pre_asap::JoinKind::Semi {
+        if *join_kind == planner_types::ir::operator::JoinKind::Semi {
             if let Ok(keys) = equijoin_keys(&pred, left, right) {
                 return Operator::semi_join(left.clone(), right.clone(), keys);
             }
@@ -702,7 +701,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
         if !inputs.is_empty() {
             return Err(invalid("Values takes no relational inputs"));
         }
-        let empty = Arc::new(planner_types::pre_asap::Schema::default());
+        let empty = Arc::new(planner_types::ir::schema::Schema::default());
         let rows = rows
             .iter()
             .map(|row| {
@@ -726,7 +725,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
             let state = summary_column(input)?;
             use crate::Statistic as S;
-            use planner_types::post_asap::ExactKind as E;
+            use planner_types::ir::schema::ExactKind as E;
             let statistic = match &input.fields[state].dtype {
                 FieldDataType::ExactAggregate(kind, _) => match kind {
                     E::Sum => S::Sum,
@@ -872,10 +871,10 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                         "keyed summary weight must be a finalized value column",
                     ));
                 };
-                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
                     && !matches!(
                         update.weight_domain,
-                        planner_types::post_asap::WeightDomain::NonNegative { .. }
+                        planner_types::ir::schema::WeightDomain::NonNegative { .. }
                     )
                 {
                     return Err(invalid("CMS requires a nonnegative weight contract"));
@@ -1144,8 +1143,8 @@ fn semi_join_keys(
 /// Deployments may use these positions to bind their source columns.
 pub fn equijoin_keys(
     pred: &planner_types::ir::Predicate,
-    left: &planner_types::post_asap::Schema,
-    right: &planner_types::post_asap::Schema,
+    left: &planner_types::ir::schema::Schema,
+    right: &planner_types::ir::schema::Schema,
 ) -> Result<Vec<(usize, usize)>, Error> {
     let mut keys = Vec::new();
     semi_join_keys(&pred.0, left.fields.len(), right.fields.len(), &mut keys)?;

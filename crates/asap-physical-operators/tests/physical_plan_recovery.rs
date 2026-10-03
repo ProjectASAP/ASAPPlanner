@@ -4,14 +4,11 @@ use asap_physical_operators::{
     operators::{Operator, SortKey},
     physical_planner::{CompiledPhysicalDAG, InputContract},
 };
-use planner_types::{
-    post_asap::{Field, FieldDataType},
-    pre_asap::DataType,
-};
+use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use std::{collections::BTreeMap, sync::Arc};
 
 fn sorted() -> CompiledPhysicalDAG {
-    let schema = Arc::new(planner_types::pre_asap::Schema {
+    let schema = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
