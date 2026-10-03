@@ -142,3 +142,15 @@ The public planner's `slow_cheap_raw_recompute_cannot_bypass_the_response_bound`
 and `slow_raw_only_query_reports_no_latency_feasible_plan` reproduce both paths.
 As with summary latency quotes, missing raw latency evidence remains unchecked;
 this does not establish a latency guarantee for an unmeasured deployment.
+
+## Planner-layering follow-up: typed frequency inputs
+
+The native UnivMon build accepts Utf8, Int64 and Boolean frequency identities,
+as well as Float64 samples. Typed keys prevent integer rounding and numeric
+coercion from changing cardinality. NULL inputs are skipped as before; other
+summary families keep their numeric input contracts. Variable-length heap keys
+contribute to state memory accounting. `univmon_execution::typed_frequency_keys_preserve_identity`
+executes one shared state with distinct/L2/entropy readers for each type,
+including neighboring integers above 2^53. Kernel tests also merge and persist
+string-key states and check memory after reset. SQL entropy/L2 idiom recognition
+is not established by these native input tests.
