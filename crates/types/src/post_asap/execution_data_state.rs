@@ -156,6 +156,18 @@ impl ExecutionDataStateEdge {
 /// it expects, and so tests can assert the *reason* a plan was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ExecutionDataStateError {
+    #[error("operator reached with conflicting execution timings: {first:?} and {second:?}")]
+    ConflictingTiming {
+        first: ExecutionDataState,
+        second: ExecutionDataState,
+    },
+    #[error("{operator} node has no execution timing")]
+    UntimedNode { operator: &'static str },
+    #[error("evaluation value under maintenance: {edge} received {child}")]
+    EvaluationUnderMaintenance {
+        edge: &'static str,
+        child: ExecutionDataState,
+    },
     #[error("invalid maintained-population maintenance/readout contract")]
     InvalidMaintainedPopulation,
     /// A query-time value (`SummaryEstimate` / read-time `ValueOperation` output)
