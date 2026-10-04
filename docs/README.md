@@ -11,7 +11,7 @@ Choose the path that matches what you need to do.
 
 ## Run or inspect a query
 
-Follow [Run and inspect a query](user_guide_docs/run-a-query.md). Tool-specific setup stays with the tool, including the [DAG viewer instructions](../tools/dag-viewer/RUNNING.md).
+Follow [Run and inspect a query](user_guide_docs/run-a-query.md). To see how the planner plans a workload stage by stage, and why it selects its plan, use [the Stage Viewer](user_guide_docs/stage-viewer.md).
 
 ## Embed the library
 
