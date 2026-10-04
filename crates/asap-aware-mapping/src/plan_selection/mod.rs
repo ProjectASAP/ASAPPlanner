@@ -19,6 +19,8 @@
 //! every combination: a dynamic program over target nesting (see there).
 //! [`select_exhaustive`] builds and prices every combination, for display and
 //! for checking the program.
+pub mod candidate_selection;
+
 use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -26,8 +28,7 @@ use std::rc::Rc;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
-};
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
