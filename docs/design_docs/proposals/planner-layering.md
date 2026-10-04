@@ -183,81 +183,49 @@ model and capabilities, but never optimize queries.
 
 In the diagram, × means the Cartesian product: each stage combines every option based on the replacement strategies along one dimension with every option along the others.
 
-```text
- Query workload
-   (PromQL / SQL / MetricsQL,
-    query recurrence,
-    accuracy requirements,
-    latency requirements)
+```mermaid
+flowchart TB
+  IN["<b>Query workload</b><br/>PromQL / SQL / MetricsQL, query recurrence,<br/>accuracy requirements, latency requirements<br/><br/><b>+ Data workload</b><br/>streaming vs. data at rest, data distribution, cardinality<br/><br/><b>+ Deployment inputs</b><br/>cost model, accuracy model, deployment capabilities"]:::input
 
- + Data workload
-   (streaming vs. data at rest,
-    data distribution,
-    cardinality)
+  subgraph PLANNER["ASAPPlanner"]
+    direction TB
+    S0["<b>0. Query-language-specific frontends</b><br/>Parse and convert source-language queries into a common logical<br/>representation. Reject unsupported query expressions.<br/><br/>Output: CandidateLogicalDAGs (a set of LogicalDAG)"]:::stage
 
- + Deployment inputs
-   (cost model,
-    accuracy model,
-    deployment capabilities)
-                         │
-                         ▼
-┌────────────────────────────── ASAPPlanner ───────────────────────────-----───┐
-│                                                                              │
-│ 0. Query-language-specific frontends                                         │
-│    Parse and convert source-language queries into a common logical           │
-│    representation. Reject unsupported query expressions.                     │
-│                                                                              │
-│    Output: CandidateLogicalDAGs (a set of LogicalDAG)                        │
-│                                                                              │
-│                         │                                                    │
-│                         ▼                                                    │
-│ Logical planning — what to compute                                           │
-│                                                                              │
-│ 1. Logical ASAP-aware optimization                                           │
-│    Explore semantically equivalent and legal logical candidates:             │
-│                                                                              │
-│      summary families, summary operations                                    │
-│      × query rewrites                                                        │
-│      × sharing one common subexpresion/summary across multiple computations  │
-│                                                                              │
-│    Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)                │
-│                                                                              │
-│                         │                                                    │
-│                         ▼                                                    │
-│ Physical planning — how to compute                                           │
-│                                                                              │
-│ 2. Physical ASAP-aware optimization                                          │
-│    Explore physical implementations of each logical candidate:               │
-│                                                                              │
-│      materialization decisions                                               │
-│      × physical operator implementations                                     │
-│      × parallelism and partitioning                                          │
-│      × resource management                                                   │
-│                                                                              │
-│    Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)              │
-│                                                                              │
-│                         │                                                    │
-│                         ▼                                                    │
-│ 3. Plan selection                                                            │
-│    Evaluate complete physical candidates using the deployment's              │
-│    empirical cost and accuracy models. Reject candidates that violate        │
-│    accuracy, latency, or capability constraints.                             │
-│                                                                              │
-│    Choose the cheapest valid plan for the whole workload.                    │
-│                                                                              │
-└────────────────────────────────┬─────────────────────────────────────------──┘
-                                 │
-                                 ▼
-                    one selected PhysicalASAPDAG
-                                 │
-                                 ▼
-┌────────────────────────────── Deployment ───────────────────────────────┐
-│                                                                        │
-│ 4. Execution                                                           │
-│   deployment executes the selected DAG (plan).                         │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
+    subgraph LOGICAL["Logical planning — what to compute"]
+      S1["<b>1. Logical ASAP-aware optimization</b><br/>Explore semantically equivalent and legal logical candidates:<br/><br/>summary families, summary operations<br/>× query rewrites<br/>× sharing one common subexpresion/summary across multiple computations<br/><br/>Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)"]:::stage
+    end
+
+    subgraph PHYSICAL["Physical planning — how to compute"]
+      S2["<b>2. Physical ASAP-aware optimization</b><br/>Explore physical implementations of each logical candidate:<br/><br/>materialization decisions<br/>× physical operator implementations<br/>× parallelism and partitioning<br/>× resource management<br/><br/>Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)"]:::stage
+    end
+
+    S3["<b>3. Plan selection</b><br/>Evaluate complete physical candidates using the deployment's<br/>empirical cost and accuracy models. Reject candidates that violate<br/>accuracy, latency, or capability constraints.<br/><br/>Choose the cheapest valid plan for the whole workload."]:::stage
+
+    S0 --> S1 --> S2 --> S3
+  end
+
+  subgraph DEPLOY["Deployment"]
+    S4["<b>4. Execution</b><br/>deployment executes the selected DAG (plan)."]:::stage
+  end
+
+  IN --> S0
+  S3 -- "one selected PhysicalASAPDAG" --> S4
+
+  click S0 href "#0-language-specific-frontends"
+  click S1 href "#1-logical-asap-aware-optimization"
+  click S2 href "#2-physical-asap-aware-optimization"
+  click S3 href "#3-plan-selection"
+  click S4 href "#4-execution"
+
+  classDef input fill:#f1f3f4,stroke:#5f6368,color:#000;
+  classDef stage fill:#fff,stroke:#5f6368,color:#000;
 ```
+
+Stage details: [0. Frontends](#0-language-specific-frontends) ·
+[1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization) ·
+[2. Physical ASAP-aware optimization](#2-physical-asap-aware-optimization) ·
+[3. Plan selection](#3-plan-selection) ·
+[4. Execution](#4-execution)
 
 
 > --> VS: this sounds good. it may be useful to say "why" we decouple into stages or if the decoupling loses some functionality or optimality? 
