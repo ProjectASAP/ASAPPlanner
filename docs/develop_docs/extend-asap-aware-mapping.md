@@ -234,16 +234,10 @@ produces constructed post-ASAP summaries.
 Construction:
 
 ```rust
-let strategy =
-    ASAPStrategies::default_cost_model();
+let strategy = ASAPStrategies::default();
 ```
 
-or with a custom cost model:
-
-```rust
-let model = MyCostModel; // illustrative
-let strategy = ASAPStrategies::new(&model);
-```
+It takes no cost model; a cost model is consumed only at selection time.
 
 The strategy matches supported aggregate nodes.
 
@@ -252,14 +246,14 @@ At a high level:
 ```mermaid
 flowchart LR
   A["Input TargetSubDAG<br/>root is a supported Aggregate"] --> B["ASAPStrategies::matches<br/>check whether the target shape can produce summaries"]
-  B -->|"true"| C["ASAPStrategies::replacements<br/>use CostModel preferences and sizing while preserving<br/>every semantically valid realization"]
+  B -->|"true"| C["ASAPStrategies::replacements<br/>size each summary_candidates entry analytically,<br/>preserving every semantically valid realization"]
   B -->|"false"| NONE["Empty candidate list"]
-  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed summary sub-DAG and rationale;<br/>all candidates retained in preferred order"]
+  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed summary sub-DAG and rationale;<br/>all candidates retained in summary_candidates order"]
 ```
 
 For an approximate quantile, both KLL and DDSketch remain candidates when
 their committed parameters and evidence satisfy the applicable accuracy checks,
-even if the cost model prefers one. When only one realization is legal, such as an exact accumulator or pass-through, the strategy returns that single candidate.
+regardless of which one a cost model later prefers. When only one realization is legal, such as an exact accumulator or pass-through, the strategy returns that single candidate.
 
 ---
 
@@ -268,7 +262,7 @@ even if the cost model prefers one. When only one realization is legal, such as 
 Call the public strategy interface and inspect every returned candidate:
 
 ```rust
-let strategy = ASAPStrategies::new(&cost_model);
+let strategy = ASAPStrategies::default();
 let candidates = strategy.replacements(&target);
 
 for candidate in candidates {
@@ -285,7 +279,7 @@ for candidate in candidates {
 ```
 
 The public contract is the behavior contributors should preserve: every legal
-candidate is returned, ordering follows the supplied `CostModel`, each summary
+candidate is returned in `summary_candidates` order, each summary
 is fully constructed, and each candidate carries a useful rationale. Nested
 aggregate choices remain independent.
 
@@ -350,8 +344,7 @@ The basic calling pattern is:
 
 ```rust
 let target = TargetSubDAG::new(&root);
-let strategy =
-    ASAPStrategies::default_cost_model();
+let strategy = ASAPStrategies::default();
 
 if strategy.matches(&target) {
     let candidates =
@@ -488,15 +481,14 @@ Do not test only the rationale string; test the actual replacement semantics.
 
 #### Custom cost model behavior
 
-If a strategy accepts a cost model, verify that a custom model changes the intended costing behavior without changing the exhaustive candidate set.
-
-The current sketch strategy does exactly this:
+Strategies do not take a cost model. Verify instead that a custom model changes
+the selection-time ranking without changing the exhaustive candidate set:
 
 ```mermaid
 flowchart LR
-  INPUT["Legal candidate set<br/>KLL + DDSketch"] --> MODEL["Custom CostModel<br/>prefers DDSketch for this AggIntent"]
+  INPUT["Strategy output<br/>KLL + DDSketch"] --> MODEL["cost_sorted / global_selection<br/>with a CostModel preferring DDSketch"]
   MODEL --> ORDER["rank_candidates output<br/>DDSketch first, KLL second"]
-  ORDER --> RESULT["Strategy output<br/>both candidates remain; only their order changes"]
+  ORDER --> RESULT["Ranked view<br/>both candidates remain; only their order changes"]
 ```
 
 That is the expected separation between enumeration and ranking.
@@ -538,19 +530,17 @@ impl CostModel for PreferDDSketch {
 }
 ```
 
-Then inject it into code that accepts a `&dyn CostModel`:
+Then pass it to the selection-time APIs that accept a `&dyn CostModel`:
 
 ```rust
 let model = PreferDDSketch;
 
-let strategy =
-    ASAPStrategies::new(&model);
-
-let replacements =
-    strategy.replacements(&target);
+let space = search_workload_with(roots, &default_strategies());
+let ranked = space.cost_sorted(&model);
+let selection = space.global_selection(&model);
 ```
 
-Important: changing `rank_candidates` changes the preferred ordering, but `ASAPStrategies` still enumerates every valid sketch candidate.
+Important: `rank_candidates` changes only the selection-time ordering; `ASAPStrategies` still enumerates every valid sketch candidate, in `summary_candidates` order, sized analytically.
 
 A custom cost model should not change which alternatives are semantically legal.
 
@@ -587,72 +577,7 @@ It must return a permutation of the supplied candidates: every input candidate e
 
 ---
 
-#### `size_params`
-
-Use when the sketch algorithm is already known and you want to choose its parameters from an accuracy target.
-
-Signature:
-
-```rust
-fn size_params(
-    &self,
-    kind: SketchAlgorithm,
-    intent: &AggIntent,
-    eps: f64,
-    delta: f64,
-) -> SketchParams;
-```
-
-Typical uses include:
-
-- choosing KLL capacity,
-- choosing HLL precision,
-- selecting sketch-specific error parameters.
-
-Conceptually:
-
-```mermaid
-flowchart LR
-  ALG["Chosen SketchAlgorithm<br/>for example, KLL or HLL"] --> SIZE["CostModel::size_params<br/>translate a requested accuracy budget into<br/>algorithm-specific storage parameters"]
-  INTENT["AggIntent<br/>what the query is computing"] --> SIZE
-  ACC["Accuracy budget<br/>epsilon and delta"] --> SIZE
-  SIZE --> PARAMS["SketchParams<br/>for example, KLL capacity or HLL precision"]
-```
-
----
-
-#### `realize_extension`
-
-Use for extension-defined implementation kinds.
-
-```rust
-fn realize_extension(
-    &self,
-    ext_kind: &str,
-    payload: &serde_json::Value,
-) -> Realization;
-```
-
-This is the hook for turning an extension description into a concrete `Realization`.
-
-Use it for implementation families that are intentionally outside the built-in enum dispatch.
-
----
-
-#### `evaluation_extension`
-
-Use when an extension-defined summary also needs custom query/evaluation behavior.
-
-```rust
-fn evaluation_extension(
-    &self,
-    ext_kind: &str,
-    payload: &serde_json::Value,
-    col: &ColumnRef,
-) -> SketchStatistic;
-```
-
-This complements `realize_extension`: realization defines what gets maintained; evaluation defines how it is queried (see the [CostModel reference](asap-aware-mapping-contracts.md#costmodel)).
+Sketch parameters are not a `CostModel` hook: candidates are sized by the analytical estimators (`accuracy::estimators::size_params`, also exposed as `replacement::default_size_params`), and `AggIntent::Extension` intents always stay `Realization::PassThrough`.
 
 ---
 
@@ -738,21 +663,16 @@ Then test integration through a consumer of the cost model.
 For example:
 
 ```rust
-let strategy =
-    ASAPStrategies::new(&model);
-
-let replacements =
-    strategy.replacements(&target);
+let ranked =
+    space.cost_sorted(&model);
 ```
 
 The important assertion is usually not that other valid candidates disappeared. They should not.
 
 Instead verify that:
 
-- the model changes ordering or parameters as intended,
+- the model changes ordering as intended,
 - all legal candidates remain available to the replacement layer.
-
-For sizing, test representative accuracy targets and assert the resulting `SketchParams`.
 
 For CSE costing, create a representative `CseCandidate` and test recompute cost, shared-maintenance cost, and the resulting `ShareDecision`.
 
@@ -775,7 +695,7 @@ Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 ```mermaid
 flowchart LR
   MAP["1. Declare legality<br/>add the algorithm to summary_candidates<br/>for each AggIntent it can answer"]
-  MAP --> MODEL["2. Define costing<br/>rank it, derive its SketchParams,<br/>and provide a comparable numeric cost"]
+  MAP --> MODEL["2. Define sizing and costing<br/>derive its SketchParams in the analytical estimators;<br/>rank it and provide a comparable numeric cost"]
   MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid summary sub-DAG<br/>with the correct maintained state and evaluation"]
   BUILD --> ACC["4. Certify accuracy<br/>derive from committed parameters;<br/>propagate and check the final target"]
   ACC --> ENUM["5. Verify integration<br/>ASAPStrategies includes it automatically;<br/>tests confirm enumeration, ordering, sizing, and cost"]
@@ -802,7 +722,7 @@ or malformed evidence, incompatible metrics and unsupported composition. Test
 root-target checking before cost ranking, exact fallback, and exported rejection
 or guarantee data. A cheaper estimate must never admit an accuracy-illegal plan.
 
-After wiring the new algorithm into `summary_candidates` and giving the cost model a real `rank_candidates`/`size_params` opinion about it, check two things. First, that `ASAPStrategies::replacements()` for a matching `TargetSubDAG` actually includes a candidate realizing the new algorithm — extend a test shaped like `replacement.rs`'s own test-module coverage-matrix tests (e.g. `agg_intent_to_summary_kind_coverage_matrix`) to cover the new algorithm's `AggIntent`. Second, that `cost_sorted`/`estimate_cost` produce sane, comparable numbers for the new candidate rather than a `NaN` placeholder or an outlier that swamps every other candidate.
+After wiring the new algorithm into `summary_candidates` and giving the analytical estimators a sizing rule and the cost model a real `rank_candidates` opinion about it, check two things. First, that `ASAPStrategies::replacements()` for a matching `TargetSubDAG` actually includes a candidate realizing the new algorithm — extend a test shaped like `replacement.rs`'s own test-module coverage-matrix tests (e.g. `agg_intent_to_summary_kind_coverage_matrix`) to cover the new algorithm's `AggIntent`. Second, that `cost_sorted`/`estimate_cost` produce sane, comparable numbers for the new candidate rather than a `NaN` placeholder or an outlier that swamps every other candidate.
 
 ---
 
@@ -944,19 +864,17 @@ When adding a new strategy:
 - [ ] Test positive and negative applicability.
 - [ ] Test exhaustive enumeration.
 - [ ] Test the actual structural semantics of each replacement.
-- [ ] Test behavior with a custom cost model if the strategy uses one.
+- [ ] Test that a custom cost model reorders, but does not remove, the strategy's candidates at selection.
 
 When adding a new cost model:
 
 - [ ] Override only the hooks whose behavior should change.
 - [ ] Keep semantic applicability outside the cost model.
 - [ ] Use `rank_candidates` for algorithm preference; return every input candidate exactly once.
-- [ ] Use `size_params` for accuracy-to-parameter mapping.
-- [ ] Use extension hooks for extension-defined implementations/evaluations.
 - [ ] Use CSE hooks for recompute-vs.-sharing costs.
 - [ ] Override `estimate_cost` if consumers require numeric costs instead of `NaN`.
 - [ ] Test the hook directly.
-- [ ] Test integration through a consumer such as `ASAPStrategies`.
+- [ ] Test integration through a selection-time consumer such as `cost_sorted` or `global_selection`.
 - [ ] Verify that changing cost preferences does not silently remove valid replacement candidates.
 
 ---
@@ -972,14 +890,12 @@ Use this table to find the right place for a change.
 | Change when a strategy applies | `ReplacementStrategy::matches` |
 | Add a new built-in sketch candidate | `replacement.rs`'s summary-candidate mapping plus realization and accuracy contracts |
 | Prefer one sketch algorithm over another | `CostModel::rank_candidates` |
-| Change sketch sizing for an accuracy target | `CostModel::size_params` |
-| Add extension-defined implementation behavior | `CostModel::realize_extension` |
-| Add extension-defined evaluation behavior | `CostModel::evaluation_extension` |
+| Change sketch sizing for an accuracy target | `accuracy::estimators::size_params` (analytical; not a `CostModel` hook) |
 | Change CSE recomputation cost | `CostModel::cse_recompute_cost` |
 | Change shared-maintenance cost | `CostModel::cse_shared_maintenance_cost` |
 | Change current share/recompute choice | `CostModel::cse_share_decision` |
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
-| Produce a normal (ranked-first) post-ASAP summary for one target | `ASAPStrategies::replacements(...).into_iter().next()` |
+| Produce the first-listed post-ASAP summary for one target (unranked, `summary_candidates` order) | `ASAPStrategies::replacements(...).into_iter().next()` |
 | Search a whole workload for supported legal candidates | `search_workload`/`search_workload_with` |
 | Enforce per-root result accuracy requirements | `search_workload_with_targets` |
 | Coordinate compatible choices across groups | `CandidateLogicalASAPDAGs::global_selection` |
@@ -990,7 +906,7 @@ Use this table to find the right place for a change.
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |
 | Explain why a replacement exists, where, and why | `explanation::explain_replacements`/`explain_replacements_with` |
-| Add a new kind of replacement explanation | new `impl ReplacementStrategy`, wired into `default_strategies`/`default_strategies_with` — not a new explanation-specific trait, see §8 |
+| Add a new kind of replacement explanation | new `impl ReplacementStrategy`, wired into `default_strategies` — not a new explanation-specific trait, see §8 |
 
 ---
 
@@ -1011,8 +927,8 @@ for explanation in &explanations {
 }
 ```
 
-To plug in a deployment-specific strategy or `CostModel`, use `explain_replacements_with` with a strategy set built the same way `default_strategies_with` builds one — see [§2](#2-adding-or-customizing-a-costmodel) and [§4](#4-adding-both-a-strategy-and-a-cost-model).
+To plug in a deployment-specific strategy, use `explain_replacements_with` with a strategy set built the same way `default_strategies` builds one — see [§1](#1-adding-a-new-replacementstrategy) and [§4](#4-adding-both-a-strategy-and-a-cost-model). Explanations do not consult a `CostModel`.
 
 ### Adding a new kind of replacement explanation
 
-There is no separate checklist here: follow [§1](#1-adding-a-new-replacementstrategy) to add the new `ReplacementStrategy` and wire it into `default_strategies`/`default_strategies_with`, then add an `ExplanationKind` variant and ensure `explain_replacements` returns that kind for the new public candidate shape. Test the behavior through `explain_replacements` or `explain_replacements_with`; explanation reporting should not introduce a second discovery rule.
+There is no separate checklist here: follow [§1](#1-adding-a-new-replacementstrategy) to add the new `ReplacementStrategy` and wire it into `default_strategies`, then add an `ExplanationKind` variant and ensure `explain_replacements` returns that kind for the new public candidate shape. Test the behavior through `explain_replacements` or `explain_replacements_with`; explanation reporting should not introduce a second discovery rule.

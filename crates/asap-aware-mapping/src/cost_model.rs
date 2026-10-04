@@ -362,15 +362,14 @@ pub fn default_cse_shared_maintenance_cost(family: &FieldDataType) -> Cost {
     Cost(weight * UNIT)
 }
 
-/// Ranks the candidate sketch algorithms for one [`AggIntent`], best choice
-/// first.
+/// Selection-time preferences and costs over the candidates Stage 1
+/// generates.
 ///
 /// [`replacement::summary_candidates`] returns every algorithm that *can* answer an
 /// intent, in an arbitrary static preference order (issue #98's "one home"
-/// for the candidate set). A `CostModel` re-orders that list under real,
-/// deployment-specific cost knowledge this crate has no way to know about —
-/// `replacement::realizations_for_intent` constructs every candidate in the
-/// resulting order.
+/// for the candidate set), and candidate generation keeps that order. A
+/// `CostModel` re-orders the candidates when they are selected, under real,
+/// deployment-specific cost knowledge this crate has no way to know about.
 pub trait CostModel {
     /// Whether [`Self::candidate_cost`] prices a complete physical
     /// alternative, including its raw baseline, rather than a local

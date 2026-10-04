@@ -42,7 +42,9 @@ A strategy should answer:
 
 A cost model should answer:
 
-> Given valid choices, which choices are preferable, and how should they be parameterized?
+> Given valid choices, which choices are preferable?
+
+It is consulted only at selection time; sketch parameters come from the analytical estimators.
 
 Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enumerate every valid alternative, even when the default cost model clearly prefers one. See [Rule 2](extend-asap-aware-mapping.md#rule-2-enumerate-do-not-rank).
 
@@ -98,8 +100,6 @@ flowchart TB
     STRATEGY["ReplacementStrategy<br/>when a target matches, enumerate every legal replacement;<br/>implementations generate but do not choose"]:::generate
     CAND["ReplacementSubDAG candidates<br/>each contains a Subtree (summary or logical rewrite) or ExactComposition<br/>plus typed provenance and rationale;<br/>no alternative is removed solely on cost"]:::store
     TARGET -->|"try every registered strategy"| STRATEGY --> CAND
-    CM(["CostModel<br/>orders candidates and supplies<br/>deployment-specific parameters"]):::choose
-    CM -. "rank and parameterize; accuracy checks remain required" .-> STRATEGY
   end
 
   subgraph SEARCHSPACE[3. Store the workload-wide search space]
@@ -108,7 +108,9 @@ flowchart TB
   end
 
   subgraph RANKING[Optional ranked view]
+    CM(["CostModel<br/>selection-time preferences and costs"]):::choose
     SORT["CandidateLogicalASAPDAGs::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
+    CM -.-> SORT
     RANKED["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
     SPACE --> SORT -->|"reorder only; preserve every candidate"| RANKED
   end
@@ -193,9 +195,8 @@ capability and accuracy checks; supported algorithm applicability alone is not
 a result certificate.
 
 The complete `replacements()` result is the candidate set produced by one
-strategy for one target. A strategy may order or parameterize candidates with
-help from a `CostModel`, but it must not remove a valid candidate because of
-cost.
+strategy for one target. Strategies take no `CostModel` and must not remove a
+valid candidate because of cost; ranking happens at selection time.
 
 ### 3.3 Current concrete strategies
 
@@ -204,9 +205,9 @@ The default context-free registry contains five `ReplacementStrategy` implementa
 - `ASAPStrategies` matches supported aggregate and binary shapes. Its
   `replacements(target)` method constructs every legal post-ASAP summary sub-DAG,
   including applicable sketch, exact-accumulator, and pass-through
-  realizations. Candidates are sized and ordered for the target's accuracy
-  requirement; candidates without a sufficient guarantee are rejected before
-  costing.
+  realizations. Candidates are sized analytically for the target's accuracy
+  requirement and listed in `summary_candidates` order; candidates without a
+  sufficient guarantee are rejected before costing.
 - `SharedSubDAGStrategy` uses `consumer_count` to identify shared targets. It
   emits both build-once-and-share and recompute-independently rewrites when a
   target has multiple consumers.
@@ -215,8 +216,8 @@ The default context-free registry contains five `ReplacementStrategy` implementa
 - `ExactCompositionStrategy` preserves child-target references for compatible
   composition selection.
 
-`default_strategies_with` uses `SemanticEquivalentRewriteStrategy` in its rewrite
-slot. The evidence-aware registry supplies the accuracy evidence provider to
+`default_strategies` uses `SemanticEquivalentRewriteStrategy` (via its
+`AvgToSumOverCountStrategy` alias) in its rewrite slot. The evidence-aware registry supplies the accuracy evidence provider to
 summary and Hydra construction. Search derives `RollupStrategy` after CSE from
 the actual sibling set. See the
 [registry definitions](../../crates/asap-aware-mapping/src/replacement.rs).
@@ -251,8 +252,9 @@ matter.
 
 A single-target inspection caller may take the first
 candidate with `.into_iter().next()` and handle the empty case according to its
-execution policy. Constructing all candidates before taking the first costs
-more than constructing only the preferred candidate, but it keeps the strategy
+execution policy; the first candidate is in `summary_candidates` order, not cost
+order. Constructing all candidates before taking the first costs more than
+constructing only one, but it keeps the strategy
 contract consistent and preserves the full choice set for other callers.
 
 `CandidateLogicalASAPDAGs::global_selection` optionally coordinates cross-target sharing and

@@ -57,7 +57,7 @@ for which that strategy returned only the kept pre-ASAP sub-DAG (`retain_exact`)
 ## Strategies
 
 The corpus measurement deliberately uses only
-`ASAPStrategies::default_cost_model().replacements(...)` on each
+`ASAPStrategies::default().replacements(...)` on each
 query root. It does not measure workload-wide search or the other default
 strategies.
 
