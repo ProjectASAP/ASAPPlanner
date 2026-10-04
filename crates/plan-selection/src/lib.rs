@@ -74,7 +74,7 @@ use asap_logical_optimizer::accuracy::{
 };
 use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
-    LocalLogicalCandidates, LogicalCandidateError,
+    read_targets, LocalLogicalCandidates, LogicalCandidateError,
 };
 pub use asap_logical_optimizer::pass2::identical_expressions::SharingVariant;
 use asap_logical_optimizer::pass2::identical_expressions::{
@@ -572,9 +572,11 @@ fn costlier(id: &str, total: f64, best: f64) -> Rejection {
 /// `best(t, c) = local(t, c) + Σ_{u beneath t, read by c} min_c' best(u, c')`,
 /// where `local(t, c)` is the change in workload cost when only `t` takes
 /// alternative `c`, and a choice is admissible when that one-target
-/// candidate builds and passes Stage 3's checks. Every Stage 1 realization
-/// reads its target's rewritten input, so every choice reads every target
-/// beneath it, and the minimum is taken per target.
+/// candidate builds and passes Stage 3's checks. Most realizations read
+/// their target's rewritten input, so they read every target beneath it; a
+/// whole-expression alternative absorbs the target beneath instead
+/// ([`read_targets`]), which then contributes nothing and takes its
+/// pass-through.
 ///
 /// The result is the exhaustive minimum when (1) cost is a sum over nodes,
 /// (2) a choice changes only its target's own nodes, and (3) shared nodes do
@@ -627,17 +629,32 @@ fn select_variant<Id: Clone>(
         })
         .collect();
     let beneath = nested_targets(inventory);
-    let mut pairs: Vec<(usize, usize)> = beneath
-        .iter()
-        .enumerate()
-        .flat_map(|(t, inner)| inner.iter().map(move |&u| (t, u)))
+    let reads: Vec<Vec<Vec<usize>>> = (0..width)
+        .map(|t| {
+            (0..local[t].len())
+                .map(|c| read_targets(inventory, &beneath, t, c))
+                .collect()
+        })
         .collect();
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for (t, by_choice) in reads.iter().enumerate() {
+        for &u in by_choice.iter().flatten() {
+            if !pairs.contains(&(t, u)) {
+                pairs.push((t, u));
+            }
+        }
+    }
     if variant.shared {
         pairs.extend(common_input_pairs(inventory, &beneath));
     }
     let mut coupling = None;
     'pairs: for &(t, u) in &pairs {
         for c in 1..local[t].len() {
+            if !reads[t][c].contains(&u) {
+                // `c` does not read `u`'s output (it absorbs it, or reads a
+                // target beneath it only through another).
+                continue;
+            }
             for d in 1..local[u].len() {
                 let joint = evaluate(&with(&[(t, c), (u, d)]));
                 let coupled = match (&local[t][c], &local[u][d], &joint) {
@@ -661,9 +678,14 @@ fn select_variant<Id: Clone>(
     }
     let mut best: Vec<Option<(f64, usize)>> = vec![None; width];
     for t in 0..width {
-        best_choice(t, &local, &beneath, &mut best);
+        best_choice(t, &local, &reads, &mut best);
     }
-    let choice: Vec<usize> = best.iter().map(|b| b.map_or(0, |(_, c)| c)).collect();
+    let mut choice: Vec<usize> = best.iter().map(|b| b.map_or(0, |(_, c)| c)).collect();
+    for t in 0..width {
+        if let Some(u) = inventory.targets[t].absorbs[choice[t]] {
+            choice[u] = 0;
+        }
+    }
     if let Some(reason) = coupling {
         return fallback(variant, targets, data, models, choice, reason);
     }
@@ -703,26 +725,31 @@ fn common_input_pairs<Id>(
     pairs
 }
 
-/// `best(t) = min_c local(t, c) + Σ_{u beneath t} best(u)`, memoized; the
+/// `best(t) = min_c local(t, c) + Σ_{u read by c} best(u)`, memoized; the
 /// first alternative wins ties, as in enumeration order. Alternative 0 (the
-/// pass-through) is admissible whenever the base plan is.
+/// pass-through) is admissible whenever the base plan is. `reads[t][c]` is
+/// [`read_targets`].
 fn best_choice(
     t: usize,
     local: &[Vec<Result<f64, String>>],
-    beneath: &[Vec<usize>],
+    reads: &[Vec<Vec<usize>>],
     best: &mut [Option<(f64, usize)>],
 ) -> f64 {
     if let Some((cost, _)) = best[t] {
         return cost;
     }
-    let inner: f64 = beneath[t]
-        .iter()
-        .map(|&u| best_choice(u, local, beneath, best))
-        .sum();
+    let mut inner = Vec::with_capacity(local[t].len());
+    for read in &reads[t] {
+        inner.push(
+            read.iter()
+                .map(|&u| best_choice(u, local, reads, best))
+                .sum::<f64>(),
+        );
+    }
     let (cost, choice) = local[t]
         .iter()
         .enumerate()
-        .filter_map(|(c, cost)| cost.as_ref().ok().map(|cost| (cost + inner, c)))
+        .filter_map(|(c, cost)| cost.as_ref().ok().map(|cost| (cost + inner[c], c)))
         .fold(
             (f64::INFINITY, 0),
             |min, next| if next.0 < min.0 { next } else { min },
@@ -1109,10 +1136,12 @@ fn price(
             Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
                 let rows = match query {
                     // The logical result, as an exact Sort → Limit sizes it.
+                    // Items are at most the series: a whole-expression
+                    // sketch reads several samples per ranked item.
                     SketchStatistic::TopK { k } => {
                         let (summarized, grouped) = summarized_rows(dag, &output, node.id);
                         selected_rows(
-                            summarized,
+                            summarized.min(shape.series),
                             (*k as u64).saturating_mul(partition_count(grouped)),
                         )
                     }
@@ -1514,6 +1543,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.selection.selected, exhaustive.selection.selected);
+    }
+
+    /// A whole-expression top-k absorbs the `sum_over_time` beneath it. When
+    /// it is the cheapest choice, the dynamic program selects it with the
+    /// inner target at its pass-through (it contributes nothing), and agrees
+    /// with brute force over every valid choice under the same costs.
+    #[test]
+    fn absorbing_alternative_drops_the_inner_target() {
+        let inventory = inventory(&["topk by (job) (10, sum_over_time(m[1m]))"]);
+        let (t, c, u) = inventory
+            .targets
+            .iter()
+            .enumerate()
+            .find_map(|(t, target)| {
+                let c = target.alternatives.iter().enumerate().position(|(c, a)| {
+                    target.absorbs[c].is_some()
+                        && matches!(a, asap_logical_optimizer::Realization::Sketch(kind)
+                            if *kind.algorithm() == SketchAlgorithm::CountSketchWithHeap)
+                })?;
+                Some((t, c, target.absorbs[c]?))
+            })
+            .expect("a whole-expression CountSketch alternative");
+        let targets = no_targets(&inventory);
+        let data = data();
+        for bonus in [0.0, 1e4] {
+            let evaluate = |choice: &[usize]| -> Result<f64, String> {
+                let (_, candidate) = realize_choice(&inventory, choice)?;
+                let total = assess(&candidate, &targets, &data, &PlanningModels::builtin())?.total;
+                Ok(total - if choice[t] == c { bonus } else { 0.0 })
+            };
+            let plan = select_variant(
+                Variant {
+                    inventory: &inventory,
+                    shared: false,
+                    offset: 0,
+                },
+                &targets,
+                &data,
+                PlanningModels::builtin(),
+                &evaluate,
+            )
+            .unwrap();
+            assert_eq!(plan.selection.method, SelectionMethod::TreeDp);
+            let brute = enumerate_choices(&inventory, usize::MAX)
+                .into_iter()
+                .map(|choice| (evaluate(&choice).unwrap(), choice))
+                .fold(None::<(f64, Vec<usize>)>, |best, next| match best {
+                    Some(best) if best.0 <= next.0 => Some(best),
+                    _ => Some(next),
+                })
+                .unwrap();
+            assert_eq!(plan.choice, brute.1, "bonus {bonus}");
+            if bonus > 0.0 {
+                assert_eq!((plan.choice[t], plan.choice[u]), (c, 0));
+            }
+        }
     }
 
     /// In a shared variant, two queries that chose structurally identical
