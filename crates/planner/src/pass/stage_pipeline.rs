@@ -1,21 +1,18 @@
 //! [`StagePipeline`] — the #509 planner stages behind the
 //! [`OptimizationPass`](super::OptimizationPass) trait.
 //!
-//! Stage 1 lists each target's local alternatives, Stage 2 implements a
-//! candidate physically (everything at query time), and Stage 3 checks
-//! accuracy and prices it; [`select_plan`] chooses among the combinations.
-//! Cross-query sharing beyond identical sub-DAGs (Pass 2) is not planned yet.
+//! [`plan_stages`] runs them: Stage 1 lists each target's local alternatives
+//! (Pass 1) with and without identical sub-DAGs shared across queries (Pass
+//! 2's identical-expression rule), Stage 2 implements a candidate physically
+//! (everything at query time), and Stage 3 checks accuracy, prices it and
+//! chooses. Pass 2's other rules are not planned yet.
 
-use std::rc::Rc;
-
-use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::schema_support::with_promql_series_identity;
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::QueryRoot;
 use asap_types::workload::QueryLanguage;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
-use asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates;
-use asap_plan_selection::select_plan;
+use asap_plan_selection::plan_stages;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StagePipeline;
@@ -36,7 +33,7 @@ impl OptimizationPass for StagePipeline {
         // PromQL rows carry each series' full identity as a column: the row
         // representation per-series state needs at runtime. A query with no
         // such representation is planned over its labels alone.
-        let roots: Vec<(usize, Rc<OperatorNode>)> = workload
+        let roots: Vec<(usize, QueryRoot)> = workload
             .operator_indices()
             .iter()
             .copied()
@@ -46,22 +43,15 @@ impl OptimizationPass for StagePipeline {
                     true => with_promql_series_identity(root).unwrap_or_else(|_| root.clone()),
                     false => root.clone(),
                 };
-                (index, root)
+                (index, QueryRoot::Operator(root))
             })
             .collect();
-        let roots = share_common_sub_dags(roots);
         let targets: Vec<_> = workload
             .entries()
             .map(|(entry, _)| Some(entry.requirements.accuracy.target()))
             .collect();
-        let inventory = enumerate_local_logical_candidates(
-            roots
-                .into_iter()
-                .map(|(index, root)| (index, QueryRoot::Operator(root)))
-                .collect(),
-        )?;
         let data = workload.data_workload().cloned().unwrap_or_default();
-        let plan = select_plan(&inventory, &targets, &data, input.models)?;
+        let plan = plan_stages(roots, &targets, &data, input.models, 0)?.plan;
 
         output.plans = plan
             .logical

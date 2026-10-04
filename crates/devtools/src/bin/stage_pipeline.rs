@@ -6,18 +6,22 @@
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
 // four planner stages (#509 MVP):
 //   - stage0_logical: the frontends' workload DAG, one root per query;
-//   - stage1_logical_asap: Pass 1 workload candidates, one per choice of a
-//     local alternative for every target (the Cartesian product), in
-//     enumeration order and capped by `--max-candidates` (default 64);
+//   - stage1_logical_asap: Stage 1 workload candidates, one per choice of a
+//     local alternative for every target (Pass 1, the Cartesian product), for
+//     the queries as written and, when Pass 2's identical-expression rule
+//     merges something, again with identical sub-DAGs shared ("· shared
+//     input"); in enumeration order and capped by `--max-candidates`
+//     (default 64);
 //   - stage2_physical_asap: one physical candidate per logical candidate
 //     (operator implementation only, everything at query time), no cost;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
 //     every other candidate as rejected (`valid: false`, including one that
 //     could not be built) or costlier.
 //
-// The enumeration is the library's (`plan_selection::select_exhaustive`);
-// the facade's dynamic program selects the same winner when its
-// assumptions hold.
+// Everything is the library's `plan_selection::plan_stages`, the function the
+// facade runs; this tool only serializes it. Stage 3 here is over every
+// displayed candidate; the facade's dynamic program selects the same winner
+// when its assumptions hold.
 //
 // `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
 // query; without them the queries are exact. `--interval-ms` is the source
@@ -25,23 +29,17 @@
 
 use std::rc::Rc;
 
-use asap_logical_optimizer::pass1::logical_candidates::{
-    choice_index, enumerate_local_logical_candidates, LocalLogicalCandidates,
-};
+use asap_logical_optimizer::pass1::logical_candidates::{choice_index, combination_count, LocalLogicalCandidates};
 use asap_logical_optimizer::Realization;
 use asap_plan_selection::PlanningModels;
-use asap_plan_selection::{select_exhaustive, Selection, MAX_ENUMERATED_CANDIDATES};
+use asap_plan_selection::{plan_stages, Selection, MAX_ENUMERATED_CANDIDATES};
+use asap_plan_selection::{select_exhaustive};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
-    Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
-};
+use asap_types::workload::{AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection};
 use serde_json::{json, Value};
 
 const USAGE: &str = "usage: stage_pipeline (--example planner-layering-1 | --promql <query>... \
@@ -109,28 +107,44 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         })
         .collect::<Result<Vec<_>, _>>()?;
     let stage0 = export(&roots)?;
-    let inventory = enumerate_local_logical_candidates(roots.into_iter().enumerate().collect())
-        .map_err(|e| format!("Pass 1: {e}"))?;
-    let owners = target_owners(&inventory);
     let targets: Vec<_> = workload
         .query_workload
         .entries()
         .map(|entry| Some(entry.requirements.accuracy.target()))
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let enumeration = select_exhaustive(
-        &inventory,
+    let run = plan_stages(
+        roots.into_iter().enumerate().collect(),
         &targets,
         &data,
         PlanningModels::builtin(),
-        max_candidates,
+        max_candidates.max(1),
     )
-    .map_err(|e| format!("Stage 3: {e}"))?;
+    .map_err(|e| format!("planning: {e}"))?;
+    let enumeration = run.enumeration.expect("display was requested");
+    let combinations = enumeration.combinations;
     let mut candidates = Vec::new();
     let mut stage2 = Vec::new();
     for candidate in &enumeration.candidates {
-        let index = choice_index(&inventory, &candidate.choice) + 1;
-        let label = label(&inventory, &owners, &candidate.choice);
+        // Candidates of the shared variant are numbered after the independent ones.
+        let mut offset = 0;
+        let variant = run
+            .stage1
+            .iter()
+            .find(|v| {
+                let found = v.shared == candidate.shared;
+                if !found {
+                    offset += combination_count(&v.inventory);
+                }
+                found
+            })
+            .expect("the candidate's variant");
+        let inventory = &variant.inventory;
+        let index = offset + choice_index(inventory, &candidate.choice) + 1;
+        let mut label = label(inventory, &target_owners(inventory), &candidate.choice);
+        if candidate.shared {
+            label += " · shared input";
+        }
         if let Some(logical) = &candidate.logical {
             let roots: Vec<_> = logical.iter().map(|(_, root)| root.clone()).collect();
             candidates
@@ -147,8 +161,8 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         "workload": { "queries": workload_queries(workload) },
         "stage0_logical": { "dag": stage0 },
         "stage1_logical_asap": {
-            "combinations": enumeration.combinations,
-            "capped": enumeration.combinations > max_candidates,
+            "combinations": combinations,
+            "capped": combinations > max_candidates,
             "candidates": candidates,
         },
         "stage2_physical_asap": { "candidates": stage2 },
