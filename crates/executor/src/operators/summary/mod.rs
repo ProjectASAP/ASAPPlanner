@@ -60,6 +60,49 @@ impl Operator {
             output: schema(fields),
         })
     }
+    /// One HydraCms state shared by every group, emitted as one row per group
+    /// that reads it. `weight: None` counts each row once.
+    pub fn shared_summary_build(
+        input: SchemaRef,
+        family: SummaryFamilyType,
+        item: usize,
+        weight: Option<usize>,
+        groups: Vec<usize>,
+    ) -> Result<Self, Error> {
+        crate::values::validate_family(&family)?;
+        crate::factory::create_hydra_cms(&family).map_err(Error::Invalid)?;
+        validate_groups(&input, &groups)?;
+        if !matches!(
+            plain(&input, item)?.0,
+            DataType::Utf8 | DataType::Int64 | DataType::Bool
+        ) {
+            return Err(invalid("HydraCms items must be Utf8, Int64 or Bool"));
+        }
+        if weight.is_some_and(|weight| !matches!(plain(&input, weight), Ok((DataType::Float64, _))))
+        {
+            return Err(invalid("HydraCms weight must be Float64"));
+        }
+        let mut fields = groups
+            .iter()
+            .map(|&i| input.fields[i].clone())
+            .collect::<Vec<_>>();
+        fields.push(SummaryField {
+            name: "state".into(),
+            dtype: family.clone(),
+            nullable: false,
+            table: None,
+        });
+        Ok(Self {
+            kind: Kind::SharedSummaryBuild {
+                family,
+                item,
+                weight,
+                groups,
+            },
+            inputs: vec![input],
+            output: schema(fields),
+        })
+    }
     pub fn keyed_evaluation(
         input: SchemaRef,
         state: usize,
@@ -261,6 +304,18 @@ pub(super) fn execute<'a>(
             Batch::try_new(
                 output,
                 build_keyed_summary(input, family, *value, items, groups, &context).await?,
+            )
+        })
+        .boxed_local()),
+        Kind::SharedSummaryBuild {
+            family,
+            item,
+            weight,
+            groups,
+        } => Ok(futures::stream::once(async move {
+            Batch::try_new(
+                output,
+                build_shared_summary(input, family, *item, *weight, groups, &context).await?,
             )
         })
         .boxed_local()),
@@ -605,6 +660,81 @@ async fn build_keyed_summary(
             labels.push(Value::Summary {
                 family: family.clone(),
                 state: Arc::new(summary),
+            });
+            labels
+        })
+        .collect())
+}
+
+async fn build_shared_summary(
+    mut input: Input<'_, Batch>,
+    family: &SummaryFamilyType,
+    item: usize,
+    weight: Option<usize>,
+    groups: &[usize],
+    context: &RunContext,
+) -> Result<Vec<Vec<Value>>, Error> {
+    use crate::summary_kernels::HydraCmsGroup;
+    let mut grid = crate::factory::create_hydra_cms(family).map_err(Error::Invalid)?;
+    let grid_bytes = grid.approx_memory_bytes();
+    let mut memory = context.reserve(grid_bytes)?;
+    let mut retained = grid_bytes;
+    let mut work = Cooperative::new(context);
+    // Group labels and the group's Hydra subpopulation name, an injective
+    // encoding of its typed key.
+    let mut seen = BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, String)>::new();
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        for row in batch.rows() {
+            work.checkpoint().await?;
+            let key = group_key(row, groups)?;
+            if !seen.contains_key(&key) {
+                let name = key
+                    .iter()
+                    .map(|part| part.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let labels = groups.iter().map(|&i| row[i].clone()).collect::<Vec<_>>();
+                retained +=
+                    key_bytes(&key) + labels.iter().map(Value::bytes).sum::<usize>() + name.len();
+                memory.resize(retained)?;
+                seen.insert(key.clone(), (labels, name));
+            }
+            let count = match weight.map(|column| &row[column]) {
+                None => 1,
+                // SQL aggregates ignore NULL weights while retaining the group.
+                Some(Value::Null) => continue,
+                Some(Value::Float64(w))
+                    if *w >= 0.0 && w.fract() == 0.0 && *w <= f64::from(i32::MAX) =>
+                {
+                    *w as i32
+                }
+                Some(_) => {
+                    return Err(Error::Operator(
+                        "HydraCms weights must be non-negative integers".into(),
+                    ))
+                }
+            };
+            let item = match &row[item] {
+                Value::Utf8(v) => v.to_string(),
+                Value::Int64(v) => v.to_string(),
+                Value::Bool(v) => v.to_string(),
+                _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
+            };
+            grid.update(&seen[&key].1, &item, count)
+                .map_err(|e| Error::Operator(e.to_string()))?;
+        }
+    }
+    let grid = Arc::new(grid);
+    Ok(seen
+        .into_values()
+        .map(|(mut labels, group)| {
+            labels.push(Value::Summary {
+                family: family.clone(),
+                state: Arc::new(HydraCmsGroup {
+                    grid: grid.clone(),
+                    group,
+                }),
             });
             labels
         })

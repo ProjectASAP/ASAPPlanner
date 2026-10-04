@@ -286,6 +286,17 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
                 })
         }
 
+        SummaryFamilyType::Sketch(_, grouping)
+            if grouping
+                != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance =>
+        {
+            let shape =
+                crate::capability::hydra_cms_shape(family, grouping).map_err(Error::Invalid)?;
+            state
+                .as_any()
+                .downcast_ref::<crate::summary_kernels::HydraCmsGroup>()
+                .is_some_and(|s| s.grid.shape() == shape)
+        }
         SummaryFamilyType::ExactAggregate(..) => state
             .as_any()
             .downcast_ref::<ExactAccumulator>()

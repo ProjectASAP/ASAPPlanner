@@ -162,6 +162,12 @@ impl TryFrom<UncheckedOperator> for Operator {
                 items,
                 groups,
             } => Operator::keyed_summary_build(input(0)?, family, value, items, groups)?,
+            Kind::SharedSummaryBuild {
+                family,
+                item,
+                weight,
+                groups,
+            } => Operator::shared_summary_build(input(0)?, family, item, weight, groups)?,
             Kind::KeyedEvaluation { state, k } => {
                 Operator::keyed_evaluation(input(0)?, state, k, output.clone())?
             }
