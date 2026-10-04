@@ -1,7 +1,5 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
 mod common;
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_logical_optimizer::search_workload;
 use asap_physical_operators::{
     factory::create_planner_accumulator,
@@ -14,6 +12,8 @@ use asap_physical_operators::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
+use asap_plan_selection::candidate_selection::global_selection;
+use asap_plan_selection::cost::cost_model::DefaultCostModel;
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};

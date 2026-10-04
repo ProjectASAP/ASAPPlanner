@@ -12,13 +12,6 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::cost_model::{
-    CostProvenance, CostUnit, ExactCompositionCostInputs, ExactCompositionCostRequest,
-};
-use asap_aware_mapping::plan_selection::candidate_selection::{
-    global_selection, runtime_support_evidence,
-};
-use asap_aware_mapping::{CostModel, DefaultCostModel, EvaluationRate};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{maintained, post_asap_dag, timed};
 use asap_logical_optimizer::pass1::exact_composition::ExactOperation;
@@ -27,6 +20,11 @@ use asap_logical_optimizer::pass1::replacement::{
     ReplacementStrategy, TargetSubDAG,
 };
 use asap_logical_optimizer::{ExplanationKind, OperationPlacement};
+use asap_plan_selection::candidate_selection::{global_selection, runtime_support_evidence};
+use asap_plan_selection::cost::cost_model::{
+    CostProvenance, CostUnit, ExactCompositionCostInputs, ExactCompositionCostRequest,
+};
+use asap_plan_selection::{CostModel, DefaultCostModel, EvaluationRate};
 use asap_types::dag_export;
 use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
 use asap_types::ir::operator::agg_intent::{default_quantile, AggIntent};

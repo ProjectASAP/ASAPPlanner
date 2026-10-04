@@ -26,10 +26,10 @@ use asap_types::ir::OperatorNode;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
-use crate::plan_selection::{Selection, SelectionError};
 use asap_logical_optimizer::pass1::logical_candidates::LogicalCandidateError;
+use asap_plan_selection::{Selection, SelectionError};
 
-pub use crate::plan_selection::PlanningModels;
+use asap_plan_selection::PlanningModels;
 pub use stage_pipeline::StagePipeline;
 
 // ── Input ────────────────────────────────────────────────────────────────

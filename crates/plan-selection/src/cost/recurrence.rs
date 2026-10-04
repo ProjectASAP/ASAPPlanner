@@ -20,10 +20,10 @@
 //! |---|---|---|
 //! | [`UpdateRate`] | Hz (updates/second) | how often the *raw* data underlying a maintained summary changes (ingest rate) |
 //! | [`EvaluationRate`] | Hz (evaluations/second) | how often a target is *read* — `sum(1 / query_interval_i)` over every repeating consumer |
-//! | [`CostRate`] | cost units / second | a steady-state cost rate — never comparable to a bare [`Cost`](crate::cost_model::Cost) without going through [`total_cost`] |
+//! | [`CostRate`] | cost units / second | a steady-state cost rate — never comparable to a bare [`Cost`](crate::cost::cost_model::Cost) without going through [`total_cost`] |
 //! | [`Horizon`] | seconds | the explicit evaluation window a caller supplies to compare a rate-valued cost against a one-shot cost |
 //!
-//! `Cost` (bare, from [`crate::cost_model`]) stays a one-time, unitless
+//! `Cost` (bare, from [`crate::cost::cost_model`]) stays a one-time, unitless
 //! magnitude — exactly what it was before this module existed, preserved
 //! for [`CostModel::cse_share_decision`] and everything else that already
 //! uses it. `CostRate` is a *new*, distinct type specifically so a rate and
@@ -75,7 +75,7 @@
 //!
 //! - [`EvaluationRate`]: derived from [`asap_types::workload::RepeatingEntry::demand`]
 //!   values of every repeating consumer reaching a target (via
-//!   [`evaluation_rate_of`], or [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles)
+//!   [`evaluation_rate_of`], or [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles)
 //!   for a whole workload). A one-shot ([`asap_types::workload::BatchEntry`])
 //!   consumer contributes to [`RecurrenceProfile::one_shot_consumers`]
 //!   instead, never to this rate.
@@ -106,7 +106,7 @@ use std::fmt;
 
 use asap_types::workload::{DataWorkload, RepetitionInterval};
 
-use crate::cost_model::{Cost, CostModel, CseCandidate, ShareDecision};
+use crate::cost::cost_model::{Cost, CostModel, CseCandidate, ShareDecision};
 
 // ── Units ────────────────────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ pub enum RecurrenceError {
          CostRate with a one-shot Cost without distorting the comparison"
     )]
     InvalidHorizon(Horizon),
-    /// [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles) was called
+    /// [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles) was called
     /// with a `root_recurrence` slice whose length doesn't match the
     /// `CandidateLogicalASAPDAGs`'s own root count — a caller error, but recoverable
     /// (this method's whole signature promises a `Result`, so this is
@@ -239,7 +239,7 @@ pub enum RecurrenceError {
 /// applied at every point an `UpdateRate` enters a [`RecurrenceProfile`]
 /// ([`RecurrenceProfile::with_update_rate`],
 /// [`update_rate_from_data_workload`],
-/// [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles)'s own parameter)
+/// [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles)'s own parameter)
 /// *and*, as a backstop that can't be bypassed by constructing a
 /// `RecurrenceProfile` via its public fields directly, inside [`decide`]
 /// itself before any comparison uses it.
@@ -373,7 +373,7 @@ impl RecurrenceProfile {
 }
 
 /// How one workload root recurs — the opaque per-root tag
-/// [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles) threads down to
+/// [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles) threads down to
 /// every target reachable from that root. Mirrors
 /// [`asap_types::workload::QueryWorkload`]'s own `query_batch` (one-shot)
 /// vs. `repeating_queries` (an interval each) split, but at the
@@ -632,10 +632,10 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cost_model::DefaultCostModel;
-    use crate::plan_selection::candidate_selection::cost_sorted_with_recurrence;
-    use crate::plan_selection::candidate_selection::global_selection_with_recurrence;
-    use crate::plan_selection::candidate_selection::recurrence_profiles;
+    use crate::candidate_selection::cost_sorted_with_recurrence;
+    use crate::candidate_selection::global_selection_with_recurrence;
+    use crate::candidate_selection::recurrence_profiles;
+    use crate::cost::cost_model::DefaultCostModel;
 
     fn interval(ms: u32) -> RepetitionInterval {
         RepetitionInterval(ms)
@@ -781,7 +781,7 @@ mod tests {
 
     // ── decide (structural fallback) ─────────────────────────────────────
 
-    use crate::cost_model::CseCandidate;
+    use crate::cost::cost_model::CseCandidate;
     use asap_types::ir::operator::operator_properties::{Reduction, Source};
     use asap_types::ir::properties::ResultGuarantee;
     use asap_types::ir::scalar::ColumnRef;
@@ -1294,7 +1294,7 @@ mod tests {
             cost_sorted_with_recurrence(&space, &DeterministicUnitCostModel, &infrequent, None)
                 .unwrap();
         let first_provenance =
-            |ranked: &[crate::plan_selection::candidate_selection::RankedTargetSubDAGCandidates<'_>]| {
+            |ranked: &[crate::candidate_selection::RankedTargetSubDAGCandidates<'_>]| {
                 ranked
                     .iter()
                     .find(|group| Rc::ptr_eq(group.target, &shared.target))
