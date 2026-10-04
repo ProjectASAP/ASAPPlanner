@@ -430,7 +430,10 @@ fn with_grouping(
 /// grid. The paper's collision term depends on deployment/data statistics;
 /// keeping those leaves symbolic makes the formula explicit while ensuring
 /// target satisfaction fails closed until a caller supplies them.
-fn hydra_guarantee(inner: &ResultGuarantee, stats: &PropagationStats) -> ResultGuarantee {
+pub(crate) fn hydra_guarantee(
+    inner: &ResultGuarantee,
+    stats: &PropagationStats,
+) -> ResultGuarantee {
     let mut provenance = inner.provenance.clone();
     provenance.extend(stats.evidence_provenance.clone());
     provenance.push(GuaranteeSource::ChildGuarantee {

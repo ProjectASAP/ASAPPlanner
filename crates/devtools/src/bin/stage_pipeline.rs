@@ -46,7 +46,7 @@ use asap_plan_selection::{plan_stages, Selection, Sharing, MAX_ENUMERATED_CANDID
 use asap_types::ir::export::{
     compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPDAGDocument,
 };
-use asap_types::ir::schema::SketchAlgorithm;
+use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
@@ -286,6 +286,12 @@ fn label(inventory: &LocalLogicalCandidates<usize>, owners: &[usize], choice: &[
                             SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
                             SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
                             other => format!("{other:?}"),
+                        };
+                        let name = match target.groupings[index] {
+                            GroupingStrategy::PerSubpopulationInstance => name,
+                            GroupingStrategy::SharedMultiSubpopulation { ref kind, .. } => {
+                                format!("{kind:?}")
+                            }
                         };
                         // The sketch reads the inner aggregate's input and replaces it.
                         sketches.push(match target.absorbs[index] {
