@@ -11,7 +11,7 @@
 //!   beside the cost and accuracy models.
 //! - [`physical`] — #509 Stage 2 decision data: exact-operator schema helpers
 //!   and window-summary pane primitives.
-//! - [`types`] / [`cost`] — accuracy targets and cost annotations.
+//! - [`types`] / [`cost`] — accuracy targets and cost units.
 pub mod cost;
 pub mod deployment;
 pub mod ir;
