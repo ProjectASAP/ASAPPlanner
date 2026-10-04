@@ -2254,10 +2254,10 @@ mod tests {
                 ..every_10s(None)
             })
             .collect();
-        let total = |shared: bool| {
+        let total = |sharing: Sharing| {
             let variant = *variants(&stage1)
                 .iter()
-                .find(|v| v.shared == shared)
+                .find(|v| v.sharing == sharing)
                 .unwrap();
             let raw = vec![0; variant.inventory.targets.len()];
             let (_, candidate) = realize(variant, &raw).unwrap();
@@ -2271,8 +2271,8 @@ mod tests {
                 .collect();
             (cost.total, scan_rows)
         };
-        let (shared, shared_scans) = total(true);
-        let (separate, separate_scans) = total(false);
+        let (shared, shared_scans) = total(Sharing::IdenticalExpressions);
+        let (separate, separate_scans) = total(Sharing::Independent);
         let year = 365.0 * 24.0 * 3_600.0 * 1_000_000.0 / 15.0;
         assert_eq!(shared_scans.len(), 1);
         assert!(
