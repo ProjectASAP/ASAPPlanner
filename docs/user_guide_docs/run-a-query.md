@@ -15,8 +15,7 @@ tool on first use.
 
 | Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
-| `show_pre_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
-| `show_post_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | Same query file format | Prints all sketch-strategy Post-ASAP candidates using a fixed approximate target, in cost-model order |
+| `show_logical_dag --data-ingestion-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
 | `analyze_corpora --corpora --data-ingestion-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
 | `variant_coverage --data-ingestion-interval-ms 1000` | Repository corpora | Reports Pre-ASAP IR variant coverage |
@@ -38,8 +37,8 @@ promql> quantile(0.99, rate(http_requests_total[5m]))
 sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 ```
 
-Blank lines and lines beginning with `#` are ignored. The two file/stdin tools
-accept `sql>` and `promql>`; MetricsQL is available through the library frontend.
+Blank lines and lines beginning with `#` are ignored. The file/stdin tool
+accepts `sql>` and `promql>`; MetricsQL is available through the library frontend.
 SQL examples use the fixed catalog
 `metrics(ts: Timestamp, service: Utf8, region: Utf8, latency: Float64, bytes: Int64)`.
 For your own schema, provide a `SqlCatalog` through the library API.
@@ -49,13 +48,13 @@ For your own schema, provide a `SqlCatalog` through the library API.
 Run:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir -- --data-ingestion-interval-ms 1000 queries.txt
+cargo run -p asap-devtools --bin show_logical_dag -- --data-ingestion-interval-ms 1000 queries.txt
 ```
 
 You can also provide the queries through stdin:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir -- --data-ingestion-interval-ms 1000 < queries.txt
+cargo run -p asap-devtools --bin show_logical_dag -- --data-ingestion-interval-ms 1000 < queries.txt
 ```
 
 To dump and compare every PromQL corpus, run:
@@ -75,44 +74,6 @@ The corresponding SQL corpus analysis is:
 ```sh
 cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir artifacts/sql_pre_asap
 ```
-
-### Inspect Post-ASAP IR candidates
-
-Run:
-
-```sh
-cargo run -p asap-devtools --bin show_post_asap_ir -- --data-ingestion-interval-ms 1000 queries.txt
-```
-
-Or through stdin:
-
-```sh
-cargo run -p asap-devtools --bin show_post_asap_ir -- --data-ingestion-interval-ms 1000 < queries.txt
-```
-
-`show_post_asap_ir` uses an approximation target of ε = 0.01 and prints every
-available binding from the sketch strategy for each query, numbered in cost-model
-order. If no candidate is available, it prints the pre-ASAP fallback as candidate
-1. It does not show the complete ranked workload candidate set or choose a
-deployment. Its SQL examples use a fixed demonstration catalog, not
-your database schema. Use the
-[library workflow](../develop_docs/library-api.md) to retain workload alternatives
-and provide your own models.
-
-The default strategy generates DDSketch quantile-ratio candidates even when no
-input-domain evidence is available. Such candidates have `guarantee: None`:
-they do not claim a certified end-to-end accuracy bound. They also remain
-visible in a target-aware `CandidateLogicalASAPDAGs` so the downstream backend can decide
-whether to select them using its own evidence. Planner's automatic
-`global_selection` skips them; their presence alone does not show that they
-meet the requested target.
-
-Each input line is followed by its debug IR or an `ERR:` message. Pre-ASAP and
-Post-ASAP output use the same node format: Post-ASAP output adds summary nodes
-(state, readouts) and keeps the original exact operators wherever no summary
-replaces them. An
-approximate target permits approximation; it does not guarantee a legal or
-certified sketch. The tool prints plans, not query results.
 
 ## More inspection commands
 
@@ -166,5 +127,5 @@ cargo run -p asap-devtools --example canonical_examples
 
 PromQL commands require `--data-ingestion-interval-ms` with the nonzero source
 sample cadence in milliseconds. The examples use a one-second cadence; supply
-the interval for your data. The mixed-input `show_pre_asap_ir` and
-`show_post_asap_ir` tools require this option even for SQL-only input files.
+the interval for your data. The mixed-input `show_logical_dag` tool requires
+this option even for SQL-only input files.
