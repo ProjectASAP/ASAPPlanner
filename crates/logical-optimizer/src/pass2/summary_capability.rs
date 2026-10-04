@@ -180,6 +180,7 @@ pub fn share_summary_capability<Id: Clone>(
             // whole-expression top-k does), so only the sizes change.
             debug_assert!(out.targets[t].absorbs.iter().all(Option::is_none));
             out.targets[t].absorbs = vec![None; alternatives.len()];
+            out.targets[t].windows = vec![Default::default(); alternatives.len()];
             out.targets[t].alternatives = alternatives;
             resized = true;
         }
