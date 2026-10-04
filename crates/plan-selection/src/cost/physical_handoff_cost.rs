@@ -1,10 +1,10 @@
 //! Byte estimates at deployment-declared physical handoffs.
 
-use crate::analytical_cost::{
+use crate::cost::analytical_cost::{
     estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDAG, ExecutionMultiplicity,
     PhysicalDAGNode,
 };
-use crate::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
+use crate::cost::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
 pub use asap_types::workload::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
