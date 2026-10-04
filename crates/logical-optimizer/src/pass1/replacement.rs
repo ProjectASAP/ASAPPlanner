@@ -8224,8 +8224,7 @@ mod tests {
         let Replacement::SubDAG(node) = &candidate.replacement else {
             unreachable!()
         };
-        let exported = asap_types::dag_export::export_summary(node);
-        assert!(exported.nodes[exported.root as usize]
+        assert!(node
             .guarantee
             .as_ref()
             .is_some_and(ResultGuarantee::has_unknown));

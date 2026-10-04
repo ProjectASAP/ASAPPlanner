@@ -11,10 +11,8 @@
 //!   beside the cost and accuracy models.
 //! - [`physical`] — #509 Stage 2 decision data: exact-operator schema helpers
 //!   and window-summary pane primitives.
-//! - [`types`] / [`dag_export`] / [`cost`] — accuracy targets, the generic
-//!   DAG export, and cost annotations.
+//! - [`types`] / [`cost`] — accuracy targets and cost annotations.
 pub mod cost;
-pub mod dag_export;
 pub mod deployment;
 pub mod ir;
 pub mod physical;
