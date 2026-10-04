@@ -4,10 +4,10 @@
 //! target, not ranked plans or accuracy certificates. Workload composition and
 //! physical planning consume this inventory later; empirical models belong to
 //! selection. The legacy search API remains until planner cutover.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator::{AggIntent, Reduction};
+use asap_types::ir::operator::{AggIntent, Reduction, Source};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::schema::{
@@ -17,6 +17,7 @@ use asap_types::ir::schema::{
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::MetricType;
 use thiserror::Error;
 
 use crate::pass1::replacement::{
@@ -34,6 +35,9 @@ pub struct LocalLogicalTarget {
     /// not computed and has no choice of its own (#509 whole-expression
     /// realization). `None`: the alternative reads this target's input.
     pub absorbs: Vec<Option<usize>>,
+    /// Whether the target's input values are [`counter_samples`]. Absorbing
+    /// alternatives read the input's own input, which then is too.
+    pub counter_input: bool,
 }
 
 /// Compact Pass 1 inventory; roots and nested producer dependencies are retained.
@@ -103,6 +107,7 @@ pub fn local_realizations_for_intent(
 /// Multi-measure aggregates remain intact pending a semantics-preserving split.
 pub fn enumerate_local_logical_candidates<Id>(
     roots: Vec<(Id, QueryRoot)>,
+    metric_types: &BTreeMap<String, MetricType>,
 ) -> Result<LocalLogicalCandidates<Id>, LogicalCandidateError> {
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
@@ -132,6 +137,10 @@ pub fn enumerate_local_logical_candidates<Id>(
                         targets.push(LocalLogicalTarget {
                             absorbs: vec![None; alternatives.len()],
                             alternatives,
+                            counter_input: node
+                                .children()
+                                .iter()
+                                .all(|child| counter_samples(child, metric_types)),
                             target: node,
                         });
                     }
@@ -410,7 +419,10 @@ pub fn compose_logical_candidate<Id: Clone>(
                 .get(index)
                 .map(|alternative| {
                     let absorbs = target.absorbs[index].is_some();
-                    (Rc::as_ptr(&target.target), (alternative, absorbs))
+                    (
+                        Rc::as_ptr(&target.target),
+                        (alternative, absorbs, target.counter_input),
+                    )
                 })
                 .ok_or(LogicalCandidateError::InvalidChoice)
         })
@@ -439,8 +451,9 @@ pub fn compose_logical_candidate<Id: Clone>(
 }
 
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
-/// Each target's chosen alternative, and whether it absorbs the target beneath.
-type Chosen<'a> = HashMap<*const OperatorNode, (&'a Realization, bool)>;
+/// Each target's chosen alternative, whether it absorbs the target beneath,
+/// and its `counter_input`.
+type Chosen<'a> = HashMap<*const OperatorNode, (&'a Realization, bool, bool)>;
 
 fn rewrite(
     node: &Rc<OperatorNode>,
@@ -458,8 +471,10 @@ fn rewrite(
         .iter()
         .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
     let rebuilt = match chosen.get(&Rc::as_ptr(node)) {
-        Some((realization, absorbs)) if **realization != Realization::PassThrough => {
-            realize(node, realization, *absorbs, memo)?
+        Some((realization, absorbs, counter_input))
+            if **realization != Realization::PassThrough =>
+        {
+            realize(node, realization, *absorbs, *counter_input, memo)?
         }
         _ if changed => Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?),
         _ => node.clone(),
@@ -472,6 +487,7 @@ fn realize(
     target: &OperatorNode,
     realization: &Realization,
     absorbs: bool,
+    counter_input: bool,
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, LogicalCandidateError> {
     let Some(NonASAPOp::Aggregate {
@@ -519,10 +535,19 @@ fn realize(
         ),
         _ => return Err(LogicalCandidateError::Unsupported("summary family")),
     };
-    let input = match whole {
+    let mut input = match whole {
         Some((_, update)) => update,
         None => summary_update(intent, &family, reduction, &child.schema)?,
     };
+    if counter_input
+        && input.item.is_some()
+        && input.weight == SummaryInputExpr::Column(ColumnRef::SampleValue)
+        && input.weight_domain == WeightDomain::UnknownOrSigned
+    {
+        input.weight_domain = WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::CounterSamples,
+        };
+    }
     let state = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: child.clone(),
         family,
@@ -540,6 +565,28 @@ fn realize(
         None => ASAPOp::FinalizeExactAccumulator { child: state },
     };
     Ok(OperatorNode::new_shared(Operator::ASAP(evaluation))?)
+}
+
+/// Whether every value `node` outputs is a sample of a metric declared a
+/// counter, or a sum of such samples: never negative. Only a time-range
+/// selection and a plain sum preserve that; any other operator (arithmetic
+/// included) ends the proof. Read off the frontend DAG, this also holds for
+/// the composed candidate because a sum has only exact realizations.
+fn counter_samples(node: &OperatorNode, metric_types: &BTreeMap<String, MetricType>) -> bool {
+    match node.non_asap() {
+        Some(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric },
+            ..
+        }) => metric_types.get(metric) == Some(&MetricType::Counter),
+        Some(NonASAPOp::TimeRange { child, .. }) => counter_samples(child, metric_types),
+        Some(NonASAPOp::Aggregate {
+            measures, child, ..
+        }) => {
+            matches!(measures.as_slice(), [AggIntent::Sum { col: None }])
+                && counter_samples(child, metric_types)
+        }
+        _ => false,
+    }
 }
 
 /// What each input row contributes, following the legacy realization rules:
@@ -644,8 +691,11 @@ mod tests {
             },
         );
         let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
-        let inventory =
-            enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let inventory = enumerate_local_logical_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let topk = inventory
             .targets
             .iter()
@@ -696,8 +746,11 @@ mod tests {
             },
         );
         let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
-        let inventory =
-            enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let inventory = enumerate_local_logical_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let (topk, inner) = inventory
             .targets
             .iter()
@@ -725,6 +778,112 @@ mod tests {
                     "the inner sum is not computed"
                 );
             }
+        }
+    }
+
+    /// The weight domain of every heap-sketch update (Count-Min or
+    /// CountSketch + heap) in every candidate of `query`.
+    fn heap_weight_domains(query: &str, metric_types: &[(&str, MetricType)]) -> Vec<WeightDomain> {
+        let root = lower_promql(
+            query,
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.001,
+            },
+        );
+        let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+        let metric_types = metric_types
+            .iter()
+            .map(|(metric, kind)| (metric.to_string(), *kind))
+            .collect();
+        let inventory =
+            enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))], &metric_types)
+                .unwrap();
+        let mut domains = Vec::new();
+        for choice in enumerate_choices(&inventory, usize::MAX) {
+            for (_, root) in compose_logical_candidate(&inventory, &choice).unwrap() {
+                let QueryRoot::Operator(root) = root else {
+                    panic!("operator root")
+                };
+                for node in OperatorNode::reachable(&root) {
+                    if let Operator::ASAP(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _),
+                        input,
+                        ..
+                    }) = &node.operator
+                    {
+                        if matches!(
+                            kind.algorithm(),
+                            SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                        ) {
+                            domains.push(input.weight_domain.clone());
+                        }
+                    }
+                }
+            }
+        }
+        domains
+    }
+
+    const COUNTER_PROOF: WeightDomain = WeightDomain::NonNegative {
+        proof: NonNegativeWeightProof::CounterSamples,
+    };
+
+    /// Raw samples of a declared counter, and their `sum_over_time`, are
+    /// proven non-negative: the whole-expression heaps read the samples, the
+    /// others read the sums.
+    #[test]
+    fn declared_counter_samples_prove_heap_weights_non_negative() {
+        let domains = heap_weight_domains(
+            "topk by (job) (10, sum_over_time(m[1m]))",
+            &[("m", MetricType::Counter)],
+        );
+        // (CMS, CountSketch) × (raw sum, Sum accumulator) + 2 whole-expression.
+        assert_eq!(domains.len(), 6);
+        assert!(domains.iter().all(|d| *d == COUNTER_PROOF), "{domains:?}");
+    }
+
+    /// No proof without a counter declaration: an undeclared metric (whatever
+    /// its name), a gauge, or another metric declared a counter.
+    #[test]
+    fn undeclared_or_gauge_samples_are_not_proven_non_negative() {
+        for (query, metric_types) in [
+            ("topk by (job) (10, sum_over_time(m_total[1m]))", vec![]),
+            (
+                "topk by (job) (10, sum_over_time(m[1m]))",
+                vec![("m", MetricType::Gauge)],
+            ),
+            (
+                "topk by (job) (10, sum_over_time(m[1m]))",
+                vec![("other", MetricType::Counter)],
+            ),
+        ] {
+            let domains = heap_weight_domains(query, &metric_types);
+            assert_eq!(domains.len(), 6, "{query}");
+            assert!(
+                domains.iter().all(|d| *d == WeightDomain::UnknownOrSigned),
+                "{query} {metric_types:?}: {domains:?}"
+            );
+        }
+    }
+
+    /// Counter samples and their sums are proven; arithmetic over them,
+    /// which can go negative, and a gauge are not.
+    #[test]
+    fn counter_samples_end_at_arithmetic() {
+        let metric_types = BTreeMap::from([
+            ("m".to_string(), MetricType::Counter),
+            ("g".to_string(), MetricType::Gauge),
+        ]);
+        for (query, proven) in [
+            ("sum_over_time(m[1m])", true),
+            ("sum by (job) (sum_over_time(m[1m]))", true),
+            ("sum_over_time(m[1m]) - 100", false),
+            ("-sum_over_time(m[1m])", false),
+            ("sum_over_time(g[1m])", false),
+        ] {
+            let root = lower_promql(query, AccuracyTarget::Exact);
+            assert_eq!(counter_samples(&root, &metric_types), proven, "{query}");
         }
     }
 

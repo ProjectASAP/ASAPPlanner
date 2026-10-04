@@ -224,6 +224,7 @@ struct DataWorkload {
     ingestion_rate: Evidence<Rate>,
     input_cardinality: Evidence<u64>,
     distribution: Evidence<DataDistribution>,
+    metric_types: BTreeMap<String, MetricType>,
 }
 ```
 
@@ -235,6 +236,7 @@ struct DataWorkload {
 | `ingestion_rate` | Optional evidence | Updates per second used to price continuous maintenance. It must be finite and non-negative; at-rest data cannot declare a positive rate. |
 | `input_cardinality` | Optional evidence | Input row/sample count used by applicable sizing, accuracy, or cost rules. |
 | `distribution` | Optional evidence | `Zipf`, `Uniform`, or `Bursty` key distribution used only by rules that explicitly consume it. |
+| `metric_types` | Optional; defaults to empty | Declared `Counter` or `Gauge` type per metric name. A counter's samples are never negative, so Count-Min over them, or over their sums, is admissible. An undeclared metric is not treated as a counter, whatever its name. |
 
 ##### `Evidence<T>` fields
 
