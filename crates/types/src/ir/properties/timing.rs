@@ -15,7 +15,8 @@
 //!   it can only exist at query time;
 //! - every other node runs when its consumer runs: everything that feeds a
 //!   maintained state runs at ingestion time, everything above a evaluation at
-//!   query time.
+//!   query time. A `SummaryMerge` is such a node: under an estimate it merges
+//!   at query time, while its inputs (tumbling panes) take their own timing.
 //!
 //! A node reached from two consumers that need different timings cannot be
 //! executed once for both; [`split_shared_by_phase`] copies such a sub-DAG
@@ -28,6 +29,7 @@
 //! |---|---|
 //! | `SummaryAgg.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
 //! | `SummaryEstimate.summary_input` | Summary state at either phase |
+//! | `SummaryMerge.children` | Summary state; at ingestion time, only ingestion-time state |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
 //! | `EvaluatePopulation.child` | A `MaintainPopulation` at ingestion time |
 //! | `MaintainPopulation.child` | Ingestion-time rows matching the population's input |
@@ -406,8 +408,27 @@ fn validate_asap(
             }
             Ok(())
         }
-        ASAPOp::SummaryMerge { .. }
-        | ASAPOp::SummarySubtract { .. }
+        ASAPOp::SummaryMerge { children } => {
+            for child in children {
+                let s = state_of(child);
+                if s.primitive != DataPrimitive::SummaryState {
+                    return Err(ExecutionDataStateError::IllegalChildDataState {
+                        edge: "SummaryMerge.children",
+                        child: s,
+                    });
+                }
+                if timing == ExecutionTiming::IngestionTime
+                    && s.timing == ExecutionTiming::QueryTime
+                {
+                    return Err(ExecutionDataStateError::EvaluationUnderMaintenance {
+                        edge: "SummaryMerge.children",
+                        child: s,
+                    });
+                }
+            }
+            Ok(())
+        }
+        ASAPOp::SummarySubtract { .. }
         | ASAPOp::SummaryDelete { .. }
         | ASAPOp::SummaryJoin { .. }
         | ASAPOp::Extension { .. } => Err(ExecutionDataStateError::UnimplementedOperator {
@@ -780,6 +801,84 @@ mod tests {
 
     fn child(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         Rc::clone(node.children()[0])
+    }
+
+    /// Tumbling pane `i` of width 60 s: a KLL over the scan, covering
+    /// `[-(i + 1)·60 s, -i·60 s)` relative to the evaluation.
+    fn pane(i: i64) -> Rc<OperatorNode> {
+        use crate::ir::properties::summary_coverage::{
+            CoverageRegion, CoverageTime, SummaryCoverage,
+        };
+        let coverage = SummaryCoverage {
+            source: Source::TimeSeries { metric: "m".into() },
+            regions: vec![CoverageRegion {
+                time_ms: Some(CoverageTime::RelativeToEvaluation(
+                    -(i + 1) * 60_000..-i * 60_000,
+                )),
+                population: Default::default(),
+            }],
+        };
+        Rc::new(
+            (*agg(scan(), kll()))
+                .clone()
+                .with_coverage(coverage)
+                .unwrap(),
+        )
+    }
+
+    fn merge(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(crate::ir::Operator::ASAP(ASAPOp::SummaryMerge { children }))
+            .unwrap()
+    }
+
+    /// A merge runs when its consumer runs (query time, under an estimate);
+    /// its panes take the assignment's timing.
+    #[test]
+    fn summary_merge_follows_its_consumer() {
+        for (assignment, panes) in [
+            (
+                MaterializationAssignment::all_query_time(),
+                ExecutionTiming::QueryTime,
+            ),
+            (
+                MaterializationAssignment::all_ingestion_time(),
+                ExecutionTiming::IngestionTime,
+            ),
+        ] {
+            let root = estimate(merge(vec![pane(0), pane(1)]));
+            let root =
+                apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+            let merged = child(&root);
+            assert_eq!(
+                data_state(&merged),
+                Some(ExecutionDataState {
+                    timing: ExecutionTiming::QueryTime,
+                    primitive: DataPrimitive::SummaryState,
+                })
+            );
+            assert!(merged
+                .children()
+                .iter()
+                .all(|pane| pane.timing == Some(panes)));
+        }
+    }
+
+    /// A merge maintained at ingestion time cannot read panes built at query
+    /// time.
+    #[test]
+    fn ingestion_time_merge_rejects_query_time_panes() {
+        let root = estimate(placed_at_ingestion(merge(vec![pane(0), pane(1)])));
+        assert!(matches!(
+            apply_materialization_timings(
+                &root,
+                &MaterializationAssignment::all_query_time(),
+                &mut TimingMemo::new()
+            ),
+            Err(ExecutionDataStateError::EvaluationUnderMaintenance {
+                edge: "SummaryMerge.children",
+                ..
+            })
+        ));
     }
 
     /// Without a materialization decision, a summary and its input run at
