@@ -127,15 +127,22 @@ pub(super) fn evaluate(
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Value::Float64(promql_function(name, &values)?));
             }
-            if name.eq_ignore_ascii_case("sqrt") {
-                return match evaluate(&args[0], row, schema)? {
-                    Value::Null => Ok(Value::Null),
-                    Value::Float64(value) => Ok(Value::Float64(value.sqrt())),
-                    Value::Int64(value) => Ok(Value::Float64((value as f64).sqrt())),
-                    _ => Err(Error::Invalid(
-                        "SQL sqrt requires a numeric argument".into(),
-                    )),
+            if name.eq_ignore_ascii_case("sqrt") || name.eq_ignore_ascii_case("ln") {
+                let value = match evaluate(&args[0], row, schema)? {
+                    Value::Null => return Ok(Value::Null),
+                    Value::Float64(value) => value,
+                    Value::Int64(value) => value as f64,
+                    _ => {
+                        return Err(Error::Invalid(
+                            "SQL math function requires a numeric argument".into(),
+                        ))
+                    }
                 };
+                return Ok(Value::Float64(if name.eq_ignore_ascii_case("sqrt") {
+                    value.sqrt()
+                } else {
+                    value.ln()
+                }));
             }
             if name == "promql_drop_metric_name" {
                 let Value::Utf8(encoded) = evaluate(&args[0], row, schema)? else {
@@ -656,7 +663,7 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
             Ok(())
         }
         ScalarExpr::FunctionCall { name, args } => {
-            if name.eq_ignore_ascii_case("sqrt") {
+            if name.eq_ignore_ascii_case("sqrt") || name.eq_ignore_ascii_case("ln") {
                 if args.len() != 1
                     || !matches!(
                         args[0]

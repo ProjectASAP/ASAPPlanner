@@ -945,3 +945,59 @@ fn sql_sqrt_executes_numeric_and_null_arguments() {
         matches!(compiled.evaluate(&[Value::Float64(-1.0)]).unwrap(), Value::Float64(v) if v.is_nan())
     );
 }
+
+// A complete SQL SUM window keeps every row and appends one nullable total, including recovery.
+#[test]
+fn complete_sql_sum_window_preserves_rows_and_nulls() {
+    let input = schema(&[("v", DataType::Int64, true)]);
+    let operator = Operator::sql_window_sum(input.clone(), 0, "total".into()).unwrap();
+    let operator: Operator =
+        serde_json::from_slice(&serde_json::to_vec(&operator).unwrap()).unwrap();
+    for (rows, expected) in [
+        (vec![], None),
+        (vec![vec![Value::Null]], None),
+        (
+            vec![
+                vec![Value::Int64(1)],
+                vec![Value::Null],
+                vec![Value::Int64(3)],
+            ],
+            Some(4),
+        ),
+    ] {
+        let original = rows.clone();
+        let actual = unary(input.clone(), vec![rows], operator.clone());
+        assert_eq!(actual.len(), original.len());
+        for (row, original) in actual.iter().zip(original) {
+            assert_eq!(row[0].key().unwrap(), original[0].key().unwrap());
+            match (&row[1], expected) {
+                (Value::Null, None) => {}
+                (Value::Int64(value), Some(expected)) => assert_eq!(*value, expected),
+                other => panic!("wrong complete-window sum: {other:?}"),
+            }
+        }
+    }
+}
+
+// SQL LN preserves nullable numeric signatures and natural-log units.
+#[test]
+fn sql_ln_executes_numeric_and_null_arguments() {
+    for (dtype, value) in [
+        (DataType::Int64, Value::Int64(2)),
+        (DataType::Float64, Value::Float64(2.0)),
+    ] {
+        let input = schema(&[("v", dtype, true)]);
+        let expression = ScalarExpr::FunctionCall {
+            name: "ln".into(),
+            args: vec![ScalarExpr::Column(0)],
+        };
+        let compiled = CompiledExpression::compile(&expression, &input).unwrap();
+        assert!(
+            matches!(compiled.evaluate(&[value]).unwrap(), Value::Float64(v) if v == std::f64::consts::LN_2)
+        );
+        assert!(matches!(
+            compiled.evaluate(&[Value::Null]).unwrap(),
+            Value::Null
+        ));
+    }
+}
