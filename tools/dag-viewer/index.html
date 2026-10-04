@@ -121,6 +121,8 @@ footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
 .editor .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .editor input { font: inherit; width: 8em; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
 .editor label { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+.editor label.stack { flex-direction: column; align-items: stretch; }
+.editor [hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -136,14 +138,20 @@ footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
       <span class="status" id="docName"></span>
     </div>
     <section class="panel" id="editor" aria-labelledby="editor-title" hidden>
-      <div class="panel-head"><h2 id="editor-title">Plan PromQL queries</h2><span class="eyebrow">needs the local server (server.py)</span></div>
+      <div class="panel-head"><h2 id="editor-title">Plan queries</h2><span class="eyebrow">needs the local server (server.py)</span></div>
       <form class="editor" id="editorForm">
-        <textarea id="editorQueries" aria-label="PromQL queries, one per line" spellcheck="false">sum by (job) (rate(http_requests_total[1m]))
+        <div class="row" role="group" aria-label="Query language">
+          <button class="btn" id="editorPromql" type="button" aria-pressed="true">PromQL</button>
+          <button class="btn" id="editorSql" type="button" aria-pressed="false">SQL</button>
+        </div>
+        <label class="stack" id="editorTablesField" hidden>tables (JSON, one table per line)
+          <textarea id="editorTables" spellcheck="false">{"name":"flows","columns":[{"name":"ts","type":"timestamp","nullable":false},{"name":"src_ip","type":"utf8","nullable":false}],"time_index":0}</textarea></label>
+        <textarea id="editorQueries" aria-label="Queries, one per line" spellcheck="false">sum by (job) (rate(http_requests_total[1m]))
 topk by (job) (10, sum_over_time(http_requests_total[1m]))</textarea>
         <div class="row">
           <label>ε <input id="editorEpsilon" type="number" min="0.000001" max="0.999999" step="any" placeholder="exact" /></label>
           <label>δ <input id="editorDelta" type="number" min="0.000001" max="0.999999" step="any" placeholder="none" /></label>
-          <label>sample interval (ms) <input id="editorInterval" type="number" min="1" step="1" value="15000" /></label>
+          <label id="editorIntervalField">sample interval (ms) <input id="editorInterval" type="number" min="1" step="1" value="15000" /></label>
           <button class="btn" type="submit">Plan</button>
           <span class="status" id="editorStatus">One query per line. Without ε the queries are exact.</span>
         </div>
