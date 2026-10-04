@@ -24,8 +24,8 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::{is_logical_rewrite, search_workload, Replacement};
 use asap_integration_tests::fixtures::lower_promql;
+use asap_logical_optimizer::{is_logical_rewrite, search_workload, Replacement};
 use asap_types::ir::NonASAPOp;
 use asap_types::types::AccuracyTarget;
 
@@ -33,7 +33,7 @@ use asap_types::types::AccuracyTarget;
 /// realistic case — two dashboards, or a query fired both standalone and as
 /// part of a larger batch) collapse onto one shared `Rc<OperatorNode>` after
 /// `search_workload`'s internal `share_common_sub_dags` pass, and onto one
-/// genuinely-shared [`TargetSubDAGCandidates`](asap_aware_mapping::TargetSubDAGCandidates) — carrying
+/// genuinely-shared [`TargetSubDAGCandidates`](asap_logical_optimizer::TargetSubDAGCandidates) — carrying
 /// every candidate discovered for it exactly once, not once per root — no
 /// second structural-equality pass at the post-ASAP layer needed for this
 /// kind of sharing.

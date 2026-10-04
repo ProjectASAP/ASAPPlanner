@@ -15,19 +15,18 @@ use std::rc::Rc;
 use asap_aware_mapping::cost_model::{
     CostProvenance, CostUnit, ExactCompositionCostInputs, ExactCompositionCostRequest,
 };
-use asap_aware_mapping::exact_composition::ExactOperation;
 use asap_aware_mapping::plan_selection::candidate_selection::{
     global_selection, runtime_support_evidence,
 };
-use asap_aware_mapping::replacement::{
+use asap_aware_mapping::{CostModel, DefaultCostModel, EvaluationRate};
+use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::post_asap::{maintained, post_asap_dag, timed};
+use asap_logical_optimizer::pass1::exact_composition::ExactOperation;
+use asap_logical_optimizer::pass1::replacement::{
     default_strategies, search_workload_with, ASAPStrategies, Replacement, ReplacementProvenance,
     ReplacementStrategy, TargetSubDAG,
 };
-use asap_aware_mapping::{
-    CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
-};
-use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::post_asap::{maintained, post_asap_dag, timed};
+use asap_logical_optimizer::{ExplanationKind, OperationPlacement};
 use asap_types::dag_export;
 use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
 use asap_types::ir::operator::agg_intent::{default_quantile, AggIntent};
@@ -105,7 +104,7 @@ struct StatsModel;
 /// Search, selection, and materialization must retain the caller's proven rule.
 #[test]
 fn custom_accuracy_rule_survives_root_target_and_materialization() {
-    use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
+    use asap_logical_optimizer::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
     use asap_types::ir::properties::{AccuracyError, CompositionOperator, ResultGuarantee};
     use asap_types::ir::schema::SketchStatistic;
     struct Model;
@@ -135,7 +134,7 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
         }
     }
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
-    let space = asap_aware_mapping::replacement::search_workload_with_targets(
+    let space = asap_logical_optimizer::pass1::replacement::search_workload_with_targets(
         vec![("q", root, Some(AccuracyTarget::Exact))],
         &default_strategies(),
         &Model,
@@ -155,10 +154,10 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
 #[test]
 fn root_target_rejects_unproven_composition() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
-    let space = asap_aware_mapping::replacement::search_workload_with_targets(
+    let space = asap_logical_optimizer::pass1::replacement::search_workload_with_targets(
         vec![("q", root, Some(AccuracyTarget::Exact))],
         &default_strategies(),
-        &asap_aware_mapping::DefaultAccuracyModel,
+        &asap_logical_optimizer::DefaultAccuracyModel,
     );
     let selection = global_selection(&space, &StatsModel);
     assert!(selection.composition(&space.roots[0].1).is_none());
@@ -235,7 +234,7 @@ fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
             && UnknownCapabilityModel
                 .candidate_cost(
                     candidate,
-                    &asap_aware_mapping::TargetSubDAG::new(&space.roots[0].1),
+                    &asap_logical_optimizer::TargetSubDAG::new(&space.roots[0].1),
                 )
                 .is_none()
     }));
@@ -249,7 +248,7 @@ fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
 
 fn plan(
     roots: Vec<(&'static str, Rc<OperatorNode>)>,
-) -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
+) -> asap_logical_optimizer::CandidateLogicalASAPDAGs<&'static str> {
     search_workload_with(roots, &default_strategies())
 }
 
@@ -700,7 +699,7 @@ fn missing_cost_statistics_preserve_the_conservative_retain_exact() {
     let node = selection.assemble_selected_dag(&root).unwrap().unwrap();
     assert!(!is_query_time_fold(&node));
 
-    let explanations = asap_aware_mapping::explain_replacements(vec![("q", Rc::clone(&root))]);
+    let explanations = asap_logical_optimizer::explain_replacements(vec![("q", Rc::clone(&root))]);
     assert!(explanations
         .iter()
         .any(|e| e.kind == ExplanationKind::ExactComposition));

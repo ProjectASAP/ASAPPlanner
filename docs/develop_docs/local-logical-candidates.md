@@ -1,6 +1,6 @@
 # Local logical alternatives (Pass 1)
 
-`asap_aware_mapping::logical_candidates` enumerates local realization choices over
+`asap_logical_optimizer::pass1::logical_candidates` enumerates local realization choices over
 unified `OperatorNode` and `QueryRoot` inputs. It is the first part of logical
 ASAP optimization in [planner layering](../design_docs/proposals/planner-layering.md).
 

@@ -1,6 +1,6 @@
 //! SQL and PromQL use the same shared-state rule without sharing membership semantics.
-use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_logical_optimizer::pass1::maintained_population::MaintainedPopulationStrategy;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::export::compile_physical_asap_dag;
 use asap_types::ir::operator::maintained_population::{MaintainedPopulation, PopulationInput};

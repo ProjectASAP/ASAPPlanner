@@ -1,9 +1,8 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
-use asap_aware_mapping::{
-    logical_candidates::{
-        enumerate_local_logical_candidates, local_realizations_for_intent, LogicalCandidateError,
-    },
-    Realization,
+use asap_logical_optimizer::{
+    pass1::logical_candidates::enumerate_local_logical_candidates,
+    pass1::logical_candidates::local_realizations_for_intent,
+    pass1::logical_candidates::LogicalCandidateError, Realization,
 };
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
@@ -244,7 +243,7 @@ fn topk_keeps_both_specialized_heap_choices() {
 /// coverage on the summary, and keeps unchosen plans identical.
 #[test]
 fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
-    use asap_aware_mapping::logical_candidates::compose_logical_candidate;
+    use asap_logical_optimizer::pass1::logical_candidates::compose_logical_candidate;
     use asap_types::ir::ASAPOp;
     let producer = aggregate(AggIntent::Cardinality {
         cols: vec![0],

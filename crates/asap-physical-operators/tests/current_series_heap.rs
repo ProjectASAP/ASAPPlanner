@@ -327,7 +327,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .remove(0);
     let open_root = Rc::new(original.clone());
     let open_selected =
-        asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
+        asap_logical_optimizer::pass1::maintained_population::MaintainedPopulationStrategy::new(
             std::slice::from_ref(&open_root),
         )
         .candidate(&open_root)
@@ -345,11 +345,12 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     assert!(encoded.contains("Sort") && encoded.contains("Limit"));
     assert_eq!(snapshot_program.input_contracts().count(), 1);
     let root = Rc::new(with_series_identity(&original).unwrap());
-    let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
-        std::slice::from_ref(&root),
-    )
-    .candidate(&root)
-    .unwrap();
+    let selected =
+        asap_logical_optimizer::pass1::maintained_population::MaintainedPopulationStrategy::new(
+            std::slice::from_ref(&root),
+        )
+        .candidate(&root)
+        .unwrap();
     let logical = compile_physical_asap_dag(&selected).unwrap();
     let raw = logical
         .nodes

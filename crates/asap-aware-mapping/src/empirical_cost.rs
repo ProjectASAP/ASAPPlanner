@@ -7,7 +7,7 @@ use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
 
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::replacement::{
+use asap_logical_optimizer::pass1::replacement::{
     accuracy_budget, accuracy_target, default_size_params, ReplacementSubDAG, TargetSubDAG,
 };
 

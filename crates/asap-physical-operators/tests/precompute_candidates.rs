@@ -1,7 +1,8 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
 mod common;
+use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::{cost_model::DefaultCostModel, search_workload};
+use asap_logical_optimizer::search_workload;
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
@@ -21,7 +22,7 @@ use planner_types::types::AccuracyTarget;
 use planner_types::workload::*;
 use std::{collections::BTreeMap, sync::Arc};
 
-fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
+fn grouped_rate_space() -> asap_logical_optimizer::CandidateLogicalASAPDAGs<&'static str> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -657,11 +658,12 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     let root =
         asap_physical_operators::physical_planner::promql_rows::with_series_identity(&original)
             .unwrap();
-    let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
-        std::slice::from_ref(&root),
-    )
-    .candidate(&root)
-    .unwrap();
+    let selected =
+        asap_logical_optimizer::pass1::maintained_population::MaintainedPopulationStrategy::new(
+            std::slice::from_ref(&root),
+        )
+        .candidate(&root)
+        .unwrap();
     let dag = compile_physical_asap_dag(&selected).unwrap();
     let raw = dag
         .nodes

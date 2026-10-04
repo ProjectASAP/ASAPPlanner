@@ -22,14 +22,17 @@ artifact, while preserving the checks required by its intended consumer.
 
 ## Dependencies
 
-Inside this workspace, depend on the frontend you need, `asap-aware-mapping`,
-and `asap-types`. External users can use Git dependencies pinned to a compatible
-revision; use the same revision across these crates. For the example below:
+Inside this workspace, depend on the frontend you need,
+`asap-logical-optimizer` (Stage 1 candidate search), `asap-aware-mapping`
+(cost models and selection) and `asap-types`. External users can use Git
+dependencies pinned to a compatible revision; use the same revision across
+these crates. For the example below:
 
 ```toml
 [dependencies]
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
+asap-logical-optimizer = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 ```
 
@@ -204,9 +207,9 @@ use asap_types::workload::{
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
-use asap_aware_mapping::{
-    default_strategies, search_workload_with_targets,
-    DefaultAccuracyModel, DefaultCostModel,
+use asap_aware_mapping::DefaultCostModel;
+use asap_logical_optimizer::{
+    default_strategies, search_workload_with_targets, DefaultAccuracyModel,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -253,7 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-| API (`asap_aware_mapping`, unless qualified) | Inputs | Output and limits |
+| API (`asap_logical_optimizer`; `candidate_selection` is `asap_aware_mapping::plan_selection::candidate_selection`) | Inputs | Output and limits |
 | --- | --- | --- |
 | `search_workload` | `(query_id, Rc<OperatorNode>)` roots | `CandidateLogicalASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `CandidateLogicalASAPDAGs`; callers choose context-free replacement strategies |
@@ -353,9 +356,10 @@ use asap_types::workload::{
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
-use asap_aware_mapping::{
-    search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
-    ReplacementStrategy, ASAPStrategies, SharedSubDAGStrategy,
+use asap_aware_mapping::DefaultCostModel;
+use asap_logical_optimizer::{
+    search_workload_with_targets, DefaultAccuracyModel, ReplacementStrategy,
+    ASAPStrategies, SharedSubDAGStrategy,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -406,7 +410,8 @@ not waive semantic or accuracy requirements.
 ### Model and evidence options
 
 Traits permit custom implementations; the following are concrete built-in options.
-Module-qualified paths below are relative to `asap_aware_mapping`.
+Cost models are in `asap_aware_mapping` (module-qualified paths below are
+relative to it); accuracy models and evidence are in `asap_logical_optimizer`.
 
 | Parameter | Available value / constructor | Meaning |
 | --- | --- | --- |
@@ -442,7 +447,7 @@ accuracy guarantees.
 ### Example: configure all sketch-strategy providers
 
 ```rust
-use asap_aware_mapping::{
+use asap_logical_optimizer::{
     DefaultAccuracyModel, EqualSplitAllocator,
     NoAccuracyEvidence, ReplacementStrategy, ASAPStrategies,
 };
@@ -487,7 +492,7 @@ Accuracy models, allocators and evidence are consumed during generation; the cos
 model is consumed only at selection (`cost_sorted`, `global_selection` and their
 `_with_recurrence` variants). Sketch parameters come from the analytical
 estimators, not the cost model. For evidence-aware defaults, use
-`asap_aware_mapping::replacement::default_strategies_with_evidence`.
+`asap_logical_optimizer::pass1::replacement::default_strategies_with_evidence`.
 For custom accuracy/allocation/evidence on sketches,
 `ASAPStrategies::new_with_planning_inputs_and_evidence` exposes these providers.
 Keep each provider's evidence scope and freshness valid for the query population.
@@ -584,7 +589,8 @@ use asap_types::workload::{
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::{search_workload, DefaultCostModel};
+use asap_aware_mapping::DefaultCostModel;
+use asap_logical_optimizer::search_workload;
 use asap_types::types::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -647,7 +653,7 @@ cargo doc -p asap-aware-mapping -p asap-types --no-deps
 ## Source references
 
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
-- [Search, ranking and selection](../../crates/asap-aware-mapping/src/replacement.rs)
+- [Search, ranking and selection](../../crates/logical-optimizer/src/pass1/replacement.rs)
 - [Cost models](../../crates/asap-aware-mapping/src/cost_model.rs)
 - [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)
