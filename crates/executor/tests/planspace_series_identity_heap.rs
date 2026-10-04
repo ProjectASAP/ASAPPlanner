@@ -3,7 +3,7 @@
 //! current-series TopK heaps without a caller-side series-identity pass, cost
 //! ranking, or workload Cartesian expansion. Placement variants are not listed.
 mod common;
-use common::compile_physical_asap_dag;
+use common::{compile_physical_asap_dag, selected_dag};
 use planner_types::ir::OperatorNode;
 
 use asap_executor::physical_planner::promql_rows::{
@@ -15,8 +15,6 @@ use asap_logical_optimizer::{
     pass1::replacement::ReplacementProvenance, search_workload_with_targets, Proposals,
     ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::cost::cost_model::DefaultCostModel;
 use planner_types::{
     ir::properties::*,
     ir::schema::*,
@@ -211,21 +209,12 @@ fn unrelated_queries_keep_their_inventory() {
     }
 }
 
-// Default cost-based selection keeps the logical plan; deployment prices heaps.
+// The stage pipeline's selection keeps the logical plan; deployment prices heaps.
 #[test]
-fn global_selection_never_commits_a_series_identity_heap() {
+fn selection_never_commits_a_series_identity_heap() {
     let accuracy = AccuracyTarget::Epsilon(0.1);
     let root = lower(CURRENT_SERIES_TOPK, &accuracy);
-    let strategies = default_strategies_with_evidence(&Evidence);
-    let space = search_workload_with_targets(
-        vec![(0, root, Some(accuracy))],
-        &strategies,
-        &DefaultAccuracyModel,
-    );
-    let selected = global_selection(&space, &DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
-        .unwrap()
-        .unwrap();
+    let selected = selected_dag(root, accuracy);
     assert!(!carries_identity(&vec![(0, selected)]));
 }
 

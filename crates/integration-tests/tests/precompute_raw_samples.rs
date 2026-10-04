@@ -1,5 +1,6 @@
 //! Planner-selected summaries over raw samples compile as precompute DAGs
 //! and produce the same estimates as feeding their kernel sample by sample.
+mod executor_models;
 mod physical_common;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::ASAPOp;
@@ -18,11 +19,8 @@ use asap_executor::{
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_logical_optimizer::{
-    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
-    TargetSubDAG,
+    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::cost::cost_model::DefaultCostModel;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
@@ -55,10 +53,10 @@ fn canonical(labels: &Series) -> Series {
         .collect()
 }
 
-/// Every Planner candidate for `query`: the searched selection plus each
-/// summary replacement of the root.
+/// Every Planner candidate for `query`: the stage pipeline's selection plus
+/// each summary replacement of the root.
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
-    let root = lower_promql(query, accuracy).expect("lowering failed");
+    let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
     let mut result = ASAPStrategies::default()
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
@@ -70,12 +68,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let space = search_workload(vec![("query", root)]);
-    if let Ok(Some(selected)) =
-        global_selection(&space, &DefaultCostModel).assemble_selected_dag(&space.roots[0].1)
-    {
-        result.push(selected);
-    }
+    result.push(executor_models::selected_dag(root, accuracy));
     result
 }
 
