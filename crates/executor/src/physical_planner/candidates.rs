@@ -364,16 +364,35 @@ mod tests {
             .unwrap()
             .remove(0);
         let root = promql_rows::with_series_identity(&root).unwrap();
-        let space = asap_logical_optimizer::search_workload(vec![("q", root)]);
-        let selected = asap_plan_selection::candidate_selection::global_selection(
-            &space,
-            &asap_plan_selection::cost::cost_model::DefaultCostModel,
-        )
-        .assemble_selected_dag(&space.roots[0].1)
-        .unwrap()
-        .unwrap();
+        let demand = [RootDemand {
+            accuracy: Some(planner_types::types::AccuracyTarget::Exact),
+            recurrence: QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            predictability: Predictability::default(),
+            latency_ms: None,
+        }];
+        let data = DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+            ingestion_rate: Evidence {
+                value: Some(Rate(1_000.0)),
+                source: EvidenceSource::Declared,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let capabilities = crate::capabilities();
+        let models =
+            asap_plan_selection::PlanningModels::builtin().with_capabilities(&capabilities);
+        let root = planner_types::ir::QueryRoot::Operator(root);
+        let run =
+            asap_plan_selection::plan_stages(vec![(0, root)], &demand, &data, models, 0).unwrap();
+        let planner_types::ir::QueryRoot::Operator(selected) = &run.plan.logical[0].1 else {
+            panic!("operator root")
+        };
         let selected = planner_types::ir::apply_materialization_timings(
-            &selected,
+            selected,
             &planner_types::ir::MaterializationAssignment::all_ingestion_time(),
             &mut Default::default(),
         )

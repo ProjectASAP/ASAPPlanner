@@ -109,3 +109,32 @@ pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
         other => panic!("expected sample expression, got {other:?}"),
     }
 }
+
+/// The logical DAG the #509 stage pipeline selects for the single query
+/// `root` at `accuracy`, run once, with the built-in models.
+#[allow(dead_code)]
+pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+    use asap_types::ir::QueryRoot;
+    use asap_types::workload::{QueryRecurrence, RootDemand};
+    let demand = [RootDemand {
+        accuracy: Some(accuracy),
+        recurrence: QueryRecurrence::OneTime {
+            invocations: 1,
+            execute_at: None,
+        },
+        predictability: Predictability::default(),
+        latency_ms: None,
+    }];
+    let run = asap_plan_selection::plan_stages(
+        vec![(0, QueryRoot::Operator(root))],
+        &demand,
+        &DataWorkload::default(),
+        asap_plan_selection::PlanningModels::builtin(),
+        0,
+    )
+    .unwrap();
+    let QueryRoot::Operator(root) = &run.plan.logical[0].1 else {
+        panic!("operator root")
+    };
+    root.clone()
+}

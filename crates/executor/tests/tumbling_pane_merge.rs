@@ -1,5 +1,6 @@
 //! Tumbling panes merged by `SummaryMerge` answer the same per-series query as
 //! one build over the whole window (#509 Example 3/4, Pattern B; #580).
+mod common;
 use asap_executor::{
     operators::Operator as PhysicalOperator,
     physical_planner::{
@@ -8,9 +9,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use asap_logical_optimizer::search_workload;
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::cost::cost_model::DefaultCostModel;
+use common::selected_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::operator_properties::TimeShift;
 use planner_types::ir::physical_export::compile_physical_asap_dag_with_node_ids;
@@ -32,7 +31,7 @@ fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy),
+                    accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -54,11 +53,7 @@ fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
         .unwrap()
         .remove(0);
     let root = asap_executor::physical_planner::promql_rows::with_series_identity(&root).unwrap();
-    let space = search_workload(vec![("q", root)]);
-    global_selection(&space, &DefaultCostModel)
-        .assemble_selected_query(&space.roots[0].1)
-        .unwrap()
-        .unwrap()
+    selected_dag(root, accuracy)
 }
 
 /// Rewrite the root's per-entity `SummaryAgg` over `TimeRange(5m)` into the

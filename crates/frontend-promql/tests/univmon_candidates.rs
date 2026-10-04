@@ -7,8 +7,6 @@ use asap_logical_optimizer::pass1::replacement::{
     default_strategies, search_workload_with_targets,
 };
 use asap_logical_optimizer::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::cost::cost_model::DefaultCostModel;
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::properties::{
@@ -17,7 +15,7 @@ use asap_types::ir::properties::{
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::types::AccuracyTarget;
-use support::{lower_promql, post_asap_dag};
+use support::{lower_promql, post_asap_dag, selected_dag};
 
 // Synthetic evidence exercises structural sharing, never runtime accuracy.
 struct TestEvidence;
@@ -161,7 +159,7 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             } else {
                 assert!(unknown > 0);
                 let space = search_workload_with_targets(
-                    vec![("q", Rc::clone(&root), Some(target))],
+                    vec![("q", Rc::clone(&root), Some(target.clone()))],
                     &default_strategies(),
                     &DefaultAccuracyModel,
                 );
@@ -171,11 +169,17 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
                     .candidates
                     .iter()
                     .any(|candidate| candidate.has_missing_accuracy_evidence()));
-                assert!(!global_selection(&space, &DefaultCostModel)
-                    .for_target(&space.roots[0].1)
-                    .unwrap()
-                    .chosen
-                    .is_some_and(|candidate| candidate.has_missing_accuracy_evidence()));
+                // Stage 3 never selects the uncalibrated UnivMon estimate.
+                let selected = selected_dag(root, target);
+                assert!(!OperatorNode::reachable(&selected)
+                    .iter()
+                    .any(|node| matches!(
+                        &node.operator,
+                        Operator::ASAP(ASAPOp::SummaryAgg {
+                            family: FieldDataType::Sketch(kind, _),
+                            ..
+                        }) if kind.algorithm() == &SketchAlgorithm::UnivMon
+                    )));
             }
         }
     }
