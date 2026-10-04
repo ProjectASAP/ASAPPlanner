@@ -3,9 +3,11 @@
 //!
 //! [`plan_stages`] runs them: Stage 1 lists each target's local alternatives
 //! (Pass 1) with and without identical sub-DAGs shared across queries (Pass
-//! 2's identical-expression rule), Stage 2 implements a candidate physically
-//! (everything at query time), and Stage 3 checks accuracy, prices it per
-//! second from each entry's recurrence and chooses. Pass 2's other rules are not planned yet.
+//! 2's identical-expression rule) and with one summary sized for its
+//! strictest consumer (Pass 2's summary-capability rule), Stage 2 implements
+//! a candidate physically (everything at query time), and Stage 3 checks
+//! accuracy, prices it per second from each entry's recurrence and chooses.
+//! Pass 2's window-composition rule is not planned yet.
 
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;

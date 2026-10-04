@@ -239,7 +239,7 @@ fn same_intent_except_accuracy(a: &AggIntent, b: &AggIntent) -> bool {
 /// — a different `Realization` family, not a point on the same sizing
 /// curve — so the numeric comparison alone does not mean what it means for
 /// two approximate targets. See the module docs for the full reasoning.
-fn dominates(tighter: &AccuracyTarget, looser: &AccuracyTarget) -> bool {
+pub(crate) fn dominates(tighter: &AccuracyTarget, looser: &AccuracyTarget) -> bool {
     if matches!(tighter, AccuracyTarget::Exact) || matches!(looser, AccuracyTarget::Exact) {
         return false;
     }

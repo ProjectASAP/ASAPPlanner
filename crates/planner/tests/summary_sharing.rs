@@ -235,7 +235,6 @@ fn unique_deployments(output: &PlanOutput) -> usize {
 /// equal-params subset of summary capability. Both plans hold the same `Rc`,
 /// so a consumer maintains it once.
 #[tokio::test]
-#[ignore = "Stage 3 selects the raw plan; query-time summaries never cost less until Stage 2 plans materialization: #580"]
 async fn quantiles_with_equal_params_share_one_producer() {
     let output = plan_promql(&[
         ("quantile_over_time(0.5, lat[5m])", 0.01),
@@ -315,7 +314,9 @@ fn kll_k_for(epsilon: f64) -> u32 {
 /// for the strictest consumer when the cost model prefers that candidate; each
 /// reader's guarantee meets its own target.
 #[tokio::test]
-#[ignore = "Pass 2 cross-query sharing is not planned by the stage pipeline: #580"]
+#[ignore = "the stage pipeline shares the KLL sized for the strictest consumer, but attaches no \
+            guarantee to plan roots, and Stage 3 ignores PlanningModels.cost, so the looser query \
+            alone selects the raw plan: #580"]
 async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
     let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
     let p99 = ("quantile_over_time(0.99, lat[5m])", 0.001);
@@ -338,10 +339,26 @@ async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
     assert_eq!(kll_k(&alone.plans[0]), kll_k_for(0.01));
 }
 
+/// The stage pipeline's summary-capability rule: p50 at ε=0.01 and p99 at
+/// ε=0.001 over one input read one KLL sized for ε=0.001, and Stage 3 accepts
+/// each query against its own target.
+#[tokio::test]
+async fn stage_pipeline_shares_one_kll_sized_for_the_strictest_consumer() {
+    let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
+    let p99 = ("quantile_over_time(0.99, lat[5m])", 0.001);
+    let output = plan_promql(&[p50, p99]).await;
+    assert!(same_states(&states(&output)));
+    assert_eq!(unique_deployments(&output), 1);
+    for plan in &output.plans {
+        assert_eq!(kll_k(plan), kll_k_for(0.001));
+    }
+    let selection = output.selection.expect("Stage 3 ran");
+    assert!(selection.costs.contains_key(&selection.selected));
+}
+
 /// Cross-series quantiles name their KLL state after the input column, not the
 /// quantile, so p50 and p99 over one selector share it.
 #[tokio::test]
-#[ignore = "Pass 2 cross-query sharing is not planned by the stage pipeline: #580"]
 async fn cross_series_p50_and_p99_share_one_producer() {
     let output = plan_promql(&[("quantile(0.5, lat)", 0.01), ("quantile(0.99, lat)", 0.01)]).await;
     assert!(same_states(&states(&output)));
@@ -362,7 +379,6 @@ async fn identical_ungrouped_queries_share_their_producers() {
 /// The SQL frontend reaches the same sharing for two copies of one filtered
 /// percentile.
 #[tokio::test]
-#[ignore = "Stage 3 selects the raw plan; query-time summaries never cost less until Stage 2 plans materialization: #580"]
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
@@ -371,11 +387,39 @@ async fn identical_sql_percentiles_share_one_producer() {
     assert_eq!(unique_deployments(&output), 1);
 }
 
+/// SQL p50 and p99 over one filtered column share one KLL through the
+/// summary-capability variant, although pre-ASAP CSE cannot merge their
+/// unkeyed scans; each query keeps its own output column.
+#[tokio::test]
+async fn stage_pipeline_shares_sql_p50_and_p99() {
+    let output = plan_sql(&[
+        "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10",
+        "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem WHERE l_orderkey > 10",
+    ])
+    .await;
+    assert!(same_states(&states(&output)));
+    assert_eq!(unique_deployments(&output), 1);
+    let names: Vec<_> = output
+        .plans
+        .iter()
+        .map(|plan| plan.root.schema.fields[0].name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "approx_percentile_cont(lineitem.l_extendedprice,Float64(0.5))",
+            "approx_percentile_cont(lineitem.l_extendedprice,Float64(0.99))",
+        ]
+    );
+}
+
 /// The quantile is a evaluation parameter: SQL p50 and p99 over one filtered
 /// column build one KLL, named after its input, while each query keeps its
 /// own output column.
 #[tokio::test]
-#[ignore = "Pass 2 cross-query sharing is not planned by the stage pipeline: #580"]
+#[ignore = "p50 and p99 now share one KLL with their own output names; the unshared cases \
+            (different filter or column) select the raw plan, since an unshared query-time \
+            summary never costs less until Stage 2 plans materialization: #580"]
 async fn sql_p50_and_p99_share_one_producer() {
     let p50 =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
