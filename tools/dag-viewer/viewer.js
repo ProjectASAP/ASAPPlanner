@@ -1168,10 +1168,11 @@ function renderStageScope(ranked) {
   const physicalTitle = hasStage3
     ? 'Physical ASAP candidates · Stage 3 result, by total cost (lane 3)'
     : 'Physical ASAP candidates (lane 3) · Stage 3 not produced, no costs';
+  const shownOf = shownOfText(stageDoc);
   scopePickerEl.innerHTML = `
     <div class="scopeGroup stageQueryGroup"><div class="scopeGroupLabel">Workload queries and requirements</div>${queryRows}</div>${deploymentGroup}
     <div class="scopeGroup"><div class="scopeGroupLabel">Logical ASAP candidates (lane 2)</div>${logicalButtons}</div>
-    <div class="scopeGroup stageRankGroup"><div class="scopeGroupLabel">${escapeHtml(physicalTitle)}</div>${physicalRows}</div>`;
+    <div class="scopeGroup stageRankGroup"><div class="scopeGroupLabel">${escapeHtml(physicalTitle)}</div>${shownOf ? `<div class="scopeRow">${escapeHtml(shownOf)}</div>` : ''}${physicalRows}</div>`;
   scopePickerEl.querySelectorAll('[data-logical]').forEach((button) => button.addEventListener('click', () => {
     stageLogicalId = button.dataset.logical;
     render();
