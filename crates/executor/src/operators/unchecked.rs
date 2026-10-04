@@ -125,12 +125,17 @@ impl TryFrom<UncheckedOperator> for Operator {
                     .clone();
                 Operator::sql_window_sum(input(0)?, column, name)?
             }
-            Kind::Aggregate { groups, measures } => {
+            Kind::Aggregate {
+                groups,
+                measures,
+                filters,
+            } => {
                 if groups.len() + measures.len() != output.fields.len() {
                     return Err(invalid("aggregate width mismatch"));
                 }
                 let names = output.fields[groups.len()..].iter().map(|f| f.name.clone());
                 Operator::aggregate(input(0)?, groups, names.zip(measures).collect())?
+                    .with_measure_filters(filters)?
             }
             Kind::SemiJoin {
                 keys,
@@ -155,22 +160,34 @@ impl TryFrom<UncheckedOperator> for Operator {
                 value,
                 time,
                 groups,
-            } => match value {
-                Some(value) => Operator::summary_build(input(0)?, family, value, time, groups)?,
-                None => Operator::unit_count_build(input(0)?, family, groups)?,
-            },
+                filter,
+            } => with_filter(
+                match value {
+                    Some(value) => Operator::summary_build(input(0)?, family, value, time, groups)?,
+                    None => Operator::unit_count_build(input(0)?, family, groups)?,
+                },
+                filter,
+            )?,
             Kind::KeyedSummaryBuild {
                 family,
                 value,
                 items,
                 groups,
-            } => Operator::keyed_summary_build(input(0)?, family, value, items, groups)?,
+                filter,
+            } => with_filter(
+                Operator::keyed_summary_build(input(0)?, family, value, items, groups)?,
+                filter,
+            )?,
             Kind::SharedSummaryBuild {
                 family,
                 item,
                 weight,
                 groups,
-            } => Operator::shared_summary_build(input(0)?, family, item, weight, groups)?,
+                filter,
+            } => with_filter(
+                Operator::shared_summary_build(input(0)?, family, item, weight, groups)?,
+                filter,
+            )?,
             Kind::KeyedEvaluation { state, k } => {
                 Operator::keyed_evaluation(input(0)?, state, k, output.clone())?
             }
@@ -189,5 +206,12 @@ impl TryFrom<UncheckedOperator> for Operator {
             return Err(invalid("operator input contracts differ"));
         }
         Ok(op)
+    }
+}
+
+fn with_filter(operator: Operator, filter: Option<Box<Expression>>) -> Result<Operator, Error> {
+    match filter {
+        Some(filter) => operator.with_row_filter(*filter),
+        None => Ok(operator),
     }
 }

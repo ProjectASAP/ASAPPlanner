@@ -55,6 +55,7 @@ impl Operator {
                 value,
                 items,
                 groups,
+                filter: None,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -98,6 +99,7 @@ impl Operator {
                 item,
                 weight,
                 groups,
+                filter: None,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -216,10 +218,26 @@ impl Operator {
                 value,
                 time,
                 groups,
+                filter: None,
             },
             inputs: vec![input],
             output: schema(fields),
         })
+    }
+    /// Update the summary only from rows where `filter` is true (a filtered
+    /// `SummaryAgg`). Every group still gets a state, so a group with no
+    /// matching row reads as an empty summary.
+    pub fn with_row_filter(mut self, filter: Expression) -> Result<Self, Error> {
+        if filter.dtype(&self.inputs[0])?.0 != DataType::Bool {
+            return Err(invalid("summary filter must be boolean"));
+        }
+        match &mut self.kind {
+            Kind::SummaryBuild { filter: slot, .. }
+            | Kind::KeyedSummaryBuild { filter: slot, .. }
+            | Kind::SharedSummaryBuild { filter: slot, .. } => *slot = Some(Box::new(filter)),
+            _ => return Err(invalid("a row filter needs a summary build")),
+        }
+        Ok(self)
     }
     pub fn summary_merge(
         input: SchemaRef,
@@ -314,10 +332,11 @@ pub(super) fn execute<'a>(
             value,
             time,
             groups,
+            filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_summary(input, family, *value, *time, groups, !operator.inputs[0].has_promql_series_identity(), &context).await?,
+                build_summary(input, family, *value, *time, groups, filter.as_deref(), !operator.inputs[0].has_promql_series_identity(), &context).await?,
             )
         })
         .boxed_local()),
@@ -326,10 +345,12 @@ pub(super) fn execute<'a>(
             value,
             items,
             groups,
+            filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_keyed_summary(input, family, *value, items, groups, &context).await?,
+                build_keyed_summary(input, family, *value, items, groups, filter.as_deref(), &context)
+                    .await?,
             )
         })
         .boxed_local()),
@@ -338,10 +359,12 @@ pub(super) fn execute<'a>(
             item,
             weight,
             groups,
+            filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_shared_summary(input, family, *item, *weight, groups, &context).await?,
+                build_shared_summary(input, family, *item, *weight, groups, filter.as_deref(), &context)
+                    .await?,
             )
         })
         .boxed_local()),
@@ -388,6 +411,12 @@ pub(super) fn execute<'a>(
                         return Err(invalid("summary value required"));
                     };
                     row[*state] = match query {
+                        // A filtered or NULL-only group's quantile is SQL NULL.
+                        SummaryEvaluation::Sketch(_)
+                            if output.fields[*state].nullable && summary.is_empty() =>
+                        {
+                            Value::Null
+                        }
                         SummaryEvaluation::Sketch(query) => {
                             let value = summary
                                 .estimate(query)
@@ -462,12 +491,14 @@ pub(super) fn execute_merge<'a>(
     .boxed_local())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
     value: Option<usize>,
     time: Option<usize>,
     groups: &[usize],
+    filter: Option<&Expression>,
     emit_empty_global: bool,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
@@ -518,6 +549,9 @@ async fn build_summary(
                 )?;
                 states.insert(key.clone(), state);
             }
+            if !selected(filter, row)? {
+                continue;
+            }
             let (_, updater, memory, overhead, previous) =
                 states.get_mut(&key).expect("inserted group");
             // SQL aggregates ignore NULL samples while retaining the group.
@@ -560,6 +594,13 @@ async fn build_summary(
             labels
         })
         .collect())
+}
+/// Whether a row passes a summary build's filter: only a true predicate
+/// does, as with SQL `FILTER (WHERE …)`.
+fn selected(filter: Option<&Expression>, row: &[Value]) -> Result<bool, Error> {
+    filter.map_or(Ok(true), |filter| {
+        Ok(matches!(filter.evaluate(row)?, Value::Bool(true)))
+    })
 }
 async fn merge_summary(
     rows: Vec<Vec<Value>>,
@@ -630,6 +671,7 @@ async fn build_keyed_summary(
     value: usize,
     items: &[usize],
     groups: &[usize],
+    filter: Option<&Expression>,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
     use crate::{summary_kernels::weighted_frequency::WeightedFrequency, AggregateCore};
@@ -666,6 +708,9 @@ async fn build_keyed_summary(
                     ),
                 );
             }
+            if !selected(filter, row)? {
+                continue;
+            }
             let (_, summary, reservation, overhead) = states.get_mut(&key).unwrap();
             let Value::Float64(weight) = row[value] else {
                 return Err(invalid("weighted frequency weight type"));
@@ -701,6 +746,7 @@ async fn build_shared_summary(
     item: usize,
     weight: Option<usize>,
     groups: &[usize],
+    filter: Option<&Expression>,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
     use crate::summary_kernels::HydraCmsGroup;
@@ -728,6 +774,9 @@ async fn build_shared_summary(
                     key_bytes(&key) + labels.iter().map(Value::bytes).sum::<usize>() + name.len();
                 memory.resize(retained)?;
                 seen.insert(key.clone(), (labels, name));
+            }
+            if !selected(filter, row)? {
+                continue;
             }
             let count = match weight.map(|column| &row[column]) {
                 None => 1,

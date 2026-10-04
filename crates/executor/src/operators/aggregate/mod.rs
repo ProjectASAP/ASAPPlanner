@@ -83,10 +83,49 @@ impl Operator {
             kind: Kind::Aggregate {
                 groups,
                 measures: measures.into_iter().map(|(_, r)| r).collect(),
+                filters: vec![],
             },
             inputs: vec![input],
             output: schema(fields),
         })
+    }
+
+    /// Give each measure an optional row filter (SQL `FILTER (WHERE …)`).
+    /// A group is formed from all its rows, so a group with no matching row
+    /// still appears, with the measure's empty-input value: 0 for counts,
+    /// NULL for SQL SUM/AVG/MIN/MAX. No filter at all keeps the plain form.
+    pub fn with_measure_filters(mut self, filters: Vec<Option<Expression>>) -> Result<Self, Error> {
+        let Kind::Aggregate {
+            filters: slot,
+            measures,
+            groups,
+        } = &mut self.kind
+        else {
+            return Err(invalid("measure filters need an aggregate"));
+        };
+        if filters.iter().all(Option::is_none) {
+            return Ok(self);
+        }
+        if filters.len() != measures.len() {
+            return Err(invalid("one filter slot per aggregate measure required"));
+        }
+        let mut output = (*self.output).clone();
+        for (index, filter) in filters.iter().enumerate() {
+            let Some(filter) = filter else { continue };
+            if filter.dtype(&self.inputs[0])?.0 != DataType::Bool {
+                return Err(invalid("measure filter must be boolean"));
+            }
+            if matches!(
+                measures[index],
+                Reduction::Sum(_) | Reduction::Avg(_) | Reduction::Min(_) | Reduction::Max(_)
+            ) && !self.inputs[0].has_promql_series_identity()
+            {
+                output.fields[groups.len() + index].nullable = true;
+            }
+        }
+        *slot = filters;
+        self.output = Arc::new(output);
+        Ok(self)
     }
     pub fn window(
         input: SchemaRef,
@@ -189,7 +228,7 @@ pub(super) fn execute<'a>(
             Kind::SQLWindowSum { column } => {
                 let mut work = Cooperative::new(&context);
                 let total = reduce_one(
-                    &rows,
+                    &rows.iter().collect::<Vec<_>>(),
                     &Reduction::Sum(*column),
                     &operator.inputs[0],
                     &mut work,
@@ -224,8 +263,20 @@ pub(super) fn execute<'a>(
                 )
                 .await?
             }
-            Kind::Aggregate { groups, measures } => {
-                reduce(rows, groups, measures, &operator.inputs[0], &context).await?
+            Kind::Aggregate {
+                groups,
+                measures,
+                filters,
+            } => {
+                reduce(
+                    rows,
+                    groups,
+                    measures,
+                    filters,
+                    &operator.inputs[0],
+                    &context,
+                )
+                .await?
             }
             _ => unreachable!(),
         };
@@ -239,6 +290,7 @@ async fn reduce(
     rows: Vec<Vec<Value>>,
     groups: &[usize],
     measures: &[Reduction],
+    filters: &[Option<Expression>],
     input: &SchemaRef,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
@@ -265,8 +317,21 @@ async fn reduce(
             .iter()
             .map(|&i| rows[0][i].clone())
             .collect::<Vec<_>>();
-        for measure in measures {
-            result.push(reduce_one(&rows, measure, input, &mut work, context).await?);
+        for (index, measure) in measures.iter().enumerate() {
+            let mut selected = Vec::with_capacity(rows.len());
+            for row in &rows {
+                // SQL FILTER keeps a row only when the predicate is true, not NULL.
+                if filters
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map_or(Ok(true), |filter| {
+                        filter.evaluate(row).map(|v| matches!(v, Value::Bool(true)))
+                    })?
+                {
+                    selected.push(row);
+                }
+            }
+            result.push(reduce_one(&selected, measure, input, &mut work, context).await?);
         }
         workspace.grow(row_bytes(&result))?;
         output.push(result);
@@ -300,7 +365,7 @@ pub(super) fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
 }
 
 async fn reduce_one(
-    rows: &[Vec<Value>],
+    rows: &[&Vec<Value>],
     measure: &Reduction,
     input: &SchemaRef,
     work: &mut Cooperative,

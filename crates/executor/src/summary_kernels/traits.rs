@@ -26,6 +26,13 @@ pub trait AggregateCore: Send + Sync {
         Err(format!("{query:?} is not supported by this summary").into())
     }
 
+    /// True when no sample reached this state, so a value readout (a
+    /// quantile) has no answer, which SQL reads as NULL. Kernels that do not
+    /// track it report false.
+    fn is_empty(&self) -> bool {
+        false
+    }
+
     /// Approximate in-memory footprint, used for execution memory reservations.
     fn approx_memory_bytes(&self) -> usize {
         4096

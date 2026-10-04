@@ -38,6 +38,10 @@ impl AggregateCore for DDSketchAccumulator {
         }))
     }
 
+    fn is_empty(&self) -> bool {
+        self.inner.total_count() == 0
+    }
+
     /// Quantiles, and the total sample count as a bare `PointCount`.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
