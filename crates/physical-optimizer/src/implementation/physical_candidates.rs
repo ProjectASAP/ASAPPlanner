@@ -247,6 +247,7 @@ mod tests {
         let inventory =
             asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(
                 vec![(0, QueryRoot::Operator(root))],
+                &Default::default(),
             )
             .unwrap();
         // A summary (the last alternative) for every target.

@@ -923,7 +923,7 @@ pub fn plan_stages<Id: Clone>(
     models: PlanningModels<'_>,
     display: usize,
 ) -> Result<StagePipelineRun<Id>, SelectionError> {
-    let stage1 = stage1_logical_candidates(roots)?;
+    let stage1 = stage1_logical_candidates(roots, &data.metric_types)?;
     let plan = select_plan(&stage1, demand, data, models)?;
     let enumeration = match display {
         0 => None,
@@ -1553,6 +1553,12 @@ mod tests {
     /// Exact (P1), CMS+heap (P2) and CountSketch+heap (P3) realizations of
     /// one approximate top-k query, in Pass 1 catalog order.
     fn candidates() -> Vec<PhysicalCandidate> {
+        candidates_with(&Default::default())
+    }
+
+    fn candidates_with(
+        metric_types: &BTreeMap<String, asap_types::workload::MetricType>,
+    ) -> Vec<PhysicalCandidate> {
         let root = lower_promql(
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::EpsilonDelta {
@@ -1563,6 +1569,7 @@ mod tests {
         let inventory =
             asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(
                 vec![(0, QueryRoot::Operator(root))],
+                metric_types,
             )
             .unwrap();
         let topk = inventory
@@ -1645,6 +1652,33 @@ mod tests {
         assert!(p2.reason.contains("non-negative"), "{}", p2.reason);
     }
 
+    /// Count-Min over samples of a declared counter is valid: Stage 3 prices it.
+    #[test]
+    fn count_min_over_declared_counter_samples_is_valid() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let counter = [("m".to_string(), asap_types::workload::MetricType::Counter)].into();
+        let selection = stage3_select(
+            &candidates_with(&counter),
+            &[every_10s(Some(target))],
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        assert!(
+            selection.costs.contains_key("P2"),
+            "{:?}",
+            selection.rejected
+        );
+        assert!(
+            selection.rejected.iter().all(|r| r.valid),
+            "{:?}",
+            selection.rejected
+        );
+    }
+
     fn inventory(queries: &[&str]) -> LocalLogicalCandidates<usize> {
         let target = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
@@ -1660,8 +1694,11 @@ mod tests {
                 (i, QueryRoot::Operator(root))
             })
             .collect();
-        asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(roots)
-            .unwrap()
+        asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(
+            roots,
+            &Default::default(),
+        )
+        .unwrap()
     }
 
     fn no_targets(inventory: &LocalLogicalCandidates<usize>) -> Vec<RootDemand> {
@@ -2188,7 +2225,7 @@ mod tests {
                 (i, QueryRoot::Operator(root))
             })
             .collect();
-        let stage1 = stage1_logical_candidates(roots).unwrap();
+        let stage1 = stage1_logical_candidates(roots, &Default::default()).unwrap();
         let data = DataWorkload {
             ingestion_rate: Evidence {
                 value: Some(Rate(1_000_000.0 / 15.0)),

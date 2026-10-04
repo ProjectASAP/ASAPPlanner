@@ -126,7 +126,7 @@ async fn facade_plans_match_exhaustive_stage_pipeline_selection() {
         roots.push((index, QueryRoot::Operator(expr)));
         targets.push(asap_types::workload::RootDemand::from(&entry));
     }
-    let inventory = stage1_logical_candidates(roots).expect("Stage 1");
+    let inventory = stage1_logical_candidates(roots, &Default::default()).expect("Stage 1");
     let data = workload.data_workload.clone().unwrap_or_default();
     let enumeration = select_exhaustive(
         &inventory,

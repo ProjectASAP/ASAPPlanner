@@ -23,9 +23,9 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence,
-    EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage,
-    QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, TimeSelection,
+    EvidenceSource, LatencyRequirement, MetricType, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
+    RepeatingEntry, RepetitionInterval, TimeSelection,
 };
 
 /// Adapters from the Phase C stage APIs to the shapes these tests were written
@@ -331,6 +331,8 @@ fn example1_workload() -> PlanningWorkload {
             ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
             input_cardinality: declared(1_000_000),
             distribution: declared(DataDistribution::Zipf),
+            // `http_requests_total` is a counter: its samples are never negative.
+            metric_types: [("http_requests_total".into(), MetricType::Counter)].into(),
         }),
     }
 }
@@ -504,12 +506,31 @@ fn relational(payload: &LogicalASAPOperatorPayload) -> Option<String> {
     }
 }
 
+/// Example 1 with `http_requests_total` declared `metric_type`, or undeclared.
+fn example1_workload_with(metric_type: Option<MetricType>) -> PlanningWorkload {
+    let mut workload = example1_workload();
+    let data = workload.data_workload.as_mut().expect("data workload");
+    data.metric_types = metric_type
+        .map(|t| [("http_requests_total".to_string(), t)].into())
+        .unwrap_or_default();
+    workload
+}
+
 fn pipeline() -> (
     PlanningWorkload,
     Vec<LogicalCandidate>,
     Vec<PhysicalCandidate>,
 ) {
-    let workload = example1_workload();
+    pipeline_for(example1_workload())
+}
+
+fn pipeline_for(
+    workload: PlanningWorkload,
+) -> (
+    PlanningWorkload,
+    Vec<LogicalCandidate>,
+    Vec<PhysicalCandidate>,
+) {
     let logical = stage1_logical_asap(&workload, &stage0_logical(&workload));
     let physical = stage2_physical(&workload, &logical);
     (workload, logical, physical)
@@ -887,13 +908,11 @@ fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
         .map_err(|e| format!("{} ({}): {e}", p.id, p.label))
 }
 
-/// Runtime capability check (added by the implementer, not part of the
-/// spec): the physical planner compiles every candidate Stage 3 finds valid,
-/// and rejects the invalid ones (Count-Min over weights not proven
-/// non-negative) for the same reason Stage 3 gives.
-#[test]
-fn stage2_runtime_compiles_exactly_the_candidates_stage3_finds_valid() {
-    let (workload, _, physical) = pipeline();
+/// The physical planner compiles every candidate Stage 3 finds valid, and
+/// rejects the invalid ones (Count-Min over weights not proven non-negative)
+/// for the same reason Stage 3 gives. Returns the number of invalid ones.
+fn assert_runtime_agrees_with_stage3(workload: PlanningWorkload) -> usize {
+    let (workload, _, physical) = pipeline_for(workload);
     let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
     let invalid: BTreeMap<_, _> = selection
         .rejected
@@ -901,7 +920,6 @@ fn stage2_runtime_compiles_exactly_the_candidates_stage3_finds_valid() {
         .filter(|r| !r.valid)
         .map(|r| (r.id.as_str(), r.reason.as_str()))
         .collect();
-    assert_eq!(invalid.len(), 24, "the Count-Min + heap candidates");
     for p in &physical {
         let compiled = compile_in_runtime(p);
         match invalid.get(p.id.as_str()) {
@@ -919,6 +937,28 @@ fn stage2_runtime_compiles_exactly_the_candidates_stage3_finds_valid() {
                 );
             }
         }
+    }
+    invalid.len()
+}
+
+/// Runtime capability check (added by the implementer, not part of the
+/// spec): with `http_requests_total` declared a counter, every candidate,
+/// Count-Min + heap included, is valid in Stage 3 and compiles.
+#[test]
+fn stage2_runtime_compiles_every_candidate_over_a_declared_counter() {
+    assert_eq!(assert_runtime_agrees_with_stage3(example1_workload()), 0);
+}
+
+/// Without the counter declaration, or with a gauge, the Count-Min + heap
+/// candidates are invalid in Stage 3 and the runtime rejects them.
+#[test]
+fn stage2_count_min_needs_a_counter_declaration() {
+    for metric_type in [None, Some(MetricType::Gauge)] {
+        assert_eq!(
+            assert_runtime_agrees_with_stage3(example1_workload_with(metric_type)),
+            24,
+            "{metric_type:?}: the Count-Min + heap candidates"
+        );
     }
 }
 
@@ -1058,8 +1098,8 @@ fn stage3_charges_each_node_once() {
 }
 
 /// Sharing the input never costs more than reading it separately, for the
-/// same local choices. Count-Min + heap is invalid here and has no cost
-/// (Hydra: see `stage1_q2_summary_families_are_heap_sketches_and_hydra`).
+/// same local choices (Hydra: see
+/// `stage1_q2_summary_families_are_heap_sketches_and_hydra`).
 #[test]
 fn stage3_shared_input_is_not_costlier() {
     let (workload, _, physical) = pipeline();
@@ -1074,7 +1114,9 @@ fn stage3_shared_input_is_not_costlier() {
         .collect();
     for option in [
         Q2Option::Exact,
+        Q2Option::CountMinHeapPerJob,
         Q2Option::CountSketchHeapPerJob,
+        Q2Option::WholeCountMinHeapPerJob,
         Q2Option::WholeCountSketchHeapPerJob,
     ] {
         assert!(

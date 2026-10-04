@@ -76,6 +76,7 @@ fn example1() -> PlanningWorkload {
             ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
             input_cardinality: declared(1_000_000),
             distribution: declared(DataDistribution::Zipf),
+            metric_types: Default::default(),
         }),
     }
 }
@@ -129,7 +130,7 @@ fn promql_inventory(workload: &PlanningWorkload) -> Inventory {
             QueryRoot::Scalar(_) => panic!("operator roots"),
         })
         .collect();
-    stage1_logical_candidates(roots).expect("Stage 1")
+    stage1_logical_candidates(roots, &Default::default()).expect("Stage 1")
 }
 
 fn targets(workload: &PlanningWorkload) -> Vec<RootDemand> {
@@ -270,7 +271,7 @@ async fn sql_dp_equals_exhaustive() {
             .expect("lowers");
         roots.push((index, QueryRoot::Operator(root)));
     }
-    let inventory = stage1_logical_candidates(roots).expect("Stage 1");
+    let inventory = stage1_logical_candidates(roots, &Default::default()).expect("Stage 1");
     assert_dp_matches_exhaustive(&inventory, &workload, 15);
 }
 

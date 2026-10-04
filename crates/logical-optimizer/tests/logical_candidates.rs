@@ -127,7 +127,7 @@ fn scalar_root_producers_are_discovered_once() {
         ),
         ("relation", QueryRoot::Operator(producer.clone())),
     ];
-    let candidates = enumerate_local_logical_candidates(roots).unwrap();
+    let candidates = enumerate_local_logical_candidates(roots, &Default::default()).unwrap();
     assert_eq!(candidates.roots.len(), 2);
     for (_, root) in &candidates.roots {
         asap_types::ir::export::compile_logical_asap_query(root)
@@ -177,8 +177,11 @@ fn promql_lowering_reaches_local_candidates_without_execution_timing() {
         }),
     };
     let roots = asap_frontend_promql::lower_promql_query_workload(&workload, 0).unwrap();
-    let candidates =
-        enumerate_local_logical_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let candidates = enumerate_local_logical_candidates(
+        roots.into_iter().enumerate().collect(),
+        &Default::default(),
+    )
+    .unwrap();
     assert!(candidates
         .targets
         .iter()
@@ -204,7 +207,10 @@ fn assigned_timing_and_invalid_accuracy_are_rejected() {
     .clone();
     producer.timing = Some(asap_types::ir::properties::ExecutionTiming::QueryTime);
     assert!(matches!(
-        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(producer)))]),
+        enumerate_local_logical_candidates(
+            vec![(0, QueryRoot::Operator(Rc::new(producer)))],
+            &Default::default()
+        ),
         Err(LogicalCandidateError::AssignedTiming)
     ));
     for target in [
@@ -249,9 +255,11 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
         cols: vec![0],
         accuracy: approximate(),
     });
-    let inventory =
-        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(producer.clone()))])
-            .unwrap();
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(producer.clone()))],
+        &Default::default(),
+    )
+    .unwrap();
     let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
     assert!(matches!(&exact[0].1, QueryRoot::Operator(node) if Rc::ptr_eq(node, &producer)));
 
