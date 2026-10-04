@@ -29,8 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use datafusion::arrow::compute::kernels::cast_utils::parse_interval_month_day_nano;
-use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field};
-use datafusion::catalog_common::MemorySchemaProvider;
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, FieldRef};
+use datafusion::catalog::MemorySchemaProvider;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column as DfColumn, DFSchema, ScalarValue as DfScalarValue};
@@ -41,15 +41,16 @@ use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::FunctionRewrite;
 use datafusion::logical_expr::function::{PartitionEvaluatorArgs, WindowUDFFieldArgs};
 use datafusion::logical_expr::{
-    self, lit, AggregateUDF, Case, Distinct, Expr, ExprSchemable, JoinType, LogicalPlan,
-    PartitionEvaluator, ScalarUDF, ScalarUDFImpl, Signature, SimpleAggregateUDF, TypeSignature,
-    Volatility, WindowFrameBound as DfWindowFrameBound, WindowFrameUnits as DfWindowFrameUnits,
-    WindowFunctionDefinition, WindowUDF, WindowUDFImpl,
+    self, lit, AggregateUDF, Case, ColumnarValue, Distinct, Expr, ExprSchemable, JoinType,
+    LogicalPlan, PartitionEvaluator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+    SimpleAggregateUDF, TypeSignature, Volatility, WindowFrameBound as DfWindowFrameBound,
+    WindowFrameUnits as DfWindowFrameUnits, WindowFunctionDefinition, WindowUDF, WindowUDFImpl,
 };
 use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion::optimizer::{AnalyzerRule, OptimizerConfig};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::parser::DFParser;
+use datafusion::sql::sqlparser::dialect::GenericDialect;
 
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
@@ -70,13 +71,11 @@ use crate::error::SqlError as LoweringError;
 
 mod clickhouse_ast;
 mod collection_planning;
-mod dialect;
 mod expr;
 mod types;
 
 pub use types::SqlCatalog;
 
-use self::dialect::GenericWithAggregateFilter;
 use self::expr::df_expr_to_unresolved;
 use self::types::{arrow_to_dtype, scalar_value_to_asap, schema_to_arrow};
 
@@ -177,16 +176,14 @@ impl<'a> SqlLowerer<'a> {
         let ctx = self.build_context()?;
         let state = ctx.state();
         let statement = if matches!(self.dialect, SqlDialect::ClickhouseSQL) {
-            let mut statement = state.sql_to_statement(sql, "ClickHouse")?;
+            let mut statement =
+                state.sql_to_statement(sql, &datafusion::config::Dialect::ClickHouse)?;
             if let datafusion::sql::parser::Statement::Statement(ast) = &mut statement {
                 clickhouse_ast::normalize(ast);
             }
             statement
         } else {
-            // Not `ctx.sql(sql)`: that parses under the by-name `generic`
-            // dialect, which cannot see an aggregate `FILTER (WHERE …)`.
-            let mut statements = DFParser::parse_sql_with_dialect(sql, &GenericWithAggregateFilter)
-                .map_err(|e| datafusion::error::DataFusionError::SQL(e, None))?;
+            let mut statements = DFParser::parse_sql_with_dialect(sql, &GenericDialect)?;
             let (Some(statement), true) = (statements.pop_front(), statements.is_empty()) else {
                 return Err(LoweringError::UnsupportedFeature(
                     "exactly one SQL statement per query".into(),
@@ -196,7 +193,7 @@ impl<'a> SqlLowerer<'a> {
         };
         let plan = state.statement_to_plan(statement).await?;
         let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
-        let plan = rewriter.analyze(plan, ctx.state().options())?;
+        let plan = rewriter.analyze(plan, &ctx.state().options())?;
         // Output schemas omit predicate and nested-expression types. Check the
         // typed SQL plan before lowering erases fixed-duration units.
         plan.apply_with_subqueries(|node| {
@@ -209,7 +206,16 @@ impl<'a> SqlLowerer<'a> {
                 expr.apply(|nested| {
                     if let Expr::BinaryExpr(binary) = nested {
                         if binary.op == logical_expr::Operator::Minus
-                            && matches!(nested.get_type(&schema)?, ArrowDataType::Duration(_))
+                            // DataFusion types `date - date` as an Int64 day
+                            // count, which the canonical DAG has no shape for.
+                            && (matches!(
+                                (binary.left.get_type(&schema)?, binary.right.get_type(&schema)?),
+                                (ArrowDataType::Date32, ArrowDataType::Date32)
+                                    | (ArrowDataType::Date64, ArrowDataType::Date64)
+                            ) || matches!(
+                                nested.get_type(&schema)?,
+                                ArrowDataType::Duration(_)
+                            ))
                         {
                             return Err(datafusion::common::DataFusionError::Plan(
                                 "temporal subtraction produces an unsupported duration type".into(),
@@ -254,7 +260,7 @@ impl<'a> SqlLowerer<'a> {
                 }
             }
             let arrow_schema = Arc::new(schema_to_arrow(schema));
-            let mem_table = MemTable::try_new(arrow_schema, vec![])?;
+            let mem_table = MemTable::try_new(arrow_schema, vec![vec![]])?;
             ctx.register_table(name.as_str(), Arc::new(mem_table))?;
         }
         // Register a stub `AggregateUDF` for every catalog-listed
@@ -362,7 +368,7 @@ impl<'a> SqlLowerer<'a> {
                                 qualifier: Some(alias_name),
                                 child,
                             }),
-                            // Otherwise (e.g. `SELECT *` unwrapped to a scan) wrap
+                            // Otherwise (e.g. a `LIMIT` or `DISTINCT` sub-plan) wrap
                             // in an identity projection that re-qualifies each
                             // output column. Names come from the sub-plan's schema.
                             inner => {
@@ -644,6 +650,7 @@ impl<'a> SqlLowerer<'a> {
         };
         let func = lower_window_func_kind(&wf.fun)?;
         let mut args = wf
+            .params
             .args
             .iter()
             .map(df_expr_to_unresolved)
@@ -664,11 +671,13 @@ impl<'a> SqlLowerer<'a> {
             func
         };
         let partition_by = wf
+            .params
             .partition_by
             .iter()
             .map(expr_to_group_ref)
             .collect::<Result<Vec<_>, _>>()?;
         let order_by = wf
+            .params
             .order_by
             .iter()
             .map(|s| {
@@ -679,7 +688,7 @@ impl<'a> SqlLowerer<'a> {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let frame = lower_window_frame(&wf.window_frame)?;
+        let frame = lower_window_frame(&wf.params.window_frame)?;
         // The window plan's schema is `[input fields …, window output]`; the last
         // field is the window column's name (what an enclosing Project references).
         let output_name = window
@@ -727,10 +736,6 @@ impl<'a> SqlLowerer<'a> {
                     child: Rc::new(input),
                 },
             });
-        }
-        // SELECT * — no column constraint; pass through without a Project.
-        if proj.expr.iter().any(|e| matches!(e, Expr::Wildcard { .. })) {
-            return self.lower_plan(&proj.input);
         }
         let child = Rc::new(self.lower_plan(&proj.input)?);
         let temporal_input = plan_has_temporal_aggregate(&proj.input);
@@ -905,13 +910,13 @@ impl<'a> SqlLowerer<'a> {
             unreachable!("is_temporal_aggregate accepted a non-aggregate expression")
         };
         let name = call.func.name().to_lowercase();
-        let [value, timestamp, window] = call.args.as_slice() else {
+        let [value, timestamp, window] = call.params.args.as_slice() else {
             unreachable!("ASAP temporal UDAF signatures require exactly three arguments")
         };
 
         let value_ref = reducer_col(&name, std::slice::from_ref(value))?;
         let timestamp_ref = reducer_col(&name, std::slice::from_ref(timestamp))?;
-        let Expr::Literal(window) = unalias(window) else {
+        let Expr::Literal(window, _) = unalias(window) else {
             return Err(LoweringError::InvalidExpression(format!(
                 "{name} window_ms must be a positive integer literal"
             )));
@@ -1328,9 +1333,9 @@ fn temporal_bridge_projection(
 
 fn positive_millis_literal(expr: &Expr, argument: &str) -> Result<Duration, LoweringError> {
     let millis = match unalias(expr) {
-        Expr::Literal(DfScalarValue::Int64(Some(value))) if *value > 0 => *value as u64,
-        Expr::Literal(DfScalarValue::UInt64(Some(value))) if *value > 0 => *value,
-        Expr::Literal(DfScalarValue::Int32(Some(value))) if *value > 0 => *value as u64,
+        Expr::Literal(DfScalarValue::Int64(Some(value)), _) if *value > 0 => *value as u64,
+        Expr::Literal(DfScalarValue::UInt64(Some(value)), _) if *value > 0 => *value,
+        Expr::Literal(DfScalarValue::Int32(Some(value)), _) if *value > 0 => *value as u64,
         other => {
             return Err(LoweringError::InvalidExpression(format!(
                 "{argument} must be a positive integer millisecond literal, got {other}"
@@ -1342,11 +1347,11 @@ fn positive_millis_literal(expr: &Expr, argument: &str) -> Result<Duration, Lowe
 
 fn float_literal(expr: &Expr) -> Option<f64> {
     match unalias(expr) {
-        Expr::Literal(DfScalarValue::Float64(Some(value))) => Some(*value),
-        Expr::Literal(DfScalarValue::Float32(Some(value))) => Some(*value as f64),
-        Expr::Literal(DfScalarValue::Int64(Some(value))) => Some(*value as f64),
-        Expr::Literal(DfScalarValue::UInt64(Some(value))) => Some(*value as f64),
-        Expr::Literal(DfScalarValue::Int32(Some(value))) => Some(*value as f64),
+        Expr::Literal(DfScalarValue::Float64(Some(value)), _) => Some(*value),
+        Expr::Literal(DfScalarValue::Float32(Some(value)), _) => Some(*value as f64),
+        Expr::Literal(DfScalarValue::Int64(Some(value)), _) => Some(*value as f64),
+        Expr::Literal(DfScalarValue::UInt64(Some(value)), _) => Some(*value as f64),
+        Expr::Literal(DfScalarValue::Int32(Some(value)), _) => Some(*value as f64),
         _ => None,
     }
 }
@@ -1469,11 +1474,11 @@ fn clickhouse_scalar_builtin_return_type(name: &str) -> ArrowDataType {
 }
 
 /// A stub `ScalarUDFImpl` carrying only what DataFusion's planner needs:
-/// name, arity-only [`Signature`], and a fixed return type. `invoke`/
-/// `invoke_batch` are left at their trait defaults (a `NotImplemented`
-/// `DataFusionError`) — see [`clickhouse_scalar_builtin_stub_udf`]'s doc for
-/// why that is unreachable in practice.
-#[derive(Debug)]
+/// name, arity-only [`Signature`], and a fixed return type. `invoke_with_args`
+/// returns a `NotImplemented` `DataFusionError` — see
+/// [`clickhouse_scalar_builtin_stub_udf`]'s doc for why that is unreachable in
+/// practice.
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct ClickHouseScalarBuiltinStub {
     name: &'static str,
     signature: Signature,
@@ -1481,10 +1486,6 @@ struct ClickHouseScalarBuiltinStub {
 }
 
 impl ScalarUDFImpl for ClickHouseScalarBuiltinStub {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.name
     }
@@ -1498,6 +1499,15 @@ impl ScalarUDFImpl for ClickHouseScalarBuiltinStub {
         _arg_types: &[ArrowDataType],
     ) -> datafusion::common::Result<ArrowDataType> {
         Ok(self.return_type.clone())
+    }
+
+    fn invoke_with_args(
+        &self,
+        _args: ScalarFunctionArgs,
+    ) -> datafusion::common::Result<ColumnarValue> {
+        Err(datafusion::common::DataFusionError::NotImplemented(
+            format!("{} is a planning-only stub", self.name),
+        ))
     }
 }
 
@@ -1527,17 +1537,13 @@ fn clickhouse_window_builtin_stub_udwf(name: &'static str, arity: Arity) -> Wind
 /// argument (matching `lag`/`lead`'s own "output type = input type"
 /// behavior). `partition_evaluator` is left `unimplemented!()` — see
 /// [`clickhouse_window_builtin_stub_udwf`]'s doc for why that is unreachable.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct ClickHouseWindowBuiltinStub {
     name: &'static str,
     signature: Signature,
 }
 
 impl WindowUDFImpl for ClickHouseWindowBuiltinStub {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.name
     }
@@ -1546,9 +1552,11 @@ impl WindowUDFImpl for ClickHouseWindowBuiltinStub {
         &self.signature
     }
 
-    fn field(&self, field_args: WindowUDFFieldArgs) -> datafusion::common::Result<Field> {
-        let dtype = field_args.get_input_type(0).unwrap_or(ArrowDataType::Null);
-        Ok(Field::new(field_args.name(), dtype, true))
+    fn field(&self, field_args: WindowUDFFieldArgs) -> datafusion::common::Result<FieldRef> {
+        let dtype = field_args
+            .get_input_field(0)
+            .map_or(ArrowDataType::Null, |field| field.data_type().clone());
+        Ok(Arc::new(Field::new(field_args.name(), dtype, true)))
     }
 
     fn partition_evaluator(
@@ -1599,17 +1607,17 @@ impl FunctionRewrite for ClickHouseBuiltinRewrite {
             // at whatever arity the call carries.
             RewriteKind::CountDistinct => AggregateFunction::new_udf(
                 count_udaf(),
-                f.args,
+                f.params.args,
                 true,
-                f.filter,
-                f.order_by,
-                f.null_treatment,
+                f.params.filter,
+                f.params.order_by,
+                f.params.null_treatment,
             ),
             // `f(cond)` -> `sum(CASE WHEN cond THEN 1 ELSE 0 END)` — see
             // `RewriteKind::CountIfToSum`'s doc; moving the `-If` family onto
             // `Aggregate.filters` (issue #466) is a follow-up.
             RewriteKind::CountIfToSum => {
-                let cond = f.args.into_iter().next().expect(
+                let cond = f.params.args.into_iter().next().expect(
                     "countif's stub signature fixes its arity at 1 -- the planner \
                      already rejected any other argument count before this rewrite runs",
                 );
@@ -1622,9 +1630,9 @@ impl FunctionRewrite for ClickHouseBuiltinRewrite {
                     sum_udaf(),
                     vec![indicator],
                     false,
-                    f.filter,
-                    f.order_by,
-                    f.null_treatment,
+                    f.params.filter,
+                    f.params.order_by,
+                    f.params.null_treatment,
                 )
             }
         };
@@ -1645,10 +1653,10 @@ fn measure_filter(expr: &Expr, input: &DFSchema) -> Result<Option<Expr>, Lowerin
     let Expr::AggregateFunction(agg_fn) = unalias(expr) else {
         return Ok(None);
     };
-    let mut conjuncts: Vec<Expr> = agg_fn.filter.iter().map(|f| (**f).clone()).collect();
-    let counts_rows = agg_fn.func.name().eq_ignore_ascii_case("count") && !agg_fn.distinct;
+    let mut conjuncts: Vec<Expr> = agg_fn.params.filter.iter().map(|f| (**f).clone()).collect();
+    let counts_rows = agg_fn.func.name().eq_ignore_ascii_case("count") && !agg_fn.params.distinct;
     if counts_rows {
-        for argument in &agg_fn.args {
+        for argument in &agg_fn.params.args {
             let nullable = argument
                 .nullable(input)
                 .map_err(|error| LoweringError::UnsupportedFeature(error.to_string()))?;
@@ -1683,7 +1691,7 @@ fn conditional_count_arm(expr: &Expr) -> Option<(&Expr, &Expr)> {
     }
     let else_is_null = match case.else_expr.as_deref() {
         None => true,
-        Some(Expr::Literal(value)) => value.is_null(),
+        Some(Expr::Literal(value, _)) => value.is_null(),
         Some(_) => false,
     };
     if !else_is_null {
@@ -1717,7 +1725,7 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             // own name rather than a native DataFusion aggregate. Handled
             // before the `NATIVE_FUNCTIONS` lookup below since neither name
             // is in that table (issue #232).
-            if let Some(intent) = lower_arg_selector(&name, &agg_fn.args)? {
+            if let Some(intent) = lower_arg_selector(&name, &agg_fn.params.args)? {
                 return Ok(intent);
             }
             let semantic = asap_sql_function_catalog::lookup_native(&name)
@@ -1726,7 +1734,7 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             // value reducers; only
             // COUNT(DISTINCT) maps (to Cardinality). Reject DISTINCT elsewhere
             // rather than silently lowering `SUM(DISTINCT x)` as `SUM(x)`.
-            if agg_fn.distinct && !matches!(semantic, AggSemantic::Count) {
+            if agg_fn.params.distinct && !matches!(semantic, AggSemantic::Count) {
                 return Err(LoweringError::UnsupportedAggregate(format!(
                     "DISTINCT {name}"
                 )));
@@ -1742,12 +1750,13 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             };
             Ok(match semantic {
                 AggSemantic::Correlation => {
-                    if agg_fn.order_by.is_some() || agg_fn.null_treatment.is_some() {
+                    if !agg_fn.params.order_by.is_empty() || agg_fn.params.null_treatment.is_some()
+                    {
                         return Err(LoweringError::UnsupportedAggregate(
                             "corr with ORDER BY or explicit null treatment".into(),
                         ));
                     }
-                    let [left, right] = agg_fn.args.as_slice() else {
+                    let [left, right] = agg_fn.params.args.as_slice() else {
                         return Err(LoweringError::UnsupportedAggregate(
                             "corr requires two arguments".into(),
                         ));
@@ -1760,7 +1769,8 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                 // Every argument reaches the intent: `COUNT(DISTINCT a, b)`
                 // counts distinct *tuples*, which is a different quantity from
                 // the distinct count of either column.
-                AggSemantic::Count if agg_fn.distinct => match agg_fn.args.as_slice() {
+                AggSemantic::Count if agg_fn.params.distinct => match agg_fn.params.args.as_slice()
+                {
                     // DataFusion's planner rejects a bare `COUNT(DISTINCT)`
                     // before lowering. Guarded anyway: an empty `cols` is the
                     // PromQL sample-value convention, which SQL never has.
@@ -1778,23 +1788,23 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                     accuracy: current_accuracy(),
                 },
                 AggSemantic::Sum => AggIntent::Sum {
-                    col: col(&agg_fn.args)?,
+                    col: col(&agg_fn.params.args)?,
                 },
                 AggSemantic::Min => AggIntent::Min {
-                    col: col(&agg_fn.args)?,
+                    col: col(&agg_fn.params.args)?,
                 },
                 AggSemantic::Max => AggIntent::Max {
-                    col: col(&agg_fn.args)?,
+                    col: col(&agg_fn.params.args)?,
                 },
                 AggSemantic::Avg => AggIntent::Avg {
-                    col: col(&agg_fn.args)?,
+                    col: col(&agg_fn.params.args)?,
                 },
                 AggSemantic::StdDev { population } => AggIntent::StdDev {
-                    col: col(&agg_fn.args)?,
+                    col: col(&agg_fn.params.args)?,
                     population,
                 },
                 AggSemantic::Variance { population } => AggIntent::Variance {
-                    col: col(&agg_fn.args)?,
+                    col: col(&agg_fn.params.args)?,
                     population,
                 },
                 // `fixed_q = Some(0.5)` is `median`/`approx_median`. As with
@@ -1804,15 +1814,15 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                 // `plan::boundary`), so both spellings share one intent
                 // (#111).
                 AggSemantic::Quantile { fixed_q } => AggIntent::Quantile {
-                    col: col(&agg_fn.args)?,
+                    col: col(&agg_fn.params.args)?,
                     q: match fixed_q {
                         Some(q) => q,
-                        None => extract_percentile_q(&agg_fn.args)?,
+                        None => extract_percentile_q(&agg_fn.params.args)?,
                     },
                     accuracy: current_accuracy(),
                 },
                 AggSemantic::Cardinality => AggIntent::Cardinality {
-                    cols: vec![reducer_col(&name, &agg_fn.args)?],
+                    cols: vec![reducer_col(&name, &agg_fn.params.args)?],
                     accuracy: current_accuracy(),
                 },
             })
@@ -2176,7 +2186,7 @@ impl DerivedCols {
             // and qualified columns. This retains both inputs and avoids losing
             // relation qualifiers when the projection becomes an unqualified schema.
             let mut rewritten = agg_fn.clone();
-            for arg in &mut rewritten.args {
+            for arg in &mut rewritten.params.args {
                 let alias = unalias(arg).to_string();
                 self.materialize(alias.clone(), df_expr_to_unresolved(arg)?)?;
                 *arg = Expr::Column(DfColumn::new_unqualified(alias));
@@ -2185,8 +2195,9 @@ impl DerivedCols {
         }
         // `COUNT(*)` reduces no column; `agg_col_name` covers bare/aliased/cast
         // columns, so `None` here means the argument really is an expression.
-        let counts_rows = agg_fn.func.name().eq_ignore_ascii_case("count") && !agg_fn.distinct;
-        let Some(arg) = agg_fn.args.first() else {
+        let counts_rows =
+            agg_fn.func.name().eq_ignore_ascii_case("count") && !agg_fn.params.distinct;
+        let Some(arg) = agg_fn.params.args.first() else {
             return Ok(expr.clone());
         };
         if counts_rows {
@@ -2195,10 +2206,10 @@ impl DerivedCols {
         // Preserve every additional column dependency (e.g. argMax's ordering
         // column) when an unrelated grouping expression creates a Project.
         // Literal parameters need no source column and remain untouched.
-        for argument in agg_fn.args.iter().skip(1) {
+        for argument in agg_fn.params.args.iter().skip(1) {
             self.passthrough(argument)?;
         }
-        match agg_col_name(&agg_fn.args) {
+        match agg_col_name(&agg_fn.params.args) {
             Some(name) => {
                 self.push(name, df_expr_to_unresolved(arg)?);
                 Ok(expr.clone())
@@ -2207,7 +2218,7 @@ impl DerivedCols {
                 let alias = unalias(arg).to_string();
                 self.materialize(alias.clone(), df_expr_to_unresolved(arg)?)?;
                 let mut agg_fn = agg_fn.clone();
-                agg_fn.args[0] = Expr::Column(DfColumn::new_unqualified(alias));
+                agg_fn.params.args[0] = Expr::Column(DfColumn::new_unqualified(alias));
                 Ok(Expr::AggregateFunction(agg_fn))
             }
         }
@@ -2293,8 +2304,8 @@ fn expr_to_group_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
 
 fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
     let q = match args.get(1) {
-        Some(Expr::Literal(DfScalarValue::Float64(Some(q)))) => *q,
-        Some(Expr::Literal(DfScalarValue::Float32(Some(q)))) => *q as f64,
+        Some(Expr::Literal(DfScalarValue::Float64(Some(q)), _)) => *q,
+        Some(Expr::Literal(DfScalarValue::Float32(Some(q)), _)) => *q as f64,
         _ => {
             return Err(LoweringError::InvalidExpression(
                 "percentile value must be a float literal (2nd arg)".into(),
@@ -2314,9 +2325,9 @@ fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
 
 fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
     expr_opt.as_ref().and_then(|e| match e.as_ref() {
-        Expr::Literal(DfScalarValue::Int64(Some(v))) if *v >= 0 => Some(*v as usize),
-        Expr::Literal(DfScalarValue::UInt64(Some(v))) => Some(*v as usize),
-        Expr::Literal(DfScalarValue::Int32(Some(v))) if *v >= 0 => Some(*v as usize),
+        Expr::Literal(DfScalarValue::Int64(Some(v)), _) if *v >= 0 => Some(*v as usize),
+        Expr::Literal(DfScalarValue::UInt64(Some(v)), _) => Some(*v as usize),
+        Expr::Literal(DfScalarValue::Int32(Some(v)), _) if *v >= 0 => Some(*v as usize),
         _ => None,
     })
 }
@@ -2351,14 +2362,6 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
             "max" => Ok(WindowFuncKind::Max),
             other => Err(unsupported("aggregate", other)),
         },
-        WindowFunctionDefinition::BuiltInWindowFunction(biwf) => {
-            use datafusion::logical_expr::BuiltInWindowFunction;
-            match biwf {
-                BuiltInWindowFunction::FirstValue => Ok(WindowFuncKind::FirstValue),
-                BuiltInWindowFunction::LastValue => Ok(WindowFuncKind::LastValue),
-                BuiltInWindowFunction::NthValue => Ok(WindowFuncKind::NthValue(None)),
-            }
-        }
     }
 }
 

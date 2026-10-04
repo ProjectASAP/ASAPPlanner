@@ -23,6 +23,28 @@ fn strip_projection(mut root: &QueryExpr) -> &QueryExpr {
     root
 }
 
+/// Skips a projection that keeps every column in place, such as the one
+/// `SELECT *` lowers to: it changes neither the rows nor the column positions
+/// a Sort key refers to.
+fn strip_identity_projection(expr: &Rc<QueryExpr>) -> &Rc<QueryExpr> {
+    if let QueryExpr::Project {
+        cols,
+        qualifier: None,
+        child,
+    } = expr.as_ref()
+    {
+        let width = child.output_schema().map(|schema| schema.fields.len());
+        if width.ok() == Some(cols.len())
+            && cols.iter().enumerate().all(|(i, item)| {
+                item.alias.is_none() && matches!(item.expr, QueryExpr::Column(c) if c == i)
+            })
+        {
+            return child;
+        }
+    }
+    expr
+}
+
 fn recognize(
     root: &QueryExpr,
 ) -> Option<(MaintainedPopulation, PopulationStatistic, Rc<QueryExpr>)> {
@@ -81,7 +103,7 @@ fn recognize(
                 return None;
             }
             (
-                child,
+                strip_identity_projection(child),
                 partition_by,
                 PopulationStatistic::TopK { k: *n },
                 Some(*col),

@@ -194,8 +194,12 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // 152 -> 154: `ScalarValue::Interval` (this branch) converts the
     // `INTERVAL x unit` literal the two `toStartOfInterval(...)` queries
     // carry.
-    expect(Category::Lowered, 154);
-    expect(Category::Plan, 40);
+    // 154 -> 156 (DataFusion 54, issue #611): q128 calls `greatest`, which
+    // DataFusion now provides (was `Plan`), and q129's subquery
+    // `ORDER BY count(*)` no longer fails as `UnsupportedFeature("expression:
+    // count(*)")`.
+    expect(Category::Lowered, 156);
+    expect(Category::Plan, 39);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
     // One query that used to fail at `uniqExact` (`Plan`) now clears that
@@ -207,7 +211,7 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // Typed Map access lowers one prior gap; six array accesses now fail
     // during typed planning because the Map adapter rejects array inputs.
     expect(Category::NotImplemented, 0);
-    expect(Category::UnsupportedFeature, 6);
+    expect(Category::UnsupportedFeature, 5);
     // Was 2: the two `toStartOfInterval(...)` queries whose `INTERVAL`-literal
     // conversion gap the `toStartOfInterval` note above describes. Both now
     // lower end to end and are counted in `Lowered`.
