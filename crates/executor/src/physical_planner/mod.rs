@@ -1001,15 +1001,25 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             }
             crate::capability::validate_summary_kernel(family, update, grouping)
                 .map_err(Error::Invalid)?;
-            let SummaryInputExpr::Column(column) = &update.weight else {
-                return Err(invalid(
-                    "summary update expression must be projected to a column",
-                ));
-            };
             let PlannerReduction::Reduce(keys) = reduction else {
                 return Err(invalid(
                     "summary construction requires explicit grouping columns",
                 ));
+            };
+            let column = match &update.weight {
+                SummaryInputExpr::Column(column) => column,
+                SummaryInputExpr::Constant(weight) if *weight == 1.0 => {
+                    return Operator::unit_count_build(
+                        input.clone(),
+                        family.clone(),
+                        groups(input, keys)?,
+                    )
+                }
+                _ => {
+                    return Err(invalid(
+                        "summary update expression must be projected to a column",
+                    ))
+                }
             };
             Operator::summary_build(
                 input.clone(),
