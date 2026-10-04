@@ -164,7 +164,15 @@ mod stages {
             .into_iter()
             .map(|c| {
                 let physical = c.physical.expect("every Example 1 candidate builds");
-                let label = format!("{:?}{}", c.choice, if c.shared { " shared" } else { "" });
+                let label = format!(
+                    "{:?}{}",
+                    c.choice,
+                    if c.sharing.merges_after_composition() {
+                        " shared"
+                    } else {
+                        ""
+                    }
+                );
                 let roots = c.logical.expect("composes");
                 candidate(
                     physical.from_logical,

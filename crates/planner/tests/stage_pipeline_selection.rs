@@ -5,7 +5,7 @@
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_logical_optimizer::pass2::identical_expressions::{
-    stage1_logical_candidates, SharingVariant,
+    stage1_logical_candidates, Sharing, SharingVariant,
 };
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{
@@ -148,6 +148,19 @@ fn assert_dp_matches_exhaustive(
     workload: &PlanningWorkload,
     combinations: usize,
 ) -> String {
+    let (selected, method, _) = selects_exhaustive_minimum(inventory, workload, combinations);
+    assert_eq!(method, SelectionMethod::TreeDp);
+    selected
+}
+
+/// [`select_plan`] chooses what building and pricing every combination of
+/// every variant chooses, however it gets there; returns the winner's id,
+/// how `select_plan` found it, and its variant.
+fn selects_exhaustive_minimum(
+    inventory: &Inventory,
+    workload: &PlanningWorkload,
+    combinations: usize,
+) -> (String, SelectionMethod, Sharing) {
     let targets = targets(workload);
     let data = workload.data_workload.clone().unwrap_or_default();
     let models = PlanningModels::builtin();
@@ -172,10 +185,17 @@ fn assert_dp_matches_exhaustive(
         .expect("winner was built");
 
     let plan = select_plan(inventory, &targets, &data, models).expect("selects");
-    assert_eq!(plan.selection.method, SelectionMethod::TreeDp);
-    assert_eq!((plan.shared, &plan.choice), (winner.shared, &winner.choice));
+    assert!(plan.selection.guaranteed_optimal());
+    assert_eq!(
+        (plan.sharing, &plan.choice),
+        (winner.sharing, &winner.choice)
+    );
     assert_eq!(plan.selection.selected, exhaustive.selection.selected);
-    exhaustive.selection.selected
+    (
+        exhaustive.selection.selected,
+        plan.selection.method,
+        plan.sharing,
+    )
 }
 
 /// #509 Example 1: the dynamic program picks the cheapest of its 64
@@ -273,6 +293,110 @@ async fn sql_dp_equals_exhaustive() {
     }
     let inventory = stage1_logical_candidates(roots, &Default::default()).expect("Stage 1");
     assert_dp_matches_exhaustive(&inventory, &workload, 15);
+}
+
+/// PromQL queries, each with its own ε (δ = 0.001).
+fn promql_with(queries: &[(&str, f64)]) -> PlanningWorkload {
+    let mut workload = promql(&[], 1_000);
+    workload.query_workload.query_batch = Some(
+        queries
+            .iter()
+            .map(|(q, epsilon)| {
+                batch(
+                    q,
+                    AccuracyTarget::EpsilonDelta {
+                        epsilon: *epsilon,
+                        delta: 0.001,
+                    },
+                )
+            })
+            .collect(),
+    );
+    workload
+}
+
+/// p50 at ε=0.01 and p99 at ε=0.001 over one input: Stage 1 has an
+/// independent, an identical-expression and a summary-capability variant
+/// (pass-through, KLL, DDSketch per target: 9 combinations each). Sharing
+/// one KLL couples the two targets, so selection builds every combination
+/// of that variant, and picks the exhaustive minimum: the shared KLL.
+#[test]
+fn summary_capability_dp_equals_exhaustive() {
+    let workload = promql_with(&[
+        ("quantile_over_time(0.5, lat[5m])", 0.01),
+        ("quantile_over_time(0.99, lat[5m])", 0.001),
+    ]);
+    let stage1 = promql_inventory(&workload);
+    assert_eq!(
+        stage1.iter().map(|v| v.sharing).collect::<Vec<_>>(),
+        [
+            Sharing::Independent,
+            Sharing::IdenticalExpressions,
+            Sharing::SummaryCapability
+        ]
+    );
+    let (_, method, sharing) = selects_exhaustive_minimum(&stage1, &workload, 27);
+    assert_eq!(method, SelectionMethod::Exhaustive);
+    assert_eq!(sharing, Sharing::SummaryCapability);
+}
+
+/// The same with an unrelated third query (pass-through or exact max): the
+/// shared KLL is still the minimum over all 3 × 18 combinations.
+#[test]
+fn summary_capability_with_an_unrelated_query_dp_equals_exhaustive() {
+    let workload = promql_with(&[
+        ("quantile_over_time(0.5, lat[5m])", 0.01),
+        ("quantile_over_time(0.99, lat[5m])", 0.001),
+        ("max_over_time(other[5m])", 0.01),
+    ]);
+    let stage1 = promql_inventory(&workload);
+    assert_eq!(stage1.len(), 3);
+    let (_, _, sharing) = selects_exhaustive_minimum(&stage1, &workload, 54);
+    assert_eq!(sharing, Sharing::SummaryCapability);
+}
+
+/// SQL p50 and p99 over one filtered column: pre-ASAP CSE merges nothing
+/// (the scan has no unique key), so the summary-capability variant is the
+/// only sharing one, and the shared KLL is the exhaustive minimum.
+#[tokio::test]
+async fn sql_summary_capability_dp_equals_exhaustive() {
+    let accuracy = AccuracyTarget::Epsilon(0.01);
+    let queries = [
+        "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10",
+        "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem WHERE l_orderkey > 10",
+    ];
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: Some(queries.iter().map(|q| batch(q, accuracy.clone())).collect()),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::AtRest,
+            ..Default::default()
+        }),
+    };
+    let catalog = SqlCatalog::new().with_table(
+        "lineitem",
+        Schema::new(vec![
+            Field::plain("l_orderkey", DataType::Int64, false),
+            Field::plain("l_extendedprice", DataType::Float64, false),
+        ]),
+    );
+    let mut roots = Vec::new();
+    for (index, query) in queries.iter().enumerate() {
+        let root = lower_sql_dialect(query, &catalog, SqlDialect::DataFusionSQL, accuracy.clone())
+            .await
+            .expect("lowers");
+        roots.push((index, QueryRoot::Operator(root)));
+    }
+    let stage1 = stage1_logical_candidates(roots).expect("Stage 1");
+    assert_eq!(
+        stage1.iter().map(|v| v.sharing).collect::<Vec<_>>(),
+        [Sharing::Independent, Sharing::SummaryCapability]
+    );
+    let (_, _, sharing) = selects_exhaustive_minimum(&stage1, &workload, 18);
+    assert_eq!(sharing, Sharing::SummaryCapability);
 }
 
 /// Through the facade, Example 1 selects the exhaustive winner, P58: both

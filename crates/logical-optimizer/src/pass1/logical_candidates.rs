@@ -574,7 +574,34 @@ fn realize(
         },
         None => ASAPOp::FinalizeExactAccumulator { child: state },
     };
-    Ok(OperatorNode::new_shared(Operator::ASAP(evaluation))?)
+    let mut evaluation = OperatorNode::new(Operator::ASAP(evaluation))?;
+    keep_output_name(target, &mut evaluation);
+    Ok(Rc::new(evaluation))
+}
+
+/// The evaluation answers `target`, so a measure the query named explicitly
+/// (SQL `approx_percentile_cont(...)`) keeps its name; a synthetic name is
+/// left as derived.
+fn keep_output_name(target: &OperatorNode, evaluation: &mut OperatorNode) {
+    let Some(NonASAPOp::Aggregate { output_names, .. }) = target.non_asap() else {
+        return;
+    };
+    let [name] = output_names.as_slice() else {
+        return;
+    };
+    if name.is_empty() || evaluation.schema.fields.len() != target.schema.fields.len() {
+        return;
+    }
+    for (field, named) in evaluation
+        .schema
+        .fields
+        .iter_mut()
+        .zip(&target.schema.fields)
+    {
+        if named.name == *name {
+            field.name = name.clone();
+        }
+    }
 }
 
 /// Whether every value `node` outputs is a sample of a metric declared a
