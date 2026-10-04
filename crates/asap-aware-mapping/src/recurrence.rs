@@ -1290,7 +1290,7 @@ mod tests {
             .cost_sorted_with_recurrence(&DeterministicUnitCostModel, &infrequent, None)
             .unwrap();
         let first_provenance =
-            |ranked: &[crate::replacement::RankedTargetSubDAGCandidates<'_>]| {
+            |ranked: &[crate::plan_selection::candidate_selection::RankedTargetSubDAGCandidates<'_>]| {
                 ranked
                     .iter()
                     .find(|group| Rc::ptr_eq(group.target, &shared.target))
