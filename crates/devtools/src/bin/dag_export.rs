@@ -60,7 +60,7 @@
 //   - `--planner-cost-json <doc>` supplies complete deployment-owned
 //     physical-plan evidence. It both ranks the candidates and is exported:
 //     every decision carries a calibrated `CostUnits` annotation.
-//   - `--default-cost` ranks with `asap_aware_mapping::cost_model::
+//   - `--default-cost` ranks with `asap_plan_selection::cost::cost_model::
 //     DefaultCostModel` — structural node counts, owning no deployment
 //     evidence. The structure of the result is real (which replacements the
 //     search found, which one won per group, what the merged post-ASAP DAG
@@ -76,23 +76,23 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_aware_mapping::analytical_cost::{
-    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDAG as PhysicalDAG,
-    PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
-};
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::cost_model::{Cost, CostModel};
-use asap_aware_mapping::physical_operator_statistics::ComparisonScope;
-use asap_aware_mapping::physical_plan_cost_model::{
-    PhysicalEvidenceSnapshot, PhysicalPlanCostModel, PlannerPhysicalPlanProvider,
-};
-use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::query_physical_lowering::PhysicalNodeRequest;
 use asap_logical_optimizer::pass1::replacement::{
     default_strategies_with_evidence, is_logical_rewrite, search_workload, search_workload_with,
     Replacement, ReplacementSubDAG,
 };
 use asap_logical_optimizer::{AccuracyEvidenceProvider, PropagationStats};
+use asap_plan_selection::candidate_selection::global_selection;
+use asap_plan_selection::cost::analytical_cost::{
+    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDAG as PhysicalDAG,
+    PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
+};
+use asap_plan_selection::cost::cost_model::DefaultCostModel;
+use asap_plan_selection::cost::cost_model::{Cost, CostModel};
+use asap_plan_selection::cost::physical_operator_statistics::ComparisonScope;
+use asap_plan_selection::cost::physical_plan_cost_model::{
+    PhysicalEvidenceSnapshot, PhysicalPlanCostModel, PlannerPhysicalPlanProvider,
+};
+use asap_plan_selection::cost::query_physical_lowering::PhysicalNodeRequest;
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
     self, DAGDecision, DAGNote, ExportDAG, NamedDAG, PostAsapSubstitution, TargetRejection,
@@ -110,10 +110,10 @@ use asap_types::workload::resources::CacheProfile;
 #[serde(deny_unknown_fields)]
 struct PlannerCostDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    storage_io: Option<asap_aware_mapping::storage_io::StorageIoProfile>,
+    storage_io: Option<asap_plan_selection::cost::storage_io::StorageIoProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "boundaries")]
-    handoffs: Option<asap_aware_mapping::physical_handoff_cost::PhysicalHandoffProfile>,
+    handoffs: Option<asap_plan_selection::cost::physical_handoff_cost::PhysicalHandoffProfile>,
     /// Immutable catalog/runtime evidence generation shared by this file.
     evidence_version: String,
     calibration: ResourceCalibration,
@@ -152,7 +152,7 @@ struct ComparisonScopeEvidence {
     time_scope: String,
     lookback_ms: Option<u64>,
     as_of_ms: Option<u64>,
-    sources: Vec<asap_aware_mapping::physical_operator_statistics::ScanSelection>,
+    sources: Vec<asap_plan_selection::cost::physical_operator_statistics::ScanSelection>,
     #[serde(default = "CacheProfile::no_cache")]
     cache_profile: CacheProfile,
 }
@@ -193,7 +193,7 @@ impl ComparisonScopeEvidence {
 #[serde(deny_unknown_fields)]
 struct QueryNodePhysicalEvidence {
     logical_node: OperatorNode,
-    operator: asap_aware_mapping::analytical_cost::PhysicalOperator,
+    operator: asap_plan_selection::cost::analytical_cost::PhysicalOperator,
     occurrence: usize,
     synthetic: bool,
     evidence: PhysicalNodeEvidence,
@@ -302,8 +302,8 @@ fn plan_values_match_inner(
 }
 
 struct ExportPhysicalProvider<'a> {
-    storage_io: Option<&'a asap_aware_mapping::storage_io::StorageIoProfile>,
-    handoffs: Option<&'a asap_aware_mapping::physical_handoff_cost::PhysicalHandoffProfile>,
+    storage_io: Option<&'a asap_plan_selection::cost::storage_io::StorageIoProfile>,
+    handoffs: Option<&'a asap_plan_selection::cost::physical_handoff_cost::PhysicalHandoffProfile>,
     evidence_version: &'a str,
     target: &'a TargetPhysicalEvidence,
     candidate: &'a CandidatePhysicalEvidence,
@@ -516,7 +516,7 @@ impl ExportPlannerCostModel<'_> {
                 cache_inputs.push(input("result_cache_invalidation_ratio", ratio, "ratio"));
             }
         }
-        let inputs = |resources: asap_aware_mapping::analytical_cost::ResourceEstimate| {
+        let inputs = |resources: asap_plan_selection::cost::analytical_cost::ResourceEstimate| {
             let mut inputs = vec![
                 CostInput {
                     name: "estimated_cpu_ops".into(),
@@ -537,7 +537,7 @@ impl ExportPlannerCostModel<'_> {
             inputs.extend(cache_inputs.iter().cloned());
             inputs
         };
-        let storage_inputs = |storage: &asap_aware_mapping::storage_io::StorageEstimate| {
+        let storage_inputs = |storage: &asap_plan_selection::cost::storage_io::StorageEstimate| {
             let mut terms: Vec<_> = storage
                 .total
                 .terms()
@@ -571,7 +571,7 @@ impl ExportPlannerCostModel<'_> {
             candidate_inputs.extend(storage_inputs(candidate));
         }
         let handoff_inputs =
-            |estimate: &asap_aware_mapping::physical_handoff_cost::PhysicalHandoffEstimate| {
+            |estimate: &asap_plan_selection::cost::physical_handoff_cost::PhysicalHandoffEstimate| {
                 let mut terms: Vec<_> = estimate
                     .total
                     .terms()
@@ -1699,14 +1699,14 @@ async fn main() {
 mod tests {
     use super::*;
 
-    use asap_aware_mapping::analytical_cost::{
+    use asap_devtools::PromqlError;
+    use asap_plan_selection::cost::analytical_cost::{
         ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator,
     };
-    use asap_aware_mapping::physical_operator_statistics::{
+    use asap_plan_selection::cost::physical_operator_statistics::{
         EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
     };
-    use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
-    use asap_devtools::PromqlError;
+    use asap_plan_selection::cost::query_physical_lowering::lower_query_physical_dag;
     use asap_types::ir::operator::{Reduction, Source};
     use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::NonASAPOp;
@@ -1758,7 +1758,7 @@ mod tests {
     // JSON evidence reaches calibrated ranking and structured annotation inputs.
     #[test]
     fn storage_requests_export_and_change_plan_selection() {
-        use asap_aware_mapping::storage_io::*;
+        use asap_plan_selection::cost::storage_io::*;
         let (query, candidate, mut document) = cost_fixture();
         let raw = fixture_raw_dag(&query, &candidate, &document);
         let candidate_dag = cheap_candidate_dag();
@@ -1921,7 +1921,7 @@ mod tests {
     // Declared handoffs survive JSON and affect the selected physical plan.
     #[test]
     fn handoff_bytes_export_and_change_plan_selection() {
-        use asap_aware_mapping::physical_handoff_cost::*;
+        use asap_plan_selection::cost::physical_handoff_cost::*;
         let (query, candidate, mut document) = cost_fixture();
         let raw = fixture_raw_dag(&query, &candidate, &document);
         let candidate_dag = cheap_candidate_dag();
@@ -2035,7 +2035,7 @@ mod tests {
         // Independent supplemental objectives add once, and either one can
         // price a zero-base plan while retaining both sets of export evidence.
         {
-            use asap_aware_mapping::storage_io::*;
+            use asap_plan_selection::cost::storage_io::*;
             let mut joint = handoff_only.clone();
             let mut storage = StorageIoProfile {
                 evidence_version: joint.evidence_version.clone(),

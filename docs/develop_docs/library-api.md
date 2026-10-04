@@ -206,8 +206,8 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
-use asap_aware_mapping::DefaultCostModel;
+use asap_plan_selection::candidate_selection::cost_sorted;
+use asap_plan_selection::DefaultCostModel;
 use asap_logical_optimizer::{
     default_strategies, search_workload_with_targets, DefaultAccuracyModel,
 };
@@ -256,7 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-| API (`asap_logical_optimizer`; `candidate_selection` is `asap_aware_mapping::plan_selection::candidate_selection`) | Inputs | Output and limits |
+| API (`asap_logical_optimizer`; `candidate_selection` is `asap_plan_selection::candidate_selection`) | Inputs | Output and limits |
 | --- | --- | --- |
 | `search_workload` | `(query_id, Rc<OperatorNode>)` roots | `CandidateLogicalASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `CandidateLogicalASAPDAGs`; callers choose context-free replacement strategies |
@@ -355,8 +355,8 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
-use asap_aware_mapping::DefaultCostModel;
+use asap_plan_selection::candidate_selection::cost_sorted;
+use asap_plan_selection::DefaultCostModel;
 use asap_logical_optimizer::{
     search_workload_with_targets, DefaultAccuracyModel, ReplacementStrategy,
     ASAPStrategies, SharedSubDAGStrategy,
@@ -588,8 +588,8 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::DefaultCostModel;
+use asap_plan_selection::candidate_selection::global_selection;
+use asap_plan_selection::DefaultCostModel;
 use asap_logical_optimizer::search_workload;
 use asap_types::types::AccuracyTarget;
 
@@ -654,6 +654,6 @@ cargo doc -p asap-aware-mapping -p asap-types --no-deps
 
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
 - [Search, ranking and selection](../../crates/logical-optimizer/src/pass1/replacement.rs)
-- [Cost models](../../crates/asap-aware-mapping/src/cost_model.rs)
+- [Cost models](../../crates/plan-selection/src/cost/cost_model.rs)
 - [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

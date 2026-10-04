@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 // Keep the original public import path while sharing the sole type definition.
 pub use asap_types::workload::resources::StorageResources;
 
-use crate::analytical_cost::{
+use crate::cost::analytical_cost::{
     estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDAG, ExecutionMultiplicity,
     PhysicalDAGNode, PhysicalOperator,
 };
-use crate::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
+use crate::cost::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
 
 pub const STORAGE_IO_MODEL_VERSION: &str = "storage-requests-v1";
 
