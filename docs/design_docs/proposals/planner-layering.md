@@ -170,7 +170,7 @@ ASAPPlanner relies on the assumptions below.
 8. **The deployment executes the plan as given.** It does not change summary
    choices or materialization.
 
-### ASAPPlanner Stages
+### ASAPPlanner System Overview: Planning Stages
 
 
 ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
