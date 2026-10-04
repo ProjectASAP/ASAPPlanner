@@ -8,6 +8,8 @@
 //!
 //! Stored-state encodings belong to deployments. Full plan acceptance is
 //! owned by `binding`, which also validates schemas, expressions and inputs.
+//!
+//! [`capabilities`] states these rules as the planner's deployment input.
 use crate::Error;
 use planner_types::ir::schema::{
     ExactKind, ExactParams, FieldDataType as SummaryFamilyType, GroupingStrategy, SketchAlgorithm,
@@ -340,4 +342,204 @@ pub fn validate_exact_evaluation(
         return Err(Error::Invalid("invalid exact counter lookback".into()));
     }
     Ok(())
+}
+
+/// This executor's capabilities, as the planner's deployment input
+/// ([`DeploymentCapabilities`]): every summary family and layout whose native
+/// state this module accepts, with the readouts it evaluates. Parameters are
+/// representative; sizing limits are checked when a plan is bound. The
+/// executor maintains state at ingestion time, keeps no query-time result
+/// across evaluations, and reads raw data from its inputs, so raw retention
+/// is the deployment's and is not priced.
+pub fn capabilities() -> planner_types::deployment::DeploymentCapabilities {
+    use planner_types::deployment::{summary_of, DeploymentCapabilities, Readout, SummarySupport};
+    use planner_types::ir::scalar::ColumnRef;
+    use planner_types::ir::schema::{default_hydra_params, HydraKind, SketchKind};
+    let exact = [
+        (ExactKind::Sum, ExactParams::Sum),
+        (ExactKind::Count, ExactParams::Count),
+        (ExactKind::Min, ExactParams::Min),
+        (ExactKind::Max, ExactParams::Max),
+        (ExactKind::Increase, ExactParams::Increase),
+        (ExactKind::Rate, ExactParams::Rate),
+        (ExactKind::IRate, ExactParams::IRate),
+    ]
+    .map(|(kind, params)| SummaryFamilyType::ExactAggregate(kind, params));
+    let (width, depth, heap_size) = (1024, 5, 16);
+    let sketches = [
+        (SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+        (
+            SketchAlgorithm::DDSketch,
+            SketchParams::DDSketch { alpha: 0.01 },
+        ),
+        (SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
+        (SketchAlgorithm::Cms, SketchParams::Cms { width, depth }),
+        (
+            SketchAlgorithm::CountSketch,
+            SketchParams::CountSketch { width, depth },
+        ),
+        (
+            SketchAlgorithm::CmsWithHeap,
+            SketchParams::CmsWithHeap {
+                width,
+                depth,
+                heap_size,
+            },
+        ),
+        (
+            SketchAlgorithm::CountSketchWithHeap,
+            SketchParams::CountSketchWithHeap {
+                width,
+                depth,
+                heap_size,
+            },
+        ),
+        (
+            SketchAlgorithm::UnivMon,
+            SketchParams::UnivMon {
+                heap_size,
+                sketch_rows: depth,
+                sketch_cols: width,
+                layers: 8,
+            },
+        ),
+        (SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1024 }),
+        (SketchAlgorithm::Theta, SketchParams::Theta { k: 1024 }),
+    ];
+    let hydra = [
+        HydraKind::HydraCms,
+        HydraKind::HydraCountSketch,
+        HydraKind::HydraKll,
+    ];
+    let sketches = sketches.into_iter().flat_map(|(algorithm, params)| {
+        let layouts = std::iter::once(GroupingStrategy::PerSubpopulationInstance).chain(
+            hydra.iter().filter_map(|kind| {
+                default_hydra_params(kind.clone(), &params).map(|params| {
+                    GroupingStrategy::SharedMultiSubpopulation {
+                        kind: kind.clone(),
+                        params,
+                    }
+                })
+            }),
+        );
+        let kind = SketchKind::new(algorithm, params.clone());
+        layouts
+            .map(|layout| SummaryFamilyType::Sketch(kind.clone(), layout))
+            .collect::<Vec<_>>()
+    });
+    let item = |value: Option<&str>| SketchStatistic::PointCount {
+        key: match value {
+            None => ColumnRef::SampleValue,
+            Some(_) => ColumnRef::Named("item".into()),
+        },
+        value: value.map(Into::into),
+    };
+    let readouts = [
+        SketchStatistic::Quantile { q: 0.5 },
+        item(None),
+        item(Some("item")),
+        SketchStatistic::Cardinality,
+        SketchStatistic::TopK { k: 1 },
+        SketchStatistic::FrequencyL2,
+        SketchStatistic::FrequencyEntropy,
+    ];
+    let summaries = exact
+        .into_iter()
+        .chain(sketches)
+        .filter(builds_from_rows)
+        .map(|family| {
+            let (summary, layout) = summary_of(&family).expect("a summary family");
+            let readouts = match &family {
+                SummaryFamilyType::Sketch(kind, _) => readouts
+                    .iter()
+                    .filter(|statistic| match statistic {
+                        // Read by the keyed evaluation operator.
+                        SketchStatistic::TopK { .. } => {
+                            crate::summary_kernels::weighted_frequency::WeightedFrequency::configuration(kind)
+                                .is_ok()
+                        }
+                        _ => validate_sketch_evaluation(&family, statistic).is_ok(),
+                    })
+                    .map(Readout::of)
+                    .collect(),
+                _ => Default::default(),
+            };
+            SummarySupport {
+                family: summary,
+                layout,
+                readouts,
+            }
+        })
+        .collect();
+    DeploymentCapabilities {
+        summaries: Some(summaries),
+        ingestion_time: true,
+        query_time_retention: false,
+        ..DeploymentCapabilities::UNRESTRICTED
+    }
+}
+
+/// Whether a plan can build `family` from rows: its native state is
+/// accepted, except a per-group Count-Min, which is native as stored state
+/// only (see [`validate_native_family`]).
+fn builds_from_rows(family: &SummaryFamilyType) -> bool {
+    let per_group_cms = matches!(family, SummaryFamilyType::Sketch(kind, grouping)
+        if kind.algorithm() == &SketchAlgorithm::Cms
+            && grouping == &GroupingStrategy::PerSubpopulationInstance);
+    !per_group_cms && validate_native_family(family).is_ok()
+}
+
+#[cfg(test)]
+mod capabilities_tests {
+    use super::*;
+    use planner_types::deployment::{InstanceLayout, Readout, SummaryFamily};
+    use planner_types::ir::schema::HydraKind;
+
+    fn readouts(
+        caps: &planner_types::deployment::DeploymentCapabilities,
+        family: SummaryFamily,
+        layout: InstanceLayout,
+    ) -> Option<Vec<Readout>> {
+        caps.summaries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|s| s.family == family && s.layout == layout)
+            .map(|s| s.readouts.iter().copied().collect())
+    }
+
+    /// The exported set follows this module's rules: e.g. KLL quantiles,
+    /// heap top-k, HydraCms counts, exact accumulators without IRate, and
+    /// no per-group Count-Min build.
+    #[test]
+    fn exported_capabilities_follow_the_validators() {
+        use InstanceLayout::{Hydra, PerGroup};
+        use SummaryFamily::{Exact, Sketch};
+        let caps = capabilities();
+        assert!(caps.ingestion_time && !caps.query_time_retention);
+        assert!(caps.raw_data_retained && caps.memory_budget_bytes.is_none());
+        let of = |family, layout| readouts(&caps, family, layout);
+        assert_eq!(
+            of(Sketch(SketchAlgorithm::Kll), PerGroup),
+            Some(vec![Readout::Quantile])
+        );
+        for heap in [
+            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountSketchWithHeap,
+        ] {
+            assert_eq!(of(Sketch(heap), PerGroup), Some(vec![Readout::TopK]));
+        }
+        assert_eq!(
+            of(Sketch(SketchAlgorithm::Cms), Hydra(HydraKind::HydraCms)),
+            Some(vec![Readout::TotalCount, Readout::ItemCount])
+        );
+        assert_eq!(of(Sketch(SketchAlgorithm::Cms), PerGroup), None);
+        assert_eq!(
+            of(Sketch(SketchAlgorithm::Kll), Hydra(HydraKind::HydraKll)),
+            None
+        );
+        assert_eq!(of(Sketch(SketchAlgorithm::CountSketch), PerGroup), None);
+        assert_eq!(of(Exact(ExactKind::Rate), PerGroup), Some(vec![]));
+        assert_eq!(of(Exact(ExactKind::IRate), PerGroup), None);
+    }
 }

@@ -19,7 +19,7 @@ for the workload in steady state.
 | CPU work of every operator, at ingestion time or at query time | Transient query-time memory |
 | Bytes a scan reads | Storage tier and retention: disk versus memory, and for how long (S3, with panes) |
 | Memory held across evaluations by ingestion-time state that query time reads | Network, parallelism and partitioning |
-| | Latency bounds (a separate check, below) and deployment capabilities |
+| Raw data a query-time scan needs kept, when the deployment does not keep it anyway (Q48) | Latency bounds and deployment capabilities (separate checks, below) |
 | | One-time setup work such as backfill (deferred, S5) |
 
 Accuracy and latency are checks, not costs. Stage 3 rejects candidates that
@@ -128,6 +128,54 @@ asks, so maintaining state at ingestion time moves work out of the bound. A
 candidate over the bound is rejected with the query, the estimate and the
 bound, for example `q1: query-time work takes 310.0 ms per evaluation, over
 the 200 ms latency bound`. The estimate assumes one core and no queueing.
+
+## Deployment inputs
+
+`PlanningModels` carries #509's three deployment inputs: the cost model
+(with `Stage3Calibration`), the accuracy model, and the deployment's
+capabilities, `DeploymentCapabilities` (in `asap-types`, module
+`deployment`). Capabilities are data: the planner names no deployment. A
+deployment exports its own set; the reference executor's is
+`asap_executor::capabilities()`. Without one, the set is unrestricted.
+
+| Field | Unrestricted default | Meaning |
+|---|---|---|
+| `summaries` | `None`: every summary | Summary families (exact kind or sketch algorithm) × instance layout (per group, or a Hydra kind), each with the readouts it supports (quantile, total count, item count, cardinality, top-k, L2, entropy) |
+| `ingestion_time` | `true` | Can maintain state at ingestion time |
+| `query_time_retention` | `true` | Can keep query-time results across evaluations (Example 4, B3; no candidate needs it yet) |
+| `memory_budget_bytes` | `None` | Most bytes a plan may retain across evaluations |
+| `raw_data_retained` | `true` | The deployment keeps the sources' raw data anyway |
+| `raw_bytes_per_sample` | 16 | An 8-byte timestamp and an 8-byte value, uncompressed |
+
+**Checks.** Stage 3 rejects a candidate that needs a capability the
+deployment lacks, before checking accuracy, with the first missing one:
+
+* `q1: deployment lacks a CmsWithHeap summary`: a `SummaryAgg` whose
+  family and layout are not listed.
+* `q1: deployment lacks a CountSketchWithHeap TopK readout`: a
+  `SummaryEstimate` whose statistic the summary it reads does not list.
+* `deployment cannot maintain state at ingestion time`: any node at
+  ingestion time when `ingestion_time` is false.
+* `retains N bytes across evaluations, over the deployment's memory budget
+  of M bytes`: the retained bytes below exceed `memory_budget_bytes`.
+
+**Raw retention (Q48).** If the deployment keeps raw data anyway, a plan
+that reads raw data at query time adds nothing: that retention is sunk.
+If it does not, the plan makes it keep the raw samples each query-time scan
+reads, and pays for them as memory:
+
+```text
+raw(scan) = w_mem · lookback(scan) · λ · raw_bytes_per_sample
+```
+
+`lookback(scan)` is the scan's extent (its longest range plus offset, as
+priced above), so `lookback · λ` is the rows it reads per evaluation. The
+charge is on the scan node, so cost stays a sum over nodes; a scan shared
+by several queries is one node and pays once. A scan at ingestion time
+reads samples as they arrive and retains none: a plan whose raw input is
+maintained at ingestion time does not pay it. Retained bytes for the
+memory budget are the ingestion-time state of the memory term plus, when
+charged, this raw retention.
 
 ## Calibration
 
