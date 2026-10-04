@@ -42,7 +42,6 @@ use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::physical_candidates::{stage2_physical, PhysicalCandidate};
 use crate::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
@@ -52,6 +51,9 @@ use asap_logical_optimizer::accuracy::{
 use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
     LocalLogicalCandidates,
+};
+use asap_physical_optimizer::implementation::physical_candidates::{
+    stage2_physical, PhysicalCandidate,
 };
 
 pub const COST_UNIT: &str = "cpu_ms_per_workload_evaluation";
@@ -1010,8 +1012,8 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physical_candidates::stage2_physical;
     use crate::test_support::lower_promql;
+    use asap_physical_optimizer::implementation::physical_candidates::stage2_physical;
     use asap_types::ir::QueryRoot;
     use asap_types::workload::{Evidence, Rate};
 

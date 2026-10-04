@@ -9,6 +9,7 @@ asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-aware-mapping = { path = "../asap-aware-mapping" }
 asap-logical-optimizer = { path = "../logical-optimizer" }
+asap-physical-optimizer = { path = "../physical-optimizer" }
 
 [dev-dependencies]
 asap-planner = { path = "../planner" }
