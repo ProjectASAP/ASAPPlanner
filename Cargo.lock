@@ -329,6 +329,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-executor"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-logical-optimizer",
+ "asap-plan-selection",
+ "asap-types",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
+ "chrono",
+ "futures",
+ "regex",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "asap-frontend-common"
 version = "0.1.0"
 dependencies = [
@@ -377,10 +396,10 @@ dependencies = [
 name = "asap-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "asap-executor",
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-logical-optimizer",
- "asap-physical-operators",
  "asap-physical-optimizer",
  "asap-plan-selection",
  "asap-planner",
@@ -400,25 +419,6 @@ dependencies = [
  "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
  "serde_json",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asap-physical-operators"
-version = "0.1.0"
-dependencies = [
- "asap-frontend-promql",
- "asap-logical-optimizer",
- "asap-plan-selection",
- "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
- "chrono",
- "futures",
- "regex",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

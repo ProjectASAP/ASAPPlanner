@@ -1,15 +1,15 @@
 //! Planner output binds directly to the shared runtime at a declared rate-value frontier.
 mod common;
-use asap_logical_optimizer::{
-    accuracy::AccuracyEvidenceProvider, accuracy::DefaultAccuracyModel,
-    accuracy::EqualSplitAllocator, accuracy::PropagationStats, ASAPStrategies, Replacement,
-    ReplacementStrategy, TargetSubDAG,
-};
-use asap_physical_operators::dag::{
+use asap_executor::dag::{
     operators::Operator,
     planner::{compile, InputContract, Source},
     values::{Batch, Value},
     Limits, RunContext, Scope,
+};
+use asap_logical_optimizer::{
+    accuracy::AccuracyEvidenceProvider, accuracy::DefaultAccuracyModel,
+    accuracy::EqualSplitAllocator, accuracy::PropagationStats, ASAPStrategies, Replacement,
+    ReplacementStrategy, TargetSubDAG,
 };
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
@@ -251,14 +251,12 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
             proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
         },
     };
-    assert!(
-        asap_physical_operators::factory::create_planner_accumulator(
-            &family,
-            &input,
-            &Default::default()
-        )
-        .is_err()
-    );
+    assert!(asap_executor::factory::create_planner_accumulator(
+        &family,
+        &input,
+        &Default::default()
+    )
+    .is_err());
 }
 
 /// A catalog-resolved per-series rate can feed a heap sketch directly, without
@@ -275,7 +273,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
 }
 
 fn check_direct_rate_topk(dynamic: bool) {
-    use asap_physical_operators::physical_planner::promql_rows::{
+    use asap_executor::physical_planner::promql_rows::{
         decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
     };
     let mut logical =
@@ -330,10 +328,8 @@ fn check_direct_rate_topk(dynamic: bool) {
             .unwrap_or_else(|| panic!("missing {algorithm:?} over direct Rate"));
         if dynamic {
             let (source, ranked) =
-                asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(
-                    candidate,
-                )
-                .unwrap();
+                asap_executor::physical_planner::promql_rows::compile_rate_ranking(candidate)
+                    .unwrap();
             assert!(matches!(
                 source.operator,
                 planner_types::ir::Operator::ASAP(
@@ -391,10 +387,9 @@ fn check_direct_rate_topk(dynamic: bool) {
         )
         .unwrap();
         let bytes = serde_json::to_vec(&raw_compiled).unwrap();
-        let raw_compiled = serde_json::from_slice::<
-            asap_physical_operators::physical_planner::CompiledPhysicalDAG,
-        >(&bytes)
-        .unwrap();
+        let raw_compiled =
+            serde_json::from_slice::<asap_executor::physical_planner::CompiledPhysicalDAG>(&bytes)
+                .unwrap();
         // Each evaluation receives a complete raw window. A reset, a stopped
         // series and an expired leader must not retain last run's heap weights.
         for (end, series, expected) in [
@@ -626,7 +621,7 @@ fn check_direct_rate_topk(dynamic: bool) {
 // CountSketch; a raw metric does not establish the non-negative CMS contract.
 #[test]
 fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
-    use asap_physical_operators::physical_planner::promql_rows::{
+    use asap_executor::physical_planner::promql_rows::{
         decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
     };
     let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
@@ -672,10 +667,8 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     )
     .unwrap();
     let snapshot_program =
-        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
-            selected,
-        )
-        .unwrap();
+        asap_executor::physical_planner::promql_rows::compile_current_series_evaluation(selected)
+            .unwrap();
     let encoded: serde_json::Value =
         serde_json::from_slice(&serde_json::to_vec(&snapshot_program).unwrap()).unwrap();
     assert!(!encoded.to_string().contains("CurrentSeries"));
@@ -805,9 +798,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
 // placement: materialization timing, not a separate candidate, puts it in precompute.
 #[test]
 fn maintained_rate_heap_compiles_fixed_window_precompute() {
-    use asap_physical_operators::physical_planner::{
-        compile_candidate, promql_rows::with_series_identity,
-    };
+    use asap_executor::physical_planner::{compile_candidate, promql_rows::with_series_identity};
     let root = Rc::new(
         with_series_identity(
             &lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap(),
@@ -867,14 +858,18 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
             &[u64::from(heap.id.0)],
         )
         .unwrap();
-        let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&dag).unwrap();
+        let exported =
+            asap_executor::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(
+                &dag,
+            )
+            .unwrap();
         assert_eq!(
             serde_json::to_vec(&exported).unwrap(),
             serde_json::to_vec(&physical).unwrap()
         );
         // Execute the selected split across a state serialization boundary.
         // Each run builds fresh weights from that window's counters.
-        let execute = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDAG,
+        let execute = |plan: &asap_executor::physical_planner::CompiledPhysicalDAG,
                        input: Batch,
                        scope: Scope| {
             let id = plan.input_contracts().next().unwrap().0;
@@ -924,10 +919,8 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
                 .zip(["a", "b", "c"])
                 .map(|(samples, label)| {
                     let mut accumulator =
-                        asap_physical_operators::factory::create_planner_accumulator(
-                            family, input, grouping,
-                        )
-                        .unwrap();
+                        asap_executor::factory::create_planner_accumulator(family, input, grouping)
+                            .unwrap();
                     for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
                         accumulator.update_single(value, end - 60_000 + offset);
                     }

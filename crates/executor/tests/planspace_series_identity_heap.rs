@@ -6,14 +6,14 @@ mod common;
 use common::compile_physical_asap_dag;
 use planner_types::ir::OperatorNode;
 
+use asap_executor::physical_planner::promql_rows::{
+    compile_current_series_evaluation, SERIES_IDENTITY_COLUMN,
+};
 use asap_logical_optimizer::{
     accuracy::AccuracyEvidenceProvider, accuracy::DefaultAccuracyModel, accuracy::PropagationStats,
     pass1::replacement::default_strategies_with_evidence,
     pass1::replacement::ReplacementProvenance, search_workload_with_targets, Proposals,
     ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
-};
-use asap_physical_operators::physical_planner::promql_rows::{
-    compile_current_series_evaluation, SERIES_IDENTITY_COLUMN,
 };
 use asap_plan_selection::candidate_selection::global_selection;
 use asap_plan_selection::cost::cost_model::DefaultCostModel;

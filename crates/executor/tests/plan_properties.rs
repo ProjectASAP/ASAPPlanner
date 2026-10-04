@@ -1,5 +1,5 @@
 //! Finite-input contracts are validated before source execution.
-use asap_physical_operators::{
+use asap_executor::{
     operators::{Operator, SortKey},
     plan::{Boundedness, Emission, PhysicalDAG},
     runtime::{Limits, OutputStream, RunContext, Scope},
@@ -122,7 +122,7 @@ fn blocking_inputs_require_an_explicit_finite_source() {
 // Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
-    use asap_physical_operators::{
+    use asap_executor::{
         capability::{validate_native_family, validate_sketch_evaluation, validate_summary_kernel},
         planner::ir::schema::SketchStatistic,
     };

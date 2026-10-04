@@ -1,11 +1,11 @@
 //! Exercise the public library without a backend server, store, or scheduler.
-use asap_physical_operators::planner::ir::{
+use asap_executor::planner::ir::{
     scalar::ColumnRef,
     schema::{
         FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     },
 };
-use asap_physical_operators::{factory::create_planner_accumulator, AggregateCore};
+use asap_executor::{factory::create_planner_accumulator, AggregateCore};
 
 fn family(k: u32) -> FieldDataType {
     FieldDataType::Sketch(
@@ -28,9 +28,7 @@ fn build(values: &[f64]) -> Box<dyn AggregateCore> {
 }
 fn read(state: &dyn AggregateCore) -> f64 {
     state
-        .estimate(
-            &asap_physical_operators::planner::ir::schema::SketchStatistic::Quantile { q: 0.5 },
-        )
+        .estimate(&asap_executor::planner::ir::schema::SketchStatistic::Quantile { q: 0.5 })
         .unwrap()
 }
 
@@ -64,8 +62,8 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 // a packed-wire column-bit budget must not be imposed on this constructor.
 #[test]
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
-    use asap_physical_operators::planner::ir::schema::SummaryInputExpr;
-    use asap_physical_operators::KeyByLabelValues;
+    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::KeyByLabelValues;
     let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::CountSketchWithHeap,
@@ -85,7 +83,7 @@ fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     let state = operator.into_accumulator();
     let state = state
         .as_any()
-        .downcast_ref::<asap_physical_operators::summary_kernels::CountSketchWithHeapAccumulator>()
+        .downcast_ref::<asap_executor::summary_kernels::CountSketchWithHeapAccumulator>()
         .unwrap();
     assert_eq!(state.query_key(&key), 7.0);
 }

@@ -1,5 +1,5 @@
 //! Acceptance tests use the library directly, without either backend engine.
-use asap_physical_operators::{
+use asap_executor::{
     dag::{
         operators::{Expression, Operator, Reduction, SortKey},
         values::{Batch, SchemaRef, Value},
@@ -147,8 +147,8 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
         Operator::evaluation(
             state,
             0,
-            asap_physical_operators::operators::SummaryEvaluation::Exact(
-                asap_physical_operators::summary_kernels::exact::ExactEvaluation {
+            asap_executor::operators::SummaryEvaluation::Exact(
+                asap_executor::summary_kernels::exact::ExactEvaluation {
                     statistic: Statistic::Sum,
                     lookback_ms: None,
                 },
@@ -302,7 +302,7 @@ fn binding_rejects_unsupported_operations() {
     assert!(Operator::evaluation(
         sum.schema(),
         0,
-        asap_physical_operators::operators::SummaryEvaluation::Sketch(
+        asap_executor::operators::SummaryEvaluation::Sketch(
             planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 }
         )
     )
@@ -404,7 +404,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
             Operator::evaluation(
                 state.clone(),
                 0,
-                asap_physical_operators::operators::SummaryEvaluation::Sketch(
+                asap_executor::operators::SummaryEvaluation::Sketch(
                     planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 },
                 ),
             )
@@ -424,7 +424,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
 // Exact state must match its declared family; a mislabeled state is rejected.
 #[test]
 fn exact_state_and_family_validation() {
-    use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
+    use asap_executor::summary_kernels::exact::ExactAccumulator;
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
     acc.update(None, 7., 0);
@@ -460,8 +460,8 @@ fn exact_state_and_family_validation() {
         Operator::evaluation(
             schema.clone(),
             0,
-            asap_physical_operators::operators::SummaryEvaluation::Exact(
-                asap_physical_operators::summary_kernels::exact::ExactEvaluation {
+            asap_executor::operators::SummaryEvaluation::Exact(
+                asap_executor::summary_kernels::exact::ExactEvaluation {
                     statistic: Statistic::Sum,
                     lookback_ms: None,
                 },
@@ -489,7 +489,7 @@ fn exact_state_and_family_validation() {
 // Planner binding rejects unknown computation instead of accepting a fallback.
 #[test]
 fn bind_post_asap_before_execution() {
-    use asap_physical_operators::dag::planner::bind;
+    use asap_executor::dag::planner::bind;
     use planner_types::ir::properties::ExecutionDataState;
     use planner_types::ir::scalar::{ArithmeticOpKind, ScalarValue};
     use std::collections::BTreeMap;
@@ -550,7 +550,7 @@ fn bind_post_asap_before_execution() {
         }],
         roots: vec![planner_types::ir::export::LogicalASAPNodeId(1)],
     };
-    let sources = || -> BTreeMap<u64, asap_physical_operators::dag::planner::Source<'static>> {
+    let sources = || -> BTreeMap<u64, asap_executor::dag::planner::Source<'static>> {
         BTreeMap::from([(
             0,
             Box::new(
@@ -559,7 +559,7 @@ fn bind_post_asap_before_execution() {
                     vec![Batch::try_new(schema.clone(), vec![vec![Value::Float64(1.)]]).unwrap()],
                 )
                 .unwrap(),
-            ) as asap_physical_operators::dag::planner::Source<'static>,
+            ) as asap_executor::dag::planner::Source<'static>,
         )])
     };
     let native = bind(&dag, sources(), &[1]).unwrap();
@@ -588,8 +588,8 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
     let read = Operator::evaluation(
         build.schema(),
         0,
-        asap_physical_operators::operators::SummaryEvaluation::Exact(
-            asap_physical_operators::summary_kernels::exact::ExactEvaluation {
+        asap_executor::operators::SummaryEvaluation::Exact(
+            asap_executor::summary_kernels::exact::ExactEvaluation {
                 statistic: Statistic::Count,
                 lookback_ms: None,
             },
@@ -607,7 +607,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
 // A deployment source cannot pass a different row shape to bound expressions.
 #[test]
 fn source_batches_must_match_the_bound_schema() {
-    use asap_physical_operators::dag::{self, PhysicalOperator};
+    use asap_executor::dag::{self, PhysicalOperator};
     use planner_types::ir::properties::ExecutionDataState;
     use std::{cell::Cell, collections::BTreeMap, rc::Rc};
     struct WrongSource {
@@ -716,7 +716,7 @@ fn extrema_preserve_numeric_values_in_the_presence_of_nan() {
 // Planner wire nodes, including grouping and edge roles, are executable at either phase.
 #[test]
 fn planner_semijoin_sort_limit_contract_at_both_phases() {
-    use asap_physical_operators::dag::planner::{bind, Source};
+    use asap_executor::dag::planner::{bind, Source};
     use planner_types::ir::operator::{GroupKeys, JoinKind};
     use planner_types::ir::properties::*;
     use planner_types::ir::scalar::CompareOpKind;
@@ -728,17 +728,16 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         ("score", DataType::Float64, false),
     ]);
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
-    let node =
-        |id, payload, schema: &asap_physical_operators::values::SchemaRef| PhysicalASAPDAGNode {
-            coverage: None,
-            id: planner_types::ir::export::LogicalASAPNodeId(id),
-            payload,
-            output_schema: (**schema).clone(),
-            output_state: ExecutionDataState::QUERY_ROWS,
-            guarantee: None,
-        };
-    let edge = |producer, consumer, role, schema: &asap_physical_operators::values::SchemaRef| {
-        PhysicalASAPDAGEdge {
+    let node = |id, payload, schema: &asap_executor::values::SchemaRef| PhysicalASAPDAGNode {
+        coverage: None,
+        id: planner_types::ir::export::LogicalASAPNodeId(id),
+        payload,
+        output_schema: (**schema).clone(),
+        output_state: ExecutionDataState::QUERY_ROWS,
+        guarantee: None,
+    };
+    let edge =
+        |producer, consumer, role, schema: &asap_executor::values::SchemaRef| PhysicalASAPDAGEdge {
             producer: planner_types::ir::export::LogicalASAPNodeId(producer),
             consumer: planner_types::ir::export::LogicalASAPNodeId(consumer),
             role,
@@ -746,8 +745,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             data_state: ExecutionDataState::QUERY_ROWS,
             grouping: GroupingEdgeCompatibility::NotApplicable,
             window: WindowEdgeCompatibility::NotApplicable,
-        }
-    };
+        };
     let groups = GroupKeys::by(vec![0]);
     let dag = PhysicalASAPDAG {
         nodes: vec![
@@ -891,7 +889,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
 // Planner scalar signatures, collection access and null predicates share native execution.
 #[test]
 fn planner_expressions_preserve_collection_and_nullable_types() {
-    use asap_physical_operators::dag::expressions::CompiledExpression;
+    use asap_executor::dag::expressions::CompiledExpression;
     use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 
     let input_schema = schema(&[(
@@ -1173,7 +1171,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
 // The grouped temporal reducer's sample schema must survive physical Sort/Limit binding.
 #[test]
 fn grouped_temporal_schema_compiles_and_executes_topk() {
-    use asap_physical_operators::physical_planner::{
+    use asap_executor::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::ir::export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
@@ -1284,7 +1282,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
 // A certified candidate set must have authoritative values for every key, including after recovery.
 #[test]
 fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
-    use asap_physical_operators::physical_planner::{
+    use asap_executor::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::ir::operator::JoinKind;
@@ -1380,7 +1378,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 while let Some(batch) = stream.next().await {
                     rows.extend(batch?.rows().iter().cloned());
                 }
-                Ok::<_, asap_physical_operators::Error>(rows)
+                Ok::<_, asap_executor::Error>(rows)
             });
             if certified && !complete {
                 assert!(result
@@ -1399,7 +1397,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
 // Precompute arithmetic must match population/window identities, never zip arrival order.
 #[test]
 fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
-    use asap_physical_operators::physical_planner::{
+    use asap_executor::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::ir::operator::BinaryOpKind;
@@ -1491,7 +1489,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
             while let Some(batch) = stream.next().await {
                 rows.extend(batch?.rows().iter().cloned());
             }
-            Ok::<_, asap_physical_operators::Error>(rows)
+            Ok::<_, asap_executor::Error>(rows)
         });
         match expected {
             Some(values) => assert_eq!(floats(&result.unwrap(), 2), values),
