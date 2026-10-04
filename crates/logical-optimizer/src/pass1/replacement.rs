@@ -2705,12 +2705,12 @@ fn summary_family(realization: Realization) -> Option<(FieldDataType, bool)> {
 /// consume the logical aggregate's immediate child and summarize its declared
 /// input value. Composite realizations can instead consume a larger
 /// logical sub-DAG and bind a different key or value.
-struct PhysicalSummaryInput {
-    child: Rc<OperatorNode>,
-    input: SummaryUpdate,
+pub(crate) struct PhysicalSummaryInput {
+    pub(crate) child: Rc<OperatorNode>,
+    pub(crate) input: SummaryUpdate,
 }
 
-enum PhysicalSummaryInputRuleResult {
+pub(crate) enum PhysicalSummaryInputRuleResult {
     NotApplicable,
     Realized(PhysicalSummaryInput),
     Unsupported(&'static str),
@@ -3479,7 +3479,7 @@ fn realize_current_series_summary_input(
 /// Realize the composite heavy-hitter realization for
 /// `TopK(Count GROUP BY key)`. The heap sketch consumes the raw keyed stream;
 /// it does not consume an independently materialized Count result.
-fn realize_keyed_additive_summary_input(
+pub(crate) fn realize_keyed_additive_summary_input(
     intent: &AggIntent,
     family: &FieldDataType,
     output_reduction: &Reduction,
