@@ -1145,6 +1145,10 @@ function renderStageScope(ranked) {
   const queryRows = stageDoc.workload.queries.map((query, index) => `
     <div class="scopeRow"><span><strong>${escapeHtml(stageQueryIds()[index])}</strong> <code>${escapeHtml(query.text)}</code></span>
       <span class="scopeMeta">${escapeHtml(formatRequirements(query.requirements))}</span></div>`).join('');
+  const deployment = deploymentRows(stageDoc.deployment);
+  const deploymentGroup = deployment.length ? `
+    <div class="scopeGroup stageDeploymentGroup"><div class="scopeGroupLabel">Deployment inputs</div>${deployment.map(([label, text]) => `
+      <div class="scopeRow"><span><strong>${escapeHtml(label)}</strong></span><span class="scopeMeta">${escapeHtml(text)}</span></div>`).join('')}</div>` : '';
   const logical = stageCandidates('stage1_logical_asap');
   const logicalButtons = logical.length ? logical.map((candidate) => {
     const linked = physical && candidate.id === physical.from_logical;
@@ -1165,7 +1169,7 @@ function renderStageScope(ranked) {
     ? 'Physical ASAP candidates · Stage 3 result, by total cost (lane 3)'
     : 'Physical ASAP candidates (lane 3) · Stage 3 not produced, no costs';
   scopePickerEl.innerHTML = `
-    <div class="scopeGroup stageQueryGroup"><div class="scopeGroupLabel">Workload queries and requirements</div>${queryRows}</div>
+    <div class="scopeGroup stageQueryGroup"><div class="scopeGroupLabel">Workload queries and requirements</div>${queryRows}</div>${deploymentGroup}
     <div class="scopeGroup"><div class="scopeGroupLabel">Logical ASAP candidates (lane 2)</div>${logicalButtons}</div>
     <div class="scopeGroup stageRankGroup"><div class="scopeGroupLabel">${escapeHtml(physicalTitle)}</div>${physicalRows}</div>`;
   scopePickerEl.querySelectorAll('[data-logical]').forEach((button) => button.addEventListener('click', () => {
