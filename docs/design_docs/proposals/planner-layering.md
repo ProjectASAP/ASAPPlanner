@@ -203,13 +203,17 @@ flowchart TB
       H0 ~~~ B0
     end
 
-    subgraph LOGICAL["Logical planning — what to compute"]
+    subgraph LOGICAL[" "]
+      LT["Logical planning — what to compute"]:::group
+      LT ~~~ H1
       H1["1. Logical ASAP-aware optimization"]:::title
       B1["Explore semantically equivalent and legal logical candidates:<br/><br/>summary families, summary operations<br/>× query rewrites<br/>× sharing one common subexpresion/summary across multiple computations<br/><br/>Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)"]:::body
       H1 ~~~ B1
     end
 
-    subgraph PHYSICAL["Physical planning — how to compute"]
+    subgraph PHYSICAL[" "]
+      PT["Physical planning — how to compute"]:::group
+      PT ~~~ H2
       H2["2. Physical ASAP-aware optimization"]:::title
       B2["Explore physical implementations of each logical candidate:<br/><br/>materialization decisions<br/>× physical operator implementations<br/>× parallelism and partitioning<br/>× resource management<br/><br/>Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)"]:::body
       H2 ~~~ B2
@@ -221,12 +225,14 @@ flowchart TB
       H3 ~~~ B3
     end
 
-    B0 --> H1
-    B1 --> H2
+    B0 --> LT
+    B1 --> PT
     B2 --> H3
   end
 
-  subgraph DEPLOY["Deployment"]
+  subgraph DEPLOY[" "]
+    DT["Deployment"]:::group
+    DT ~~~ H4
     H4["4. Execution"]:::title
     B4["deployment executes the selected DAG (plan)."]:::body
     H4 ~~~ B4
@@ -236,7 +242,7 @@ flowchart TB
   DW ~~~ TOP
   DI ~~~ TOP
   INPUTS --> TOP
-  B3 -- "one selected PhysicalASAPDAG" --> H4
+  B3 -- "one selected PhysicalASAPDAG" --> DT
 
   click H0 href "#0-language-specific-frontends"
   click H1 href "#1-logical-asap-aware-optimization"
@@ -247,6 +253,7 @@ flowchart TB
   classDef input fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef title fill:none,stroke:none,color:#0969da,font-weight:bold;
   classDef anchor fill:none,stroke:none,font-size:1px;
+  classDef group fill:none,stroke:none,color:#333;
   classDef body fill:none,stroke:none,color:#000;
   style INPUTS fill:#fff,stroke:#5f6368;
   style ST0 fill:#fff,stroke:#5f6368;
