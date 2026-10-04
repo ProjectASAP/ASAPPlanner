@@ -19,6 +19,14 @@ The stages are those of
 The viewer reads one JSON document per workload, written by the
 `stage_pipeline` command. It does not run the plans.
 
+> **Based on [PR #574](https://github.com/ProjectASAP/ASAPPlanner/pull/574)**
+> (branch `stack/509-viewer-stages`), which redesigns the viewer, together with
+> the PRs it is stacked on: #613 (`stage_pipeline` examples 2 and 4b, and
+> pricing every plan), #610 (deployment inputs in the document) and #609
+> (deployment capabilities). Until they are merged, check out
+> `stack/509-viewer-stages` to use the viewer as described here; `main` still
+> has the earlier Pre/Post-ASAP viewer.
+
 ## Start the viewer
 
 Run from the repository root, with Rust/Cargo and Python 3 installed:
