@@ -205,11 +205,11 @@ pub use recurrence::{
     UpdateRate,
 };
 pub use replacement::{
-    default_strategies, default_strategies_with, is_logical_rewrite, search_workload,
-    search_workload_with, search_workload_with_targets, summary_candidates, ASAPStrategies,
-    CandidateLogicalASAPDAGs, Matcher, Proposals, Realization, RealizationError, RejectedCandidate,
-    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
-    SharedSubDAGStrategy, TargetSubDAG, TargetSubDAGCandidates, MAX_SEARCH_ITERATIONS,
+    default_strategies, is_logical_rewrite, search_workload, search_workload_with,
+    search_workload_with_targets, summary_candidates, ASAPStrategies, CandidateLogicalASAPDAGs,
+    Matcher, Proposals, Realization, RealizationError, RejectedCandidate, Replacement,
+    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SharedSubDAGStrategy,
+    TargetSubDAG, TargetSubDAGCandidates, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use topk_reuse::TopKLimitReuseStrategy;

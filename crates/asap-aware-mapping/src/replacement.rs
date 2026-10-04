@@ -11,11 +11,11 @@
 //! [`ReplacementSubDAG`]:
 //!
 //! 1. **Decide**: [`realizations_for_intent`] enumerates every valid
-//!    [`Realization`] for the target's intent — exhaustive, and ranked
-//!    most-preferred-first via a [`CostModel`] (candidate sketch family/kind,
-//!    already sized to the target's own accuracy target: `Realization::Sketch`'s
-//!    `params` are the output of inverting that accuracy target through
-//!    `CostModel::size_params`, not a placeholder filled in later).
+//!    [`Realization`] for the target's intent — exhaustive, in a static
+//!    order (candidate sketch family/kind, already sized to the target's own
+//!    accuracy target: `Realization::Sketch`'s `params` are the output of
+//!    inverting that accuracy target through the analytical estimators, not a
+//!    placeholder filled in later).
 //! 2. **Build**: for each candidate in that list, [`construct_summary`]
 //!    mechanically turns the already-decided `(kind, params)` into a real
 //!    [`OperatorNode`] — derives the child schema, resolves the summarized
@@ -41,7 +41,7 @@
 //!   (still logical, structurally different from the target but semantically
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
-//!   extension-point shape [`CostModel`] and [`Matcher`] already use in this
+//!   extension-point shape [`CostModel`](crate::cost_model::CostModel) and [`Matcher`] already use in this
 //!   crate: a new replacement source is a new `impl ReplacementStrategy`, not
 //!   a restructuring of this trait or of any existing strategy. `replacements`
 //!   is **exhaustive, not ranked, not filtered** — reporting "every valid
@@ -234,7 +234,7 @@
 //! ### Cost-based final selection — reusing `CostModel`, not a second interface
 //!
 //! [`CandidateLogicalASAPDAGs::cost_sorted`] is the `sorted_by(cost_model)` step, and it
-//! reuses this crate's existing [`CostModel`] trait rather than inventing a
+//! reuses this crate's existing [`CostModel`](crate::cost_model::CostModel) trait rather than inventing a
 //! second cost interface (`docs/design_docs/cse-cost-model-decision.md`,
 //! issue #237, explicitly reasoned about *why* a narrow, direct cost
 //! comparison was enough for the CSE share/recompute decision alone, and
@@ -244,15 +244,15 @@
 //!
 //! - A group whose candidates are the [`SharedSubDAGStrategy`]
 //!   share-vs-recompute pair is ranked by calling
-//!   [`CostModel::cse_share_decision`] via this module's own
+//!   [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) via this module's own
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
 //! - A group whose candidates are [`ASAPStrategies`]'s sketch-family
-//!   candidates is ranked via [`CostModel::rank_candidates`] (the same hook
+//!   candidates is ranked via [`CostModel::rank_candidates`](crate::cost_model::CostModel::rank_candidates) (the same hook
 //!   `realizations_for_intent` itself consults), applied to the
 //!   candidates' own [`SketchAlgorithm`]s.
 //! - Any other shape (a single candidate, or a mix this module doesn't have
 //!   a defined comparison for) keeps discovery order — there is nothing to
-//!   rank, or no [`CostModel`] hook this module knows how to apply; it never
+//!   rank, or no [`CostModel`](crate::cost_model::CostModel) hook this module knows how to apply; it never
 //!   invents a comparison `CostModel` doesn't already define.
 //!
 //! ## Whole-plan (cross-group) selection — issue #271
@@ -262,7 +262,7 @@
 //! group is costed. That's the right behavior when groups genuinely don't
 //! interact — which both shipped strategies' one-round convergence (see
 //! "Termination" above) makes the common case — but it's the wrong answer
-//! whenever they do. Concretely: [`CostModel::cse_share_decision`] costs a
+//! whenever they do. Concretely: [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) costs a
 //! [`SharedSubDAGStrategy`] group by comparing a `consumer_count`-scaled
 //! recompute cost against a fixed maintenance cost — but a **nested**
 //! `SharedSubDAGStrategy` group's *true* recompute burden isn't its own
@@ -284,11 +284,11 @@
 //! **effective consumer count** — how many times that site actually runs
 //! once every ancestor's own selected candidate is accounted for — and, for
 //! every [`SharedSubDAGStrategy`]-shaped group, re-decides
-//! [`CostModel::cse_share_decision`] against *that* corrected count instead
+//! [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) against *that* corrected count instead
 //! of the group's raw structural one. When that group also contains a
 //! non-CSE alternative such as a semantic rewrite, the chosen CSE candidate
 //! and the cheapest non-CSE candidate additionally compete through
-//! [`CostModel::estimate_cost`]; the CSE pair is no longer allowed to hide an
+//! [`CostModel::estimate_cost`](crate::cost_model::CostModel::estimate_cost); the CSE pair is no longer allowed to hide an
 //! otherwise valid logical alternative. See [`multiplier`]'s doc for the
 //! exact recurrence: a group that chooses `Share` collapses its own
 //! multiplicity to exactly `1` for everything beneath it (one shared
@@ -314,8 +314,8 @@
 //! Two things this deliberately does **not** attempt, both left as
 //! documented follow-up rather than silently overclaimed:
 //!
-//! - [`CostModel::rank_candidates`]/[`CostModel::size_params`] — the hooks
-//!   [`ASAPStrategies`] groups rank by — take no `consumer_count`
+//! - [`CostModel::rank_candidates`](crate::cost_model::CostModel::rank_candidates) — the hook
+//!   [`ASAPStrategies`] groups rank by — takes no `consumer_count`
 //!   parameter at all today, so a `ASAPStrategies` group's selection
 //!   here still falls back to [`rank_group`]'s ordinary (consumer-count-
 //!   blind) local ranking, even though its own
@@ -327,7 +327,7 @@
 //!   would need, and this module now computes it for every group, sketch
 //!   groups included.
 //! - This is not an exhaustive search over combinations of choices for a
-//!   provably-global optimum in every case. [`CostModel::cse_share_decision`]
+//!   provably-global optimum in every case. [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision)
 //!   is still a *local*, pairwise comparison at each `SharedSubDAGStrategy`
 //!   site (recompute-total vs. one fixed maintenance cost) — this module
 //!   just now feeds it a *correct* input instead of an *incorrect* one. Two
@@ -341,7 +341,7 @@
 
 use crate::accuracy::estimators::{
     cms::{cms_depth, cms_width},
-    saturating_ceil,
+    saturating_ceil, size_params,
 };
 use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::scalar::resolve_column_ref;
@@ -378,7 +378,6 @@ use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
     DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
 };
-use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
 use crate::grouping::HydraGroupingStrategy;
 use crate::plan_selection::candidate_selection::{GlobalSelection, TargetSubDAGSelection};
@@ -576,7 +575,7 @@ pub enum ReplacementProvenance {
 /// accuracy-legality grounds (issue #172) — kept alongside the group's
 /// legal candidates in [`TargetSubDAGCandidates::rejected`] so a rejection is as
 /// inspectable (and exportable) as a selection. Never ranked: a
-/// [`CostModel`] only ever sees [`TargetSubDAGCandidates::candidates`].
+/// [`CostModel`](crate::cost_model::CostModel) only ever sees [`TargetSubDAGCandidates::candidates`].
 #[derive(Debug, Clone)]
 pub struct RejectedCandidate {
     /// Name of the [`ReplacementStrategy`] that considered it.
@@ -603,7 +602,7 @@ pub struct Proposals {
 /// replacement (`replacements`)?
 ///
 /// The extension point this module exists for — the same shape
-/// [`CostModel`] and [`Matcher`] already use elsewhere in this crate: a new
+/// [`CostModel`](crate::cost_model::CostModel) and [`Matcher`] already use elsewhere in this crate: a new
 /// replacement source is a new `impl ReplacementStrategy`, no restructuring
 /// of this trait or any existing strategy required.
 ///
@@ -628,7 +627,7 @@ pub trait ReplacementStrategy {
 
     /// Every valid replacement for `target` — not ranked, not filtered.
     /// Reporting "every valid candidate" is this method's whole job; picking
-    /// the best one is a [`CostModel`]'s job, out of scope here.
+    /// the best one is a [`CostModel`](crate::cost_model::CostModel)'s job, out of scope here.
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG>;
 
     /// [`replacements`](Self::replacements) plus the accuracy-illegal
@@ -816,8 +815,8 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
     }
 }
 
-/// Every valid [`Realization`] for `intent`, exhaustive and ranked
-/// (most-preferred first via `cost_model`) — the *only* place this crate
+/// Every valid [`Realization`] for `intent`, exhaustive, in
+/// [`summary_candidates`]' static order — the *only* place this crate
 /// decides what an `AggIntent` may become. Nothing in this crate computes
 /// "the one" `Realization` independently of this list:
 /// [`ASAPStrategies`] keeps every entry as a candidate, and a caller
@@ -833,10 +832,7 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// caller outside it, needing the exact same already-ranked candidate list
 /// to find the `Realization::Sketch` matching the Hydra-eligible kind it
 /// is building a candidate for.
-pub(crate) fn realizations_for_intent(
-    intent: &AggIntent,
-    cost_model: &dyn CostModel,
-) -> Vec<Realization> {
+pub(crate) fn realizations_for_intent(intent: &AggIntent) -> Vec<Realization> {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
@@ -854,11 +850,11 @@ pub(crate) fn realizations_for_intent(
             ],
             AccuracyTarget::Exact => vec![exact_realization(intent)],
             _ if matches!(intent, AggIntent::Count { .. }) => {
-                let mut candidates = sketch_realizations(intent, accuracy, cost_model);
+                let mut candidates = sketch_realizations(intent, accuracy);
                 candidates.push(exact_realization(intent));
                 candidates
             }
-            _ => sketch_realizations(intent, accuracy, cost_model),
+            _ => sketch_realizations(intent, accuracy),
         },
 
         // ── Exact mergeable accumulators ─────────────────────────────────────
@@ -924,17 +920,9 @@ pub(crate) fn realizations_for_intent(
         AggIntent::Group | AggIntent::CountValues { .. } => vec![Realization::PassThrough],
 
         // ── Extension (deployment-model-specific, issue #131) — core has no
-        //    realization opinion for a shape it doesn't know, so it defers
-        //    entirely to the `CostModel` (issue #150): `realize_extension`
-        //    defaults to `PassThrough`, preserving today's behavior for
-        //    every deployment that doesn't override it. Core has no way to
-        //    enumerate alternatives for an opaque deployment-defined shape,
-        //    so this is always exactly one candidate. This is also the only
-        //    path that can currently produce `Realization::Sample`/
-        //    `Wavelet`/`StatModel` — see the module docs.
-        AggIntent::Extension { ext_kind, payload } => {
-            vec![cost_model.realize_extension(ext_kind, payload)]
-        }
+        //    realization opinion for a shape it doesn't know, so it stays
+        //    logical.
+        AggIntent::Extension { .. } => vec![Realization::PassThrough],
     }
 }
 
@@ -959,8 +947,8 @@ fn exact_accumulator(intent: &AggIntent, kind: ExactKind, params: ExactParams) -
     Realization::ExactAggregate { kind, params }
 }
 
-/// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget
-/// [`CostModel::size_params`] needs. Shared by [`sketch_realizations`] and
+/// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget sketch
+/// sizing needs. Shared by [`sketch_realizations`] and
 /// this crate's own sizing — one place this resolution happens, so nothing
 /// can drift apart on it.
 ///
@@ -976,23 +964,15 @@ pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
 }
 
 /// Every candidate sketch [`Realization`] for an approximate-capable
-/// intent, sized to `accuracy` and ranked via `cost_model.rank_candidates`
-/// (most-preferred first) — [`realizations_for_intent`]'s Sketch branch.
-fn sketch_realizations(
-    intent: &AggIntent,
-    accuracy: &AccuracyTarget,
-    cost_model: &dyn CostModel,
-) -> Vec<Realization> {
+/// intent, sized analytically to `accuracy`, in [`summary_candidates`]'
+/// order — [`realizations_for_intent`]'s Sketch branch.
+fn sketch_realizations(intent: &AggIntent, accuracy: &AccuracyTarget) -> Vec<Realization> {
     let (eps, delta) = accuracy_budget(accuracy);
-    let ranked = crate::cost_model::validated_candidate_ranking(
-        cost_model,
-        intent,
-        summary_candidates(intent),
-    );
-    ranked
-        .into_iter()
+    summary_candidates(intent)
+        .iter()
+        .cloned()
         .filter_map(|algorithm| {
-            let params = cost_model.size_params(algorithm.clone(), intent, eps, delta);
+            let params = size_params(algorithm.clone(), intent, eps, delta);
             sketch_state_bytes(&params)
                 .is_none_or(|bytes| bytes <= DEFAULT_MAX_SKETCH_STATE_BYTES)
                 .then(|| Realization::Sketch(SketchKind::new(algorithm, params)))
@@ -1045,10 +1025,7 @@ pub fn sketch_state_bytes(params: &SketchParams) -> Option<u64> {
 }
 
 /// `asap-plan`'s built-in `SketchParams` sizing, keyed off the resolved
-/// `(eps, delta)` accuracy budget. [`CostModel::size_params`]'s default
-/// body — factored out to a free function so a deployment's own
-/// `CostModel` impl can still delegate to it for the candidates it
-/// doesn't want to resize itself.
+/// `(eps, delta)` accuracy budget.
 ///
 /// Each formula inverts the sketch family's standard error bound to the
 /// smallest parameter satisfying the target, clamped to the family's sane
@@ -1181,34 +1158,26 @@ pub fn posterior_aware_size_params(
 
 // ── ASAPStrategies ─────────────────────────────────────────────────
 
-/// A single static instance so [`ASAPStrategies::default_cost_model`]
-/// can hand out a `&'static dyn CostModel` without heap-allocating one —
-/// `DefaultCostModel` is a unit struct with no state, so one instance serves
-/// every caller.
-static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static DEFAULT_ALLOCATOR: EqualSplitAllocator = EqualSplitAllocator;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 
-/// The cost, accuracy, allocation, and evidence inputs consulted during
-/// candidate construction, bundled so the construction path threads one argument. `cost` ranks and sizes; `accuracy` and `allocator` decide
-/// legality (issue #172) — see [`crate::accuracy`]'s module docs for why
-/// those are separate from `cost` and run before it.
+/// The accuracy, allocation, and evidence inputs consulted during
+/// candidate construction, bundled so the construction path threads one
+/// argument. `accuracy` and `allocator` decide legality (issue #172) — see
+/// [`crate::accuracy`]'s module docs.
 #[derive(Clone, Copy)]
 pub(crate) struct CandidatePlanningInputs<'a> {
-    pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub allocator: &'a dyn AccuracyBudgetAllocator,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
 }
 
-impl<'a> CandidatePlanningInputs<'a> {
-    /// `cost` with the built-in [`DefaultAccuracyModel`]/
-    /// [`EqualSplitAllocator`] — what every entry point that only takes a
-    /// `CostModel` uses.
-    pub(crate) fn with_default_accuracy(cost: &'a dyn CostModel) -> Self {
+impl CandidatePlanningInputs<'static> {
+    /// The built-in [`DefaultAccuracyModel`]/[`EqualSplitAllocator`], with no
+    /// planning-time evidence.
+    pub(crate) fn with_default_accuracy() -> Self {
         Self {
-            cost,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             allocator: &DEFAULT_ALLOCATOR,
             evidence: &NO_ACCURACY_EVIDENCE,
@@ -1220,17 +1189,12 @@ impl<'a> CandidatePlanningInputs<'a> {
 /// exact accumulators, approximate sketches, and supported maintained populations.
 /// Each valid realization becomes its own [`ReplacementSubDAG`].
 ///
-/// [`realizations_for_intent`] enumerates summary families; extension hooks can
-/// supply additional supported families. This is not limited to sketch algorithms.
+/// [`realizations_for_intent`] enumerates summary families. This is not
+/// limited to sketch algorithms. Nothing here ranks candidates by cost; that
+/// is plan selection's job.
 ///
-/// Ranked (only to *order the enumeration*, never to drop a candidate) via a
-/// [`CostModel`] — [`DefaultCostModel`] unless constructed with
-/// [`ASAPStrategies::new`] — so a deployment-specific cost model's
-/// other hooks (`size_params`, `realize_extension`, `evaluation_extension`) are
-/// still consulted while binding each candidate.
-///
-/// The one thing that *does* drop a candidate is accuracy legality (issue
-/// #172), decided by the [`AccuracyModel`] — never by the cost model: a
+/// The one thing that drops a candidate is accuracy legality (issue
+/// #172), decided by the [`AccuracyModel`]: a
 /// sketch over an approximate child is proposed only if its composed
 /// guarantee has a sound propagation rule and satisfies the node's own
 /// `AccuracyTarget`; otherwise it is reported through
@@ -1241,40 +1205,25 @@ pub struct ASAPStrategies<'a> {
     planning_inputs: CandidatePlanningInputs<'a>,
 }
 
-impl ASAPStrategies<'static> {
-    /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
-    /// what a deployment gets with no custom cost model plugged in.
-    pub fn default_cost_model() -> Self {
+impl Default for ASAPStrategies<'static> {
+    /// The built-in [`DefaultAccuracyModel`]/[`EqualSplitAllocator`].
+    fn default() -> Self {
         Self {
-            planning_inputs: CandidatePlanningInputs::with_default_accuracy(&DEFAULT_COST_MODEL),
+            planning_inputs: CandidatePlanningInputs::with_default_accuracy(),
         }
     }
 }
 
 impl<'a> ASAPStrategies<'a> {
-    /// A strategy that ranks/binds via `cost_model` instead of the built-in
-    /// static preference order — the same customization point
-    /// [`realizations_for_intent`] already offers. Accuracy legality stays
-    /// with the built-in [`DefaultAccuracyModel`]/[`EqualSplitAllocator`].
-    pub fn new(cost_model: &'a dyn CostModel) -> Self {
-        Self {
-            planning_inputs: CandidatePlanningInputs::with_default_accuracy(cost_model),
-        }
-    }
-
-    /// A strategy with every model plugged in explicitly: `cost_model` for
-    /// ranking/sizing, `accuracy_model` for guarantee derivation/propagation/
-    /// satisfaction, `allocator` for end-to-end budget splits. One model
-    /// never overrides another: legality is settled by `accuracy_model`
-    /// before `cost_model` ranks what is left.
+    /// A strategy with every model plugged in explicitly: `accuracy_model`
+    /// for guarantee derivation/propagation/satisfaction, `allocator` for
+    /// end-to-end budget splits.
     pub fn new_with_planning_inputs(
-        cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
         allocator: &'a dyn AccuracyBudgetAllocator,
     ) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs {
-                cost: cost_model,
                 accuracy: accuracy_model,
                 allocator,
                 evidence: &NO_ACCURACY_EVIDENCE,
@@ -1285,14 +1234,12 @@ impl<'a> ASAPStrategies<'a> {
     /// Like [`Self::new_with_planning_inputs`], with typed planning-time evidence for
     /// rules such as TopK membership and Hydra shared-grid composition.
     pub fn new_with_planning_inputs_and_evidence(
-        cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
         allocator: &'a dyn AccuracyBudgetAllocator,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs {
-                cost: cost_model,
                 accuracy: accuracy_model,
                 allocator,
                 evidence,
@@ -1535,7 +1482,7 @@ impl<'a> ASAPStrategies<'a> {
         // candidate in practice (every other variant's own dispatch produces
         // exactly one `Realization`), but this loop doesn't need to know
         // that; it just constructs whatever the list contains.
-        for realization in realizations_for_intent(intent, planning_inputs.cost) {
+        for realization in realizations_for_intent(intent) {
             let rationale = describe_realization(intent, &realization);
             // The as-declared composition: every layer sized to its own
             // declared `AccuracyTarget`. Legal iff the composed guarantee
@@ -1558,10 +1505,7 @@ impl<'a> ASAPStrategies<'a> {
             if let (Some(stricter), Realization::Sketch(kind)) = (strictest_sibling, &realization) {
                 let (eps, delta) = accuracy_budget(stricter);
                 let algorithm = kind.algorithm().clone();
-                let params =
-                    planning_inputs
-                        .cost
-                        .size_params(algorithm.clone(), intent, eps, delta);
+                let params = size_params(algorithm.clone(), intent, eps, delta);
                 if params != *kind.params() {
                     proposals.record(
                         format!(
@@ -1598,7 +1542,7 @@ impl<'a> ASAPStrategies<'a> {
             else {
                 continue;
             };
-            let evaluation_query = evaluation(intent, &input.input, planning_inputs.cost);
+            let evaluation_query = evaluation(intent, &input.input);
             let Some(local) = planning_inputs
                 .accuracy
                 .local_guarantee(&family, &evaluation_query)
@@ -1630,9 +1574,7 @@ impl<'a> ASAPStrategies<'a> {
                 let (eps, delta) = accuracy_budget(outer_target);
                 let resized = Realization::Sketch(SketchKind::new(
                     kind.algorithm().clone(),
-                    planning_inputs
-                        .cost
-                        .size_params(kind.algorithm().clone(), intent, eps, delta),
+                    size_params(kind.algorithm().clone(), intent, eps, delta),
                 ));
                 // Identical to the as-declared composition already recorded
                 // above — nothing new to propose.
@@ -1788,18 +1730,18 @@ fn describe_realization(intent: &AggIntent, realization: &Realization) -> String
             describe_intent(intent)
         ),
         Realization::Sample { kind, .. } => format!(
-            "{} realizes as a {kind:?} sample — the only realization the plugged-in \
-             CostModel produced for this intent",
+            "{} realizes as a {kind:?} sample — the only realization produced for \
+             this intent",
             describe_intent(intent)
         ),
         Realization::Wavelet { kind, .. } => format!(
-            "{} realizes as a {kind:?} wavelet transform — the only realization the \
-             plugged-in CostModel produced for this intent",
+            "{} realizes as a {kind:?} wavelet transform — the only realization \
+             produced for this intent",
             describe_intent(intent)
         ),
         Realization::StatModel { kind, .. } => format!(
-            "{} realizes as a {kind:?} statistical model — the only realization the \
-             plugged-in CostModel produced for this intent",
+            "{} realizes as a {kind:?} statistical model — the only realization \
+             produced for this intent",
             describe_intent(intent)
         ),
     }
@@ -1847,20 +1789,13 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// independent enumeration instead of inheriting the parent's forced
 /// candidate), from this module's own [`realize_one`] (the representative
 /// bound `OperatorNode` [`cse_preference`] needs for a
-/// [`CostModel::cse_share_decision`] comparison), and from
+/// [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) comparison), and from
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] (the same
 /// representative-node need, for a [`Replacement::Rewrite`] candidate's own
 /// cost estimate). Every other caller goes through
 /// [`ASAPStrategies::replacements`] directly and decides for itself.
-pub(crate) fn realize_child(
-    root: &Rc<OperatorNode>,
-    cost_model: &dyn CostModel,
-) -> Result<Rc<OperatorNode>, RealizationError> {
-    realize_child_with(
-        root,
-        CandidatePlanningInputs::with_default_accuracy(cost_model),
-        None,
-    )
+pub(crate) fn realize_child(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+    realize_child_with(root, CandidatePlanningInputs::with_default_accuracy(), None)
 }
 
 /// [`realize_child`] with every model explicit, plus an optional
@@ -2448,9 +2383,7 @@ fn realize_ddsketch_quantile_operand(
     let (epsilon, delta) = accuracy_budget(target);
     let realization = Realization::Sketch(SketchKind::new(
         SketchAlgorithm::DDSketch,
-        planning_inputs
-            .cost
-            .size_params(SketchAlgorithm::DDSketch, &intent, epsilon, delta),
+        size_params(SketchAlgorithm::DDSketch, &intent, epsilon, delta),
     ));
     construct_summary_with(operand, &intent, realization, planning_inputs, None, None)
 }
@@ -3043,7 +2976,7 @@ fn construct_summary_agg(
                 };
             }
         }
-        evaluation(intent, &summary_input, planning_inputs.cost)
+        evaluation(intent, &summary_input)
     });
 
     let mut state_schema = out_schema.clone();
@@ -3134,7 +3067,7 @@ fn construct_summary_agg(
         local_target,
     );
     let membership_query = if snapshot_weighted {
-        Some(evaluation(intent, &summary_input, planning_inputs.cost))
+        Some(evaluation(intent, &summary_input))
     } else {
         query.clone()
     };
@@ -3846,11 +3779,7 @@ pub(crate) fn summarised_input(
 }
 
 /// The `SummaryEstimate` evaluation for a summary-bound intent.
-fn evaluation(
-    intent: &AggIntent,
-    input: &SummaryUpdate,
-    cost_model: &dyn CostModel,
-) -> PostAsapSketchStatistic {
+fn evaluation(intent: &AggIntent, input: &SummaryUpdate) -> PostAsapSketchStatistic {
     match intent {
         AggIntent::Quantile { q, .. } => PostAsapSketchStatistic::Quantile { q: *q },
         AggIntent::Cardinality { .. } => PostAsapSketchStatistic::Cardinality,
@@ -3864,17 +3793,6 @@ fn evaluation(
                 _ => unreachable!("point count requires one column"),
             },
             value: None,
-        },
-        // Core doesn't know the shape of a deployment-specific `Extension`
-        // intent, so it can't build its evaluation either — delegate to the
-        // same `CostModel` that decided (via `realize_extension`) this
-        // intent gets a summary realization at all. See `evaluation_extension`'s
-        // doc for the invariant this depends on.
-        AggIntent::Extension { ext_kind, payload } => match &input.weight {
-            SummaryInputExpr::Column(col) => {
-                cost_model.evaluation_extension(ext_kind, payload, col)
-            }
-            _ => unreachable!("extension evaluation requires one column"),
         },
         other => {
             unreachable!("no summary realization for {other:?} (realizations_for_intent)")
@@ -3898,7 +3816,7 @@ fn evaluation(
 /// "Non-goals" on why that traversal isn't itself part of this strategy).
 /// This strategy only reframes "two or more consumers already share this
 /// `Rc`" as the two-way choice a downstream cost model (today,
-/// [`CostModel::cse_share_decision`]) picks between: build once and share, or
+/// [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision)) picks between: build once and share, or
 /// build independently at each consumer.
 pub struct SharedSubDAGStrategy;
 
@@ -3985,7 +3903,7 @@ pub struct TargetSubDAGCandidates {
     /// accuracy-legality grounds (issue #172), plus any `candidates` entry
     /// the root-target check ([`search_workload_with_targets`]) moved here.
     /// Never ranked — [`CandidateLogicalASAPDAGs::cost_sorted`]/[`CandidateLogicalASAPDAGs::global_selection`]
-    /// read only `candidates`, so a [`CostModel`] cannot resurrect one.
+    /// read only `candidates`, so a [`CostModel`](crate::cost_model::CostModel) cannot resurrect one.
     pub rejected: Vec<RejectedCandidate>,
 }
 
@@ -4471,22 +4389,19 @@ pub(crate) fn direct_child_counts(node: &OperatorNode) -> Vec<(*const OperatorNo
 }
 // ── default_strategies ──────────────────────────────────────────────────
 
-/// The context-free strategies [`search_workload`] runs in the built-in
-/// [`DefaultCostModel`] configuration. Workload-dependent strategies such as
+/// The context-free strategies [`search_workload`] runs with the built-in
+/// accuracy models. Workload-dependent strategies such as
 /// [`RollupStrategy`] and [`AccuracyReconciliationStrategy`] (issue #273,
 /// cross-consumer accuracy reconciliation for CSE sharing — see that
 /// module's own docs) are added by [`search_workload`] after CSE and target
 /// discovery, when their sibling context exists.
 /// [`crate::explanation::explain_replacements`] (issue #257) uses
 /// this same set (via [`search_workload`]) rather than keeping a second,
-/// explanation-specific list to stay in sync with. Use
-/// [`default_strategies_with`] to plug in a deployment-specific
-/// [`CostModel`] instead.
+/// explanation-specific list to stay in sync with.
 ///
 /// [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) is
 /// included here (issue #253) even though it's a
-/// [`Replacement::Rewrite`]-only strategy with no [`CostModel`] of its own to
-/// plug in — it's context-free (`matches`/`replacements` need nothing beyond
+/// [`Replacement::Rewrite`]-only strategy — it's context-free (`matches`/`replacements` need nothing beyond
 /// the target itself) exactly like [`SharedSubDAGStrategy`], so it belongs
 /// in this list rather than being derived per-workload the way
 /// [`RollupStrategy`] is. Rewriting `avg` into `sum`/`count` upfront is what
@@ -4496,47 +4411,29 @@ pub(crate) fn direct_child_counts(node: &OperatorNode) -> Vec<(*const OperatorNo
 /// [`ReplacementStrategy`] target for anything.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
-        Box::new(ASAPStrategies::default_cost_model()),
-        Box::new(HydraGroupingStrategy::default_cost_model()),
+        Box::new(ASAPStrategies::default()),
+        Box::new(HydraGroupingStrategy::default()),
         Box::new(SharedSubDAGStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
-        Box::new(ExactCompositionStrategy::default_cost_model()),
+        Box::new(ExactCompositionStrategy),
     ]
 }
 
-/// Like [`default_strategies`], but [`ASAPStrategies`] ranks/binds via
-/// `cost_model` instead of the built-in [`DefaultCostModel`] — the same
-/// customization point [`ASAPStrategies::new`] itself offers.
-pub fn default_strategies_with<'a>(
-    cost_model: &'a dyn CostModel,
-) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
-    vec![
-        Box::new(ASAPStrategies::new(cost_model)),
-        Box::new(HydraGroupingStrategy::new(cost_model)),
-        Box::new(SharedSubDAGStrategy),
-        Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
-        Box::new(ExactCompositionStrategy::new(cost_model)),
-    ]
-}
-
-/// Default context-free strategies with both deployment costing and typed
-/// planning-time accuracy evidence. This is the production counterpart of
+/// Default context-free strategies with typed planning-time accuracy
+/// evidence. This is the production counterpart of
 /// constructing [`ASAPStrategies::new_with_planning_inputs_and_evidence`] and
 /// [`HydraGroupingStrategy::new_with_planning_inputs_and_evidence`] separately.
 pub fn default_strategies_with_evidence<'a>(
-    cost_model: &'a dyn CostModel,
     evidence: &'a dyn AccuracyEvidenceProvider,
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
         Box::new(ASAPStrategies::new_with_planning_inputs_and_evidence(
-            cost_model,
             &DEFAULT_ACCURACY_MODEL,
             &DEFAULT_ALLOCATOR,
             evidence,
         )),
         Box::new(
             HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
-                cost_model,
                 &DEFAULT_ACCURACY_MODEL,
                 &DEFAULT_ALLOCATOR,
                 evidence,
@@ -4544,27 +4441,22 @@ pub fn default_strategies_with_evidence<'a>(
         ),
         Box::new(SharedSubDAGStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
-        Box::new(ExactCompositionStrategy::new(cost_model)),
+        Box::new(ExactCompositionStrategy),
     ]
 }
 
 // ── search_workload ──────────────────────────────────────────────────────
 
 /// Search a whole workload's pre-ASAP roots for every candidate replacement
-/// [`default_strategies`] can find, deduped into a [`CandidateLogicalASAPDAGs`]. Candidate
-/// *generation* uses the built-in [`DefaultCostModel`] (via
-/// [`default_strategies`], the same way [`ASAPStrategies::default_cost_model`]
-/// does); call [`CandidateLogicalASAPDAGs::cost_sorted`] on the result for the final
-/// `sorted_by(cost_model)` step. Use [`search_workload_with`] to plug in a
-/// custom strategy set (e.g. built via [`default_strategies_with`] for a
-/// deployment-specific [`CostModel`]).
+/// [`default_strategies`] can find, deduped into a [`CandidateLogicalASAPDAGs`].
+/// Candidate generation is cost-free; ranking happens in plan selection. Use
+/// [`search_workload_with`] to plug in a custom strategy set.
 pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogicalASAPDAGs<Id> {
     search_workload_with(roots, &default_strategies())
 }
 
 /// Like [`search_workload`], but with an explicit set of context-free
-/// `strategies` (see [`default_strategies_with`] to plug in a
-/// deployment-specific [`CostModel`]). The workload-dependent
+/// `strategies`. The workload-dependent
 /// [`RollupStrategy`] is derived and added automatically after CSE for both
 /// entry points, because only this function owns the post-CSE sibling set.
 ///
@@ -4575,11 +4467,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogic
 /// `TargetSubDAG` (see [`discover_targets`]) and runs the
 /// fixpoint loop the module docs describe, capped at
 /// [`MAX_SEARCH_ITERATIONS`] passes (see the module docs' "Termination"
-/// section). Deduping candidate plans this way needs no
-/// [`CostModel`] at all — that only enters at two well-defined points: each
-/// [`ReplacementStrategy`] in `strategies` may already carry its own (e.g.
-/// [`ASAPStrategies::new`]'s), and [`CandidateLogicalASAPDAGs::cost_sorted`]'s final
-/// ranking step takes one explicitly.
+/// section). Deduping candidate plans this way needs no cost model.
 pub fn search_workload_with<'s, Id>(
     roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
@@ -5095,6 +4983,7 @@ fn walk_children(
 mod tests {
     use super::*;
     use crate::accuracy::PropagationStats;
+    use crate::cost_model::DefaultCostModel;
     use crate::plan_selection::candidate_selection::sketch_kind_of;
     use crate::test_support::{agg, agg_per_entity, lower_promql, maintained, metric_scan, timed};
     use asap_types::ir::operator::agg_intent::{
@@ -5188,7 +5077,7 @@ mod tests {
             let space = search_workload(vec![(0usize, root.clone())]);
             let inventory = space.enumerate_candidate_dags(4096).unwrap();
             assert!(!inventory.candidates.is_empty());
-            let strategy = ASAPStrategies::new(&DefaultCostModel);
+            let strategy = ASAPStrategies::default();
             for candidate in strategy.propose(&TargetSubDAG::new(&root)).candidates {
                 if let Replacement::SubDAG(node) = candidate.replacement {
                     let output = finalize_query_candidate(node, &root).unwrap();
@@ -5333,8 +5222,7 @@ mod tests {
     #[test]
     fn temporal_average_requires_finite_division_guard() {
         let root = lower_promql("avg_over_time(a[5m])", AccuracyTarget::Exact);
-        let candidates =
-            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
         let operator = candidates
             .iter()
             .find_map(|c| match &c.replacement {
@@ -5364,8 +5252,7 @@ mod tests {
                 delta: 0.01,
             },
         );
-        let planning_inputs =
-            CandidatePlanningInputs::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+        let planning_inputs = CandidatePlanningInputs::with_default_accuracy();
         let node = exact_topk_over_temporal_values(&root, planning_inputs)
             .unwrap()
             .expect("exact ranking is legal for an approximate request");
@@ -5381,9 +5268,7 @@ mod tests {
             "topk by(job)(5, count_over_time(a[5m]))",
         ] {
             let root = lower_promql(query, AccuracyTarget::Exact);
-            let planning_inputs = CandidatePlanningInputs::with_default_accuracy(
-                &crate::cost_model::DefaultCostModel,
-            );
+            let planning_inputs = CandidatePlanningInputs::with_default_accuracy();
             let node = exact_topk_over_temporal_values(&root, planning_inputs)
                 .unwrap()
                 .expect("exact Top-K candidate");
@@ -5441,7 +5326,7 @@ mod tests {
         };
         let inputs = CandidatePlanningInputs {
             evidence: &Domain,
-            ..CandidatePlanningInputs::with_default_accuracy(&DefaultCostModel)
+            ..CandidatePlanningInputs::with_default_accuracy()
         };
         for query in [
             "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
@@ -5466,8 +5351,7 @@ mod tests {
             "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
             target.clone(),
         );
-        let planning_inputs =
-            CandidatePlanningInputs::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+        let planning_inputs = CandidatePlanningInputs::with_default_accuracy();
         let candidate = realize_binary(&root, planning_inputs, Some(&target))
             .unwrap()
             .expect("direct quantile ratio candidate");
@@ -5492,7 +5376,7 @@ mod tests {
     /// &DefaultCostModel)`'s head — for tests that only care about the
     /// default pick, not the full candidate list.
     fn preferred(intent: &AggIntent) -> Realization {
-        realizations_for_intent(intent, &DefaultCostModel)
+        realizations_for_intent(intent)
             .into_iter()
             .next()
             .expect("every intent has at least one Realization")
@@ -5681,7 +5565,7 @@ mod tests {
     fn pearson_corr_keeps_exact_paired_input() {
         let intent = AggIntent::PearsonCorr { left: 0, right: 1 };
         assert!(matches!(
-            realizations_for_intent(&intent, &crate::cost_model::DefaultCostModel).as_slice(),
+            realizations_for_intent(&intent).as_slice(),
             [Realization::PassThrough]
         ));
         assert!(summary_candidates(&intent).is_empty());
@@ -5737,7 +5621,7 @@ mod tests {
         let intent = AggIntent::Count {
             accuracy: eps(0.01),
         };
-        assert!(realizations_for_intent(&intent, &DefaultCostModel)
+        assert!(realizations_for_intent(&intent)
             .iter()
             .any(|candidate| matches!(
                 candidate,
@@ -5849,14 +5733,13 @@ mod tests {
         // Quantile's candidate list is [Kll, DDSketch] — realizations_for_intent
         // must return both, ranked with the DefaultCostModel's preferred
         // (Kll) first.
-        let kinds: Vec<SketchAlgorithm> =
-            realizations_for_intent(&default_quantile(0.99), &DefaultCostModel)
-                .into_iter()
-                .map(|realization| match realization {
-                    Realization::Sketch(kind) => kind.algorithm().clone(),
-                    other => panic!("expected Sketch, got {other:?}"),
-                })
-                .collect();
+        let kinds: Vec<SketchAlgorithm> = realizations_for_intent(&default_quantile(0.99))
+            .into_iter()
+            .map(|realization| match realization {
+                Realization::Sketch(kind) => kind.algorithm().clone(),
+                other => panic!("expected Sketch, got {other:?}"),
+            })
+            .collect();
         assert_eq!(kinds, vec![SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]);
     }
 
@@ -6037,12 +5920,12 @@ mod tests {
     fn matches_a_bindable_aggregate() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        assert!(ASAPStrategies::default_cost_model().matches(&target));
+        assert!(ASAPStrategies::default().matches(&target));
     }
 
     #[test]
     fn does_not_match_a_multi_intent_or_having_aggregate() {
-        let strategy = ASAPStrategies::default_cost_model();
+        let strategy = ASAPStrategies::default();
 
         let multi =
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
@@ -6076,10 +5959,8 @@ mod tests {
     fn does_not_match_a_non_aggregate_node() {
         let scan = metric_scan(&["job"]);
         let target = TargetSubDAG::new(&scan);
-        assert!(!ASAPStrategies::default_cost_model().matches(&target));
-        assert!(ASAPStrategies::default_cost_model()
-            .replacements(&target)
-            .is_empty());
+        assert!(!ASAPStrategies::default().matches(&target));
+        assert!(ASAPStrategies::default().replacements(&target).is_empty());
     }
 
     #[test]
@@ -6089,7 +5970,7 @@ mod tests {
         // not just Kll (the CostModel-ranked head realizations_for_intent commits to).
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default().replacements(&target);
         assert_eq!(
             replacements.len(),
             2,
@@ -6117,7 +5998,7 @@ mod tests {
     fn cardinality_epsilon_delta_keeps_unknown_accuracy_candidates() {
         let q = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default().replacements(&target);
         let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
@@ -6148,7 +6029,7 @@ mod tests {
             },
             metric_scan(&["job"]),
         );
-        let kinds: Vec<_> = ASAPStrategies::default_cost_model()
+        let kinds: Vec<_> = ASAPStrategies::default()
             .replacements(&TargetSubDAG::new(&q))
             .iter()
             .map(|r| match &r.replacement {
@@ -6180,7 +6061,7 @@ mod tests {
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -6193,7 +6074,7 @@ mod tests {
     fn exact_mergeable_intent_yields_exactly_one_accumulator_candidate() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -6202,46 +6083,6 @@ mod tests {
                 Operator::ASAP(ASAPOp::SummaryAgg { .. })
             )
         ));
-    }
-
-    /// A custom `CostModel` doesn't change *which* candidates are enumerated
-    /// (still every `summary_candidates` entry) — only which one
-    /// `realizations_for_intent` itself would prefer first, and how each
-    /// candidate's own params are sized.
-    struct PreferDDSketch;
-    impl CostModel for PreferDDSketch {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
-                let dd = v.remove(pos);
-                v.insert(0, dd);
-            }
-            v
-        }
-    }
-
-    #[test]
-    fn custom_cost_model_still_enumerates_every_candidate_not_just_its_own_pick() {
-        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let target = TargetSubDAG::new(&q);
-        let custom = PreferDDSketch;
-        let replacements = ASAPStrategies::new(&custom).replacements(&target);
-        let kinds: Vec<SketchAlgorithm> = replacements
-            .iter()
-            .map(|r| match &r.replacement {
-                Replacement::SubDAG(node) => summary_family_algorithm(node),
-                Replacement::ExactComposition(_) => {
-                    panic!("expected a Summary replacement")
-                }
-            })
-            .collect();
-        assert!(kinds.contains(&SketchAlgorithm::Kll));
-        assert!(kinds.contains(&SketchAlgorithm::DDSketch));
-        assert_eq!(kinds.len(), 2);
     }
 
     /// Constructing the outer target's candidates never leaks its algorithm
@@ -6260,24 +6101,17 @@ mod tests {
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.99), inner);
         let target = TargetSubDAG::new(&outer);
-        let replacements = ASAPStrategies::new_with_planning_inputs(
-            &DefaultCostModel,
-            &RankAdditiveModel,
-            &EqualSplitAllocator,
-        )
-        .replacements(&target);
+        let replacements =
+            ASAPStrategies::new_with_planning_inputs(&RankAdditiveModel, &EqualSplitAllocator)
+                .replacements(&target);
 
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| {
             matches!(&candidate.replacement, Replacement::SubDAG(n) if n.contains_asap())
         }));
-        // The inner target is still independently enumerated and ranked —
-        // a custom cost model that prefers DDSketch for it is honored, and
-        // nothing about the outer target's choice reaches it.
-        let space = search_workload_with(
-            vec![("q", Rc::clone(&outer))],
-            &default_strategies_with(&PreferDDSketchViaCostModel),
-        );
+        // The inner target is still independently enumerated, and nothing
+        // about the outer target's choice reaches it.
+        let space = search_workload(vec![("q", Rc::clone(&outer))]);
         let Some(NonASAPOp::Aggregate { child, .. }) = space.roots[0].1.non_asap() else {
             unreachable!()
         };
@@ -6294,8 +6128,8 @@ mod tests {
             .collect();
         assert_eq!(
             inner_kinds,
-            vec![SketchAlgorithm::DDSketch, SketchAlgorithm::Kll],
-            "the nested inner aggregate keeps its own cost-model-ranked candidates"
+            vec![SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
+            "the nested inner aggregate keeps its own candidates"
         );
     }
 
@@ -6753,7 +6587,7 @@ mod tests {
         // twice for the same target.
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let mut group = TargetSubDAGCandidates::new(Rc::clone(&root), 1);
-        let strategy = ASAPStrategies::default_cost_model();
+        let strategy = ASAPStrategies::default();
         let target = TargetSubDAG::new(&root);
         for candidate in strategy.replacements(&target) {
             group.add_candidate(candidate);
@@ -6886,15 +6720,8 @@ mod tests {
             .unwrap_or_else(|| panic!("no field {name:?} in {schema:?}"))
     }
 
-    fn realize_first(
-        expr: &OperatorNode,
-        cost_model: &dyn CostModel,
-    ) -> Result<Rc<OperatorNode>, RealizationError> {
-        realize_child(&Rc::new(expr.clone()), cost_model)
-    }
-
     fn realize(expr: &OperatorNode) -> Result<Rc<OperatorNode>, RealizationError> {
-        realize_first(expr, &DefaultCostModel)
+        realize_child(&Rc::new(expr.clone()))
     }
 
     #[test]
@@ -6955,122 +6782,10 @@ mod tests {
         assert!(!child.contains_asap());
     }
 
-    /// A deployment-supplied [`CostModel`] can override the default KLL
-    /// choice — `realize_first` (via `realize_child`) must actually consult
-    /// it, not just accept and ignore it (issue: cost model interface, see
-    /// `crate::cost_model`).
-    struct PreferDDSketchViaCostModel;
-
-    impl CostModel for PreferDDSketchViaCostModel {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
-                let ddsketch = v.remove(pos);
-                v.insert(0, ddsketch);
-            }
-            v
-        }
-    }
-
-    #[test]
-    fn realize_with_custom_cost_model_overrides_default_summary_choice() {
-        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-
-        // Default: KLL (see `quantile_realizes_kll_wrapped_in_estimate` above).
-        let default_root = realize(&q).unwrap();
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &default_root.operator
-        else {
-            panic!(
-                "expected SummaryEstimate root, got {:?}",
-                default_root.operator
-            );
-        };
-        let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
-            panic!("expected SummaryAgg, got {:?}", summary_input.operator);
-        };
-        assert!(matches!(
-            family,
-            FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
-        ));
-
-        // With `PreferDDSketchViaCostModel`: DDSketch instead, same query.
-        let custom_root = realize_first(&q, &PreferDDSketchViaCostModel).unwrap();
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &custom_root.operator
-        else {
-            panic!(
-                "expected SummaryEstimate root, got {:?}",
-                custom_root.operator
-            );
-        };
-        let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
-            panic!("expected SummaryAgg, got {:?}", summary_input.operator);
-        };
-        assert_eq!(
-            family,
-            &FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::DDSketch,
-                    SketchParams::DDSketch { alpha: 0.01 }
-                ),
-                GroupingStrategy::default()
-            )
-        );
-    }
-
-    /// A deployment-supplied `CostModel` can realize an `AggIntent::Extension`
-    /// intent as a real sketch instead of the default `PassThrough` (issue
-    /// #150) — `realizations_for_intent` must consult `realize_extension`
-    /// for the `Extension` arm, and `evaluation` must consult
-    /// `evaluation_extension` to build its `SketchStatistic` without panicking.
-    struct FrequencyCostModel;
-
-    impl CostModel for FrequencyCostModel {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            candidates.to_vec()
-        }
-
-        fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Realization {
-            if ext_kind == "frequency" {
-                Realization::Sketch(SketchKind::new(
-                    SketchAlgorithm::CountSketch,
-                    SketchParams::CountSketch {
-                        width: 256,
-                        depth: 4,
-                    },
-                ))
-            } else {
-                Realization::PassThrough
-            }
-        }
-
-        fn evaluation_extension(
-            &self,
-            ext_kind: &str,
-            payload: &serde_json::Value,
-            _col: &ColumnRef,
-        ) -> PostAsapSketchStatistic {
-            assert_eq!(ext_kind, "frequency");
-            let value = payload["item"].as_str().map(str::to_string);
-            PostAsapSketchStatistic::PointCount {
-                key: ColumnRef::Named("item".into()),
-                value,
-            }
-        }
-    }
-
     #[test]
     fn extension_intent_stays_logical_by_default() {
-        // Without a CostModel overriding `realize_extension`, an
-        // `Extension` intent must stay `PassThrough` -- today's behavior,
-        // unchanged.
+        // Core has no realization for a deployment-specific `Extension`
+        // intent, so it stays `PassThrough`.
         let intent = AggIntent::Extension {
             ext_kind: "frequency".to_string(),
             payload: serde_json::json!({ "item": "checkout" }),
@@ -7078,46 +6793,6 @@ mod tests {
         let q = agg(vec![], intent, metric_scan(&[]));
         let root = realize(&q).unwrap();
         assert!(!root.contains_asap());
-    }
-
-    #[test]
-    fn extension_intent_realizes_via_custom_cost_model() {
-        let intent = AggIntent::Extension {
-            ext_kind: "frequency".to_string(),
-            payload: serde_json::json!({ "item": "checkout" }),
-        };
-        let q = agg(vec![], intent, metric_scan(&[]));
-        let root = realize_first(&q, &FrequencyCostModel).unwrap();
-
-        let Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input,
-            query,
-        }) = &root.operator
-        else {
-            panic!("expected SummaryEstimate root, got {:?}", root.operator);
-        };
-        assert!(matches!(
-            query,
-            PostAsapSketchStatistic::PointCount { key: ColumnRef::Named(k), value: Some(v) }
-                if k == "item" && v == "checkout"
-        ));
-
-        let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
-            panic!("expected SummaryAgg, got {:?}", summary_input.operator);
-        };
-        assert_eq!(
-            family,
-            &FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::CountSketch,
-                    SketchParams::CountSketch {
-                        width: 256,
-                        depth: 4
-                    }
-                ),
-                GroupingStrategy::default()
-            )
-        );
     }
 
     #[test]
@@ -7437,8 +7112,7 @@ mod tests {
             },
             inner,
         );
-        let proposals =
-            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let proposals = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
         assert!(!proposals.is_empty());
         assert!(proposals.iter().any(|candidate| matches!(
             &candidate.replacement,
@@ -7494,7 +7168,6 @@ mod tests {
             inner,
         );
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopKEvidence,
@@ -7528,7 +7201,6 @@ mod tests {
             inner,
         );
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopKEvidence,
@@ -7595,7 +7267,6 @@ mod tests {
             inner,
         );
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopKEvidence,
@@ -7670,7 +7341,6 @@ mod tests {
             inner,
         );
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopKEvidence,
@@ -7722,7 +7392,6 @@ mod tests {
             inner,
         );
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopKEvidence,
@@ -7775,7 +7444,6 @@ mod tests {
             inner,
         );
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopKEvidence,
@@ -7915,7 +7583,7 @@ mod tests {
         // typed reason and the raw/pre-ASAP alternative is what remains.
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.99), inner);
-        let proposals = ASAPStrategies::default_cost_model().propose(&TargetSubDAG::new(&outer));
+        let proposals = ASAPStrategies::default().propose(&TargetSubDAG::new(&outer));
         assert!(
             proposals.candidates.is_empty(),
             "no outer sketch may be proposed over an approximate child without a rule: {:?}",
@@ -7937,7 +7605,7 @@ mod tests {
             );
         }
         // Fallback keeps the whole sub-DAG pre-ASAP — executed exactly.
-        let realized = realize_child(&outer, &DefaultCostModel).unwrap();
+        let realized = realize_child(&outer).unwrap();
         assert!(!realized.contains_asap());
         assert!(realized
             .guarantee
@@ -7947,7 +7615,7 @@ mod tests {
         // Cross-metric: a quantile over a cardinality estimate.
         let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.99), inner);
-        let proposals = ASAPStrategies::default_cost_model().propose(&TargetSubDAG::new(&outer));
+        let proposals = ASAPStrategies::default().propose(&TargetSubDAG::new(&outer));
         assert!(proposals.candidates.is_empty());
         assert!(proposals.rejected.iter().all(|r| matches!(
             &r.error,
@@ -8032,11 +7700,8 @@ mod tests {
         // summary levels explicit while preserving the composed guarantee.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = agg(vec![], quantile_eps(0.99, 0.1), inner);
-        let strategy = ASAPStrategies::new_with_planning_inputs(
-            &DefaultCostModel,
-            &RankAdditiveModel,
-            &EqualSplitAllocator,
-        );
+        let strategy =
+            ASAPStrategies::new_with_planning_inputs(&RankAdditiveModel, &EqualSplitAllocator);
         let proposals = strategy.propose(&TargetSubDAG::new(&outer));
 
         assert!(!proposals.candidates.is_empty());
@@ -8059,12 +7724,9 @@ mod tests {
         // and global cost ranking.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = agg(vec![], quantile_eps(0.99, 0.1), inner);
-        let strategies: Vec<Box<dyn ReplacementStrategy>> =
-            vec![Box::new(ASAPStrategies::new_with_planning_inputs(
-                &DefaultCostModel,
-                &RankAdditiveModel,
-                &EqualSplitAllocator,
-            ))];
+        let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(
+            ASAPStrategies::new_with_planning_inputs(&RankAdditiveModel, &EqualSplitAllocator),
+        )];
         let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies);
         let root = &space.roots[0].1;
         let group = space.candidates_for_target(root).unwrap();
@@ -8237,7 +7899,6 @@ mod tests {
             max_distinct: 128,
         };
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &evidence,
@@ -8276,7 +7937,7 @@ mod tests {
                 precision: expected
             }
         );
-        let absent = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let absent = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
         assert!(!absent.iter().any(|candidate| matches!(&candidate.replacement, Replacement::SubDAG(node)
             if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
         // Invalid contracts, infeasible targets and evidence for another source
@@ -8308,7 +7969,6 @@ mod tests {
                 max_distinct,
             };
             let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-                &DefaultCostModel,
                 &DefaultAccuracyModel,
                 &EqualSplitAllocator,
                 &evidence,
@@ -8380,7 +8040,7 @@ mod tests {
             metric_scan(&["job"]),
         );
         let source = Source::TimeSeries { metric: "m".into() };
-        let proposals = ASAPStrategies::default_cost_model().propose(&TargetSubDAG::new(&root));
+        let proposals = ASAPStrategies::default().propose(&TargetSubDAG::new(&root));
         let states: Vec<_> = proposals
             .candidates
             .iter()

@@ -48,7 +48,7 @@ use asap_types::workload::SqlDialect;
 /// single-answer pins below don't all repeat it by hand.
 fn realize(target: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     let target_dag = TargetSubDAG::new(target);
-    match ASAPStrategies::default_cost_model()
+    match ASAPStrategies::default()
         .replacements(&target_dag)
         .into_iter()
         .next()

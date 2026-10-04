@@ -34,7 +34,7 @@ use support::lower_promql;
 /// check over the whole corpus wants.
 fn bind(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     let target = TargetSubDAG::new(root);
-    match ASAPStrategies::default_cost_model()
+    match ASAPStrategies::default()
         .replacements(&target)
         .into_iter()
         .next()
