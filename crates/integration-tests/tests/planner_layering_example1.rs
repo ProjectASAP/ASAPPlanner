@@ -144,14 +144,14 @@ mod stages {
         workload: &PlanningWorkload,
         _logical: &LogicalCandidate,
     ) -> Vec<LogicalCandidate> {
-        let targets: Vec<_> = workload
+        let demand: Vec<_> = workload
             .query_workload
             .entries()
-            .map(|entry| Some(entry.requirements.accuracy.target()))
+            .map(|entry| asap_types::workload::RootDemand::from(&entry))
             .collect();
         let run = plan_stages(
             lower(workload).into_iter().enumerate().collect(),
-            &targets,
+            &demand,
             workload.data_workload.as_ref().expect("data workload"),
             PlanningModels::builtin(),
             MAX_ENUMERATED_CANDIDATES,
@@ -211,15 +211,15 @@ mod stages {
         physical: &[PhysicalCandidate],
         models: PlanningModels<'_>,
     ) -> Selection {
-        let targets: Vec<_> = workload
+        let demand: Vec<_> = workload
             .query_workload
             .entries()
-            .map(|entry| Some(entry.requirements.accuracy.target()))
+            .map(|entry| asap_types::workload::RootDemand::from(&entry))
             .collect();
         let candidates: Vec<_> = physical.iter().map(|p| p.stage2.clone()).collect();
         let selection = asap_plan_selection::stage3_select(
             &candidates,
-            &targets,
+            &demand,
             workload.data_workload.as_ref().expect("data workload"),
             models,
         )
@@ -993,6 +993,34 @@ fn stage3_selects_cheapest_valid() {
     for p in physical.iter().filter(|p| !invalid.contains(p.id.as_str())) {
         assert!(best <= selection.costs[&p.id].total, "{} is cheaper", p.id);
     }
+}
+
+/// Per-second cost keeps Example 1's ranking: both panels repeat every
+/// 10 s and everything runs at query time, so every candidate costs 0.1 ×
+/// its per-evaluation cost, and P58 still wins at 52.201 × 0.1 per second.
+#[test]
+fn stage3_per_second_cost_keeps_the_ranking() {
+    let (workload, _, physical) = pipeline();
+    let per_second = stage3_select(&workload, &physical, PlanningModels::builtin());
+    // Evaluated once per second, a candidate's cost is its per-evaluation cost.
+    let mut every_second = workload.clone();
+    for entry in every_second
+        .query_workload
+        .repeating_queries
+        .iter_mut()
+        .flatten()
+    {
+        entry.demand = RepeatedDemand::FixedInterval(RepetitionInterval(1_000));
+    }
+    let per_evaluation = stage3_select(&every_second, &physical, PlanningModels::builtin());
+    assert_eq!(per_second.selected, "P58");
+    assert_eq!(per_evaluation.selected, "P58");
+    for (id, cost) in &per_second.costs {
+        let expected = 0.1 * per_evaluation.costs[id].total;
+        assert!((cost.total - expected).abs() <= 1e-9 * expected, "{id}");
+    }
+    let best = per_second.costs["P58"].total;
+    assert!((best - 5.2201).abs() < 1e-3, "{best}");
 }
 
 /// Every node is charged exactly once, so a shared input is costed once for

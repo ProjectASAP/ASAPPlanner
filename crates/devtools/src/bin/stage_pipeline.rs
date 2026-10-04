@@ -46,7 +46,7 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
     Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
+    RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection,
 };
 use serde_json::{json, Value};
 
@@ -115,15 +115,15 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         })
         .collect::<Result<Vec<_>, _>>()?;
     let stage0 = export(&roots)?;
-    let targets: Vec<_> = workload
+    let demand: Vec<RootDemand> = workload
         .query_workload
         .entries()
-        .map(|entry| Some(entry.requirements.accuracy.target()))
+        .map(|entry| RootDemand::from(&entry))
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let run = plan_stages(
         roots.into_iter().enumerate().collect(),
-        &targets,
+        &demand,
         &data,
         PlanningModels::builtin(),
         max_candidates.max(1),

@@ -124,7 +124,7 @@ async fn facade_plans_match_exhaustive_stage_pipeline_selection() {
         .await
         .expect("lowers");
         roots.push((index, QueryRoot::Operator(expr)));
-        targets.push(Some(accuracy));
+        targets.push(asap_types::workload::RootDemand::from(&entry));
     }
     let inventory = stage1_logical_candidates(roots).expect("Stage 1");
     let data = workload.data_workload.clone().unwrap_or_default();

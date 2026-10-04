@@ -20,7 +20,7 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
     Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
-    RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection,
+    RepeatingEntry, RepetitionInterval, RootDemand, SqlDialect, TimeSelection,
 };
 
 type Inventory = Vec<SharingVariant<usize>>;
@@ -132,11 +132,11 @@ fn promql_inventory(workload: &PlanningWorkload) -> Inventory {
     stage1_logical_candidates(roots).expect("Stage 1")
 }
 
-fn targets(workload: &PlanningWorkload) -> Vec<Option<AccuracyTarget>> {
+fn targets(workload: &PlanningWorkload) -> Vec<RootDemand> {
     workload
         .query_workload
         .entries()
-        .map(|entry| Some(entry.requirements.accuracy.target()))
+        .map(|entry| RootDemand::from(&entry))
         .collect()
 }
 
