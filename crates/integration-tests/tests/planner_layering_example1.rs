@@ -814,7 +814,7 @@ fn stage2_everything_runs_at_query_time() {
 /// runs as a retained PromQL expression, and the samples of each time range a
 /// native operator reads.
 fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
-    use asap_physical_operators::physical_planner::{compile, promql_fallback, InputContract};
+    use asap_executor::physical_planner::{compile, promql_fallback, InputContract};
     use asap_types::ir::export::compile_physical_asap_workload_with_node_ids;
     use std::sync::Arc;
     let ids = compile_physical_asap_workload_with_node_ids(&p.stage2.roots)

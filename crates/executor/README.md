@@ -1,6 +1,6 @@
-# ASAP physical operators
+# ASAP executor
 
-An independent Rust physical operator DAG runtime shared by ingestion time and
+The #509 Stage 4 reference executor: an independent Rust physical operator DAG runtime shared by ingestion time and
 query time execution. The library requires neither backend engine, a server,
 a storage implementation, Arrow nor DataFusion. DataFusion informed the design;
 it is not the execution framework.
@@ -20,14 +20,14 @@ operator is needed. Summary construction updates state batch by batch. End of
 input means the supplied query range or ingestion window is complete.
 
 ```rust
-use asap_physical_operators::{
+use asap_executor::{
     expressions::Expression,
     operators::Operator,
     values::Value,
     plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
 };
-use asap_physical_operators::planner::ir::schema::DataType;
+use asap_executor::planner::ir::schema::DataType;
 use futures::{executor::block_on, StreamExt};
 
 let source = Operator::scalar(Value::Int64(7), DataType::Int64)?;
@@ -44,7 +44,7 @@ let run = RunContext::new(
 let mut output = plan.execute(&[1], run)?.remove(0);
 let batch = block_on(output.next()).unwrap()?;
 assert!(matches!(batch.rows()[0][0], Value::Int64(-7)));
-# Ok::<(), asap_physical_operators::dag::Error>(())
+# Ok::<(), asap_executor::dag::Error>(())
 ```
 
 `physical_planner::compile` accepts a logical Post-ASAP DAG (`PhysicalASAPDAG`) and typed input contracts.

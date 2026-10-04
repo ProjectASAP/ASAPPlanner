@@ -4,11 +4,7 @@
 use std::path::Path;
 
 /// Crates Stage 2 must not depend on: Stage 3, the facade and the executor.
-const FORBIDDEN_CRATES: &[&str] = &[
-    "asap-plan-selection",
-    "asap-planner",
-    "asap-physical-operators",
-];
+const FORBIDDEN_CRATES: &[&str] = &["asap-plan-selection", "asap-planner", "asap-executor"];
 
 /// The manifest names no later stage, facade or executor crate, so Cargo
 /// rejects any import of them.

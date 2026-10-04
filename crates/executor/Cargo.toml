@@ -1,7 +1,11 @@
 [package]
-name = "asap-physical-operators"
+name = "asap-executor"
 version = "0.1.0"
 edition = "2021"
+
+# #509 Stage 4 reference executor. No stage crate (asap-logical-optimizer,
+# asap-physical-optimizer, asap-plan-selection) depends on it; their manifest
+# guards reject it. Its tests use the stage crates as dev-dependencies.
 
 [dependencies]
 chrono = { version = "=0.4.39", default-features = false, features = ["std"] }

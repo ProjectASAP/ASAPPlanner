@@ -1,6 +1,6 @@
 //! Maintenance -> stored pane state -> independently bound query execution.
 mod physical_common;
-use asap_physical_operators::{
+use asap_executor::{
     operators::{Operator, SummaryEvaluation},
     physical_planner::{CompiledPhysicalDAG, InputContract, Source},
     plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
