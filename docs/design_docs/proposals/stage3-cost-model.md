@@ -19,11 +19,11 @@ for the workload in steady state.
 | CPU work of every operator, at ingestion time or at query time | Transient query-time memory |
 | Bytes a scan reads | Storage tier and retention: disk versus memory, and for how long (S3, with panes) |
 | Memory held across evaluations by ingestion-time state that query time reads | Network, parallelism and partitioning |
-| | Latency bounds and deployment capabilities (separate checks, not cost) |
+| | Latency bounds (a separate check, below) and deployment capabilities |
 | | One-time setup work such as backfill (deferred, S5) |
 
-Accuracy is a check, not a cost. Stage 3 rejects candidates that miss a
-target, then prices the rest.
+Accuracy and latency are checks, not costs. Stage 3 rejects candidates that
+miss a target, then prices the rest.
 
 ## Time basis
 
@@ -102,6 +102,33 @@ factor 2 covers the window being built plus the completed window that
 queries read. Query-time state, built and discarded within one evaluation, is
 transient and not priced.
 
+**Tumbling panes at ingestion time.** A window of `lookback` read every
+evaluation as `N = lookback / w` panes of width `w` is, at ingestion time,
+one pane built as rows arrive and kept for the next evaluations: pane `i` of
+this evaluation is the newest pane of the evaluation `i · w` earlier. So the
+newest pane (the smallest shift) pays the build, over λ rows per second, and
+the memory of itself and the `N` completed panes:
+
+```text
+retained_bytes(newest) = (N + 1) · groups · state_bytes
+```
+
+The older panes, and the shifts and ranges that feed only them, cost nothing.
+When panes are shared by windows of different lengths, the longest sets `N`.
+The merge and the estimate run at query time, per evaluation. Retention is
+in memory only (S3).
+
+## Latency check
+
+A query's `response_latency` bound (S6) is checked against the query-time
+work it waits for in one evaluation: the per-evaluation cost of every
+query-time node the query reaches, shared nodes included, times
+`latency_ms_per_cost_unit`. Ingestion-time work is done before the query
+asks, so maintaining state at ingestion time moves work out of the bound. A
+candidate over the bound is rejected with the query, the estimate and the
+bound, for example `q1: query-time work takes 310.0 ms per evaluation, over
+the 200 ms latency bound`. The estimate assumes one core and no queueing.
+
 ## Calibration
 
 Every coefficient lives in `Stage3Calibration`, carried by `PlanningModels`
@@ -113,6 +140,7 @@ and set with `PlanningModels::with_calibration`:
 | `cost_per_scan_byte` | 1e-7 | per byte read by a scan |
 | `cost_per_retained_byte_second` | 1.25e-7 | `w_mem` |
 | `horizon_s` | 3600 | `H` |
+| `latency_ms_per_cost_unit` | 1 | ms of response time per cost unit of query-time work: one CPU-ms on one core (1e6 operations or 1e7 scanned bytes per ms) |
 | `version` | `illustrative-v2` | reported in each candidate's cost `source` |
 
 A deployment that prices memory differently, for example memory-rich
@@ -161,9 +189,10 @@ cost model never discounts or multiplies a node by its number of consumers.
 ## Worked example: Example 1
 
 Example 1 has two panels, each repeating every 10 s, over 1 000 000 series
-ingested every 15 s (λ = 66 667 rows/s). Every node runs at query time, since
-Stage 2 does not choose ingestion time yet. Both roots have the same 10-s
-interval, so every node, shared or not, has `r = 0.1`/s.
+ingested every 15 s (λ = 66 667 rows/s). In the selected plan every node runs
+at query time (no summary in it can be maintained: its windows slide). Both
+roots have the same 10-s interval, so every node, shared or not, has
+`r = 0.1`/s.
 
 P60, the selected plan (Q1 exact; Q2 Count-Min + heap over an exact
 `sum_over_time` accumulator, valid because `http_requests_total` is declared a
@@ -187,14 +216,25 @@ The runner-up is P44 at 4.720 per second; the same choices with separate
 inputs (P28) cost 7.340, because the scan and range are charged twice.
 
 Before per-second pricing, P60 cost 46.201 CPU-ms per workload evaluation. Now
-it costs 46.201 × 0.1 = 4.620 per second. Every other candidate scales by the
-same factor, so the ranking is unchanged. With uniform recurrence and no
-ingestion-time nodes the new unit is a rescaling. It changes the ranking once
-recurrences differ, or once Stage 2 offers ingestion-time candidates that pay
-λ-rate maintenance and memory instead of per-evaluation rebuilds.
+it costs 46.201 × 0.1 = 4.620 per second. Every other all-query-time
+candidate scales by the same factor, so their ranking is unchanged.
+
+**With materialization.** Stage 2 also offers Q2's exact `sum_over_time` in
+six 10-s panes maintained at ingestion time. The cheapest such candidate costs
+47.407 per second: the panes' ingestion work is small (scan 0.387, shift and
+range 0.133, newest-pane build 0.067), but the newest pane retains seven
+panes of 1 000 000 per-series sums, 336 MB, for 42.0 per second of memory.
+The selection is unchanged. Q2's 100 ms latency bound rejects 40 candidates,
+every Count-Sketch + heap among them.
 
 ## Out of scope for now
 
+* **Not materialized for several consumers (Q44, Example 4 A3).** Stage 2
+  would duplicate the sub-DAG per consuming query; it does not generate that
+  option yet.
+* **Query time, kept (Example 4 B3).** A pane built at query time and kept
+  for later evaluations is not offered; panes are rebuilt at query time or
+  maintained at ingestion time.
 * **Storage tier and retention (S3).** Retained state is priced as memory.
   Choosing disk versus memory and how long to keep state comes with panes.
 * **Calibration from measurements.** The coefficients and default statistics

@@ -180,8 +180,8 @@ fn selects_exhaustive_minimum(
         .iter()
         .find(|c| {
             c.physical
-                .as_ref()
-                .is_some_and(|p| p.id == exhaustive.selection.selected)
+                .iter()
+                .any(|p| p.id == exhaustive.selection.selected)
         })
         .expect("winner was built");
 

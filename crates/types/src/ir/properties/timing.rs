@@ -20,8 +20,8 @@
 //!
 //! A node reached from two consumers that need different timings cannot be
 //! executed once for both; [`split_shared_by_phase`] copies such a sub-DAG
-//! for one side before the assignment is applied, and the pass itself
-//! rejects a conflict it still finds.
+//! per phase, across the roots of a workload, before the assignment is
+//! applied, and the pass itself rejects a conflict it still finds.
 //!
 //! ## Edge rules (checked after the write)
 //!
@@ -581,15 +581,19 @@ fn validate_non_asap(
     Ok(())
 }
 
-/// Copy, for one consumer, every sub-DAG that `assignment` would reach with
-/// two different timings, so that a workload whose CSE shared a `Scan`
-/// between an ingestion-time summary and a query-time computation can still
-/// be timed. Only the conflicting sub-DAGs are copied; a sub-DAG reached with
-/// one timing stays one `Rc`. Returns the (possibly rewritten) root.
+/// Copy, per phase, every sub-DAG that `assignment` would reach with two
+/// different timings across the roots of one workload, so that a workload
+/// whose CSE shared a `Scan` between an ingestion-time summary and a
+/// query-time computation (of the same query or of another) can still be
+/// timed. Only the conflicting sub-DAGs and the nodes above them are copied;
+/// a sub-DAG reached with one timing stays one `Rc`, also across roots.
+///
+/// Returns the rewritten roots and the assignment re-keyed to them: a copied
+/// `SummaryAgg` is a new `Rc`, and keeps its state's timing.
 pub fn split_shared_by_phase(
-    root: &Rc<OperatorNode>,
+    roots: &[Rc<OperatorNode>],
     assignment: &MaterializationAssignment,
-) -> Rc<OperatorNode> {
+) -> (Vec<Rc<OperatorNode>>, MaterializationAssignment) {
     // First pass: the set of timings each node is reached with.
     let mut reached: HashMap<*const OperatorNode, Vec<ExecutionTiming>> = HashMap::new();
     let mut forced = HashMap::new();
@@ -610,38 +614,43 @@ pub fn split_shared_by_phase(
             collect(child, timing, assignment, reached, forced);
         }
     }
-    collect(
-        root,
-        ExecutionTiming::QueryTime,
-        assignment,
-        &mut reached,
-        &mut forced,
-    );
+    for root in roots {
+        collect(
+            root,
+            ExecutionTiming::QueryTime,
+            assignment,
+            &mut reached,
+            &mut forced,
+        );
+    }
     if reached.values().all(|timings| timings.len() <= 1) {
-        return Rc::clone(root);
+        return (roots.to_vec(), assignment.clone());
     }
     // Second pass: rebuild, giving each (node, timing) pair its own copy.
-    let mut copies: HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>> =
-        HashMap::new();
+    struct Rebuild<'a> {
+        assignment: &'a MaterializationAssignment,
+        reached: HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
+        copies: HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>>,
+        forced: HashMap<*const OperatorNode, bool>,
+        rekeyed: MaterializationAssignment,
+    }
     fn rebuild(
         node: &Rc<OperatorNode>,
         consumer: ExecutionTiming,
-        assignment: &MaterializationAssignment,
-        reached: &HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
-        copies: &mut HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>>,
-        forced: &mut HashMap<*const OperatorNode, bool>,
+        state: &mut Rebuild<'_>,
     ) -> Rc<OperatorNode> {
-        let timing = own_timing(node, consumer, assignment, forced);
+        let timing = own_timing(node, consumer, state.assignment, &mut state.forced);
         let key = (Rc::as_ptr(node), timing);
-        if let Some(done) = copies.get(&key) {
+        if let Some(done) = state.copies.get(&key) {
             return Rc::clone(done);
         }
-        let conflicted = reached
+        let conflicted = state
+            .reached
             .get(&Rc::as_ptr(node))
             .is_some_and(|timings| timings.len() > 1);
         let mut changed = conflicted;
         let operator = node.operator.map_children(|child| {
-            let rebuilt = rebuild(child, timing, assignment, reached, copies, forced);
+            let rebuilt = rebuild(child, timing, state);
             changed |= !Rc::ptr_eq(&rebuilt, child);
             rebuilt
         });
@@ -654,17 +663,26 @@ pub fn split_shared_by_phase(
         } else {
             Rc::clone(node)
         };
-        copies.insert(key, Rc::clone(&out));
+        if matches!(node.operator, Operator::ASAP(ASAPOp::SummaryAgg { .. })) {
+            state
+                .rekeyed
+                .set(&out, state.assignment.summary_timing(node));
+        }
+        state.copies.insert(key, Rc::clone(&out));
         out
     }
-    rebuild(
-        root,
-        ExecutionTiming::QueryTime,
+    let mut state = Rebuild {
         assignment,
-        &reached,
-        &mut copies,
-        &mut forced,
-    )
+        reached,
+        copies: HashMap::new(),
+        forced,
+        rekeyed: assignment.clone(),
+    };
+    let roots = roots
+        .iter()
+        .map(|root| rebuild(root, ExecutionTiming::QueryTime, &mut state))
+        .collect();
+    (roots, state.rekeyed)
 }
 
 /// Maintenance arithmetic needs the same per-series population on both sides.
@@ -1010,8 +1028,45 @@ mod tests {
                 second: ExecutionDataState::QUERY_ROWS,
             })
         );
-        let split = split_shared_by_phase(&root, &MaterializationAssignment::all_ingestion_time());
-        assert!(apply(&split).is_ok());
+        let (split, _) = split_shared_by_phase(
+            std::slice::from_ref(&root),
+            &MaterializationAssignment::all_ingestion_time(),
+        );
+        assert!(apply(&split[0]).is_ok());
+    }
+
+    /// Across roots: a scan read by one query's ingestion-time summary and by
+    /// another query's query-time aggregate is copied per phase. The summary
+    /// above the copied scan keeps its assignment, and a sub-DAG reached at
+    /// one timing by both roots stays one node.
+    #[test]
+    fn split_by_phase_across_roots_keeps_the_assignment() {
+        let shared = scan();
+        let summary = agg(Rc::clone(&shared), kll());
+        let both = max(Rc::clone(&shared));
+        let maintained = estimate(Rc::clone(&summary));
+        let queried = max(Rc::clone(&shared));
+        let mut assignment = MaterializationAssignment::all_query_time();
+        assignment.set(&summary, ExecutionTiming::IngestionTime);
+        let roots = [maintained, queried, Rc::clone(&both), both];
+        let time = |roots: &[Rc<OperatorNode>], assignment| {
+            let mut memo = TimingMemo::new();
+            roots
+                .iter()
+                .map(|root| apply_materialization_timings(root, assignment, &mut memo))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        assert!(matches!(
+            time(&roots, &assignment),
+            Err(ExecutionDataStateError::ConflictingTiming { .. })
+        ));
+        let (split, rekeyed) = split_shared_by_phase(&roots, &assignment);
+        let timed = time(&split, &rekeyed).unwrap();
+        let build = child(&timed[0]);
+        assert_eq!(build.timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(child(&build).timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(child(&timed[1]).timing, Some(ExecutionTiming::QueryTime));
+        assert!(Rc::ptr_eq(&split[2], &split[3]));
     }
 
     /// Both paired operands must be plain; an unrelated state column is not
