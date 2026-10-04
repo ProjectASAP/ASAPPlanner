@@ -12,9 +12,7 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_logical_optimizer::search_workload;
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::cost::cost_model::DefaultCostModel;
-use common::compile_physical_asap_dag;
+use common::{compile_physical_asap_dag, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::schema::{DataType, *};
@@ -22,7 +20,7 @@ use planner_types::types::AccuracyTarget;
 use planner_types::workload::*;
 use std::{collections::BTreeMap, sync::Arc};
 
-fn grouped_rate_space() -> asap_logical_optimizer::CandidateLogicalASAPDAGs<&'static str> {
+fn grouped_rate_root() -> std::rc::Rc<planner_types::ir::OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -50,17 +48,15 @@ fn grouped_rate_space() -> asap_logical_optimizer::CandidateLogicalASAPDAGs<&'st
     let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
-    let root = asap_executor::physical_planner::promql_rows::with_series_identity(&root).unwrap();
-    search_workload(vec![("grouped-rate", root)])
+    asap_executor::physical_planner::promql_rows::with_series_identity(&root).unwrap()
+}
+
+fn grouped_rate_space() -> asap_logical_optimizer::CandidateLogicalASAPDAGs<&'static str> {
+    search_workload(vec![("grouped-rate", grouped_rate_root())])
 }
 
 fn grouped_rate() -> PhysicalASAPDAG {
-    let space = grouped_rate_space();
-    let selected = global_selection(&space, &DefaultCostModel)
-        .assemble_selected_query(&space.roots[0].1)
-        .unwrap()
-        .unwrap();
-    compile_physical_asap_dag(&selected).unwrap()
+    compile_physical_asap_dag(&selected_dag(grouped_rate_root(), AccuracyTarget::Exact)).unwrap()
 }
 fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs

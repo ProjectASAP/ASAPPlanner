@@ -4,17 +4,16 @@ use asap_logical_optimizer::{
     default_strategies, search_workload_with_targets, ASAPStrategies, Replacement,
     ReplacementStrategy, TargetSubDAG,
 };
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::cost::cost_model::DefaultCostModel;
 mod support;
 use asap_types::ir::export::PhysicalASAPOperatorPayload;
 use asap_types::ir::schema::{
-    ExactKind, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
-    WeightDomain,
+    ExactKind, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm,
+    SummaryInputExpr, WeightDomain,
 };
-use asap_types::ir::{ASAPOp, Operator};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::types::AccuracyTarget;
-use support::{lower_promql, post_asap_dag};
+use std::rc::Rc;
+use support::{lower_promql, post_asap_dag, selected_dag};
 
 #[test]
 fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
@@ -24,7 +23,7 @@ fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
     };
     let root = lower_promql("count by(job)(up)", target.clone()).unwrap();
     let space = search_workload_with_targets(
-        vec![("count", root, Some(target))],
+        vec![("count", Rc::clone(&root), Some(target.clone()))],
         &default_strategies(),
         &DefaultAccuracyModel,
     );
@@ -40,11 +39,17 @@ fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
     assert!(hydra
         .iter()
         .all(|candidate| candidate.has_missing_accuracy_evidence()));
-    assert!(!global_selection(&space, &DefaultCostModel)
-        .for_target(planned)
-        .unwrap()
-        .chosen
-        .is_some_and(|candidate| candidate.has_missing_accuracy_evidence()));
+    // Stage 3 never selects a summary without accuracy evidence.
+    let selected = selected_dag(root, target);
+    assert!(!OperatorNode::reachable(&selected)
+        .iter()
+        .any(|node| matches!(
+            &node.operator,
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. }),
+                ..
+            })
+        )));
 }
 
 // Exact series and temporal counts must select a count accumulator, not distinct or sum.
