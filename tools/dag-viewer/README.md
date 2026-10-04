@@ -64,7 +64,8 @@ Summary nodes show their configuration, for example
 keep one state per group (or series) or one shared Hydra state.
 
 When the document has a `deployment` section, a **Deployment inputs** list
-shows what the deployment supplied: the summaries and readouts it can run,
+shows what the deployment supplied: the exact aggregates it can compute and
+the sketches it can build with the estimates each can be read for,
 whether it maintains state at ingestion time, its memory budget, whether it
 keeps raw data (query-time plans pay for raw retention when it does not),
 the cost model with its calibration constants, and the accuracy model.
