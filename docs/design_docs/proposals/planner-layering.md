@@ -245,11 +245,11 @@ flowchart TB
   INPUTS --> TOP
   B3 -- "one selected PhysicalASAPDAG" --> DT
 
-  click H0 href "https://github.com/ProjectASAP/ASAPPlanner/blob/main/docs/design_docs/proposals/planner-layering.md#0-language-specific-frontends" _blank
-  click H1 href "https://github.com/ProjectASAP/ASAPPlanner/blob/main/docs/design_docs/proposals/planner-layering.md#1-logical-asap-aware-optimization" _blank
-  click H2 href "https://github.com/ProjectASAP/ASAPPlanner/blob/main/docs/design_docs/proposals/planner-layering.md#2-physical-asap-aware-optimization" _blank
-  click H3 href "https://github.com/ProjectASAP/ASAPPlanner/blob/main/docs/design_docs/proposals/planner-layering.md#3-plan-selection" _blank
-  click H4 href "https://github.com/ProjectASAP/ASAPPlanner/blob/main/docs/design_docs/proposals/planner-layering.md#4-execution" _blank
+  click H0 href "#0-language-specific-frontends"
+  click H1 href "#1-logical-asap-aware-optimization"
+  click H2 href "#2-physical-asap-aware-optimization"
+  click H3 href "#3-plan-selection"
+  click H4 href "#4-execution"
 
   classDef input fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef title fill:none,stroke:none,color:#0969da,font-weight:bold;
