@@ -312,7 +312,7 @@ and `query`. *Maintenance* stays materialization's word (section 2): it covers
 how state is built, retained, reused and scheduled. A precompute DAG is the
 physical object that maintenance compiles to, so reusing *maintenance* for it
 collapses two layers: Stage 2 materialization (#509) owns maintenance, and
-`asap-physical-operators::physical_planner` owns the DAGs.
+`asap-executor::physical_planner` owns the DAGs.
 
 ### Precompute Physical DAG
 
@@ -523,7 +523,7 @@ Deployment:
 ```
 
 The deployment engine executes the bound Physical DAGs through ASAPPlanner's
-shared physical operator implementation library, `asap-physical-operators`, and
+shared physical operator implementation library, `asap-executor`, and
 its DAG runtime. The merge executes once per run for both consumers. Execution
 does not introduce additional planning decisions.
 

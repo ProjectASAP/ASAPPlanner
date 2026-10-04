@@ -1,7 +1,7 @@
 //! Contract tests inspired by DataFusion's limit, sort and join test matrices.
 //! Expectations follow ASAP's IR (notably row-count and IEEE NaN equality).
 //! Reference: apache/datafusion e2ca7f3, physical-plan/src/{limit.rs,sorts/sort.rs}.
-use asap_physical_operators::{
+use asap_executor::{
     expressions::CompiledExpression,
     operators::{Expression, Operator, Reduction, SortKey},
     plan::PhysicalDAG,
@@ -347,7 +347,7 @@ fn projection_rejects_expression_bound_to_another_schema() {
 // A valid Planner MIN/MAX schema must bind even for a non-null input column.
 #[test]
 fn global_extrema_bind_with_planner_derived_schema() {
-    use asap_physical_operators::physical_planner::compile_node;
+    use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlanReduction};
     use planner_types::ir::properties::*;
     use planner_types::ir::schema::*;
@@ -601,7 +601,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                 Operator::evaluation(
                     state.clone(),
                     0,
-                    asap_physical_operators::operators::SummaryEvaluation::Sketch(
+                    asap_executor::operators::SummaryEvaluation::Sketch(
                         planner_types::ir::schema::SketchStatistic::Quantile { q },
                     ),
                 )
@@ -621,8 +621,8 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
         ));
         for (pair, expected) in outputs.chunks(2).zip([0., 64., 127.]) {
             let value = |batches: &[Result<
-                asap_physical_operators::runtime::SharedValue<Batch>,
-                asap_physical_operators::Error,
+                asap_executor::runtime::SharedValue<Batch>,
+                asap_executor::Error,
             >]| {
                 assert_eq!(batches.len(), 1);
                 match batches[0].as_ref().unwrap().rows()[0][0] {
@@ -641,7 +641,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
 // Retained zero-column rows still own Vec headers and must consume the output budget.
 #[test]
 fn zero_column_output_obeys_memory_limit() {
-    use asap_physical_operators::Error;
+    use asap_executor::Error;
     let input = schema(&[]);
     let batch = Batch::try_new(input.clone(), vec![vec![]; 200]).unwrap();
     let mut dag = PhysicalDAG::default();
@@ -670,7 +670,7 @@ fn zero_column_output_obeys_memory_limit() {
 // Empty exact-state finalization must preserve ordinary global MIN/MAX null semantics.
 #[test]
 fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
-    use asap_physical_operators::Statistic;
+    use asap_executor::Statistic;
     use planner_types::ir::schema::{ExactKind, ExactParams};
 
     let input = schema(&[("v", DataType::Float64, false)]);
@@ -697,8 +697,8 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
             Operator::evaluation(
                 state,
                 0,
-                asap_physical_operators::operators::SummaryEvaluation::Exact(
-                    asap_physical_operators::summary_kernels::exact::ExactEvaluation {
+                asap_executor::operators::SummaryEvaluation::Exact(
+                    asap_executor::summary_kernels::exact::ExactEvaluation {
                         statistic,
                         lookback_ms: None,
                     },

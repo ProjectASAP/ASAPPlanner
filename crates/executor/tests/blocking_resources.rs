@@ -1,5 +1,5 @@
 //! Blocking operators enforce resources before returning their first batch.
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     plan::{PhysicalDAG, PhysicalOperator},
     runtime::{Limits, RunContext, Scope},
@@ -107,7 +107,7 @@ fn join_yields_during_computation_and_observes_cancellation() {
 // Sorting and grouping yield even for one large batch.
 #[test]
 fn blocking_reductions_yield_and_release_memory_on_cancellation() {
-    use asap_physical_operators::{
+    use asap_executor::{
         operators::{Reduction, SortKey},
         plan::PhysicalOperator,
     };
@@ -143,7 +143,7 @@ fn blocking_reductions_yield_and_release_memory_on_cancellation() {
 // Merge-sort rounds preserve input order for tied keys across chunk boundaries.
 #[test]
 fn cooperative_sort_preserves_ties_across_chunks() {
-    use asap_physical_operators::operators::SortKey;
+    use asap_executor::operators::SortKey;
     let batch = Batch::try_new(
         schema(2),
         (0..1025)

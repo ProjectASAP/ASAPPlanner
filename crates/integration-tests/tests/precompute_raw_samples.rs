@@ -7,12 +7,7 @@ use asap_types::ir::OperatorNode;
 use physical_common::compile_maintained_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
-use asap_integration_tests::fixtures::lower_promql;
-use asap_logical_optimizer::{
-    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
-    TargetSubDAG,
-};
-use asap_physical_operators::{
+use asap_executor::{
     factory::create_planner_accumulator,
     operators::Operator,
     physical_planner::{precompute, Source},
@@ -20,6 +15,11 @@ use asap_physical_operators::{
     summary_kernels::{exact::ExactAccumulator, weighted_frequency::WeightedFrequency},
     values::{Batch, Value},
     AggregateCore, KeyByLabelValues, Statistic,
+};
+use asap_integration_tests::fixtures::lower_promql;
+use asap_logical_optimizer::{
+    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
+    TargetSubDAG,
 };
 use asap_plan_selection::candidate_selection::global_selection;
 use asap_plan_selection::cost::cost_model::DefaultCostModel;
@@ -141,9 +141,9 @@ fn execute(
                 .map(|n| (&n.output_schema, &n.payload))
         );
     });
-    let program = serde_json::from_slice::<
-        asap_physical_operators::physical_planner::CompiledPhysicalDAG,
-    >(&serde_json::to_vec(&program).unwrap())
+    let program = serde_json::from_slice::<asap_executor::physical_planner::CompiledPhysicalDAG>(
+        &serde_json::to_vec(&program).unwrap(),
+    )
     .unwrap();
     let schema = precompute::raw_sample_schema();
     let batch = Batch::try_new(
@@ -317,7 +317,7 @@ fn check(
     };
     let stored_only = matches!(family, FieldDataType::Sketch(kind, _)
         if kind.algorithm() == &asap_types::ir::schema::SketchAlgorithm::Cms);
-    if stored_only || asap_physical_operators::capability::validate_native_family(family).is_err() {
+    if stored_only || asap_executor::capability::validate_native_family(family).is_err() {
         // Families without a native state (e.g. UnivMon), or with native
         // stored state only (plain CMS), are outside precompute execution;
         // their compile must fail.
@@ -363,7 +363,7 @@ fn check(
         }
     }
     let mut expected =
-        BTreeMap::<Series, Box<dyn asap_physical_operators::factory::AccumulatorUpdater>>::new();
+        BTreeMap::<Series, Box<dyn asap_executor::factory::AccumulatorUpdater>>::new();
     for (labels, time, value) in rows {
         let updater = expected
             .entry(population(reduction, &keys, labels))

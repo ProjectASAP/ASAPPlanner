@@ -1,7 +1,6 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
 mod common;
-use asap_logical_optimizer::search_workload;
-use asap_physical_operators::{
+use asap_executor::{
     factory::create_planner_accumulator,
     operators::Operator,
     physical_planner::{
@@ -12,6 +11,7 @@ use asap_physical_operators::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
+use asap_logical_optimizer::search_workload;
 use asap_plan_selection::candidate_selection::global_selection;
 use asap_plan_selection::cost::cost_model::DefaultCostModel;
 use common::compile_physical_asap_dag;
@@ -51,8 +51,7 @@ fn grouped_rate_space() -> asap_logical_optimizer::CandidateLogicalASAPDAGs<&'st
     let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
-    let root = asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
-        .unwrap();
+    let root = asap_executor::physical_planner::promql_rows::with_series_identity(&root).unwrap();
     search_workload(vec![("grouped-rate", root)])
 }
 
@@ -138,9 +137,9 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             let state = accumulator.into_accumulator();
             expected_rate_sum += state
                 .as_any()
-                .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
+                .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
+                .evaluation(asap_executor::Statistic::Rate, range_ms, None)
                 .unwrap()
                 .unwrap();
             let summary = Value::Summary {
@@ -173,7 +172,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let root = dag.roots[0] as u64;
     let state_id = state.id as u64;
     let rate_id = evaluation.id as u64;
-    let frontiers = asap_physical_operators::physical_planner::enumerate_frontiers(
+    let frontiers = asap_executor::physical_planner::enumerate_frontiers(
         &dag,
         &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
         &[root],
@@ -184,15 +183,13 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     assert!(frontiers.contains(&vec![rate_id]));
     assert!(frontiers.contains(&vec![root]));
     assert!(!frontiers.contains(&vec![root, rate_id]));
-    assert!(
-        asap_physical_operators::physical_planner::enumerate_frontiers(
-            &dag,
-            &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
-            &[root],
-            1,
-        )
-        .is_err()
-    );
+    assert!(asap_executor::physical_planner::enumerate_frontiers(
+        &dag,
+        &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
+        &[root],
+        1,
+    )
+    .is_err());
     let candidates = compile_candidates(
         &dag,
         BTreeMap::from([(state_id, InputContract::bounded(input_schema))]),
@@ -257,15 +254,13 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         InputContract::bounded(Arc::new(state.output_schema.clone())),
     )]);
     for frontier in [vec![rate_id, rate_id], vec![root, rate_id], vec![999]] {
-        assert!(
-            asap_physical_operators::physical_planner::compile_candidate(
-                &dag,
-                contracts.clone(),
-                &[root],
-                &frontier
-            )
-            .is_err()
-        );
+        assert!(asap_executor::physical_planner::compile_candidate(
+            &dag,
+            contracts.clone(),
+            &[root],
+            &frontier
+        )
+        .is_err());
     }
     let inventory = compile_candidates(
         &dag,
@@ -366,9 +361,9 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let rate_of_sum = wrong_order
         .into_accumulator()
         .as_any()
-        .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
+        .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
         .unwrap()
-        .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
+        .evaluation(asap_executor::Statistic::Rate, range_ms, None)
         .unwrap()
         .unwrap();
     assert_ne!(
@@ -381,7 +376,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
 /// persistence; an explicit Rate-state input retains its original semantics.
 #[test]
 fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
-    use asap_physical_operators::physical_planner::enumerate_frontiers;
+    use asap_executor::physical_planner::enumerate_frontiers;
     let dag = grouped_rate();
     let state = dag
         .nodes
@@ -563,8 +558,8 @@ fn recompiled_candidate(
     inputs: &BTreeMap<u64, InputContract>,
     roots: &[u64],
     frontier: &[u64],
-) -> Result<CompiledPhysicalPlan, asap_physical_operators::Error> {
-    use asap_physical_operators::plan::Emission;
+) -> Result<CompiledPhysicalPlan, asap_executor::Error> {
+    use asap_executor::plan::Emission;
     if frontier.is_empty() {
         return Ok(CompiledPhysicalPlan {
             precompute: None,
@@ -662,8 +657,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
         .unwrap()
         .remove(0);
     let root =
-        asap_physical_operators::physical_planner::promql_rows::with_series_identity(&original)
-            .unwrap();
+        asap_executor::physical_planner::promql_rows::with_series_identity(&original).unwrap();
     let selected =
         asap_logical_optimizer::pass1::maintained_population::MaintainedPopulationStrategy::new(
             std::slice::from_ref(&root),

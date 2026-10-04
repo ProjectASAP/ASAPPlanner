@@ -11,7 +11,7 @@ const FORBIDDEN_CRATES: &[&str] = &[
     "asap-physical-optimizer",
     "asap-plan-selection",
     "asap-planner",
-    "asap-physical-operators",
+    "asap-executor",
 ];
 
 /// Every `.rs` file under `dir`.
