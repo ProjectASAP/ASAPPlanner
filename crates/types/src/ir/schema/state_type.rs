@@ -13,7 +13,7 @@
 //! [`GroupingStrategy`] is a second, orthogonal axis: how many physical
 //! instances of a summary exist across a grouped aggregate's `by`
 //! subpopulations (per-subpopulation vs. one shared Hydra instance — see
-//! `asap_aware_mapping::grouping`). It rides on `ASAPOp::SummaryAgg` and on
+//! `asap_logical_optimizer::pass1::grouping`). It rides on `ASAPOp::SummaryAgg` and on
 //! sketch-valued edge types.
 
 use serde::{Deserialize, Serialize};
@@ -161,7 +161,7 @@ pub enum SketchCategory {
 /// [`SketchKind::new`] is the one place `(SketchAlgorithm, SketchParams)`
 /// pairs get classified into a category; construct through it rather than
 /// naming a variant directly, so a new algorithm can't drift out of sync
-/// with its category. See `asap_aware_mapping::summary_candidates` for the
+/// with its category. See `asap_logical_optimizer::summary_candidates` for the
 /// `AggIntent -> [SketchAlgorithm]` candidate list this ultimately groups.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchKind {
@@ -322,7 +322,7 @@ pub enum StatModelParams {
 // family/kind answers an intent — any family could in principle grow its own
 // per-subpopulation vs. shared-multi-subpopulation variant, so it is a
 // second, independent axis, not a member of any one family's own kind
-// vocabulary. See `asap_aware_mapping::grouping`'s module docs for where this
+// vocabulary. See `asap_logical_optimizer::pass1::grouping`'s module docs for where this
 // axis actually plugs into the post-ASAP IR and the legality rules gating
 // when `SharedMultiSubpopulation` is offered as a candidate at all.
 
@@ -411,7 +411,7 @@ pub enum HydraParams {
         /// subpopulation. Correctly sizing this against an estimated
         /// subpopulation cardinality is a cost-model concern — out of scope
         /// for the legality axis this type lives on (see
-        /// `asap_aware_mapping::grouping`'s module docs) — so this is
+        /// `asap_logical_optimizer::pass1::grouping`'s module docs) — so this is
         /// deliberately not derived from any cardinality estimate here.
         shared_buckets: u32,
     },
@@ -468,7 +468,7 @@ pub fn hydra_kind_for(algorithm: &SketchAlgorithm) -> Option<HydraKind> {
 /// belong to the [`SketchAlgorithm`] `kind` wraps: a caller bug, since
 /// [`hydra_kind_for`] and the algorithm a `SketchParams` came from must
 /// agree; callers that got both from the same already-ranked
-/// `Realization` (as `asap_aware_mapping::grouping` does) cannot hit
+/// `Realization` (as `asap_logical_optimizer::pass1::grouping` does) cannot hit
 /// this.
 ///
 /// This function is generic over which inner sketch type `kind` wraps

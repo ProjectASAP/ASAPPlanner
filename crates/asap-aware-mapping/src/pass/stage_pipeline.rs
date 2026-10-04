@@ -14,8 +14,8 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::QueryLanguage;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
-use crate::logical_candidates::enumerate_local_logical_candidates;
 use crate::plan_selection::select_plan;
+use asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StagePipeline;

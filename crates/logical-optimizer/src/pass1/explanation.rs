@@ -1,5 +1,5 @@
 //! This crate's **explanation of a replacement**: for a `TargetSubDAG` that
-//! [`crate::replacement::search_workload`] found something to say about, why
+//! [`crate::pass1::replacement::search_workload`] found something to say about, why
 //! does that candidate exist? (issue #33: "Add logic to detect which
 //! optimizations are applicable to a query workload"; this module: issue
 //! #257.)
@@ -7,7 +7,7 @@
 //! This module does not answer "is optimization X applicable here, yes or
 //! no" — that framing implies a classifier deciding admissibility from
 //! scratch. What it actually does is narrower and more mechanical: reuse a
-//! matching candidate's own [`crate::replacement::ReplacementSubDAG::rationale`]
+//! matching candidate's own [`crate::pass1::replacement::ReplacementSubDAG::rationale`]
 //! to explain, in the candidate's own words, why a [`Replacement`] exists at
 //! a given target. No new prose is invented here; see "The reframing" below
 //! for exactly what's being reused and why.
@@ -18,10 +18,10 @@
 //! Earlier (PR #247, superseded by this module — see "What this replaces"
 //! below), "is optimization X applicable here?" was a yes/no fact each rule
 //! re-derived by walking the DAG itself. That made sense before there was
-//! any other structure to consult. But [`crate::replacement::search_workload`]
+//! any other structure to consult. But [`crate::pass1::replacement::search_workload`]
 //! (issue #252) now *already* computes, for every
-//! [`TargetSubDAG`](crate::replacement::TargetSubDAG) in the workload, every
-//! semantically valid [`crate::replacement::ReplacementSubDAG`] a registered
+//! `TargetSubDAG` in the workload, every
+//! semantically valid [`crate::pass1::replacement::ReplacementSubDAG`] a registered
 //! [`ReplacementStrategy`] can propose — a [`CandidateLogicalASAPDAGs`] of [`TargetSubDAGCandidates`]s. A
 //! rule re-deriving the same yes/no fact from scratch would be answering a
 //! question the search already answered, via a second, independently
@@ -46,7 +46,7 @@
 //!   candidate list contains at least one summary-realization [`Replacement::SubDAG`] that
 //!   actually realizes a sketch family (`FieldDataType::Sketch`), i.e.
 //!   [`ASAPStrategies`] found something to offer beyond whatever
-//!   exact/pass-through candidate [`crate::replacement`]'s own
+//!   exact/pass-through candidate [`crate::pass1::replacement`]'s own
 //!   `realizations_for_intent` would have committed to on its own.
 //! - [`ExplanationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
 //!   has two or more consumers *and* its candidate list contains the
@@ -56,7 +56,7 @@
 //!   just an accident of how the workload happened to be built.
 //!
 //! Each finding's `reason` is literally the matching candidate's own
-//! [`crate::replacement::ReplacementSubDAG::rationale`] (joined, if more than one candidate
+//! [`crate::pass1::replacement::ReplacementSubDAG::rationale`] (joined, if more than one candidate
 //! qualifies) — this module invents no new prose to explain *why* a
 //! candidate is valid; that explanation already exists on the candidate a
 //! [`ReplacementStrategy`] produced, and repeating it here (rather than
@@ -73,7 +73,7 @@
 //! unrepresented). So do the two top-level entry points,
 //! [`explain_replacements`] and [`explain_replacements_with`]
 //! — same "workload roots in, findings out" contract, mirroring
-//! [`crate::replacement::search_workload`]/[`crate::replacement::search_workload_with`]'s
+//! [`crate::pass1::replacement::search_workload`]/[`crate::pass1::replacement::search_workload_with`]'s
 //! own signature shape. Only the *data source* changed: this module now
 //! calls those two functions and translates the result, rather than running
 //! its own rules and their supporting traversal over the DAG a second time.
@@ -86,15 +86,15 @@
 //!
 //! PR #247 gave this module its own extension-point trait, `ApplicabilityRule`
 //! (`fn optimization(&self) -> ExplanationKind` + `fn evaluate(&self, roots)
-//! -> Vec<ReplacementExplanation>`), the same shape [`crate::cost_model::CostModel`]
-//! and [`crate::replacement::Matcher`] use elsewhere in this crate. Once
+//! -> Vec<ReplacementExplanation>`), the same shape `cost_model::CostModel`
+//! and [`crate::pass1::replacement::Matcher`] use elsewhere in this crate. Once
 //! findings are a *view* over [`CandidateLogicalASAPDAGs`] rather than an independent
 //! computation, that trait would be a second extension point answering a
 //! question [`ReplacementStrategy`] (issue #251) already answers: "does this
 //! `TargetSubDAG` have an alternative worth reporting, and why". A caller who
 //! wants a new optimization represented as a finding needs a new
 //! `impl ReplacementStrategy` wired into
-//! [`crate::replacement::search_workload_with`]'s strategy set *regardless*
+//! [`crate::pass1::replacement::search_workload_with`]'s strategy set *regardless*
 //! (that's the only way its candidates end up in the [`CandidateLogicalASAPDAGs`] this
 //! module reads) — adding an `ApplicabilityRule` too would mean maintaining
 //! two extension points for the same new capability, one of which (the rule)
@@ -103,13 +103,13 @@
 //! [`ReplacementStrategy`] already *is* that extension point, one layer
 //! down, and [`explain_replacements_with`]'s own `strategies`
 //! parameter is where a caller plugs in a custom one — the identical spot
-//! [`crate::replacement::search_workload_with`] itself exposes.
+//! [`crate::pass1::replacement::search_workload_with`] itself exposes.
 //!
 //! ## Two guarantees the old traversal made, re-verified against the new one
 //!
 //! 1. **A finding is reported at the maximal `TargetSubDAG`, never once more
-//!    per subsumed descendant.** [`crate::replacement`]'s own
-//!    `discover_targets` (used by [`crate::replacement::search_workload_with`],
+//!    per subsumed descendant.** [`crate::pass1::replacement`]'s own
+//!    `discover_targets` (used by [`crate::pass1::replacement::search_workload_with`],
 //!    and so by this module) walks every workload root's whole DAG but only
 //!    *recurses into a node's children the first time that node's `Rc` is
 //!    seen*; every subsequent occurrence still counts towards
@@ -119,7 +119,7 @@
 //!    references it — identical to PR #247's own discovery pass, which
 //!    reported "the highest point sharing starts," not a finding at every
 //!    subsumed level below it. Same guarantee, same mechanism, just living in
-//!    [`crate::replacement`] now instead of here.
+//!    [`crate::pass1::replacement`] now instead of here.
 //! 2. **A node reachable via more than one path is one finding, not one per
 //!    path.** [`TargetSubDAGCandidates`]s are keyed by `Rc` pointer identity in
 //!    [`CandidateLogicalASAPDAGs`]'s internal map — there is exactly one group per distinct
@@ -143,9 +143,9 @@
 //! the deleted rule traversal: it makes no applicability decision (it runs
 //! the same regardless of what any strategy found), and duplicating this
 //! small, self-contained shape rather than threading location strings
-//! through [`crate::replacement`]'s own `discover_targets` matches the same
+//! through [`crate::pass1::replacement`]'s own `discover_targets` matches the same
 //! call that module's own docs already make for its (test-only)
-//! `count_consumers` counterpart — see [`crate::replacement`]'s "Where
+//! `count_consumers` counterpart — see [`crate::pass1::replacement`]'s "Where
 //! `TargetSubDAG` discovery comes from" section.
 //!
 //! ## Catalog primitives deliberately left as future work
@@ -156,12 +156,12 @@
 //! this codebase today**. Faking a variant for one of them would report a
 //! finding this codebase cannot back with a real candidate, so none of the
 //! below get an [`ExplanationKind`] variant yet — each gets one once a real
-//! strategy exists and is wired into [`crate::replacement::default_strategies`]:
+//! strategy exists and is wired into [`crate::pass1::replacement::default_strategies`]:
 //!
 //! | Catalog entry | Status | Where a future `ExplanationKind` would come from |
 //! |---|---|---|
-//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::SubDAG` rewrite candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_candidate_logical_asap_dags` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
-//! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::SubDAG` rewrite candidate that rolls a coarse aggregate up from a compatible finer aggregate |
+//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | `AvgToSumOverCountStrategy` exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::SubDAG` rewrite candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_candidate_logical_asap_dags` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
+//! | Roll-ups (fine-to-coarse group-by reuse) | `RollupStrategy`, derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::SubDAG` rewrite candidate that rolls a coarse aggregate up from a compatible finer aggregate |
 //! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), not reachable (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` for it, once some intent shape actually maps to `Realization::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
 //! | Deep generative compression | No representation at all — no `Realization`/`FieldDataType` variant | Needs a new summary family added to `asap_types::ir::schema::state_type` first |
@@ -171,14 +171,14 @@
 //! | Incremental computation across time | No representation — nothing carries state across repeated evaluations of a `RepeatingEntry` today | Would key off `RepeatingEntry` + `TimeShift`/`TimeRange` once incremental state-carry exists |
 //! | Delta encoding | No representation — `AggIntent::Delta`/`IDelta` are PromQL *value*-difference semantics, not a wire/storage delta-encoding optimization | Would plug into a future deployment-side wire/storage encoding decision (post-ASAP), not this crate's IR-level dispatch |
 //!
-//! [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
-//! [`ReplacementSubDAG`]: crate::replacement::ReplacementSubDAG
-//! [`Replacement`]: crate::replacement::Replacement
-//! [`Replacement::SubDAG`]: crate::replacement::Replacement::SubDAG
-//! [`ASAPStrategies`]: crate::replacement::ASAPStrategies
-//! [`SharedSubDAGStrategy`]: crate::replacement::SharedSubDAGStrategy
-//! [`CandidateLogicalASAPDAGs`]: crate::replacement::CandidateLogicalASAPDAGs
-//! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
+//! [`ReplacementStrategy`]: crate::pass1::replacement::ReplacementStrategy
+//! [`ReplacementSubDAG`]: crate::pass1::replacement::ReplacementSubDAG
+//! [`Replacement`]: crate::pass1::replacement::Replacement
+//! [`Replacement::SubDAG`]: crate::pass1::replacement::Replacement::SubDAG
+//! [`ASAPStrategies`]: crate::pass1::replacement::ASAPStrategies
+//! [`SharedSubDAGStrategy`]: crate::pass1::replacement::SharedSubDAGStrategy
+//! [`CandidateLogicalASAPDAGs`]: crate::pass1::replacement::CandidateLogicalASAPDAGs
+//! [`TargetSubDAGCandidates`]: crate::pass1::replacement::TargetSubDAGCandidates
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -188,7 +188,7 @@ use asap_types::ir::cse::{structural_hash, HashCache};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 
-use crate::replacement::{
+use crate::pass1::replacement::{
     self, CandidateLogicalASAPDAGs, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
 };
 
@@ -199,26 +199,26 @@ use crate::replacement::{
 /// deliberately left as future work" table for everything else in the
 /// catalog).
 ///
-/// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
+/// [`ReplacementStrategy`]: crate::pass1::replacement::ReplacementStrategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ExplanationKind {
     /// A `TargetSubDAG`'s candidate list contains at least one
     /// [`Replacement::SubDAG`] that realizes a sketch family —
-    /// [`crate::replacement::ASAPStrategies`] found a genuine sketch
+    /// [`crate::pass1::replacement::ASAPStrategies`] found a genuine sketch
     /// alternative for this `Aggregate`, beyond whatever exact/pass-through
-    /// candidate `crate::replacement`'s own `realizations_for_intent` would
+    /// candidate `crate::pass1::replacement`'s own `realizations_for_intent` would
     /// have committed to on its own.
     SketchApproximation,
     /// A `TargetSubDAG` has two or more consumers *and* its candidate list
-    /// contains [`crate::replacement::SharedSubDAGStrategy`]'s "build once
+    /// contains [`crate::pass1::replacement::SharedSubDAGStrategy`]'s "build once
     /// and share" candidate — the catalog's cross-statistic / cross-metrics /
     /// cross-subpopulation reuse entries, all the same underlying structural
     /// fact.
     CommonSubexpressionReuse,
     /// A `TargetSubDAG`'s candidate list contains at least one
     /// [`Replacement::ExactComposition`] —
-    /// [`crate::exact_composition::ExactCompositionStrategy`] found an exact
+    /// [`crate::pass1::exact_composition::ExactCompositionStrategy`] found an exact
     /// operator that can be composed with a summary plan across an explicit
     /// update/evaluation boundary instead of keeping the whole tree as it is
     /// (issue #171).
@@ -229,7 +229,7 @@ pub enum ExplanationKind {
 /// breadcrumb into the workload — e.g. `root "dashboard_p99"` or
 /// `root "ratio" > lhs`): `reason` (human-readable, meant for a report/log,
 /// not machine parsing — literally the matching candidate's own
-/// [`crate::replacement::ReplacementSubDAG::rationale`]).
+/// [`crate::pass1::replacement::ReplacementSubDAG::rationale`]).
 ///
 /// `node_hash` is [`structural_hash`](asap_types::ir::cse::structural_hash)
 /// of the `TargetSubDAG`'s own `target` sub-DAG — the same function, on the
@@ -250,16 +250,16 @@ pub struct ReplacementExplanation {
     pub target: Rc<OperatorNode>,
 }
 
-/// Explain every replacement [`crate::replacement::search_workload`] finds
+/// Explain every replacement [`crate::pass1::replacement::search_workload`] finds
 /// across a workload's pre-ASAP query roots, using
-/// [`crate::replacement::default_strategies`].
+/// [`crate::pass1::replacement::default_strategies`].
 ///
-/// `roots` — like [`crate::replacement::search_workload`]'s own `Id` type
+/// `roots` — like [`crate::pass1::replacement::search_workload`]'s own `Id` type
 /// parameter — is caller-chosen: a `QueryWorkload` entry's own key, an index,
 /// a query name. It only needs [`Display`], since a finding's `location` is
 /// prose, not a structured key back to the caller.
 ///
-/// Internally runs [`crate::replacement::search_workload`] to build the
+/// Internally runs [`crate::pass1::replacement::search_workload`] to build the
 /// candidate-plan space, then reads findings off it — see the module docs'
 /// "The reframing" section for what that translation actually checks.
 pub fn explain_replacements<Id: Display>(
@@ -269,10 +269,10 @@ pub fn explain_replacements<Id: Display>(
 }
 
 /// Like [`explain_replacements`], but searches with `strategies`
-/// instead of [`crate::replacement::default_strategies`] — the extension
+/// instead of [`crate::pass1::replacement::default_strategies`] — the extension
 /// point for a deployment-specific [`ReplacementStrategy`].
 ///
-/// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
+/// [`ReplacementStrategy`]: crate::pass1::replacement::ReplacementStrategy
 pub fn explain_replacements_with<'s, Id: Display>(
     roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
@@ -292,7 +292,7 @@ pub fn explain_replacements_with<'s, Id: Display>(
 ///
 /// `space`'s own `Id` is always `String` here: [`explain_replacements_with`]
 /// already converted the caller's `Id: Display` into a `String` (via
-/// `to_string()`) before calling [`crate::replacement::search_workload_with`],
+/// `to_string()`) before calling [`crate::pass1::replacement::search_workload_with`],
 /// so this function (and [`collect_locations`], which formats `id` with
 /// [`std::fmt::Debug`] for the breadcrumb text) doesn't need its own generic
 /// `Id` bound.
@@ -399,7 +399,7 @@ fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<Strin
 }
 
 /// Does `node` (unwrapping any `SummaryEstimate` layer, the same shape
-/// [`crate::replacement`]'s own private `sketch_kind_of` unwraps) ultimately
+/// [`crate::pass1::replacement`]'s own private `sketch_kind_of` unwraps) ultimately
 /// realize a [`FieldDataType::Sketch`] family? This module only needs the
 /// yes/no fact (a candidate's own `rationale` already names the specific
 /// `SketchKind`/`SketchAlgorithm` for a finding's `reason` text), so unlike
@@ -455,7 +455,7 @@ fn visit(
 }
 
 /// `node`'s own **relational-skeleton** operator children — the same scope
-/// `crate::replacement`'s own target-discovery `walk_children` (and
+/// `crate::pass1::replacement`'s own target-discovery `walk_children` (and
 /// `asap_types::ir::cse::share_common_sub_dags`) use. Exhaustive over every
 /// `NonASAPOp` variant: a new variant fails to compile here until this match
 /// is extended too. An ASAP node never occurs in a workload root.
@@ -658,7 +658,7 @@ mod tests {
     /// collapses onto one `Rc` — the same `median(x) == median(x)` shape
     /// `ir::cse`'s own `single_query_shares_its_own_repeated_sub-DAG`
     /// test uses — must be reported once, not once per path: it is exactly
-    /// one [`crate::replacement::TargetSubDAGCandidates`], keyed by `Rc` pointer identity,
+    /// one [`crate::pass1::replacement::TargetSubDAGCandidates`], keyed by `Rc` pointer identity,
     /// not one per path that reaches it.
     #[test]
     fn a_shared_sketchable_aggregate_is_reported_only_once() {
@@ -774,11 +774,11 @@ mod tests {
     }
 
     /// A shared node nested three levels under two *different*, unshared
-    /// `Filter` parents (mirrors `crate::replacement::tests::
+    /// `Filter` parents (mirrors `crate::pass1::replacement::tests::
     /// nested_shared_sub-DAG_below_an_unshared_parent_is_still_discovered`)
     /// must still be exactly one finding — the maximal-`TargetSubDAG`
     /// guarantee the module docs describe, now provided by
-    /// `crate::replacement`'s own target discovery rather than this module's
+    /// `crate::pass1::replacement`'s own target discovery rather than this module's
     /// (deleted) traversal.
     #[test]
     fn a_deeply_shared_sub_dag_under_different_parents_is_reported_once() {

@@ -69,7 +69,7 @@ Both current `Concat`-constructing call sites, and every consumer of
 - **Every consumer of `Schema::unique_keys`** in the DAG, to check for a
   cost beyond "a literal `Dedup` node": `ir::cse::share_common_sub_dags`
   (gates CSE producer-sharing on `Schema::has_unique_key()`) and
-  `asap_aware_mapping::rollup::is_legal_rollup_source` (gates rollup-source
+  `asap_logical_optimizer::pass1::rollup::is_legal_rollup_source` (gates rollup-source
   legality the same way, on an *`Aggregate`'s* own output schema). Neither
   case is exercised by a `histogram_quantiles` or `ROLLUP`/`CUBE`/
   `GROUPING SETS` `Concat` in any current test, workload, or call site: no

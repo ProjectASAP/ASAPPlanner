@@ -19,7 +19,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, Schem
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
-use crate::replacement::{
+use crate::pass1::replacement::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates, Realization,
 };
 
@@ -352,7 +352,7 @@ fn summary_update(
         FieldDataType::Sketch(kind, _) => Some(kind.algorithm()),
         _ => None,
     };
-    let weight = crate::replacement::summarised_input(intent, child)
+    let weight = crate::pass1::replacement::summarised_input(intent, child)
         .map_err(|_| LogicalCandidateError::Unsupported("input column outside child schema"))?;
     Ok(match (intent, algorithm) {
         (AggIntent::TopK { .. }, Some(_)) => {
@@ -373,7 +373,7 @@ fn summary_update(
                 .into_iter()
                 .flat_map(|keys| keys.iter())
                 .filter_map(|&index| child.fields.get(index))
-                .map(crate::replacement::column_ref)
+                .map(crate::pass1::replacement::column_ref)
                 .collect();
             // Rows that carry the full series identity rank it as a column,
             // the item form the runtime builds keyed summaries from.

@@ -8,23 +8,27 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::accuracy::{
-    AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-    QuantileInputDomain,
-};
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::replacement::{is_logical_rewrite, retain_exact, RealizationError};
-use asap_aware_mapping::{
-    search_workload, search_workload_with_targets, ASAPStrategies, AccuracyModel, Replacement,
-    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
-};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{
     maintained, maintained_post_asap_dag, post_asap_dag, timed,
 };
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use asap_logical_optimizer::accuracy::{
+    AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+    QuantileInputDomain,
+};
+use asap_logical_optimizer::pass1::replacement::{
+    is_logical_rewrite, retain_exact, RealizationError,
+};
+use asap_logical_optimizer::{
+    search_workload, search_workload_with_targets, ASAPStrategies, AccuracyModel, Replacement,
+    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+};
+use asap_types::ir::physical_export::{ PhysicalASAPOperatorPayload};
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::properties::CompositionOperator;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::DataType;
@@ -572,7 +576,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
     };
     let space = search_workload_with_targets(
         vec![("ratio", query, Some(target.clone()))],
-        &asap_aware_mapping::replacement::default_strategies_with_evidence(&evidence),
+        &asap_logical_optimizer::pass1::replacement::default_strategies_with_evidence(&evidence),
         &DefaultAccuracyModel,
     );
     let root = &space.roots[0].1;
@@ -1151,7 +1155,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
     assert!(root.guarantee.is_none());
     let space = search_workload_with_targets(
         vec![("unproven", pre, Some(AccuracyTarget::Epsilon(0.01)))],
-        &asap_aware_mapping::default_strategies(),
+        &asap_logical_optimizer::default_strategies(),
         &DefaultAccuracyModel,
     );
     let root_group = space
@@ -1379,7 +1383,7 @@ fn without_aggregation_candidates_export_valid_dags() {
             let root = lower_promql(query, accuracy.clone()).unwrap();
             let space = search_workload_with_targets(
                 vec![(0, root, Some(accuracy.clone()))],
-                &asap_aware_mapping::default_strategies(),
+                &asap_logical_optimizer::default_strategies(),
                 &DefaultAccuracyModel,
             );
             let inventory = space.enumerate_candidate_dags_for_root(&0, 65_536).unwrap();

@@ -78,7 +78,7 @@ gate) and the cost-aware decision is applied downstream, in
 
 ## Where it hooks in
 
-`candidate_selection::cost_sorted`(../../../crates/asap-aware-mapping/src/replacement.rs)
+[`candidate_selection::cost_sorted`](../../../crates/asap-aware-mapping/src/plan_selection/candidate_selection.rs)
 is where this hooks in today. `search_workload_with` computes each shared
 sub-DAG's true `consumer_count` across the whole workload up front (the same
 role `implement_workload_with`'s pre-pass used to play, before that function
@@ -86,7 +86,7 @@ was retired along with `bind.rs` — this crate no longer commits to one
 physically-materialized answer at all; picking and building one final
 `SummaryNode` per shared sub-DAG is a downstream deployment's job, not this
 crate's). For a `TargetSubDAGCandidates` whose candidates are a
-[`SharedSubDAGStrategy`](../../../crates/asap-aware-mapping/src/replacement.rs)
+[`SharedSubDAGStrategy`](../../../crates/logical-optimizer/src/pass1/replacement.rs)
 share-vs-recompute pair, `cost_sorted`'s ranking step (`rank_group`/
 `cse_preference`) asks `CostModel::cse_share_decision` once per group — using
 one representative bound `SummaryNode` built just for that comparison, not
