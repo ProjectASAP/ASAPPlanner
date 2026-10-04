@@ -1,0 +1,44 @@
+[
+  {
+    "id": "example1",
+    "name": "1 · dashboard panels",
+    "example": "planner-layering-1",
+    "file": "out/example1.json",
+    "story": "Two panels over 1M counter series every 10 s: Q1 the exact per-job request rate, Q2 the approximate top-10 series per job. The planner keeps Q1 exact and answers Q2 with one CMS+heap over the raw samples, both reading one shared scan."
+  },
+  {
+    "id": "example2",
+    "name": "2 · SQL flow statistics",
+    "example": "planner-layering-2",
+    "file": "out/example2.json",
+    "story": "Three SQL queries over the last minute of flows: distinct sources, and the entropy and L2 of the per-source counts. Pass 1 offers UnivMon to each and Pass 2 one shared UnivMon, but there is no UnivMon accuracy model yet (Q45), so every UnivMon plan is invalid and an exact plan wins."
+  },
+  {
+    "id": "example3a",
+    "name": "3a · historical p99 batch",
+    "example": "planner-layering-3a",
+    "file": "out/example3a.json",
+    "story": "An ad hoc batch of five p99 reports over 1–5 years, run once. Each query gets a KLL, and sharing the input scan across all five is cheapest. Exponential histograms are not implemented yet, so no plan shares window summaries across the reports."
+  },
+  {
+    "id": "example3b",
+    "name": "3b · live p99 panel",
+    "example": "planner-layering-3b",
+    "file": "out/example3b.json",
+    "story": "p99 over the last 5 min every minute, 1M series sampled every 15 s, raw data kept by the deployment. A per-series KLL built at query time wins: keeping 1-min KLL panes from ingestion time costs 768 cost/s of memory, and rebuilding the panes at query time breaks the 200 ms bound."
+  },
+  {
+    "id": "example4a",
+    "name": "4a · monthly p99 reports",
+    "example": "planner-layering-4a",
+    "file": "out/example4a.json",
+    "story": "Example 3a repeated monthly and known in advance. The same shared-input KLL plan wins; its cost is now amortized over the month between runs."
+  },
+  {
+    "id": "example4b",
+    "name": "4b · panes that pay off",
+    "example": "planner-layering-4b",
+    "file": "out/example4b.json",
+    "story": "p99 over the last hour every 10 min, 1k series sampled every second, and a deployment that does not keep raw data (Q49). A 10-min pane covers 600 samples per series, far more bytes than its KLL, so maintaining six panes at ingestion time beats keeping an hour of raw samples."
+  }
+]
