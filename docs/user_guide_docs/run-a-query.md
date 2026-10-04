@@ -120,7 +120,7 @@ certified sketch. The tool prints plans, not query results.
 
 ### Export a query DAG
 
-Export pre-ASAP IR for SQL or PromQL queries for use with the interactive DAG viewer:
+Export the IR of SQL or PromQL queries as JSON:
 
 ```sh
 cargo run -p asap-devtools --bin dag_export -- --sql "<SQL query>"
@@ -132,7 +132,13 @@ or:
 cargo run -p asap-devtools --bin dag_export -- --data-ingestion-interval-ms 1000 --promql "<PromQL query>"
 ```
 
-See [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md) for instructions on running the DAG viewer.
+### See how the planner plans a workload
+
+```sh
+cargo run -p asap-devtools --bin stage_pipeline -- --promql "<PromQL query>" --epsilon 0.01 --out plan.json
+```
+
+writes the planner's four stages for the query. Open `plan.json` in the Stage Viewer, which also plans PromQL queries from its editor; see [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md).
 
 ### Check IR variant coverage
 
