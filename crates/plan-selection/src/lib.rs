@@ -24,9 +24,12 @@
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count, weighted by [`Stage3Calibration`]; summary build and estimation are
 //! priced as rows × sketch depth and rows read out. These numbers are
-//! illustrative, not calibrated. Latency bounds and deployment capabilities
-//! are not checked yet.
+//! illustrative, not calibrated. A query's latency bound is checked against
+//! the query-time work it waits for in one evaluation; deployment
+//! capabilities are not checked yet.
 //!
+//! A logical candidate has several physical candidates, one per Stage 2
+//! materialization choice; selection takes the cheapest valid one.
 //! [`select_plan`] chooses over Stage 1's sharing variants without building
 //! every combination: per variant, a dynamic program over target nesting (see
 //! there). [`select_exhaustive`] builds and prices every combination, for
@@ -57,8 +60,7 @@ use std::rc::Rc;
 
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
-};
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
@@ -86,8 +88,9 @@ use asap_logical_optimizer::pass2::identical_expressions::{
 pub use asap_logical_optimizer::pass2::identical_expressions::{Sharing, SharingVariant};
 use asap_logical_optimizer::pass2::window_composition::{pane_source, WindowForm};
 use asap_physical_optimizer::implementation::physical_candidates::{
-    stage2_physical, PhysicalCandidate,
+    stage2_physical, PhysicalCandidate, Stage2Candidates,
 };
+use asap_physical_optimizer::materialization::MAX_PHYSICAL_PER_LOGICAL;
 
 /// Cost per second of wall time; one cost unit is one CPU-millisecond under
 /// [`Stage3Calibration::ILLUSTRATIVE`]. See
@@ -118,17 +121,23 @@ pub struct Stage3Calibration {
     pub cost_per_retained_byte_second: f64,
     /// Seconds over which one-off and unknown recurrence is amortized.
     pub horizon_s: f64,
+    /// Response time of one cost unit of query-time work in one evaluation,
+    /// for the latency check: one CPU-ms, run on one core.
+    pub latency_ms_per_cost_unit: f64,
     pub version: &'static str,
 }
 
 impl Stage3Calibration {
     /// 1 ns of CPU per operation; 1 GB retained costs 1/8 vCPU
-    /// (125 CPU-ms per second); one-off work is amortized over 1 h.
+    /// (125 CPU-ms per second); one-off work is amortized over 1 h; an
+    /// evaluation runs on one core, so a cost unit (a CPU-ms) is 1 ms of
+    /// latency.
     pub const ILLUSTRATIVE: Self = Self {
         cost_per_cpu_op: 1e-6,
         cost_per_scan_byte: 1e-7,
         cost_per_retained_byte_second: 1.25e-7,
         horizon_s: 3_600.0,
+        latency_ms_per_cost_unit: 1.0,
         version: "illustrative-v2",
     };
 
@@ -136,6 +145,7 @@ impl Stage3Calibration {
         for (name, value) in [
             ("cost_per_cpu_op", self.cost_per_cpu_op),
             ("cost_per_scan_byte", self.cost_per_scan_byte),
+            ("latency_ms_per_cost_unit", self.latency_ms_per_cost_unit),
             (
                 "cost_per_retained_byte_second",
                 self.cost_per_retained_byte_second,
@@ -252,8 +262,12 @@ pub enum SelectionMethod {
     /// The dynamic program over target nesting, whose assumptions held.
     TreeDp,
     /// The dynamic program's result although its assumptions did not hold
-    /// and there were too many combinations to enumerate.
+    /// and there were too many combinations to enumerate, or Stage 2
+    /// searched some candidate's materialization greedily.
     TreeDpNotGuaranteedOptimal { reason: String },
+    /// Every combination was built, but Stage 2 searched some candidate's
+    /// materialization greedily.
+    ExhaustiveGreedyMaterialization { reason: String },
 }
 
 /// Costs are present for valid candidates only.
@@ -271,6 +285,7 @@ impl Selection {
         !matches!(
             self.method,
             SelectionMethod::TreeDpNotGuaranteedOptimal { .. }
+                | SelectionMethod::ExhaustiveGreedyMaterialization { .. }
         )
     }
 }
@@ -350,8 +365,43 @@ fn assess(
     if let Some(reason) = accuracy_violation(candidate, demand, models) {
         return Err(reason);
     }
-    price(&candidate.dag, demand, data, &models.calibration)
-        .map_err(|(node, error)| format!("node {node:?}: {error}"))
+    let (cost, per_evaluation) = price_nodes(&candidate.dag, demand, data, &models.calibration)
+        .map_err(|(node, error)| format!("node {node:?}: {error}"))?;
+    if let Some(reason) =
+        latency_violation(&candidate.dag, &per_evaluation, demand, &models.calibration)
+    {
+        return Err(reason);
+    }
+    Ok(cost)
+}
+
+/// The first query whose query-time work in one evaluation exceeds its
+/// latency bound (S6), as a reason. The estimate is the per-evaluation cost
+/// of the query-time nodes the query reaches, run on one core: ingestion-time
+/// work is done before the query asks.
+fn latency_violation(
+    dag: &PhysicalASAPDAG,
+    per_evaluation: &HashMap<PhysicalASAPNodeId, f64>,
+    demand: &[RootDemand],
+    calibration: &Stage3Calibration,
+) -> Option<String> {
+    let reached = reaching_roots(dag);
+    demand.iter().enumerate().find_map(|(query, demand)| {
+        let bound = demand.latency_ms?;
+        let work: f64 = per_evaluation
+            .iter()
+            .filter(|(id, _)| reached.get(id).is_some_and(|roots| roots.contains(&query)))
+            .map(|(_, cost)| cost)
+            .sum();
+        let latency = work * calibration.latency_ms_per_cost_unit;
+        (latency > bound).then(|| {
+            format!(
+                "q{}: query-time work takes {latency:.1} ms per evaluation, over the {bound} ms \
+                 latency bound",
+                query + 1
+            )
+        })
+    })
 }
 
 /// One Stage 1 sharing variant as selection sees it: candidates of variant
@@ -403,31 +453,41 @@ pub fn independent<Id>(inventory: LocalLogicalCandidates<Id>) -> Vec<SharingVari
     }]
 }
 
-/// Stage 1 → Stage 2 for `choice` in the independent variant, named
-/// `P<index+1>` from `L<index+1>`. `Err` is the reason the candidate cannot
-/// be built.
+/// Stage 1 → Stage 2 for `choice` in the independent variant, all query
+/// time, named `P<index+1>` from `L<index+1>`. `Err` is the reason the
+/// candidate cannot be built.
 pub fn realize_choice<Id: Clone>(
     inventory: &LocalLogicalCandidates<Id>,
     choice: &[usize],
 ) -> Result<(Vec<(Id, QueryRoot)>, PhysicalCandidate), String> {
-    realize(
+    let (logical, mut stage2) = realize(
         Variant {
             inventory,
             sharing: Sharing::Independent,
             offset: 0,
         },
         choice,
-    )
+        &[],
+        &DataWorkload::default(),
+        &PlanningModels::builtin(),
+    )?;
+    Ok((logical, stage2.candidates.swap_remove(0)))
 }
 
 /// Stage 1 → Stage 2 for `choice` in `variant`. A sharing variant also
 /// merges identical sub-DAGs after composition, so queries that chose the
 /// same summary producer reach one node; the returned Stage 1 candidate is
-/// the merged one.
+/// the merged one. The physical candidates are `P<n>` (all query time) and
+/// `P<n>-m<k>` for each materialization choice; above
+/// [`MAX_PHYSICAL_PER_LOGICAL`] choices Stage 2 searches them greedily by
+/// Stage 3's cost.
 fn realize<Id: Clone>(
     variant: Variant<'_, Id>,
     choice: &[usize],
-) -> Result<(Vec<(Id, QueryRoot)>, PhysicalCandidate), String> {
+    demand: &[RootDemand],
+    data: &DataWorkload,
+    models: &PlanningModels<'_>,
+) -> Result<(Vec<(Id, QueryRoot)>, Stage2Candidates), String> {
     let index = variant.number(choice);
     let mut logical = compose_logical_candidate(variant.inventory, choice)
         .map_err(|e| format!("Stage 1: {e}"))?;
@@ -443,21 +503,59 @@ fn realize<Id: Clone>(
             QueryRoot::Scalar(_) => Err("Stage 2: scalar query roots are not physical yet"),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut candidate =
-        stage2_physical(&format!("L{index}"), &roots).map_err(|e| format!("Stage 2: {e}"))?;
-    candidate.id = format!("P{index}");
-    candidate.label = format!("{choice:?}");
-    Ok((logical, candidate))
+    let score = |candidate: &PhysicalCandidate| {
+        assess(candidate, demand, data, models)
+            .ok()
+            .map(|cost| cost.total)
+    };
+    let mut stage2 = stage2_physical(&format!("L{index}"), &roots, demand, data, &score)
+        .map_err(|e| format!("Stage 2: {e}"))?;
+    for (k, candidate) in stage2.candidates.iter_mut().enumerate() {
+        candidate.id = match k {
+            0 => format!("P{index}"),
+            k => format!("P{index}-m{k}"),
+        };
+        candidate.label = match candidate.materialization.as_str() {
+            "" => format!("{choice:?}"),
+            m => format!("{choice:?} · {m}"),
+        };
+    }
+    Ok((logical, stage2))
 }
 
-/// One built combination; `physical` is `None` when it could not be built.
+/// Why a selection is not guaranteed optimal when Stage 2 searched a
+/// candidate's materialization greedily.
+fn greedy_reason(id: &str) -> String {
+    format!("{id}: more than {MAX_PHYSICAL_PER_LOGICAL} materialization choices, searched greedily")
+}
+
+/// Stage 3 over the physical candidates of one logical candidate: its
+/// cheapest valid cost, or the reason the first (all query time) fails.
+fn best_total(
+    candidates: &[PhysicalCandidate],
+    demand: &[RootDemand],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<f64, String> {
+    match stage3_select(candidates, demand, data, models) {
+        Ok(selection) => Ok(selection.costs[&selection.selected].total),
+        Err(SelectionError::NoValidCandidate(rejected)) => Err(rejected
+            .into_iter()
+            .next()
+            .map_or_else(|| "no physical candidate".into(), |r| r.reason)),
+        Err(other) => Err(other.to_string()),
+    }
+}
+
+/// One built combination; `physical` is empty when it could not be built,
+/// else its Stage 2 candidates, all query time first.
 #[derive(Debug, Clone)]
 pub struct EnumeratedCandidate<Id> {
     /// The Pass 2 variant it comes from.
     pub sharing: Sharing,
     pub choice: Vec<usize>,
     pub logical: Option<Vec<(Id, QueryRoot)>>,
-    pub physical: Option<PhysicalCandidate>,
+    pub physical: Vec<PhysicalCandidate>,
 }
 
 /// Every combination [`select_exhaustive`] built, and Stage 3 over them.
@@ -491,11 +589,17 @@ fn exhaustive<Id: Clone>(
 ) -> Result<Enumeration<Id>, SelectionError> {
     let mut candidates = Vec::new();
     let mut failed = Vec::new();
+    let mut greedy = None;
     for variant in variants {
         let left = max.saturating_sub(candidates.len());
         for choice in enumerate_choices(variant.inventory, left) {
-            let (logical, physical) = match realize(*variant, &choice) {
-                Ok((logical, physical)) => (Some(logical), Some(physical)),
+            let (logical, physical) = match realize(*variant, &choice, demand, data, &models) {
+                Ok((logical, stage2)) => {
+                    if !stage2.exhaustive {
+                        greedy.get_or_insert_with(|| greedy_reason(&stage2.candidates[0].id));
+                    }
+                    (Some(logical), stage2.candidates)
+                }
                 Err(reason) => {
                     failed.push(Rejection {
                         id: format!("P{}", variant.number(&choice)),
@@ -505,7 +609,7 @@ fn exhaustive<Id: Clone>(
                     // Composition may have succeeded: keep it for display.
                     (
                         compose_logical_candidate(variant.inventory, &choice).ok(),
-                        None,
+                        Vec::new(),
                     )
                 }
             };
@@ -519,11 +623,14 @@ fn exhaustive<Id: Clone>(
     }
     let physical: Vec<_> = candidates
         .iter()
-        .filter_map(|c| c.physical.clone())
+        .flat_map(|c| c.physical.iter().cloned())
         .collect();
     let selection = match stage3_select(&physical, demand, data, models) {
         Ok(mut selection) => {
             selection.rejected.extend(failed);
+            if let Some(reason) = greedy {
+                selection.method = SelectionMethod::ExhaustiveGreedyMaterialization { reason };
+            }
             selection
         }
         Err(SelectionError::NoValidCandidate(mut rejected)) => {
@@ -574,9 +681,17 @@ pub fn select_plan<Id: Clone>(
     let mut not_optimal = None;
     let mut failures = Vec::new();
     for variant in variants(stage1) {
+        // The program sees each logical candidate at its cheapest
+        // materialization.
+        let greedy = std::cell::RefCell::new(None);
         let evaluate = |choice: &[usize]| -> Result<f64, String> {
-            let (_, candidate) = realize(variant, choice)?;
-            assess(&candidate, demand, data, &models).map(|cost| cost.total)
+            let (_, stage2) = realize(variant, choice, demand, data, &models)?;
+            if !stage2.exhaustive {
+                greedy
+                    .borrow_mut()
+                    .get_or_insert_with(|| greedy_reason(&stage2.candidates[0].id));
+            }
+            best_total(&stage2.candidates, demand, data, models)
         };
         let plan = match select_variant(variant, demand, data, models, &evaluate) {
             Ok(plan) => plan,
@@ -586,8 +701,15 @@ pub fn select_plan<Id: Clone>(
             }
             Err(other) => return Err(other),
         };
-        if let SelectionMethod::TreeDpNotGuaranteedOptimal { reason } = &plan.selection.method {
-            not_optimal.get_or_insert_with(|| reason.clone());
+        match &plan.selection.method {
+            SelectionMethod::TreeDpNotGuaranteedOptimal { reason }
+            | SelectionMethod::ExhaustiveGreedyMaterialization { reason } => {
+                not_optimal.get_or_insert_with(|| reason.clone());
+            }
+            _ => {}
+        }
+        if let Some(reason) = greedy.into_inner() {
+            not_optimal.get_or_insert(reason);
         }
         costs.extend(plan.selection.costs.clone());
         rejected.extend(plan.selection.rejected.clone());
@@ -847,7 +969,8 @@ fn best_choice(
     cost
 }
 
-/// Build `choice` in `variant` and run Stage 3 on it.
+/// Build `choice` in `variant` and run Stage 3 on its physical candidates:
+/// the cheapest valid one is selected.
 fn finish<Id: Clone>(
     variant: Variant<'_, Id>,
     demand: &[RootDemand],
@@ -856,17 +979,38 @@ fn finish<Id: Clone>(
     choice: Vec<usize>,
     method: SelectionMethod,
 ) -> Result<SelectedPlan<Id>, String> {
-    let (logical, physical) = realize(variant, &choice)?;
-    let cost = assess(&physical, demand, data, models)?;
+    let (logical, stage2) = realize(variant, &choice, demand, data, models)?;
+    let selection = match stage3_select(&stage2.candidates, demand, data, *models) {
+        Ok(selection) => selection,
+        Err(SelectionError::NoValidCandidate(rejected)) => {
+            return Err(rejected
+                .into_iter()
+                .next()
+                .map_or_else(|| "no physical candidate".into(), |r| r.reason))
+        }
+        Err(other) => return Err(other.to_string()),
+    };
+    let method = match (stage2.exhaustive, method) {
+        (false, SelectionMethod::TreeDp) => SelectionMethod::TreeDpNotGuaranteedOptimal {
+            reason: greedy_reason(&stage2.candidates[0].id),
+        },
+        (false, SelectionMethod::Exhaustive) => SelectionMethod::ExhaustiveGreedyMaterialization {
+            reason: greedy_reason(&stage2.candidates[0].id),
+        },
+        (_, method) => method,
+    };
+    let physical = stage2
+        .candidates
+        .into_iter()
+        .find(|c| c.id == selection.selected)
+        .expect("the selected candidate is one of them");
     Ok(SelectedPlan {
         sharing: variant.sharing,
         choice,
         logical,
         selection: Selection {
-            selected: physical.id.clone(),
-            costs: BTreeMap::from([(physical.id.clone(), cost)]),
-            rejected: Vec::new(),
             method,
+            ..selection
         },
         physical,
     })
@@ -890,8 +1034,8 @@ fn fallback<Id: Clone>(
             .iter()
             .find(|c| {
                 c.physical
-                    .as_ref()
-                    .is_some_and(|p| p.id == enumeration.selection.selected)
+                    .iter()
+                    .any(|p| p.id == enumeration.selection.selected)
             })
             .expect("the selected candidate was built");
         let mut plan = finish(
@@ -1169,19 +1313,129 @@ fn scan_extent_ms(dag: &PhysicalASAPDAG, id: PhysicalASAPNodeId, offset_ms: i64)
         .max()
 }
 
+/// The role of an ingestion-time node in a chain of tumbling panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneRole {
+    /// The pane being built: every arriving row lands in it. It retains
+    /// `panes` completed panes plus itself.
+    Newest { panes: u64 },
+    /// An older pane: the newest pane of an earlier evaluation, kept. It is
+    /// not built again.
+    Retained,
+    /// Feeds only retained panes: its work was done for the newest pane.
+    FeedsRetained,
+}
+
+/// Ingestion-time panes merged by a `SummaryMerge`: pane `i` is pane 0
+/// shifted back by `i` widths, so at ingestion time the chain is one pane
+/// built as rows arrive and kept for the later evaluations. The newest pane
+/// is the one with the smallest shift.
+fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
+    let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
+    let producers = |id| {
+        dag.edges
+            .iter()
+            .filter(move |e| e.consumer == id)
+            .map(|e| e.producer)
+    };
+    let ingestion = |id: PhysicalASAPNodeId| !nodes[&id].output_state.timing.is_query_time();
+    // The shift of a pane over `TimeRange` over `TimeShift`, else 0.
+    let shift = |pane| {
+        producers(pane)
+            .flat_map(producers)
+            .find_map(|id| match &nodes[&id].payload {
+                Payload::NonASAP(NonASAPOp::TimeShift { shift }) => Some(shift.offset_ms),
+                _ => None,
+            })
+            .unwrap_or(0)
+    };
+    let mut roles: HashMap<PhysicalASAPNodeId, PaneRole> = HashMap::new();
+    for merge in dag
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryMerge {})))
+    {
+        let panes: Vec<_> = producers(merge.id)
+            .filter(|&id| ingestion(id) && matches!(nodes[&id].payload, Payload::ASAP(ASAPOp::SummaryAgg { .. })))
+            .collect();
+        let Some(&newest) = panes.iter().min_by_key(|&&id| shift(id)) else {
+            continue;
+        };
+        let count = panes.len() as u64;
+        for &pane in &panes {
+            let role = if pane == newest {
+                PaneRole::Newest { panes: count }
+            } else {
+                PaneRole::Retained
+            };
+            // A pane newest in one merge stays newest; the longest chain sets
+            // the retention.
+            let merged = match (roles.get(&pane).copied(), role) {
+                (Some(PaneRole::Newest { panes: a }), PaneRole::Newest { panes: b }) => {
+                    PaneRole::Newest { panes: a.max(b) }
+                }
+                (Some(newest @ PaneRole::Newest { .. }), _) => newest,
+                (_, role) => role,
+            };
+            roles.insert(pane, merged);
+        }
+    }
+    // Consumers first: an ingestion-time node whose consumers all are
+    // retained panes, or feed only those, does no work of its own.
+    for node in dag.nodes.iter().rev() {
+        if roles.contains_key(&node.id) || !ingestion(node.id) {
+            continue;
+        }
+        let mut consumers = dag
+            .edges
+            .iter()
+            .filter(|e| e.producer == node.id)
+            .peekable();
+        if consumers.peek().is_some()
+            && consumers.all(|e| {
+                matches!(
+                    roles.get(&e.consumer),
+                    Some(PaneRole::Retained | PaneRole::FeedsRetained)
+                )
+            })
+        {
+            roles.insert(node.id, PaneRole::FeedsRetained);
+        }
+    }
+    roles
+}
+
 /// Price every node of `dag` once, per second of wall time. Nodes are
 /// exported children first, so each node's input statistics are known when
 /// it is reached. An ingestion-time node is priced over one second of
 /// ingested rows; a query-time node per evaluation, times its evaluation
 /// rate. State an ingestion-time node keeps for query-time readers is also
 /// charged per retained byte per second.
+#[cfg(test)]
 fn price(
     dag: &PhysicalASAPDAG,
     demand: &[RootDemand],
     data: &DataWorkload,
     calibration: &Stage3Calibration,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let first = dag.roots.first().copied().unwrap_or(0);
+    price_nodes(dag, demand, data, calibration).map(|(cost, _)| cost)
+}
+
+/// [`price`], and the cost of one evaluation of each query-time node.
+fn price_nodes(
+    dag: &PhysicalASAPDAG,
+    demand: &[RootDemand],
+    data: &DataWorkload,
+    calibration: &Stage3Calibration,
+) -> Result<
+    (CandidateCost, HashMap<PhysicalASAPNodeId, f64>),
+    (PhysicalASAPNodeId, AnalyticalCostError),
+> {
+    let first = dag
+        .roots
+        .first()
+        .copied()
+        .unwrap_or(0);
     calibration.validate().map_err(|error| (first, error))?;
     let series = data
         .input_cardinality
@@ -1202,8 +1456,10 @@ fn price(
     };
     let reached = reaching_roots(dag);
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
+    let roles = pane_roles(dag);
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
+    let mut per_evaluation = HashMap::new();
     for node in &dag.nodes {
         let ingestion = !node.output_state.timing.is_query_time();
         let inputs: Vec<_> = dag
@@ -1453,21 +1709,40 @@ fn price(
             let read_at_query_time = dag.edges.iter().any(|e| {
                 e.producer == node.id && nodes[&e.consumer].output_state.timing.is_query_time()
             });
-            match read_at_query_time {
+            let retain = |windows: u64, cost: f64, what: &str| {
+                let retained = windows * out.rows * state_bytes(node);
+                (
+                    cost + calibration.cost_per_retained_byte_second * retained as f64,
+                    format!("{detail}; ingestion time, {what}, retains {retained} bytes"),
+                )
+            };
+            match (roles.get(&node.id), read_at_query_time) {
+                (Some(PaneRole::Retained), _) => (
+                    0.0,
+                    "pane kept from an earlier evaluation; built and retained as the newest \
+                     pane"
+                        .to_string(),
+                ),
+                (Some(PaneRole::FeedsRetained), _) => (
+                    0.0,
+                    "feeds only kept panes; done for the newest pane".to_string(),
+                ),
+                // The pane being built and every completed one the
+                // longest window reads.
+                (Some(PaneRole::Newest { panes }), _) => retain(
+                    panes + 1,
+                    cost,
+                    &format!("newest of {panes} panes, keeps {panes} completed"),
+                ),
                 // The window being built and the completed one.
-                true => {
-                    let retained = 2 * out.rows * state_bytes(node);
-                    (
-                        cost + calibration.cost_per_retained_byte_second * retained as f64,
-                        format!("{detail}; ingestion time, retains {retained} bytes"),
-                    )
-                }
-                false => (cost, format!("{detail}; ingestion time")),
+                (None, true) => retain(2, cost, "window being built and the completed one"),
+                (None, false) => (cost, format!("{detail}; ingestion time")),
             }
         } else {
             let roots = reached.get(&node.id).into_iter().flatten();
             let rate = evaluation_rate(roots.filter_map(|&r| demand.get(r)), calibration.horizon_s)
                 .map_err(|error| (node.id, error))?;
+            per_evaluation.insert(node.id, cost);
             (cost * rate, format!("{detail}; x {rate:.4} evaluations/s"))
         };
         output.insert(node.id, out);
@@ -1480,15 +1755,18 @@ fn price(
             },
         );
     }
-    Ok(CandidateCost {
-        total: per_node.values().map(|n| n.cost).sum(),
-        unit: COST_PER_SECOND,
-        source: format!(
-            "analytical-cost-v2 (illustrative statistics, calibration {})",
-            calibration.version
-        ),
-        per_node,
-    })
+    Ok((
+        CandidateCost {
+            total: per_node.values().map(|n| n.cost).sum(),
+            unit: COST_PER_SECOND,
+            source: format!(
+                "analytical-cost-v2 (illustrative statistics, calibration {})",
+                calibration.version
+            ),
+            per_node,
+        },
+        per_evaluation,
+    ))
 }
 
 /// Partitions a per-group ranking assumes, absent group-count evidence.
@@ -1602,7 +1880,24 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_physical_optimizer::implementation::physical_candidates::stage2_physical;
+
+    /// Stage 2's all-query-time candidate.
+    fn stage2_physical(
+        from: &str,
+        roots: &[Rc<OperatorNode>],
+    ) -> Result<
+        PhysicalCandidate,
+        asap_physical_optimizer::implementation::physical_candidates::Stage2Error,
+    > {
+        asap_physical_optimizer::implementation::physical_candidates::stage2_physical(
+            from,
+            roots,
+            &[],
+            &DataWorkload::default(),
+            &|_| None,
+        )
+        .map(|mut stage2| stage2.candidates.swap_remove(0))
+    }
     use asap_types::ir::QueryRoot;
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{Evidence, Predictability, Rate, RepetitionInterval};
@@ -1615,6 +1910,7 @@ mod tests {
                 RepetitionInterval(interval_ms),
             )),
             predictability: Predictability::Unknown,
+            latency_ms: None,
         }
     }
 
@@ -2156,6 +2452,180 @@ mod tests {
         matches!(payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
     }
 
+    /// A p99 over the last 5 min every minute, predictable, over `data`
+    /// arriving continuously; latency bound `latency_ms`.
+    fn pattern_b(
+        data: DataWorkload,
+        latency_ms: Option<f64>,
+    ) -> (StagePipelineRun<usize>, Vec<RootDemand>, DataWorkload) {
+        let demand = vec![RootDemand {
+            accuracy: Some(AccuracyTarget::Epsilon(0.01)),
+            predictability: Predictability::Predictable { known_at: None },
+            latency_ms,
+            ..repeating(None, 60_000)
+        }];
+        let data = DataWorkload {
+            arrival: asap_types::workload::DataArrival::ContinuouslyIngesting,
+            ..data
+        };
+        let root = lower_promql(
+            "quantile_over_time(0.99, m[5m])",
+            AccuracyTarget::Epsilon(0.01),
+        );
+        let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+        let run = plan_stages(
+            vec![(0, QueryRoot::Operator(root))],
+            &demand,
+            &data,
+            PlanningModels::builtin(),
+            MAX_ENUMERATED_CANDIDATES,
+        )
+        .unwrap();
+        (run, demand, data)
+    }
+
+    /// The maintained KLL panes of [`pattern_b`] and their cost.
+    fn maintained_panes(run: &StagePipelineRun<usize>) -> (&PhysicalCandidate, &CandidateCost) {
+        let enumeration = run.enumeration.as_ref().unwrap();
+        let p = enumeration
+            .candidates
+            .iter()
+            .flat_map(|c| &c.physical)
+            .find(|p| p.materialization == "ingestion time: Kll ×5 panes")
+            .expect("maintained KLL panes");
+        (p, &enumeration.selection.costs[&p.id])
+    }
+
+    /// At ingestion time a chain of panes is one pane built as rows arrive
+    /// and kept: the newest pane pays the build and the memory of itself
+    /// and the 5 completed panes; the older panes and their inputs cost
+    /// nothing, since they are earlier evaluations' newest panes.
+    #[test]
+    fn maintained_panes_build_once_and_retain_lookback_over_width_plus_one() {
+        let (run, ..) = pattern_b(data(), None);
+        let (p, cost) = maintained_panes(&run);
+        let builds: Vec<_> = p
+            .dag
+            .nodes
+            .iter()
+            .filter(|n| is_build(&n.payload))
+            .collect();
+        assert_eq!(builds.len(), 5);
+        let charged: Vec<_> = builds
+            .iter()
+            .filter(|n| cost.per_node[&n.id].cost > 0.0)
+            .collect();
+        let [newest] = charged[..] else {
+            panic!("one charged pane: {}", charged.len())
+        };
+        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &newest.payload else {
+            unreachable!()
+        };
+        // data(): λ = 10 000 rows/s into 10 000 series.
+        let node = &cost.per_node[&newest.id];
+        let retained = 6 * 10_000 * summary_shape(family).1;
+        let build = 10_000.0 * 1e-6;
+        assert!(
+            (node.cost - build - 1.25e-7 * retained as f64).abs() < 1e-9,
+            "{}: {}",
+            node.cost,
+            node.detail
+        );
+        let ingestion: Vec<_> = p
+            .dag
+            .nodes
+            .iter()
+            .filter(|n| !n.output_state.timing.is_query_time() && cost.per_node[&n.id].cost > 0.0)
+            .map(|n| cost.per_node[&n.id].detail.clone())
+            .collect();
+        // The scan, one shift, one range and the newest pane.
+        assert_eq!(ingestion.len(), 4, "{ingestion:#?}");
+    }
+
+    /// The latency check (S6) rejects a candidate whose query-time work in
+    /// one evaluation, at one cost unit per ms, exceeds its query's bound,
+    /// and names the query, the estimate and the bound.
+    #[test]
+    fn latency_bound_rejects_slow_query_time_work() {
+        let (run, ..) = pattern_b(data(), None);
+        let enumeration = run.enumeration.as_ref().unwrap();
+        let all: Vec<_> = enumeration
+            .candidates
+            .iter()
+            .flat_map(|c| &c.physical)
+            .collect();
+        assert!(enumeration.selection.rejected.iter().all(|r| r.valid));
+        // Per evaluation, in cost units: per-second cost × 60 s for the
+        // all-query-time candidates.
+        let per_evaluation =
+            |p: &PhysicalCandidate| enumeration.selection.costs[&p.id].total * 60.0;
+        let query_time: Vec<&PhysicalCandidate> = all
+            .iter()
+            .copied()
+            .filter(|p| p.materialization.is_empty())
+            .collect();
+        let (low, high) = query_time
+            .iter()
+            .map(|p| per_evaluation(p))
+            .fold((f64::INFINITY, 0.0f64), |(lo, hi), x| {
+                (lo.min(x), hi.max(x))
+            });
+        let bound = ((low + high) / 2.0).round();
+        let (fast, slow): (Vec<_>, Vec<_>) = query_time
+            .into_iter()
+            .partition(|p| per_evaluation(p) < bound);
+        assert!(!fast.is_empty() && !slow.is_empty(), "{low} {high}");
+        let (bounded, ..) = pattern_b(data(), Some(bound));
+        let selection = &bounded.enumeration.as_ref().unwrap().selection;
+        for p in slow {
+            let reason = &selection
+                .rejected
+                .iter()
+                .find(|r| r.id == p.id)
+                .unwrap()
+                .reason;
+            assert!(
+                reason.starts_with("q1: query-time work takes")
+                    && reason.ends_with(&format!("over the {bound} ms latency bound")),
+                "{reason}"
+            );
+        }
+        for p in fast {
+            assert!(selection.costs.contains_key(&p.id), "{}", p.id);
+        }
+    }
+
+    /// With few series and a high ingestion rate, maintaining the panes
+    /// beats rebuilding the window at every evaluation, and the dynamic
+    /// program, which sees each logical candidate at its cheapest
+    /// materialization, selects what exhaustive selection does.
+    #[test]
+    fn maintained_panes_win_with_few_series_and_dp_agrees() {
+        let few = DataWorkload {
+            ingestion_rate: Evidence {
+                value: Some(Rate(100_000.0)),
+                ..Default::default()
+            },
+            input_cardinality: Evidence {
+                value: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (run, ..) = pattern_b(few, None);
+        let enumeration = run.enumeration.as_ref().unwrap();
+        let selected = &enumeration.selection.selected;
+        assert!(selected.contains("-m"), "{selected}");
+        assert_eq!(&run.plan.selection.selected, selected);
+        assert!(!run.plan.physical.materialization.is_empty());
+        assert!(run.plan.selection.guaranteed_optimal());
+        let (run, ..) = pattern_b(data(), None);
+        let (_, maintained) = maintained_panes(&run);
+        let selection = &run.enumeration.as_ref().unwrap().selection;
+        assert!(maintained.total > selection.costs[&selection.selected].total);
+        assert_eq!(run.plan.selection.selected, selection.selected);
+    }
+
     /// An ingestion-time node is priced over λ rows per second, whatever its
     /// readers' evaluation rate; a query-time node scales with that rate.
     #[test]
@@ -2335,8 +2805,10 @@ mod tests {
                 .find(|v| v.sharing == sharing)
                 .unwrap();
             let raw = vec![0; variant.inventory.targets.len()];
-            let (_, candidate) = realize(variant, &raw).unwrap();
-            let cost = assess(&candidate, &demand, &data, &PlanningModels::builtin()).unwrap();
+            let models = PlanningModels::builtin();
+            let (_, mut stage2) = realize(variant, &raw, &demand, &data, &models).unwrap();
+            let candidate = stage2.candidates.swap_remove(0);
+            let cost = assess(&candidate, &demand, &data, &models).unwrap();
             let scan_rows: Vec<_> = candidate
                 .dag
                 .nodes
