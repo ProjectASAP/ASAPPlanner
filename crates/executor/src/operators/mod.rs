@@ -147,6 +147,13 @@ enum Kind {
         items: Vec<usize>,
         groups: Vec<usize>,
     },
+    /// One shared state for all groups (HydraCms); `weight: None` is a unit count.
+    SharedSummaryBuild {
+        family: SummaryFamilyType,
+        item: usize,
+        weight: Option<usize>,
+        groups: Vec<usize>,
+    },
     KeyedEvaluation {
         state: usize,
         k: usize,
@@ -291,6 +298,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
                 | Kind::SemiJoin { .. }
                 | Kind::SummaryBuild { .. }
                 | Kind::KeyedSummaryBuild { .. }
+                | Kind::SharedSummaryBuild { .. }
                 | Kind::SummaryMerge { .. }
                 | Kind::VectorToScalar { .. }
         )
@@ -342,7 +350,9 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::Window { .. } => "WindowAggregate",
             Kind::SemiJoin { .. } => "SemiJoin",
             Kind::Join { .. } => "RelationalJoin",
-            Kind::SummaryBuild { .. } | Kind::KeyedSummaryBuild { .. } => "SummaryAgg",
+            Kind::SummaryBuild { .. }
+            | Kind::KeyedSummaryBuild { .. }
+            | Kind::SharedSummaryBuild { .. } => "SummaryAgg",
             Kind::KeyedEvaluation { .. } => "SummaryEstimate",
             Kind::SummaryMerge { .. } => "SummaryMerge",
             Kind::Evaluation { .. } => "SummaryEvaluation",
@@ -397,6 +407,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::SummaryBuild { .. }
             | Kind::Evaluation { .. }
             | Kind::KeyedSummaryBuild { .. }
+            | Kind::SharedSummaryBuild { .. }
             | Kind::KeyedEvaluation { .. } => summary::execute(self, inputs, context),
         }
     }

@@ -2,7 +2,7 @@ use crate::summary_kernels::hll_sketch::HllSketchAccumulator;
 use crate::summary_kernels::univmon::UnivMonAccumulator;
 use crate::summary_kernels::{
     CountMinSketchAccumulator, CountMinSketchWithHeapAccumulator, CountSketchAccumulator,
-    CountSketchWithHeapAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator,
+    CountSketchWithHeapAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms,
     HydraKllSketchAccumulator,
 };
 use crate::{AggregateCore, KeyByLabelValues};
@@ -563,7 +563,9 @@ pub fn create_planner_accumulator(
     crate::capability::validate_summary_kernel(family, input, grouping)?;
     use planner_types::ir::schema::GroupingStrategy;
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
-        return Err("shared summary grouping requires a supported Planner Hydra kernel".into());
+        return Err(
+            "shared grouping has one state for all groups; build it with `create_hydra_cms`".into(),
+        );
     }
     if matches!(family, SummaryFamilyType::ExactAggregate(..)) {
         return Ok(Box::new(PlannerExactUpdater {
@@ -645,6 +647,18 @@ pub fn create_planner_accumulator(
         return Err("Planner item expression does not match the selected kernel layout".into());
     }
     Ok(updater)
+}
+
+/// Construct the one state a `SharedMultiSubpopulation { kind: HydraCms }`
+/// family shares across its groups. The update contract is checked with the
+/// plan by `validate_summary_kernel`.
+pub fn create_hydra_cms(family: &SummaryFamilyType) -> Result<HydraCms, String> {
+    let SummaryFamilyType::Sketch(_, grouping) = family else {
+        return Err("HydraCms requires a Count-Min family".into());
+    };
+    let (shared_rows, shared_columns, width, depth) =
+        crate::capability::hydra_cms_shape(family, grouping)?;
+    HydraCms::new(shared_rows, shared_columns, width, depth).map_err(|e| e.to_string())
 }
 
 struct PlannerExactUpdater {
@@ -817,5 +831,48 @@ mod planner_parameter_regression {
             };
             assert_eq!(dims, (3, 128), "{algorithm:?}");
         }
+    }
+
+    // HydraCms builds one shared grid shaped by its Hydra params; it is never
+    // a per-group updater, and its family must be the matching Count-Min.
+    #[test]
+    fn hydra_cms_builds_one_shared_grid() {
+        use planner_types::ir::schema::{GroupingStrategy, HydraKind, HydraParams};
+        let grouping = |width| GroupingStrategy::SharedMultiSubpopulation {
+            kind: HydraKind::HydraCms,
+            params: HydraParams::HydraCms {
+                width,
+                depth: 3,
+                shared_rows: 5,
+                shared_columns: 32,
+            },
+        };
+        let family = |width| {
+            SummaryFamilyType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::Cms,
+                    SketchParams::Cms {
+                        width: 128,
+                        depth: 3,
+                    },
+                ),
+                grouping(width),
+            )
+        };
+        assert_eq!(
+            create_hydra_cms(&family(128)).unwrap().shape(),
+            (5, 32, 128, 3)
+        );
+        assert!(create_hydra_cms(&family(64)).is_err());
+        let update = SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(
+                planner_types::ir::scalar::ColumnRef::Named("host".into()),
+            )),
+            weight: SummaryInputExpr::Constant(1.0),
+            weight_domain: planner_types::ir::schema::WeightDomain::NonNegative {
+                proof: planner_types::ir::schema::NonNegativeWeightProof::UnitCount,
+            },
+        };
+        assert!(create_planner_accumulator(&family(128), &update, &grouping(128)).is_err());
     }
 }

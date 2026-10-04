@@ -219,3 +219,41 @@ fn family_merge_capability() {
         assert_eq!(family.family_merges(), merges, "{family:?}");
     }
 }
+
+/// Shared Hydra grids merge only for linear counter cells (#580 W7).
+#[test]
+fn hydra_merge_capability() {
+    use asap_types::ir::schema::{HydraKind, HydraParams};
+    let hydra = |algorithm, params, kind, hydra_params| {
+        FieldDataType::Sketch(
+            SketchKind::new(algorithm, params),
+            GroupingStrategy::SharedMultiSubpopulation {
+                kind,
+                params: hydra_params,
+            },
+        )
+    };
+    let (width, depth) = (64, 3);
+    let cms = hydra(
+        SketchAlgorithm::Cms,
+        SketchParams::Cms { width, depth },
+        HydraKind::HydraCms,
+        HydraParams::HydraCms {
+            width,
+            depth,
+            shared_rows: 3,
+            shared_columns: 64,
+        },
+    );
+    assert!(cms.family_merges());
+    let kll = hydra(
+        SketchAlgorithm::Kll,
+        SketchParams::Kll { k: 200 },
+        HydraKind::HydraKll,
+        HydraParams::HydraKll {
+            k: 200,
+            shared_buckets: 200,
+        },
+    );
+    assert!(!kll.family_merges());
+}

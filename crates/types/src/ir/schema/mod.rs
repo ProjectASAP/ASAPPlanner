@@ -163,11 +163,18 @@ impl FieldDataType {
     /// state of their union with the family's guarantee intact. Rate/Increase
     /// accumulators depend on window edges, and merged heap top-k states have
     /// no accuracy model yet; families not listed fail closed.
+    ///
+    /// A shared Hydra grid over Count-Min or Count-Sketch cells is linear:
+    /// same-shape grids add cell-wise under the same hashes, giving the grid
+    /// of the union, so Theorem 2 still holds. HydraKll has no accuracy model.
     pub fn family_merges(&self) -> bool {
-        use state_type::{ExactKind as E, SketchAlgorithm as S};
+        use state_type::{ExactKind as E, HydraKind as H, SketchAlgorithm as S};
         match self {
             FieldDataType::ExactAggregate(kind, _) => {
                 matches!(kind, E::Sum | E::Count | E::Min | E::Max)
+            }
+            FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
+                matches!(kind, H::HydraCms | H::HydraCountSketch)
             }
             FieldDataType::Sketch(kind, _) => matches!(
                 kind.algorithm(),

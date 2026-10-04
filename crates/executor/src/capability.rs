@@ -22,7 +22,7 @@ pub fn validate_summary_kernel(
     grouping: &GroupingStrategy,
 ) -> Result<(), String> {
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
-        return Err("shared summary grouping has no registered kernel".into());
+        return validate_hydra_cms(family, input, grouping);
     }
     let keyed = match family {
         SummaryFamilyType::ExactAggregate(kind, params) => {
@@ -111,6 +111,76 @@ pub fn validate_summary_kernel(
     Ok(())
 }
 
+/// The only shared grouping with a kernel: Hydra over Count-Min. Each update
+/// adds a unit or non-negative column weight for one item of one group.
+fn validate_hydra_cms(
+    family: &SummaryFamilyType,
+    input: &SummaryUpdate,
+    grouping: &GroupingStrategy,
+) -> Result<(), String> {
+    use planner_types::ir::schema::{SummaryInputExpr, WeightDomain};
+    hydra_cms_shape(family, grouping)?;
+    if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
+        return Err("HydraCms requires one item column".into());
+    }
+    if !matches!(input.weight_domain, WeightDomain::NonNegative { .. })
+        || !matches!(
+            input.weight,
+            SummaryInputExpr::Constant(1.0) | SummaryInputExpr::Column(_)
+        )
+    {
+        return Err("HydraCms requires a unit or non-negative column weight".into());
+    }
+    Ok(())
+}
+
+/// `(shared_rows, shared_columns, width, depth)` of a HydraCms state. Its
+/// family is the per-group Count-Min it emulates, with the Hydra's own width
+/// and depth.
+pub(crate) fn hydra_cms_shape(
+    family: &SummaryFamilyType,
+    grouping: &GroupingStrategy,
+) -> Result<(usize, usize, usize, usize), String> {
+    use planner_types::ir::schema::{HydraKind, HydraParams};
+    let GroupingStrategy::SharedMultiSubpopulation {
+        kind: HydraKind::HydraCms,
+        params:
+            HydraParams::HydraCms {
+                width,
+                depth,
+                shared_rows,
+                shared_columns,
+            },
+    } = grouping
+    else {
+        return Err("shared summary grouping has no registered kernel".into());
+    };
+    let SummaryFamilyType::Sketch(kind, layout) = family else {
+        return Err("HydraCms requires a Count-Min family".into());
+    };
+    if layout != grouping {
+        return Err("Planner family and operator grouping disagree".into());
+    }
+    if kind.algorithm() != &SketchAlgorithm::Cms
+        || kind.params()
+            != &(SketchParams::Cms {
+                width: *width,
+                depth: *depth,
+            })
+    {
+        return Err("HydraCms family must be Count-Min with the Hydra width and depth".into());
+    }
+    if !valid_matrix(*width, *depth) || !valid_matrix(*shared_columns, *shared_rows) {
+        return Err("invalid HydraCms dimensions".into());
+    }
+    Ok((
+        *shared_rows as usize,
+        *shared_columns as usize,
+        *width as usize,
+        *depth as usize,
+    ))
+}
+
 fn valid_matrix(width: u32, depth: u32) -> bool {
     // Construction uses the kernel's native row hashing, so no encoded-size
     // limit applies here.
@@ -142,9 +212,15 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::ir::schema::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
-        // its bare count, but the DAG does not build it from rows.
+        // its bare count, but the DAG does not build it from rows. HydraCms
+        // is built by the shared summary operator.
         if let (A::Cms, SketchParams::Cms { width, depth }) = (kind.algorithm(), kind.params()) {
-            return if valid_matrix(*width, *depth) && grouping == &Default::default() {
+            if grouping != &GroupingStrategy::PerSubpopulationInstance {
+                return hydra_cms_shape(family, grouping)
+                    .map(|_| ())
+                    .map_err(Error::Invalid);
+            }
+            return if valid_matrix(*width, *depth) {
                 Ok(())
             } else {
                 Err(Error::Invalid(
@@ -211,6 +287,13 @@ pub fn validate_sketch_evaluation(
             | (A::UnivMon, SketchStatistic::Cardinality)
             | (A::UnivMon, SketchStatistic::FrequencyL2)
             | (A::UnivMon, SketchStatistic::FrequencyEntropy) => true,
+            // HydraCms answers a group's item frequency as well as its total.
+            (A::Cms, SketchStatistic::PointCount { .. })
+                if matches!(family, SummaryFamilyType::Sketch(_, grouping)
+                    if grouping != &GroupingStrategy::PerSubpopulationInstance) =>
+            {
+                true
+            }
             // Only count intents read a Count-Min bare count, and their
             // updates have unit weight; the evaluation is typed Int64 on that basis.
             (A::Cms, _) => bare_count,
