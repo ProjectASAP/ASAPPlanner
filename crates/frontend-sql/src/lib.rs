@@ -9,6 +9,7 @@
 //! Depends on DataFusion only — never on the PromQL parser.
 
 pub mod error;
+pub mod frequency;
 pub mod sql;
 
 use std::rc::Rc;
@@ -55,7 +56,9 @@ pub async fn lower_sql_dialect(
     // Binding resolves names and derives every node's schema; result-type
     // checks (such as temporal subtraction, whose duration unit the IR cannot
     // represent) surface here as `ResolveDAGError::Schema`.
-    Ok(resolve_root(&unresolved)?)
+    let root = resolve_root(&unresolved)?;
+    // #509 Example 2: the L2 and entropy idioms become frequency intents.
+    Ok(frequency::recognize_frequency_idioms(&root).unwrap_or(root))
 }
 
 /// Lower every SQL batch entry in `workload` to an operator DAG.
