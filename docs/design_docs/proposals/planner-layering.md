@@ -16,8 +16,8 @@ design is extended.
 - [ASAPPlanner Design](#asapplanner-design)
   - [Design Intuition](#design-intuition)
   - [Assumptions](#assumptions)
-  - [ASAPPlanner Stages](#asapplanner-stages)
-- [Stages and their decisions](#stages-and-their-decisions)
+  - [ASAPPlanner System Overview: Planning Stages](#asapplanner-system-overview-planning-stages)
+- [ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies](#asapplanner-detailed-design-planning-stages-and-their-decisionsstrategies)
   - [0. Language-specific frontends](#0-language-specific-frontends)
   - [1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization)
     - [Pass 1: Local candidate generation](#pass-1-local-candidate-generation)
@@ -69,7 +69,7 @@ design is extended.
 * ASAPPlanner should selecting the optimal physical plan. 
   * The optimization goals include reducing total query execution costs, obeying the application accuracy target.
   * The use case deployment can take the physical plan and determine how the engines runs the plan at runtime (execution). So deployment constraints can be the input to ASAPPlanner for some invalid plans early pruning (e.g., if the deployment has no materialized view computation engine, MV is not an optimziation option).
-  * *Efficiency of selecting optimal physical plan*: ASAPPlanner currently doesn't consider how to early prune sub-optimal plans but just generates all possible candidates and then select an optimal one among all of them.
+  * *Efficiency of selecting optimal physical plan*: ASAPPlanner currently doesn't consider how to early remove sub-optimal plans but just generates all possible candidates and then select an optimal one among all of them.
   
 > --> VS: not clear what this means. it may be useful to have concrete use csaes and requirements 
 
@@ -144,7 +144,7 @@ ASAPPlanner relies on the assumptions below.
    * For ASAPPlanner, given one batch of queries (as a multi-root DAG), the strategies can be applied to a sub-DAG inside the DAG, one sub-DAG (part of the query execution) can be mapped to different candidates based on the strategies, this gives us an initial brute-force version of plan candidate generation.  
    * The semantic/structure of the strategies (rules) are based on the logical DAG representation, where a pattern of a sub-DAG in the DAG can be identified, and being replace by another sub-DAG with ASAP-aware operators (primitive operators).
    * These strategies can be potentially shared in different use cases and workloads, we depend on the cost model to rank all possible plans. For example, both the repeated dashboard query over time series data, and the batch query execution over data at rest, can leverage the TopK as a Count-Min Sketch replacement strategy. 
-   The strategies we have applied in ASAPPlanner, see Section [Stages and their decisions](#stages-and-their-decisions). 
+   The strategies we have applied in ASAPPlanner, see Section [Stages and their decisions](#asapplanner-detailed-design-planning-stages-and-their-decisionsstrategies). 
  
 > --> VS: are there priorities across rules, is the mapping from query to rule one to one or one to many?
 
@@ -184,48 +184,90 @@ model and capabilities, but never optimize queries.
 In the diagram, × means the Cartesian product: each stage combines every option based on the replacement strategies along one dimension with every option along the others.
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 900, "nodeSpacing": 40, "rankSpacing": 40}}}%%
 flowchart TB
-  IN["<b>Query workload</b><br/>PromQL / SQL / MetricsQL, query recurrence,<br/>accuracy requirements, latency requirements<br/><br/><b>+ Data workload</b><br/>streaming vs. data at rest, data distribution, cardinality<br/><br/><b>+ Deployment inputs</b><br/>cost model, accuracy model, deployment capabilities"]:::input
+  subgraph INPUTS[" "]
+    direction LR
+    QW["Query workload<br/>(PromQL / SQL / MetricsQL,<br/>query recurrence,<br/>accuracy requirements,<br/>latency requirements)"]:::input
+    DW["+ Data workload<br/>(streaming vs. data at rest,<br/>data distribution,<br/>cardinality)"]:::input
+    DI["+ Deployment inputs<br/>(cost model,<br/>accuracy model,<br/>deployment capabilities)"]:::input
+  end
 
   subgraph PLANNER["ASAPPlanner"]
     direction TB
-    S0["<b>0. Query-language-specific frontends</b><br/>Parse and convert source-language queries into a common logical<br/>representation. Reject unsupported query expressions.<br/><br/>Output: CandidateLogicalDAGs (a set of LogicalDAG)"]:::stage
+    subgraph ST0[" "]
+      direction TB
+      H0["0. Query-language-specific frontends"]:::title
+      B0["Parse and convert source-language queries into a common logical<br/>representation. Reject unsupported query expressions.<br/><br/>Output: CandidateLogicalDAGs (a set of LogicalDAG)"]:::body
+      H0 ~~~ B0
+    end
 
     subgraph LOGICAL["Logical planning — what to compute"]
-      S1["<b>1. Logical ASAP-aware optimization</b><br/>Explore semantically equivalent and legal logical candidates:<br/><br/>summary families, summary operations<br/>× query rewrites<br/>× sharing one common subexpresion/summary across multiple computations<br/><br/>Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)"]:::stage
+      direction TB
+      subgraph ST1[" "]
+        direction TB
+        H1["1. Logical ASAP-aware optimization"]:::title
+        B1["Explore semantically equivalent and legal logical candidates:<br/><br/>summary families, summary operations<br/>× query rewrites<br/>× sharing one common subexpresion/summary across multiple computations<br/><br/>Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)"]:::body
+        H1 ~~~ B1
+      end
     end
 
     subgraph PHYSICAL["Physical planning — how to compute"]
-      S2["<b>2. Physical ASAP-aware optimization</b><br/>Explore physical implementations of each logical candidate:<br/><br/>materialization decisions<br/>× physical operator implementations<br/>× parallelism and partitioning<br/>× resource management<br/><br/>Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)"]:::stage
+      direction TB
+      subgraph ST2[" "]
+        direction TB
+        H2["2. Physical ASAP-aware optimization"]:::title
+        B2["Explore physical implementations of each logical candidate:<br/><br/>materialization decisions<br/>× physical operator implementations<br/>× parallelism and partitioning<br/>× resource management<br/><br/>Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)"]:::body
+        H2 ~~~ B2
+      end
     end
 
-    S3["<b>3. Plan selection</b><br/>Evaluate complete physical candidates using the deployment's<br/>empirical cost and accuracy models. Reject candidates that violate<br/>accuracy, latency, or capability constraints.<br/><br/>Choose the cheapest valid plan for the whole workload."]:::stage
+    subgraph ST3[" "]
+      direction TB
+      H3["3. Plan selection"]:::title
+      B3["Evaluate complete physical candidates using the deployment's<br/>empirical cost and accuracy models. Reject candidates that violate<br/>accuracy, latency, or capability constraints.<br/><br/>Choose the cheapest valid plan for the whole workload."]:::body
+      H3 ~~~ B3
+    end
 
-    S0 --> S1 --> S2 --> S3
+    ST0 --> LOGICAL --> PHYSICAL --> ST3
   end
 
   subgraph DEPLOY["Deployment"]
-    S4["<b>4. Execution</b><br/>deployment executes the selected DAG (plan)."]:::stage
+    direction TB
+    subgraph ST4[" "]
+      direction TB
+      H4["4. Execution"]:::title
+      B4["deployment executes the selected DAG (plan)."]:::body
+      H4 ~~~ B4
+    end
   end
 
-  IN --> S0
-  S3 -- "one selected PhysicalASAPDAG" --> S4
+  INPUTS --> ST0
+  ST3 -- "one selected PhysicalASAPDAG" --> DEPLOY
 
-  click S0 href "#0-language-specific-frontends"
-  click S1 href "#1-logical-asap-aware-optimization"
-  click S2 href "#2-physical-asap-aware-optimization"
-  click S3 href "#3-plan-selection"
-  click S4 href "#4-execution"
+  click H0 href "#0-language-specific-frontends"
+  click H1 href "#1-logical-asap-aware-optimization"
+  click H2 href "#2-physical-asap-aware-optimization"
+  click H3 href "#3-plan-selection"
+  click H4 href "#4-execution"
 
   classDef input fill:#f1f3f4,stroke:#5f6368,color:#000;
-  classDef stage fill:#fff,stroke:#5f6368,color:#000;
+  classDef title fill:none,stroke:none,color:#0969da,font-weight:bold;
+  classDef body fill:none,stroke:none,color:#000;
+  style INPUTS fill:none,stroke:none;
+  style ST0 fill:#fff,stroke:#5f6368;
+  style ST1 fill:#fff,stroke:#5f6368;
+  style ST2 fill:#fff,stroke:#5f6368;
+  style ST3 fill:#fff,stroke:#5f6368;
+  style ST4 fill:#fff,stroke:#5f6368;
 ```
 
-Stage details: [0. Frontends](#0-language-specific-frontends) ·
-[1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization) ·
-[2. Physical ASAP-aware optimization](#2-physical-asap-aware-optimization) ·
-[3. Plan selection](#3-plan-selection) ·
-[4. Execution](#4-execution)
+Stage details: 
+- [0. Frontends](#0-language-specific-frontends) ·
+- [1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization) ·
+- [2. Physical ASAP-aware optimization](#2-physical-asap-aware-optimization) ·
+- [3. Plan selection](#3-plan-selection) ·
+- [4. Execution](#4-execution)
 
 
 > --> VS: this sounds good. it may be useful to say "why" we decouple into stages or if the decoupling loses some functionality or optimality? 
@@ -236,9 +278,7 @@ Stage details: [0. Frontends](#0-language-specific-frontends) ·
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
-Stages 0 to 2 each output a candidate set holding every semantically equivalent
-and legal candidate DAG of that stage; stage 3 is the only step that chooses
-one candidate DAG as output. Candidate sets are internal to ASAPPlanner and may
+Stages 0 to 2 (logical and physical planning stages) each output a candidate set holding every semantically equivalent and legal candidate DAG of that stage; stage 3 is the only step that chooses one candidate DAG as output currently (TODO: early selection for valid and more efficient candidates of stage 0-2 can be designed later). Candidate sets are internal to ASAPPlanner and may
 be shared or enumerated lazily. Two kinds of removal are kept apart:
 
 * **Pruning** removes an **invalid** candidate. Any stage may prune, but only
@@ -251,7 +291,7 @@ be shared or enumerated lazily. Two kinds of removal are kept apart:
 A candidate is a DAG for the **whole workload**, not for one query. Each stage
 combines its choices for every sub-DAG with the candidates it receives (the ×
 in the diagram), so the candidate set grows from stage to stage until
-selection picks one. Example 1 traces this growth step by step.
+selection picks one. [Example 1](#example-1-aggregation-over-dimensions--the-candidate-set-through-every-stage) traces this growth step by step.
 
 | Stage | Input | Decides | Output |
 |---|---|---|---|
@@ -263,7 +303,7 @@ selection picks one. Example 1 traces this growth step by step.
 
 The sections below describe each stage.
 
---> VS: What is CSE? expand on first use?
+> --> VS: What is CSE? expand on first use?
 
 
 ### 0. Language-specific frontends
