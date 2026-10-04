@@ -1,8 +1,10 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --example planner-layering-1 --max-candidates 128 --out planner-layering-example1.json
-// (also planner-layering-3a and planner-layering-3b: #509 Example 3,
-// Patterns A and B; planner-layering-4a: Example 4, Pattern A repeated
-// monthly)
+// (also planner-layering-2: #509 Example 2, three SQL statistics over
+// `flows`; planner-layering-3a and planner-layering-3b: Example 3, Patterns A
+// and B; planner-layering-4a: Example 4, Pattern A repeated monthly;
+// planner-layering-4b: Example 4's Q49 crossover, Pattern B's hourly p99
+// every 10 min on a deployment that does not keep raw data)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 //
@@ -28,7 +30,8 @@
 //     be built) or costlier.
 //
 // The deployment inputs are the built-in cost and accuracy models and the
-// reference executor's capabilities (`asap_executor::capabilities`).
+// reference executor's capabilities (`asap_executor::capabilities`; without
+// raw data retention for planner-layering-4b).
 //
 //   - deployment: the deployment inputs Stage 3 used (the executor's
 //     capabilities, summarized; the cost model and its Stage3Calibration;
@@ -49,14 +52,14 @@ use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, LocalLogicalCandidates,
 };
 use asap_logical_optimizer::Realization;
-use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{
     plan_stages, Selection, Sharing, COST_MODEL, COST_PER_SECOND, MAX_ENUMERATED_CANDIDATES,
 };
+use asap_plan_selection::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::export::{
     compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPDAGDocument,
 };
-use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
+use asap_types::ir::schema::{DataType, Field, GroupingStrategy, Schema, SketchAlgorithm};
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
@@ -64,12 +67,13 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
     Evidence, EvidenceSource, LatencyRequirement, MetricType, PlanningWorkload, Predictability,
     Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection, TimestampMs,
+    RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, SqlDialect, TimeSelection,
+    TimestampMs,
 };
 use serde_json::{json, Value};
 
 const USAGE: &str =
-    "usage: stage_pipeline (--example planner-layering-{1,3a,3b,4a} | --promql <query>... \
+    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b,4a,4b} | --promql <query>... \
 [--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) [--max-candidates <n>] --out <file>";
 
 fn main() {
@@ -102,9 +106,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     let workload = match (example.as_deref(), queries.is_empty()) {
         (Some("planner-layering-1"), true) => planner_layering_example1(),
+        (Some("planner-layering-2"), true) => planner_layering_example2(),
         (Some("planner-layering-3a"), true) => planner_layering_example3a(),
         (Some("planner-layering-3b"), true) => planner_layering_example3b(),
         (Some("planner-layering-4a"), true) => planner_layering_example4a(),
+        (Some("planner-layering-4b"), true) => planner_layering_example4b(),
         (Some(other), true) => return Err(format!("unknown example {other}")),
         (None, false) => {
             let accuracy = match (epsilon, delta) {
@@ -118,24 +124,49 @@ fn run(args: Vec<String>) -> Result<(), String> {
         _ => return Err("give exactly one of --example or --promql".into()),
     };
     let out = out.ok_or("--out is required")?;
-    let document = stage_pipeline(&workload, max_candidates)?;
+    let capabilities = DeploymentCapabilities {
+        // Example 4b's crossover needs a deployment that does not keep raw data.
+        raw_data_retained: example.as_deref() != Some("planner-layering-4b"),
+        ..asap_executor::capabilities()
+    };
+    let document = stage_pipeline(&workload, &capabilities, max_candidates)?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))
 }
 
-fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<Value, String> {
-    // PromQL rows carry each series' full identity as a column: the row
-    // representation per-series state needs at runtime.
-    let roots = asap_frontend_promql::lower_promql_query_workload(workload, 0)
-        .map_err(|e| format!("lowering: {e}"))?
-        .into_iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => with_promql_series_identity(&node)
-                .map(QueryRoot::Operator)
-                .map_err(|e| format!("series identity: {e}")),
-            scalar => Ok(scalar),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+fn stage_pipeline(
+    workload: &PlanningWorkload,
+    capabilities: &DeploymentCapabilities,
+    max_candidates: usize,
+) -> Result<Value, String> {
+    let roots = match workload.query_workload.language {
+        // The only SQL workload here is Example 2's, over `flows`.
+        QueryLanguage::SQL(_) => tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(|e| e.to_string())?
+            .block_on(asap_frontend_sql::lower_sql_batch(
+                &workload.query_workload,
+                &flows_catalog(),
+            ))
+            .into_iter()
+            .map(|root| {
+                root.map(QueryRoot::Operator)
+                    .map_err(|e| format!("lowering: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        // PromQL rows carry each series' full identity as a column: the row
+        // representation per-series state needs at runtime.
+        _ => asap_frontend_promql::lower_promql_query_workload(workload, 0)
+            .map_err(|e| format!("lowering: {e}"))?
+            .into_iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => with_promql_series_identity(&node)
+                    .map(QueryRoot::Operator)
+                    .map_err(|e| format!("series identity: {e}")),
+                scalar => Ok(scalar),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     let stage0 = export(&roots)?;
     let demand: Vec<RootDemand> = workload
         .query_workload
@@ -143,8 +174,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         .map(|entry| RootDemand::from(&entry))
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let capabilities = asap_executor::capabilities();
-    let models = PlanningModels::builtin().with_capabilities(&capabilities);
+    let models = PlanningModels::builtin().with_capabilities(capabilities);
     let run = plan_stages(
         roots.into_iter().enumerate().collect(),
         &demand,
@@ -372,6 +402,10 @@ fn label(inventory: &LocalLogicalCandidates<usize>, owners: &[usize], choice: &[
 }
 
 fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
+    let language = match workload.query_workload.language {
+        QueryLanguage::SQL(_) => "sql",
+        _ => "promql",
+    };
     workload
         .query_workload
         .entries()
@@ -395,7 +429,7 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
             }
             json!({
                 "id": format!("q{}", index + 1),
-                "language": "promql",
+                "language": language,
                 "text": entry.query.0,
                 "requirements": requirements,
             })
@@ -490,6 +524,67 @@ fn planner_layering_example1() -> PlanningWorkload {
             distribution: declared(DataDistribution::Zipf),
             // `http_requests_total` is a counter: its samples are never negative.
             metric_types: [("http_requests_total".into(), MetricType::Counter)].into(),
+        }),
+    }
+}
+
+/// #509 Example 2's `flows` table.
+fn flows_catalog() -> asap_frontend_sql::SqlCatalog {
+    asap_frontend_sql::SqlCatalog::new().with_table(
+        "flows",
+        Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("src_ip", DataType::Utf8, false),
+        ]),
+    )
+}
+
+/// #509 Example 2: distinct count, entropy and L2 of `src_ip` over the last
+/// minute, one-time, as in `planner_layering_example2.rs`. Q3 casts its
+/// product to DOUBLE: the design's Int64 `c * c` can overflow, so the L2 rule
+/// does not accept it.
+fn planner_layering_example2() -> PlanningWorkload {
+    const WINDOW: &str = "WHERE ts >= now() - INTERVAL '1 minute'";
+    let queries = [
+        (format!("SELECT COUNT(DISTINCT src_ip) FROM flows {WINDOW}"), 0.02),
+        (
+            format!("SELECT -SUM(p * LN(p)) FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows {WINDOW} GROUP BY src_ip)"),
+            0.05,
+        ),
+        (
+            format!("SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FROM (SELECT src_ip, COUNT(*) AS c FROM flows {WINDOW} GROUP BY src_ip)"),
+            0.01,
+        ),
+    ];
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: Some(
+                queries
+                    .into_iter()
+                    .map(|(query, epsilon)| BatchEntry {
+                        query: Query(query),
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                                epsilon,
+                                delta: 0.01,
+                            }),
+                            ..Default::default()
+                        },
+                        predictability: Default::default(),
+                        invocations: 1,
+                        execute_at: None,
+                        time_selection: Default::default(),
+                    })
+                    .collect(),
+            ),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+            ingestion_rate: declared(Rate(100_000.0)),
+            input_cardinality: declared(10_000_000),
+            ..Default::default()
         }),
     }
 }
@@ -630,4 +725,25 @@ fn planner_layering_example3b() -> PlanningWorkload {
         },
         data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
     }
+}
+
+/// #509 Example 4's Q49 crossover (`stage3_b_panes_smaller_than_their_raw_data_win`):
+/// Pattern B's p99 over the last hour every 10 min, over 1,000 series sampled
+/// every second. Run on a deployment that does not keep raw data, where the
+/// 10-min KLL panes are smaller than the samples they cover.
+fn planner_layering_example4b() -> PlanningWorkload {
+    let mut workload = planner_layering_example3b();
+    let entry = &mut workload
+        .query_workload
+        .repeating_queries
+        .as_mut()
+        .expect("Pattern B repeats")[0];
+    entry.query = Query("quantile_over_time(0.99, latency_ms[60m])".into());
+    entry.demand = RepeatedDemand::FixedInterval(RepetitionInterval(600_000));
+    entry.time_selection.lookback = Some(DurationMs(3_600_000));
+    let data = workload.data_workload.as_mut().expect("Pattern B's data");
+    data.data_ingestion_interval = declared(DurationMs(1_000));
+    data.ingestion_rate = declared(Rate(1_000.0));
+    data.input_cardinality = declared(1_000);
+    workload
 }

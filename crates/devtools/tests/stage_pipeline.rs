@@ -1,4 +1,4 @@
-//! `stage_pipeline` writes a valid four-stage viewer document for #509 Example 1.
+//! `stage_pipeline` writes valid four-stage viewer documents for #509's examples.
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
@@ -193,6 +193,86 @@ fn example4a_repeats_monthly_with_nothing_maintainable() {
             .unwrap()
     };
     assert!(cost(&monthly) < cost(&once));
+}
+
+/// Every exported DAG in `document` validates with one root per query, and
+/// the selected candidate is a Stage 2 candidate with a cost.
+fn assert_valid_document(document: &Value, queries: usize) {
+    assert_eq!(document["format"], "asap-stage-pipeline/v1");
+    assert_eq!(
+        document["workload"]["queries"].as_array().unwrap().len(),
+        queries
+    );
+    validated_dag(&document["stage0_logical"]["dag"], queries);
+    for candidate in document["stage1_logical_asap"]["candidates"]
+        .as_array()
+        .unwrap()
+    {
+        validated_dag(&candidate["dag"], queries);
+    }
+    let physical = document["stage2_physical_asap"]["candidates"]
+        .as_array()
+        .unwrap();
+    for candidate in physical {
+        let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
+        assert_eq!(dag.roots.len(), queries);
+        PhysicalASAPDAGDocument::new(dag).validate().unwrap();
+    }
+    let stage3 = &document["stage3_selection"];
+    let selected = stage3["selected"].as_str().unwrap();
+    assert!(physical.iter().any(|p| p["id"] == selected));
+    assert!(stage3["costs"][selected]["total"].as_f64().is_some());
+}
+
+/// The selected Stage 2 candidate's label.
+fn selected_label(document: &Value) -> String {
+    let selected = &document["stage3_selection"]["selected"];
+    document["stage2_physical_asap"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| &p["id"] == selected)
+        .unwrap()["label"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Example 2: the three SQL statistics over `flows` lower through the SQL
+/// frontend, are reported as SQL, and plan. The built-in models have no
+/// UnivMon accuracy model, so the selected plan is the exact one with the
+/// shared input (recorded, not required by the design).
+#[test]
+fn example2_plans_the_sql_workload() {
+    let document = generate(&["--example", "planner-layering-2", "--max-candidates", "200"]);
+    assert_valid_document(&document, 3);
+    assert!(document["workload"]["queries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|q| q["language"] == "sql"));
+    assert_eq!(document["stage1_logical_asap"]["capped"], false);
+    assert_eq!(
+        selected_label(&document),
+        "Q1 exact · Q2 exact (Count acc) · Q3 exact (Count acc) · shared summary"
+    );
+}
+
+/// Example 4b (Q49): on a deployment that does not keep raw data, the hourly
+/// p99 every 10 min over 1,000 series sampled every second selects the
+/// tumbling KLL maintained at ingestion time (B1), and the document says the
+/// deployment keeps no raw data.
+#[test]
+fn example4b_selects_ingestion_time_panes_without_raw_data() {
+    let document = generate(&["--example", "planner-layering-4b"]);
+    assert_valid_document(&document, 1);
+    assert_eq!(
+        document["deployment"]["capabilities"]["raw_data_retained"],
+        false
+    );
+    let label = selected_label(&document);
+    assert!(label.contains("ingestion time"), "{label}");
+    assert!(label.contains("tumbling 10m panes"), "{label}");
 }
 
 /// The document records the deployment inputs Stage 3 used: the executor's
