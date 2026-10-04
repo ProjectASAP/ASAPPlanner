@@ -3,10 +3,10 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput};
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates;
 use asap_plan_selection::{select_exhaustive, PlanningModels, MAX_ENUMERATED_CANDIDATES};
+use asap_planner::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
@@ -242,7 +242,7 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
             "mangling"
         }
         fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
-            let mut output = asap_aware_mapping::StagePipeline.optimize(input)?;
+            let mut output = asap_planner::StagePipeline.optimize(input)?;
             for plan in output.plans.iter_mut() {
                 plan.entry_index += 1;
             }
