@@ -19,6 +19,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+mod executor_models;
+use executor_models::executor_models;
+
 use asap_plan_selection::PlanningModels;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::schema::state_type::{GroupingStrategy, HydraKind, SketchAlgorithm};
@@ -165,7 +168,7 @@ mod stages {
             lower(workload).into_iter().enumerate().collect(),
             &demand,
             workload.data_workload.as_ref().expect("data workload"),
-            PlanningModels::builtin(),
+            executor_models(),
             DISPLAYED,
         )
         .expect("plans");
@@ -1024,7 +1027,7 @@ fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
 /// candidates invalid for their weights.
 fn assert_runtime_agrees_with_stage3(workload: PlanningWorkload) -> usize {
     let (workload, _, physical) = pipeline_for(workload);
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     let invalid: BTreeMap<_, _> = selection
         .rejected
         .iter()
@@ -1100,12 +1103,42 @@ fn stage2_count_sketch_heap_topk_compiles_in_the_physical_planner() {
 #[test]
 fn stage3_selected_plan_compiles_in_the_physical_planner() {
     let (workload, _, physical) = pipeline();
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     let selected = physical
         .iter()
         .find(|p| p.id == selection.selected)
         .unwrap();
     compile_in_runtime(selected).unwrap();
+}
+
+/// Deployment inputs (C2, added by the implementer): the reference
+/// executor's exported capabilities reject no candidate its physical planner
+/// compiles, and planning with them selects what the unrestricted default
+/// does, at the same costs (Example 1 needs nothing the executor lacks, and
+/// both keep raw data, so no raw retention is priced).
+#[test]
+fn executor_capabilities_accept_every_compiled_candidate_and_keep_the_selection() {
+    let (workload, _, physical) = pipeline();
+    let executor = stage3_select(&workload, &physical, executor_models());
+    let default = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let mut compiled = 0;
+    for p in &physical {
+        if compile_in_runtime(p).is_ok() {
+            compiled += 1;
+            if let Some(r) = executor.rejected.iter().find(|r| r.id == p.id) {
+                assert!(!r.reason.contains("deployment"), "{}: {}", p.id, r.reason);
+            }
+        }
+    }
+    assert_eq!(compiled, physical.len());
+    assert_eq!(executor.selected, default.selected);
+    let totals = |s: &Selection| -> BTreeMap<String, f64> {
+        s.costs
+            .iter()
+            .map(|(id, c)| (id.clone(), c.total))
+            .collect()
+    };
+    assert_eq!(totals(&executor), totals(&default));
 }
 
 // ── Stage 3 ──────────────────────────────────────────────────────────────
@@ -1114,7 +1147,7 @@ fn stage3_selected_plan_compiles_in_the_physical_planner() {
 #[test]
 fn stage3_selects_one_and_explains_the_rest() {
     let (workload, _, physical) = pipeline();
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     let all: BTreeSet<_> = physical.iter().map(|p| p.id.clone()).collect();
     let mut accounted: BTreeSet<_> = selection.rejected.iter().map(|r| r.id.clone()).collect();
     assert_eq!(
@@ -1134,7 +1167,7 @@ fn stage3_selects_one_and_explains_the_rest() {
 #[test]
 fn stage3_selects_cheapest_valid() {
     let (workload, _, physical) = pipeline();
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     let invalid: BTreeSet<_> = selection
         .rejected
         .iter()
@@ -1154,7 +1187,7 @@ fn stage3_selects_cheapest_valid() {
 #[test]
 fn stage3_rejects_candidates_over_the_latency_bound() {
     let (workload, _, physical) = pipeline();
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     let over: BTreeSet<_> = selection
         .rejected
         .iter()
@@ -1186,7 +1219,7 @@ fn stage3_rejects_candidates_over_the_latency_bound() {
 #[test]
 fn stage3_per_second_cost_keeps_the_ranking() {
     let (workload, _, physical) = pipeline();
-    let per_second = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let per_second = stage3_select(&workload, &physical, executor_models());
     // Evaluated once per second, a candidate's cost is its per-evaluation cost.
     let mut every_second = workload.clone();
     for entry in every_second
@@ -1197,7 +1230,7 @@ fn stage3_per_second_cost_keeps_the_ranking() {
     {
         entry.demand = RepeatedDemand::FixedInterval(RepetitionInterval(1_000));
     }
-    let per_evaluation = stage3_select(&every_second, &physical, PlanningModels::builtin());
+    let per_evaluation = stage3_select(&every_second, &physical, executor_models());
     assert_eq!(per_second.selected, "P82");
     assert_eq!(per_evaluation.selected, "P82");
     for (id, cost) in per_second.costs.iter().filter(|(id, _)| !id.contains("-m")) {
@@ -1213,7 +1246,7 @@ fn stage3_per_second_cost_keeps_the_ranking() {
 #[test]
 fn stage3_charges_each_node_once() {
     let (workload, _, physical) = pipeline();
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     let invalid: BTreeSet<_> = selection
         .rejected
         .iter()
@@ -1248,7 +1281,7 @@ fn stage3_charges_each_node_once() {
 #[test]
 fn stage3_shared_input_is_not_costlier() {
     let (workload, _, physical) = pipeline();
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     // All query time: a maintained-pane candidate cannot share the scan.
     let by_combo: BTreeMap<_, _> = physical
         .iter()
@@ -1288,7 +1321,7 @@ fn stage3_shared_input_is_not_costlier() {
 #[test]
 fn stage3_selects_a_shared_input_plan() {
     let (workload, _, physical) = pipeline();
-    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let selection = stage3_select(&workload, &physical, executor_models());
     let selected = physical
         .iter()
         .find(|p| p.id == selection.selected)
