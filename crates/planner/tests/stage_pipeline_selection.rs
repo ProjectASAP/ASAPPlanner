@@ -390,6 +390,50 @@ async fn sql_dp_equals_exhaustive() {
     assert_dp_matches_exhaustive(&inventory, &workload, 15);
 }
 
+/// A SQL grouped count, which also has a HydraCms alternative (#580 W7),
+/// and a percentile select the exhaustive minimum.
+#[tokio::test]
+async fn sql_hydra_count_dp_equals_exhaustive() {
+    let accuracy = AccuracyTarget::Epsilon(0.1);
+    let queries = [
+        "SELECT l_orderkey, COUNT(*) FROM lineitem GROUP BY l_orderkey",
+        "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem",
+    ];
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: Some(queries.iter().map(|q| batch(q, accuracy.clone())).collect()),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::AtRest,
+            ..Default::default()
+        }),
+    };
+    let catalog = SqlCatalog::new().with_table(
+        "lineitem",
+        Schema::new(vec![
+            Field::plain("l_orderkey", DataType::Int64, false),
+            Field::plain("l_extendedprice", DataType::Float64, false),
+        ]),
+    );
+    let mut roots = Vec::new();
+    for (index, query) in queries.iter().enumerate() {
+        let root = lower_sql_dialect(query, &catalog, SqlDialect::DataFusionSQL, accuracy.clone())
+            .await
+            .expect("lowers");
+        roots.push((index, QueryRoot::Operator(root)));
+    }
+    let inventory = stage1_logical_candidates(roots, &Default::default(), &[]).expect("Stage 1");
+    assert!(inventory[0]
+        .inventory
+        .targets
+        .iter()
+        .any(|t| t.groupings.iter().any(|g| *g != Default::default())));
+    // (pass-through, Count acc, CMS, CountSketch, UnivMon, HydraCms) × (pass-through, KLL, DDSketch).
+    assert_dp_matches_exhaustive(&inventory, &workload, 18);
+}
+
 /// PromQL queries, each with its own ε (δ = 0.001).
 fn promql_with(queries: &[(&str, f64)]) -> PlanningWorkload {
     let mut workload = promql(&[], 1_000);

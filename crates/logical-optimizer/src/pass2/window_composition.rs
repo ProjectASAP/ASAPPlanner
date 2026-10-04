@@ -206,32 +206,32 @@ pub fn add_window_forms<Id>(inventory: &mut LocalLogicalCandidates<Id>, demand: 
         if !panes_tile_window(&window, pane_ms) {
             continue;
         }
-        let tumbling: Vec<Realization> = target
+        let tumbling: Vec<(Realization, GroupingStrategy)> = target
             .alternatives
             .iter()
             .zip(&target.absorbs)
-            .filter(|(alternative, absorbs)| {
-                absorbs.is_none() && family(alternative).is_some_and(|f| f.family_merges())
+            .zip(&target.groupings)
+            .filter(|((alternative, absorbs), grouping)| {
+                absorbs.is_none()
+                    && family(alternative, grouping).is_some_and(|f| f.family_merges())
             })
-            .map(|(alternative, _)| alternative.clone())
+            .map(|((alternative, _), grouping)| (alternative.clone(), grouping.clone()))
             .collect();
-        for alternative in tumbling {
+        for (alternative, grouping) in tumbling {
             target.alternatives.push(alternative);
             target.absorbs.push(None);
             target.windows.push(WindowForm::Tumbling { pane_ms });
+            target.groupings.push(grouping);
         }
     }
 }
 
-fn family(realization: &Realization) -> Option<FieldDataType> {
+fn family(realization: &Realization, grouping: &GroupingStrategy) -> Option<FieldDataType> {
     match realization {
         Realization::ExactAggregate { kind, params } => {
             Some(FieldDataType::ExactAggregate(kind.clone(), params.clone()))
         }
-        Realization::Sketch(kind) => Some(FieldDataType::Sketch(
-            kind.clone(),
-            GroupingStrategy::default(),
-        )),
+        Realization::Sketch(kind) => Some(FieldDataType::Sketch(kind.clone(), grouping.clone())),
         _ => None,
     }
 }
@@ -508,7 +508,7 @@ mod tests {
             Ok(OperatorNode::new_shared(Operator::ASAP(
                 ASAPOp::SummaryAgg {
                     child: input,
-                    family: family(&target.alternatives[1]).unwrap(),
+                    family: family(&target.alternatives[1], &GroupingStrategy::default()).unwrap(),
                     input: asap_types::ir::schema::SummaryUpdate::column(
                         asap_types::ir::scalar::ColumnRef::SampleValue,
                     ),
