@@ -365,9 +365,9 @@ mod tests {
             .remove(0);
         let root = promql_rows::with_series_identity(&root).unwrap();
         let space = asap_logical_optimizer::search_workload(vec![("q", root)]);
-        let selected = asap_aware_mapping::plan_selection::candidate_selection::global_selection(
+        let selected = asap_plan_selection::candidate_selection::global_selection(
             &space,
-            &asap_aware_mapping::cost_model::DefaultCostModel,
+            &asap_plan_selection::cost::cost_model::DefaultCostModel,
         )
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()

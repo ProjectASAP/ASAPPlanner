@@ -26,8 +26,9 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 // `e2e_plan` or straight to `optimize`.
 pub use asap_aware_mapping::pass::{
     optimize, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry, PlanOutput,
-    PlanningModels, QueryPlan, StagePipeline,
+    QueryPlan, StagePipeline,
 };
+pub use asap_plan_selection::PlanningModels;
 
 // ── Input ────────────────────────────────────────────────────────────────
 

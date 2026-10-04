@@ -9,6 +9,7 @@ const FORBIDDEN_MODULES: &[&str] = &["cost_model", "recurrence"];
 /// Crates Stage 1 must not depend on: later stages, the facade and the executor.
 const FORBIDDEN_CRATES: &[&str] = &[
     "asap-physical-optimizer",
+    "asap-plan-selection",
     "asap-aware-mapping",
     "asap-physical-operators",
 ];

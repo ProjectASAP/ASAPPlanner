@@ -15,7 +15,7 @@ use asap_types::workload::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::AnalyticalCostError;
+use crate::cost::analytical_cost::AnalyticalCostError;
 
 /// The semantic and workload boundary within which two resource estimates
 /// may be compared. Canonical workload and query-IR types remain authoritative;
@@ -276,7 +276,7 @@ pub struct PartitionStatistics {
 }
 
 /// Workload-dependent evidence for one operator in an already-lowered
-/// physical DAG. [`PhysicalOperator`](crate::analytical_cost::PhysicalOperator)
+/// physical DAG. [`PhysicalOperator`](crate::cost::analytical_cost::PhysicalOperator)
 /// is the authoritative operator vocabulary: every one of its variants has a
 /// matching statistics variant here.
 ///

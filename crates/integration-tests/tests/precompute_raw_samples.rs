@@ -7,8 +7,6 @@ use asap_types::ir::OperatorNode;
 use physical_common::compile_maintained_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_logical_optimizer::{
     search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
@@ -23,6 +21,8 @@ use asap_physical_operators::{
     values::{Batch, Value},
     AggregateCore, KeyByLabelValues, Statistic,
 };
+use asap_plan_selection::candidate_selection::global_selection;
+use asap_plan_selection::cost::cost_model::DefaultCostModel;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{

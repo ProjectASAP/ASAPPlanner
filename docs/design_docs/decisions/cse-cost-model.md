@@ -28,7 +28,7 @@ decides the framework for stage 4, "wire workload-level CSE credit into
 ## Decision: cost-based (Volcano/Cascades), implemented for real
 
 This lands as an actual cost comparison, not a documented-but-unimplemented
-shape. [`CostModel::cse_share_decision`](../../../crates/asap-aware-mapping/src/cost_model.rs)
+shape. [`CostModel::cse_share_decision`](../../../crates/plan-selection/src/cost/cost_model.rs)
 compares two real, overridable cost estimates for every CSE candidate with
 two or more consumers:
 
@@ -78,7 +78,7 @@ gate) and the cost-aware decision is applied downstream, in
 
 ## Where it hooks in
 
-[`candidate_selection::cost_sorted`](../../../crates/asap-aware-mapping/src/plan_selection/candidate_selection.rs)
+[`candidate_selection::cost_sorted`](../../../crates/plan-selection/src/candidate_selection.rs)
 is where this hooks in today. `search_workload_with` computes each shared
 sub-DAG's true `consumer_count` across the whole workload up front (the same
 role `implement_workload_with`'s pre-pass used to play, before that function

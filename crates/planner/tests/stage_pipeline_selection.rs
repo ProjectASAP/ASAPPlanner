@@ -3,13 +3,13 @@
 //! the combination it picks is the one that building and pricing every
 //! combination picks.
 
-use asap_aware_mapping::pass::PlanningModels;
-use asap_aware_mapping::plan_selection::{
-    select_exhaustive, select_plan, SelectionMethod, MAX_ENUMERATED_CANDIDATES,
-};
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_logical_optimizer::pass1::logical_candidates::{
     enumerate_local_logical_candidates, LocalLogicalCandidates,
+};
+use asap_plan_selection::PlanningModels;
+use asap_plan_selection::{
+    select_exhaustive, select_plan, SelectionMethod, MAX_ENUMERATED_CANDIDATES,
 };
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::cse::share_common_sub_dags;

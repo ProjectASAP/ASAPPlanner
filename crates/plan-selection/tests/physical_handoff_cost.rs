@@ -1,8 +1,8 @@
-use asap_aware_mapping::analytical_cost::{
+use asap_plan_selection::cost::analytical_cost::{
     EvidenceBackedPhysicalDAG, ExecutionMultiplicity, PhysicalDAGNode, PhysicalNodeEvidence,
     PhysicalOperator,
 };
-use asap_aware_mapping::physical_operator_statistics::{
+use asap_plan_selection::cost::physical_operator_statistics::{
     ComparisonScope, EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
 };
 use asap_types::ir::operator::operator_properties::Source;
@@ -136,7 +136,7 @@ fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
     )
 }
 
-use asap_aware_mapping::physical_handoff_cost::*;
+use asap_plan_selection::cost::physical_handoff_cost::*;
 
 // Legacy mapping imports and the shared resource API are the very same Rust types.
 #[test]
@@ -387,7 +387,7 @@ fn missing_stale_and_non_finite_evidence_is_rejected() {
 // Individual actions may fit while accumulation across actions or nodes overflows.
 #[test]
 fn handoff_accumulation_and_calibrated_cost_overflow_are_rejected() {
-    use asap_aware_mapping::analytical_cost::AnalyticalCostError;
+    use asap_plan_selection::cost::analytical_cost::AnalyticalCostError;
     let (mut dag, mut scope) = fixture();
     scope.recurrence = QueryRecurrence::OneTime {
         invocations: 1,

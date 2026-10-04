@@ -45,7 +45,7 @@ can be bound to other physical nodes.
 
 Their sole data type is `asap_types::workload::resources::StorageResources`, defined in
 the shared resources module alongside CPU and byte dimensions. The mapping
-crate re-exports it at `asap_aware_mapping::storage_io::StorageResources` for
+crate re-exports it at `asap_plan_selection::cost::storage_io::StorageResources` for
 source compatibility; the four integer JSON fields are unchanged. Pure term
 enumeration and checked addition live with the shared type. Access profiles,
 request-count estimation, calibration, and ranking remain in the mapping

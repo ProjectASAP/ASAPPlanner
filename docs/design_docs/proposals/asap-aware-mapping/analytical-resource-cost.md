@@ -1,7 +1,7 @@
 # Analytical resource cost model
 
 > Status: implemented model with explicit support limits. The
-> [analytical estimator](../../../../crates/asap-aware-mapping/src/analytical_cost.rs)
+> [analytical estimator](../../../../crates/plan-selection/src/cost/analytical_cost.rs)
 > and physical-plan adapter implement supported evidenced comparisons.
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
 > proposed extensions are not implied by the implemented formulas.

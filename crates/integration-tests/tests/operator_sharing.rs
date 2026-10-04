@@ -9,11 +9,11 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::DefaultCostModel;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_logical_optimizer::search_workload;
+use asap_plan_selection::candidate_selection::global_selection;
+use asap_plan_selection::DefaultCostModel;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::types::AccuracyTarget;

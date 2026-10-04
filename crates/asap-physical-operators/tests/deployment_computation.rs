@@ -54,9 +54,9 @@ fn exact_dag(query: &str) -> PhysicalASAPDAG {
     let expression = lower(query);
     let root = promql_rows::with_series_identity(&expression).unwrap_or(expression);
     let space = asap_logical_optimizer::search_workload(vec![("q", root)]);
-    let selected = asap_aware_mapping::plan_selection::candidate_selection::global_selection(
+    let selected = asap_plan_selection::candidate_selection::global_selection(
         &space,
-        &asap_aware_mapping::DefaultCostModel,
+        &asap_plan_selection::DefaultCostModel,
     )
     .assemble_selected_dag(&space.roots[0].1)
     .unwrap()

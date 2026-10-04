@@ -262,12 +262,12 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// constructed by the test.
 #[tokio::test]
 async fn batch_planning_selects_and_executes_each_plan() {
-    use asap_aware_mapping::pass::PlanningModels;
     use asap_physical_operators::{
         physical_planner::{compile, InputContract},
         runtime::Scope,
         values::{Batch, Value},
     };
+    use asap_plan_selection::PlanningModels;
     use asap_planner::{e2e_plan, FrontendInput, UserInput};
     use asap_types::workload::*;
     use std::{collections::BTreeMap, sync::Arc};
