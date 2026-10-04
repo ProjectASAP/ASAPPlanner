@@ -21,11 +21,11 @@
 // `metrics(ts, service, region, latency, bytes)` catalog — the same table
 // used in cross_language.rs and topk_ir.rs.
 
-use asap_aware_mapping::replacement::retain_exact;
-use asap_aware_mapping::{
+use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
+use asap_logical_optimizer::pass1::replacement::retain_exact;
+use asap_logical_optimizer::{
     ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;

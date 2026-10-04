@@ -17,11 +17,11 @@ use crate::cost_model::{
     raw_recompute_cost_rate, CostModel, CseCandidate, ExactCompositionCostInputs,
     ExactCompositionCostRequest, ShareDecision,
 };
-use crate::exact_composition::OperationPlacement;
 use crate::recurrence::{
     CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
 };
-use crate::replacement::{
+use asap_logical_optimizer::pass1::exact_composition::OperationPlacement;
+use asap_logical_optimizer::pass1::replacement::{
     bindable_intent, cse_candidate_pair, direct_child_counts, is_logical_rewrite, realize_child,
     CandidateLogicalASAPDAGs, GlobalSelection, PreparedComposition, Replacement,
     ReplacementProvenance, ReplacementSubDAG, TargetSubDAG, TargetSubDAGCandidates,
@@ -195,7 +195,7 @@ impl RecurrenceProfileMap {
 
 /// Build one [`RecurrenceProfile`] per discovered site, by walking every
 /// root's whole reachable sub-DAG (the same relational-skeleton
-/// traversal [`discover_targets`] itself used to discover those sites)
+/// traversal `discover_targets` itself used to discover those sites)
 /// and folding each root's own recurrence tag
 /// (a normalized repeating rate or a one-time invocation count) into every
 /// site reachable from it.
@@ -242,7 +242,7 @@ impl RecurrenceProfileMap {
 /// structural DAG actually reaches — e.g. one only ever produced by a
 /// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
 /// (this walk only follows [`TargetSubDAGCandidates::target`]'s own structural
-/// children, the same scope [`discover_targets`] uses for the original
+/// children, the same scope `discover_targets` uses for the original
 /// roots, never a candidate's rewritten value). Such a site gets
 /// [`RecurrenceProfile::EMPTY`] — in particular, `update_rate` is
 /// **not** stamped onto it — so it falls back to the ordinary
@@ -563,7 +563,7 @@ fn realize_one(target: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
 /// copy is test-only, so this needs its own for real (non-test) ranking
 /// code — the same "duplicate a small, self-contained traversal rather than
 /// restructure a test helper" call this file's own top doc already makes
-/// for [`discover_targets`].
+/// for `discover_targets`.
 pub(crate) fn sketch_kind_of(node: &OperatorNode) -> Option<SketchAlgorithm> {
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
@@ -1216,7 +1216,7 @@ fn pick_shared_sub_dag_candidate(
 // ── reference DAG + topological order ─────────────────────────────────
 
 /// The parent/child structure [`global_selection`]'s DP walks —
-/// built separately from [`discover_targets`]'s own `order`/`nodes`/`counts`
+/// built separately from `discover_targets`'s own `order`/`nodes`/`counts`
 /// maps (which only track *aggregate* reference counts, not per-parent
 /// breakdown or direction). Selection needs per-parent edge counts to
 /// distinguish shared producers from repeated uses within one consumer.
@@ -1306,7 +1306,7 @@ fn record_possible_edges(
 
 /// A topological order over `order` (parent before every child) via Kahn's
 /// algorithm on `dag`'s reverse adjacency — needed because
-/// [`discover_targets`]'s own `order` is only a valid *discovery* order
+/// `discover_targets`'s own `order` is only a valid *discovery* order
 /// (first-seen-first), not a valid topological one: a node reached via two
 /// different root paths can have a parent that's discovered *after* it (see
 /// this function's own test for a worked diamond example), which is exactly
@@ -1355,16 +1355,16 @@ fn topological_order(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
-    use crate::accuracy::{
+    use crate::cost_model::{Cost, DefaultCostModel};
+    use crate::test_support::{agg, lower_promql, metric_scan};
+    use asap_logical_optimizer::accuracy::{
         AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
     };
-    use crate::cost_model::{Cost, DefaultCostModel};
-    use crate::replacement::{
-        default_strategies, discover_targets, search_workload, search_workload_with,
-        search_workload_with_targets, ASAPStrategies, ReplacementStrategy,
+    use asap_logical_optimizer::pass1::replacement::{
+        default_strategies, search_workload, search_workload_with, search_workload_with_targets,
+        ASAPStrategies, ReplacementStrategy,
     };
-    use crate::test_support::{agg, lower_promql, metric_scan};
+    use asap_logical_optimizer::pass2::reconciliation::AccuracyReconciliationStrategy;
     use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile, AggIntent};
     use asap_types::ir::operator::operator_properties::Reduction;
     use asap_types::ir::properties::{
@@ -1775,32 +1775,36 @@ mod tests {
     #[test]
     fn mixed_rewrite_group_keeps_and_selects_its_explicit_cse_pair() {
         let target = metric_scan(&["job"]);
-        let mut group = TargetSubDAGCandidates::new(Rc::clone(&target), 2);
-        group.candidates = vec![
-            ReplacementSubDAG {
-                strategy: "TestStrategy",
-                replacement: Replacement::SubDAG(Rc::clone(&target)),
-                provenance: ReplacementProvenance::CseShare,
-                rationale: "share".into(),
-            },
-            ReplacementSubDAG {
-                strategy: "TestStrategy",
-                replacement: Replacement::SubDAG(Rc::new(target.as_ref().clone())),
-                provenance: ReplacementProvenance::CseRecompute,
-                rationale: "recompute".into(),
-            },
-            ReplacementSubDAG {
-                strategy: "TestStrategy",
-                replacement: Replacement::SubDAG(
-                    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
-                        NonASAPOp::PromqlVectorFromScalar(ScalarExpr::EvalTimestamp),
-                    ))
-                    .unwrap(),
-                ),
-                provenance: ReplacementProvenance::LogicalRewrite,
-                rationale: "different rewrite strategy".into(),
-            },
-        ];
+        let group = TargetSubDAGCandidates {
+            target: Rc::clone(&target),
+            consumer_count: 2,
+            rejected: Vec::new(),
+            candidates: vec![
+                ReplacementSubDAG {
+                    strategy: "TestStrategy",
+                    replacement: Replacement::SubDAG(Rc::clone(&target)),
+                    provenance: ReplacementProvenance::CseShare,
+                    rationale: "share".into(),
+                },
+                ReplacementSubDAG {
+                    strategy: "TestStrategy",
+                    replacement: Replacement::SubDAG(Rc::new(target.as_ref().clone())),
+                    provenance: ReplacementProvenance::CseRecompute,
+                    rationale: "recompute".into(),
+                },
+                ReplacementSubDAG {
+                    strategy: "TestStrategy",
+                    replacement: Replacement::SubDAG(
+                        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+                            NonASAPOp::PromqlVectorFromScalar(ScalarExpr::EvalTimestamp),
+                        ))
+                        .unwrap(),
+                    ),
+                    provenance: ReplacementProvenance::LogicalRewrite,
+                    rationale: "different rewrite strategy".into(),
+                },
+            ],
+        };
 
         assert!(cse_candidate_pair(&group).is_some());
         let ranked = rank_group(&group, &ConstantCseCost);
@@ -2359,25 +2363,8 @@ mod tests {
             .unwrap();
         let roots = vec![("a", root_a), ("b", root_b)];
 
-        let mut order = Vec::new();
-        let mut nodes = HashMap::new();
-        let mut counts = HashMap::new();
-        discover_targets(&roots, &mut order, &mut nodes, &mut counts);
-        let groups = order
-            .iter()
-            .map(|ptr| {
-                (
-                    *ptr,
-                    TargetSubDAGCandidates::new(Rc::clone(&nodes[ptr]), counts[ptr]),
-                )
-            })
-            .collect();
-        let space = CandidateLogicalASAPDAGs {
-            roots,
-            groups,
-            order: order.clone(),
-            composition_plans: Vec::new(),
-        };
+        let space = search_workload(roots);
+        let order = space.order();
         let dag = reference_dag(&space);
 
         // Discovery-order sanity: root_b comes after the shared child in
@@ -2399,7 +2386,7 @@ mod tests {
             "fixture sanity: discover_targets's own order must NOT already be topological here"
         );
 
-        let topo = topological_order(&order, &dag);
+        let topo = topological_order(order, &dag);
         let shared_topo_pos = topo.iter().position(|p| *p == shared_ptr).unwrap();
         let root_b_topo_pos = topo.iter().position(|p| *p == root_b_ptr).unwrap();
         assert!(
@@ -2732,7 +2719,7 @@ mod tests {
             // win on its own merit, not just fail to lose as badly as before.
             assert_eq!(
                 chosen.map(|c| c.provenance),
-                Some(crate::replacement::ReplacementProvenance::AccuracyReconciliation)
+                Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::AccuracyReconciliation)
             );
         }
 
@@ -2810,7 +2797,7 @@ mod tests {
             // of a tie — is gone).
             assert_eq!(
                 chosen.map(|c| c.provenance),
-                Some(crate::replacement::ReplacementProvenance::CseShare)
+                Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare)
             );
         }
 

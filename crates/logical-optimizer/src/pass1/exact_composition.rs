@@ -48,7 +48,7 @@
 //! with explicit positive support evidence from its cost model.
 //!
 //! `avg` gets a read-time operation candidate *and* keeps
-//! [`crate::rewrite::AvgToSumOverCountStrategy`]'s rewrite in the same
+//! [`crate::pass1::rewrite::AvgToSumOverCountStrategy`]'s rewrite in the same
 //! group; the cost model picks between them, nothing here hard-codes one.
 //!
 //! ## What this strategy never does
@@ -58,7 +58,7 @@
 //!   `RealizationError` regardless.
 //! - Decide whether a composition is *worth it*: that is
 //!   `global_selection`'s job, using the issue's cost-units-per-second
-//!   formulas (see `crate::cost_model::read_operation_plan_cost_rate` and
+//!   formulas (see `cost_model::read_operation_plan_cost_rate` and
 //!   siblings). Missing statistics keep the conservative kept sub-DAG.
 
 use asap_types::ir::operator::non_asap::any_measure_filtered;
@@ -77,7 +77,7 @@ use asap_types::physical::execution_data_state::lift_plain;
 use asap_types::physical::ExactOperationSchemaError;
 use asap_types::types::AccuracyTarget;
 
-use crate::replacement::{
+use crate::pass1::replacement::{
     bindable_intent, describe_intent, realizations_for_intent, Realization, RealizationError,
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
@@ -426,7 +426,7 @@ impl ExactCompositionStrategy {
                      accumulator cannot consume query-time values, so instead of keeping \
                      the whole tree pre-ASAP this applies the fold as an \
                      ExactRead over whichever summary evaluation global_selection \
-                     commits for the child target (asap_aware_mapping::exact_composition)",
+                     commits for the child target (asap_logical_optimizer::pass1::exact_composition)",
                     describe_intent(&intent),
                     child_desc
                 ),
@@ -447,7 +447,7 @@ impl ExactCompositionStrategy {
                     "{} is an exact per-entity function with no accumulator form; as an \
                      explicit ExactMaintenance on the update path its output can feed a \
                      maintained summary above it instead of being handed over as an opaque \
-                     raw kept sub_dag (asap_aware_mapping::exact_composition)",
+                     raw kept sub_dag (asap_logical_optimizer::pass1::exact_composition)",
                     describe_intent(&intent)
                 ),
             });
@@ -469,7 +469,7 @@ impl ReplacementStrategy for ExactCompositionStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replacement::retain_exact;
+    use crate::pass1::replacement::retain_exact;
     use crate::test_support::{agg, agg_per_entity as per_entity, metric_scan, timed};
     use asap_types::ir::operator::agg_intent::default_quantile;
     use asap_types::ir::properties::ExecutionDataStateError;
@@ -523,7 +523,7 @@ mod tests {
         let target = TargetSubDAG::new(&root);
         assert_eq!(ExactCompositionStrategy.replacements(&target).len(), 1);
         // `avg` competes with AvgToSumOverCountStrategy in the same group.
-        assert!(crate::rewrite::AvgToSumOverCountStrategy.matches(&target));
+        assert!(crate::pass1::rewrite::AvgToSumOverCountStrategy.matches(&target));
     }
 
     #[test]
@@ -568,7 +568,7 @@ mod tests {
         };
         // A bare SummaryAgg (state, no evaluation) is not a legal read-time operation
         // input — the operator would be consuming sketch state.
-        let state_child = crate::replacement::realize_child(&comp.child_target).unwrap();
+        let state_child = crate::pass1::replacement::realize_child(&comp.child_target).unwrap();
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &state_child.operator
         else {
             panic!("expected the child to realize to a evaluation");
@@ -610,7 +610,7 @@ mod tests {
         let Replacement::ExactComposition(comp) = &candidates[0].replacement else {
             unreachable!()
         };
-        let evaluation = crate::replacement::realize_child(&comp.child_target).unwrap();
+        let evaluation = crate::pass1::replacement::realize_child(&comp.child_target).unwrap();
         assert!(!comp.accepts_child(&evaluation));
         assert!(matches!(
             comp.compose(evaluation),

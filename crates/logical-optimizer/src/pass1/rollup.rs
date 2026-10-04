@@ -108,11 +108,13 @@ use asap_types::ir::{NonASAPOp, OperatorNode};
 
 use asap_types::types::AccuracyTarget;
 
-use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
+use crate::pass1::replacement::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+};
 
 /// The `(by, intent, child)` shape this strategy operates on: a single
 /// measure, no `HAVING` — the same bindable shape
-/// [`crate::replacement::ASAPStrategies`] requires (see that module's
+/// [`crate::pass1::replacement::ASAPStrategies`] requires (see that module's
 /// private `bindable_intent`) — **plus** a genuine [`Reduction::Reduce`]
 /// grouping to compare (not [`Reduction::PerEntity`], which has no `by` set
 /// at all). `None` for anything else, including a multi-measure or `HAVING`
@@ -381,7 +383,7 @@ fn build_rollup(
     Some(ReplacementSubDAG {
         strategy: "RollupStrategy",
         replacement: Replacement::SubDAG(rewritten),
-        provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
+        provenance: crate::pass1::replacement::ReplacementProvenance::LogicalRewrite,
         rationale: format!(
             "rolls up from the finer Aggregate grouped by {:?} (a strict superset of this \
              node's own {:?} grouping over the same shared source) instead of an independent \
@@ -683,7 +685,8 @@ mod tests {
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &fine_scan);
         let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &coarse_scan);
 
-        let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
+        let space =
+            crate::pass1::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
         let coarse_group = space
             .target_subdag_candidates()
             .find(|group| {
@@ -723,7 +726,8 @@ mod tests {
         };
         let fine = agg(vec![2, 3], intent.clone(), &metric_scan());
         let coarse = agg(vec![2], intent, &metric_scan());
-        let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
+        let space =
+            crate::pass1::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
         let coarse_group = space
             .target_subdag_candidates()
             .find(|group| {

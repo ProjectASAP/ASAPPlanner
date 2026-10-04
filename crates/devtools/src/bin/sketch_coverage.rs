@@ -2,7 +2,7 @@
 //
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
 // corpus list exactly, so the two reports are directly comparable) with an
-// *approximate* `AccuracyTarget`, runs `asap_aware_mapping::explain_replacements`
+// *approximate* `AccuracyTarget`, runs `asap_logical_optimizer::explain_replacements`
 // over each corpus as one workload, and reports the MVP demo's query-coverage
 // metric: of the queries that lowered successfully, what fraction got
 //
@@ -25,9 +25,9 @@
 // reuse inside one corpus shows up here the same way it would in the
 // dag-viewer's Union mode.
 
-use asap_aware_mapping::{explain_replacements, ExplanationKind};
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_logical_optimizer::{explain_replacements, ExplanationKind};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;

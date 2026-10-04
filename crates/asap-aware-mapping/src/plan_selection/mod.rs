@@ -39,20 +39,20 @@ use asap_types::types::AccuracyTarget;
 use asap_types::workload::DataWorkload;
 use thiserror::Error;
 
-use crate::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
-};
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::logical_candidates::{
-    choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
-    LocalLogicalCandidates,
-};
 use crate::physical_candidates::{stage2_physical, PhysicalCandidate};
 use crate::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
+};
+use asap_logical_optimizer::accuracy::{
+    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
+};
+use asap_logical_optimizer::pass1::logical_candidates::{
+    choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
+    LocalLogicalCandidates,
 };
 
 pub const COST_UNIT: &str = "cpu_ms_per_workload_evaluation";
@@ -1043,11 +1043,11 @@ mod tests {
                 delta: 0.001,
             },
         );
-        let inventory = crate::logical_candidates::enumerate_local_logical_candidates(vec![(
-            0,
-            QueryRoot::Operator(root),
-        )])
-        .unwrap();
+        let inventory =
+            asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(
+                vec![(0, QueryRoot::Operator(root))],
+            )
+            .unwrap();
         let topk = inventory
             .targets
             .iter()
@@ -1059,14 +1059,16 @@ mod tests {
                 let mut choice = vec![0; inventory.targets.len()];
                 choice[topk] = alternative;
                 let roots: Vec<_> =
-                    crate::logical_candidates::compose_logical_candidate(&inventory, &choice)
-                        .unwrap()
-                        .into_iter()
-                        .map(|(_, root)| match root {
-                            QueryRoot::Operator(node) => node,
-                            QueryRoot::Scalar(_) => panic!("operator root"),
-                        })
-                        .collect();
+                    asap_logical_optimizer::pass1::logical_candidates::compose_logical_candidate(
+                        &inventory, &choice,
+                    )
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, root)| match root {
+                        QueryRoot::Operator(node) => node,
+                        QueryRoot::Scalar(_) => panic!("operator root"),
+                    })
+                    .collect();
                 let mut candidate = stage2_physical("L", &roots).unwrap();
                 candidate.id = format!("P{}", alternative + 1);
                 candidate
@@ -1141,7 +1143,8 @@ mod tests {
                 (i, QueryRoot::Operator(root))
             })
             .collect();
-        crate::logical_candidates::enumerate_local_logical_candidates(roots).unwrap()
+        asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(roots)
+            .unwrap()
     }
 
     fn no_targets(inventory: &LocalLogicalCandidates<usize>) -> Vec<Option<AccuracyTarget>> {
@@ -1266,10 +1269,10 @@ mod tests {
             "quantile_over_time(0.5, m[5m])",
             "quantile_over_time(0.99, m[5m])",
         ]);
-        let kll = |t: &crate::logical_candidates::LocalLogicalTarget| {
+        let kll = |t: &asap_logical_optimizer::pass1::logical_candidates::LocalLogicalTarget| {
             t.alternatives
                 .iter()
-                .position(|a| matches!(a, crate::Realization::Sketch(kind) if *kind.algorithm() == SketchAlgorithm::Kll))
+                .position(|a| matches!(a, asap_logical_optimizer::Realization::Sketch(kind) if *kind.algorithm() == SketchAlgorithm::Kll))
                 .unwrap()
         };
         let choice: Vec<_> = inventory.targets.iter().map(kll).collect();

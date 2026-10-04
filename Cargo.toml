@@ -5,6 +5,7 @@ members = [
     "crates/frontend-common",
     "crates/sql-function-catalog",
     "crates/asap-aware-mapping",
+    "crates/logical-optimizer",
     "crates/frontend-promql",
     "crates/frontend-metricsql",
     "crates/metricsql-common-parser-support",

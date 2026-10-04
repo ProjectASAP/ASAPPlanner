@@ -1,5 +1,5 @@
-// Shared fixture helpers; not every test module uses every helper.
-#![allow(dead_code)]
+// Fixture helpers for this crate's tests: the subset of
+// `asap-logical-optimizer`'s `test_support` that Stage 2/3 tests use.
 
 use std::rc::Rc;
 
@@ -45,16 +45,17 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
 //
 // Every builder returns an `Rc<OperatorNode>` whose schema is derived by
 // `OperatorNode::new_shared`, so a fixture is exactly what a front end
-// would hand the planner. Added by the test migration; only add here, never
-// rename or remove (several test modules share these).
-
-use std::time::Duration;
+// would hand the planner.
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
+use asap_types::ir::{NonASAPOp, Predicate};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
 /// no unique key.

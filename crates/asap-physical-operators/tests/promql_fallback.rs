@@ -1224,9 +1224,10 @@ fn histogram_quantile_rejects_equal_output_label_sets() {
 // for an approximate target, and the selected DAG compiles and executes.
 #[test]
 fn histogram_quantile_selection_keeps_the_exact_fallback() {
-    use asap_aware_mapping::{
-        accuracy::DefaultAccuracyModel, cost_model::DefaultCostModel, default_strategies,
-        search_workload_with_targets, Replacement,
+    use asap_aware_mapping::cost_model::DefaultCostModel;
+    use asap_logical_optimizer::{
+        accuracy::DefaultAccuracyModel, default_strategies, search_workload_with_targets,
+        Replacement,
     };
     let samples = buckets(&[("job=a", HISTOGRAM)]);
     for target in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.01)] {

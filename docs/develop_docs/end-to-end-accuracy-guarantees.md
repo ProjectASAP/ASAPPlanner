@@ -41,9 +41,9 @@ The main implementation locations are:
 | Concern | Location |
 | --- | --- |
 | Guarantee and error vocabulary | `asap_types::ir::properties::guarantee` |
-| Accuracy model and built-in propagation | `asap_aware_mapping::accuracy` |
-| Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
-| Parameter sizing | `asap_aware_mapping::accuracy::estimators` |
+| Accuracy model and built-in propagation | `asap_logical_optimizer::accuracy` |
+| Candidate construction and legality filtering | `asap_logical_optimizer::pass1::replacement` |
+| Parameter sizing | `asap_logical_optimizer::accuracy::estimators` |
 | Guarantee and rejection export | `asap_types::dag_export` and the `dag_export` devtool |
 
 Read the sections below when changing one of those contracts.

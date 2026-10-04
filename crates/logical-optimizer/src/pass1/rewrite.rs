@@ -68,7 +68,9 @@ use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ProjectItem, Scala
 
 use asap_types::types::AccuracyTarget;
 
-use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
+use crate::pass1::replacement::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+};
 
 /// The shape [`AvgToSumOverCountStrategy`] rewrites: a single `Avg{col}`
 /// measure, no `HAVING`, grouped with an ordinary `by(...)` reduction (see
@@ -385,7 +387,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<O
 ///
 /// A unit struct: unlike [`ASAPStrategies`], this strategy doesn't
 /// bind anything (its one [`Replacement`] is always [`Replacement::Rewrite`],
-/// never [`Replacement::Summary`]) and so has no [`CostModel`](crate::CostModel)
+/// never [`Replacement::Summary`]) and so has no `CostModel`
 /// to hold a reference to — the same "no state needed" shape
 /// [`SharedSubDAGStrategy`] already has.
 #[derive(Debug, Default, Clone, Copy)]
@@ -406,7 +408,7 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
             return vec![ReplacementSubDAG {
                 strategy: "SemanticEquivalentRewriteStrategy",
                 replacement: Replacement::SubDAG(rewritten),
-                provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
+                provenance: crate::pass1::replacement::ReplacementProvenance::LogicalRewrite,
                 rationale: "compose compatible per-entity and cross-entity accumulators using their algebraic intent while preserving the original output schema".into(),
             }];
         }
@@ -416,7 +418,7 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
         vec![ReplacementSubDAG {
             strategy: "AvgToSumOverCountStrategy",
             replacement: Replacement::SubDAG(rewritten),
-            provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
+            provenance: crate::pass1::replacement::ReplacementProvenance::LogicalRewrite,
             rationale:
                 "avg has no summary realization at all (replacement::realizations_for_intent \
                         dispatches it to PassThrough) and so can never share or sketch; \
@@ -690,13 +692,13 @@ mod tests {
     #[test]
     fn default_search_discovers_bindable_sum_and_count_targets() {
         let root = avg_agg(vec![2], None, metric_scan(&["job"]));
-        let space = crate::replacement::search_workload(vec![("avg", Rc::clone(&root))]);
+        let space = crate::pass1::replacement::search_workload(vec![("avg", Rc::clone(&root))]);
 
         let avg_group = space
             .candidates_for_target(&space.roots[0].1)
             .expect("avg group");
         assert!(avg_group.candidates.iter().any(|candidate| {
-            candidate.provenance == crate::replacement::ReplacementProvenance::LogicalRewrite
+            candidate.provenance == crate::pass1::replacement::ReplacementProvenance::LogicalRewrite
         }));
 
         let mut found_sum = false;
@@ -908,7 +910,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             },
         );
-        let space = crate::replacement::search_workload(vec![("sum-count", root)]);
+        let space = crate::pass1::replacement::search_workload(vec![("sum-count", root)]);
         let root = &space.roots[0].1;
         let group = space.candidates_for_target(root).expect("root memo group");
         let candidate = group

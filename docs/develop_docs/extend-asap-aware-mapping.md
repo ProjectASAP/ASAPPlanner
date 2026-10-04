@@ -915,7 +915,7 @@ Use this table to find the right place for a change.
 ### Using it
 
 ```rust
-use asap_aware_mapping::{explain_replacements, ExplanationKind};
+use asap_logical_optimizer::{explain_replacements, ExplanationKind};
 
 let explanations = explain_replacements(vec![("dashboard_p99", query)]);
 for explanation in &explanations {

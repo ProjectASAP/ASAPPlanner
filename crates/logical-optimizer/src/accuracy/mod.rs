@@ -9,7 +9,6 @@ pub mod allocation;
 pub mod composition;
 pub mod estimators;
 pub mod evidence;
-pub mod reconciliation;
 
 pub use allocation::{
     AccuracyAllocation, AccuracyBudgetAllocator, CompositionShape, EqualSplitAllocator,
@@ -28,13 +27,13 @@ use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, Sketc
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
-use crate::exact_composition::ExactOperation;
+use crate::pass1::exact_composition::ExactOperation;
 
 /// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
 /// default rejects (a registered cross-metric conversion, say) implements
 /// this trait and passes it to
-/// [`crate::replacement::ASAPStrategies::new_with_planning_inputs`].
+/// [`crate::pass1::replacement::ASAPStrategies::new_with_planning_inputs`].
 pub trait AccuracyModel {
     /// The definition-registered rule for applying `operation` to an
     /// approximate input. `None` means the function is exact only over exact
@@ -46,7 +45,7 @@ pub trait AccuracyModel {
     /// The guarantee of reading `query` out of a summary of family `family`
     /// built over an **exact** input — derived from the family's committed
     /// parameters by inverting the same sizing formulas
-    /// [`crate::replacement::default_size_params`] uses. `None` when this
+    /// [`crate::pass1::replacement::default_size_params`] uses. `None` when this
     /// model has no error model for the family (the default has none for
     /// `Sample`/`Wavelet`/`StatModel`).
     fn local_guarantee(

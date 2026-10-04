@@ -141,11 +141,11 @@ pub struct DAGNode {
 #[derive(Debug, Clone, Serialize)]
 pub struct DAGNote {
     /// A short tag for the kind of annotation this is (e.g. a
-    /// `Debug`-formatted `asap_aware_mapping::ExplanationKind`) — opaque to
+    /// `Debug`-formatted `asap_logical_optimizer::ExplanationKind`) — opaque to
     /// `asap_types`, meant for a renderer to group or color by.
     pub kind: String,
     /// Human-readable explanation text (e.g. an
-    /// `asap_aware_mapping::ReplacementExplanation::reason`).
+    /// `asap_logical_optimizer::ReplacementExplanation::reason`).
     pub reason: String,
 }
 
@@ -294,7 +294,7 @@ pub struct WorkloadDAG {
 // the `dag_export` devtools binary's `--post-asap` flag) populates after
 // running its own search — the exact same layering rule [`DAGNode::notes`]'s
 // doc above already states: this module never runs
-// `asap_aware_mapping::replacement::search_workload_with` itself, never
+// `asap_logical_optimizer::pass1::replacement::search_workload_with` itself, never
 // picks a "winning" candidate, and has no opinion on what a
 // `ReplacementProvenance` or a cost model even is. It only defines shapes
 // concrete and serializable enough for a higher layer to fill in, and for
@@ -335,7 +335,7 @@ pub struct SummaryDAGNode {
 }
 
 /// One accuracy-illegal candidate a higher layer's search refused for a
-/// target (issue #172) — `asap_aware_mapping::replacement::RejectedCandidate`
+/// target (issue #172) — `asap_logical_optimizer::pass1::replacement::RejectedCandidate`
 /// re-shaped into this crate's own crate-agnostic vocabulary, the same
 /// layering rule as [`TargetReplacement`]. Carried on
 /// [`NamedDAG::rejections`] so a renderer can explain *why* a target kept
@@ -362,7 +362,7 @@ pub struct SummaryDAG {
 }
 
 /// One replacement site a higher layer (the `dag_export` binary) found by
-/// running `asap_aware_mapping::replacement::search_workload_with` +
+/// running `asap_logical_optimizer::pass1::replacement::search_workload_with` +
 /// `candidate_selection::cost_sorted` and picking the best-ranked candidate for one
 /// `TargetSubDAGCandidates` — `asap_types` never runs that search itself (same layering
 /// rule as [`DAGNote`]: this crate defines the shape, a higher crate
@@ -419,7 +419,7 @@ pub struct TargetReplacement {
 
 /// What a [`TargetReplacement`] became — either a genuine post-ASAP binding
 /// or a still-relational structural rewrite, mirroring
-/// `asap_aware_mapping::replacement::Replacement`'s own two variants. Both
+/// `asap_logical_optimizer::pass1::replacement::Replacement`'s own two variants. Both
 /// carry an ordinary [`ExportDAG`]: the unified IR renders a summary sub-DAG
 /// and a rewritten relational sub-DAG through the same [`export`].
 ///
@@ -442,7 +442,7 @@ pub enum TargetReplacementAfter {
 /// What a higher layer found for one specific node when building a merged
 /// post-ASAP dag via [`export_post_asap`] — see that function's own doc
 /// for the full design. `asap_types` has no opinion on *how* this is
-/// decided (that's `asap_aware_mapping::replacement::search_workload_with` +
+/// decided (that's `asap_logical_optimizer::pass1::replacement::search_workload_with` +
 /// `candidate_selection::cost_sorted`'s job, a higher layer, exactly the layering rule
 /// [`DAGNode::notes`] already states); it only defines the shape a decision
 /// comes back in. Both variants render identically (one IR, one builder);
@@ -511,7 +511,7 @@ pub fn export_summary(node: &Rc<OperatorNode>) -> SummaryDAG {
 /// `::after` — small, independent, per-site before/after pairs — do).
 ///
 /// `find_winner` is the whole layering seam: `asap_types` never runs
-/// `asap_aware_mapping::replacement::search_workload_with` or
+/// `asap_logical_optimizer::pass1::replacement::search_workload_with` or
 /// `candidate_selection::cost_sorted` itself, and has no idea what a `TargetSubDAGCandidates` or a
 /// `ReplacementProvenance` is — it only asks, for one node at a time, "did a
 /// higher layer already decide something for you?" A caller (e.g. the

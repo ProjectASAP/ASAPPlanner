@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use asap_types::ir::{NonASAPOp, OperatorNode};
 
-use crate::replacement::{
+use crate::pass1::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 

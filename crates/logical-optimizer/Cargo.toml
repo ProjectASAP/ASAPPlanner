@@ -1,0 +1,18 @@
+[package]
+name = "asap-logical-optimizer"
+version = "0.1.0"
+edition = "2021"
+
+# #509 Stage 1: logical candidate generation (Pass 1 rewrites and summary
+# realization, Pass 2 ASAP-aware CSE) and the analytical accuracy model.
+# Depends only on asap-types (the PromQL front end is a test-only
+# dev-dependency); never on the cost model or a later stage.
+# tests/stage1_cost_independence.rs checks this manifest.
+[dependencies]
+asap_sketchlib = { workspace = true }
+asap-types = { path = "../types" }
+thiserror = "2"
+serde_json = "1"
+
+[dev-dependencies]
+asap-frontend-promql = { path = "../frontend-promql" }
