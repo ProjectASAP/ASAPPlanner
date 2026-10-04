@@ -369,14 +369,10 @@ fn price(
                     offset,
                     partition_by,
                 } => {
-                    let partitions = if partition_by.keys().is_empty() {
-                        1
-                    } else {
-                        DEFAULT_GROUP_COUNT
-                    };
+                    let partitions = partition_count(!partition_by.keys().is_empty());
                     let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
                     let offset = (*offset as u64).saturating_mul(partitions);
-                    let out = edge(input.rows.saturating_sub(offset).min(limit));
+                    let out = edge(selected_rows(input.rows.saturating_sub(offset), limit));
                     let estimate = estimate_operator(
                         PhysicalOperator::Limit { limit, offset },
                         OperatorStatistics::Limit { edges: unary(out) },
@@ -418,15 +414,22 @@ fn price(
                 )
             }
             Payload::SummaryEstimate { query } => {
-                let per_group = match query {
-                    SketchStatistic::TopK { k } => *k as u64,
-                    _ => 1,
+                let rows = match query {
+                    // The logical result, as an exact Sort → Limit sizes it.
+                    SketchStatistic::TopK { k } => {
+                        let (summarized, grouped) = summarized_rows(dag, &output, node.id);
+                        selected_rows(
+                            summarized,
+                            (*k as u64).saturating_mul(partition_count(grouped)),
+                        )
+                    }
+                    _ => input.rows,
                 };
-                let out = edge(input.rows * per_group);
+                let out = edge(rows);
                 (
                     out,
                     Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
-                    format!("estimate {} groups x {per_group}", input.rows),
+                    format!("estimate {} rows from {} states", out.rows, input.rows),
                 )
             }
             Payload::FinalizeExactAccumulator => (
@@ -452,6 +455,49 @@ fn price(
         source: COST_SOURCE,
         per_node,
     })
+}
+
+/// Partitions a per-group ranking assumes, absent group-count evidence.
+fn partition_count(grouped: bool) -> u64 {
+    if grouped {
+        DEFAULT_GROUP_COUNT
+    } else {
+        1
+    }
+}
+
+/// Rows a limit of `limit` keeps from `input` rows. Every top-k realization
+/// is sized by this, so its consumers are priced alike whichever is chosen.
+fn selected_rows(input: u64, limit: u64) -> u64 {
+    input.min(limit)
+}
+
+/// The rows the summary under estimate `id` read, and whether it groups them.
+fn summarized_rows(
+    dag: &PhysicalASAPDAG,
+    output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
+    id: PhysicalASAPNodeId,
+) -> (u64, bool) {
+    let producer = |consumer| {
+        dag.edges
+            .iter()
+            .find(|e| e.consumer == consumer)
+            .map(|e| e.producer)
+    };
+    let state = producer(id);
+    let grouped = state
+        .and_then(|state| dag.nodes.iter().find(|n| n.id == state))
+        .is_some_and(|n| match &n.payload {
+            Payload::SummaryAgg { reduction, .. } => {
+                !matches!(reduction, Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without())
+            }
+            _ => false,
+        });
+    let rows = state
+        .and_then(producer)
+        .and_then(|input| output.get(&input))
+        .map_or(1, |edge| edge.rows);
+    (rows, grouped)
 }
 
 /// `input` split as evenly as integers allow into `partitions` parts.
