@@ -390,7 +390,7 @@ async fn sql_summary_capability_dp_equals_exhaustive() {
             .expect("lowers");
         roots.push((index, QueryRoot::Operator(root)));
     }
-    let stage1 = stage1_logical_candidates(roots).expect("Stage 1");
+    let stage1 = stage1_logical_candidates(roots, &Default::default()).expect("Stage 1");
     assert_eq!(
         stage1.iter().map(|v| v.sharing).collect::<Vec<_>>(),
         [Sharing::Independent, Sharing::SummaryCapability]

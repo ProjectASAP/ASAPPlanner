@@ -207,7 +207,7 @@ mod tests {
                 (i, QueryRoot::Operator(root))
             })
             .collect();
-        enumerate_local_logical_candidates(roots).unwrap()
+        enumerate_local_logical_candidates(roots, &Default::default()).unwrap()
     }
 
     fn kll_k(inventory: &LocalLogicalCandidates<usize>, t: usize) -> u32 {
