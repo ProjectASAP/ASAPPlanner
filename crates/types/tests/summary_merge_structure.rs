@@ -8,6 +8,15 @@ use asap_types::ir::schema::{
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
 fn state(k: u32) -> Rc<OperatorNode> {
+    family_state(
+        FieldDataType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
+            Default::default(),
+        ),
+        0..1,
+    )
+}
+fn family_state(family: FieldDataType, time: std::ops::Range<i64>) -> Rc<OperatorNode> {
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: Source::Table {
             table_ref: "latencies".into(),
@@ -18,10 +27,7 @@ fn state(k: u32) -> Rc<OperatorNode> {
     .unwrap();
     let summary = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan,
-        family: FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
-            Default::default(),
-        ),
+        family,
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![]),
         grouping: GroupingStrategy::default(),
@@ -37,7 +43,7 @@ fn state(k: u32) -> Rc<OperatorNode> {
                     },
                     regions: vec![
                         asap_types::ir::properties::summary_coverage::CoverageRegion {
-                            time_ms: Some((0..1).into()),
+                            time_ms: Some(time.into()),
                             population: Default::default(),
                         },
                     ],
@@ -106,4 +112,110 @@ fn merge_derives_coverage_and_validates_retained_metadata() {
     let mut forged = (*root).clone();
     forged.coverage.as_mut().unwrap().regions[0].time_ms = Some((0..2).into());
     assert!(Rc::new(forged).validate_structure().is_err());
+}
+
+fn merge_panes(family: FieldDataType) -> Result<Rc<OperatorNode>, impl std::fmt::Debug> {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![
+            family_state(family.clone(), 0..1),
+            family_state(family, 1..2),
+        ],
+    }))
+}
+/// Heap top-k states have no sound merge model, so disjoint panes still cannot
+/// merge; KLL panes over the same coverage can.
+#[test]
+fn summary_merge_requires_a_mergeable_family() {
+    let heap = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CmsWithHeap,
+            SketchParams::CmsWithHeap {
+                width: 64,
+                depth: 4,
+                heap_size: 10,
+            },
+        ),
+        Default::default(),
+    );
+    let error = format!("{:?}", merge_panes(heap).unwrap_err());
+    assert!(error.contains("no sound merge"), "{error}");
+    let kll = FieldDataType::Sketch(
+        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+        Default::default(),
+    );
+    merge_panes(kll).unwrap().validate_structure().unwrap();
+}
+/// Sound-merge capability is a closed list per family (W6).
+#[test]
+fn family_merge_capability() {
+    use asap_types::ir::schema::{ExactKind, ExactParams};
+    let exact = |kind, params| FieldDataType::ExactAggregate(kind, params);
+    for family in [
+        exact(ExactKind::Sum, ExactParams::Sum),
+        exact(ExactKind::Count, ExactParams::Count),
+        exact(ExactKind::Min, ExactParams::Min),
+        exact(ExactKind::Max, ExactParams::Max),
+    ] {
+        assert!(family.family_merges(), "{family:?}");
+    }
+    for family in [
+        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Increase, ExactParams::Increase),
+        exact(ExactKind::IRate, ExactParams::IRate),
+        FieldDataType::Plain(DataType::Float64),
+    ] {
+        assert!(!family.family_merges(), "{family:?}");
+    }
+    let sketch = |algorithm, params| {
+        FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
+    };
+    use SketchAlgorithm as A;
+    use SketchParams as P;
+    let (width, depth, heap_size) = (64, 4, 10);
+    for (family, merges) in [
+        (sketch(A::Kll, P::Kll { k: 200 }), true),
+        (sketch(A::DDSketch, P::DDSketch { alpha: 0.01 }), true),
+        (sketch(A::Hll, P::Hll { precision: 12 }), true),
+        (sketch(A::Cms, P::Cms { width, depth }), true),
+        (
+            sketch(A::CountSketch, P::CountSketch { width, depth }),
+            true,
+        ),
+        (
+            sketch(
+                A::UnivMon,
+                P::UnivMon {
+                    heap_size,
+                    sketch_rows: depth,
+                    sketch_cols: width,
+                    layers: 8,
+                },
+            ),
+            true,
+        ),
+        (
+            sketch(
+                A::CmsWithHeap,
+                P::CmsWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            ),
+            false,
+        ),
+        (
+            sketch(
+                A::CountSketchWithHeap,
+                P::CountSketchWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            ),
+            false,
+        ),
+    ] {
+        assert_eq!(family.family_merges(), merges, "{family:?}");
+    }
 }

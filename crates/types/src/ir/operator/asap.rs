@@ -486,6 +486,11 @@ impl ASAPOp {
                         "summary merge requires exactly one state column".into(),
                     ));
                 }
+                if let Some(family) = self.produced_state().filter(|f| !f.family_merges()) {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(format!(
+                        "summary merge over {family:?} is unsupported: the family has no sound merge"
+                    )));
+                }
                 for child in children {
                     needs_state(child, "SummaryMerge")?;
                     if child.schema != first.schema {
