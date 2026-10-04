@@ -98,8 +98,11 @@ async fn stage1_offers_exact_and_summary_l2_alternatives() {
         delta: 0.01,
     };
     let root = lower_sql("SELECT SQRT(SUM(c*c)) FROM (SELECT src_ip, CAST(COUNT(*) AS DOUBLE) AS c FROM flows GROUP BY src_ip) f", &catalog(false), target).await.unwrap();
-    let inventory =
-        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(root))],
+        &Default::default(),
+    )
+    .unwrap();
     let l2 = inventory
         .targets
         .iter()
