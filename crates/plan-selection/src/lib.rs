@@ -100,6 +100,9 @@ use asap_physical_optimizer::materialization::MAX_PHYSICAL_PER_LOGICAL;
 /// [`Stage3Calibration::ILLUSTRATIVE`]. See
 /// `docs/design_docs/proposals/stage3-cost-model.md`.
 pub const COST_PER_SECOND: &str = "cost_per_second";
+/// The analytical cost model Stage 3 prices with, as reported in each
+/// candidate's cost `source`.
+pub const COST_MODEL: &str = "analytical-cost-v2";
 
 /// Groups assumed for every `by (...)` reduction, absent group-count evidence.
 const DEFAULT_GROUP_COUNT: u64 = 100;
@@ -1877,7 +1880,7 @@ fn price_nodes(
             total: per_node.values().map(|n| n.cost).sum(),
             unit: COST_PER_SECOND,
             source: format!(
-                "analytical-cost-v2 (illustrative statistics, calibration {})",
+                "{COST_MODEL} (illustrative statistics, calibration {})",
                 calibration.version
             ),
             per_node,
