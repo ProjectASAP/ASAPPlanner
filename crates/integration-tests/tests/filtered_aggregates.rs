@@ -328,3 +328,198 @@ async fn hand_filtered_kll_compiles_and_executes() {
         );
     }
 }
+
+/// Whether `root` binds in the executor against an in-memory `events`.
+fn binds(root: &Rc<OperatorNode>) -> Result<(), String> {
+    use asap_executor::sources::{DataSources, MemorySource};
+    use asap_executor::values::Batch;
+    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
+    let wire = physical_common::compile_physical_asap_dag(root).map_err(|e| e.to_string())?;
+    let (source, schema) = wire
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            PhysicalASAPOperatorPayload::Relational {
+                operator: NonASAPOpKind::Scan { source, .. },
+            } => Some((source.clone(), node.output_schema.clone())),
+            _ => None,
+        })
+        .unwrap();
+    let schema = std::sync::Arc::new(schema);
+    let batch = Batch::try_new(schema.clone(), vec![]).unwrap();
+    let mut sources = DataSources::default();
+    sources
+        .register(
+            source,
+            std::sync::Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+        )
+        .unwrap();
+    asap_executor::physical_planner::bind_with_data_sources(
+        &wire,
+        BTreeMap::new(),
+        &[u64::from(wire.roots[0].0)],
+        &sources,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Every Pass 1 alternative for `sql` at `target`, composed, with the
+/// families of its `SummaryAgg`s and whether they all carry a filter.
+async fn alternatives(sql: &str, target: AccuracyTarget) -> Vec<(String, Rc<OperatorNode>)> {
+    let root = lower_sql(sql, &catalog(), target).await.unwrap();
+    let inventory =
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))], &BTreeMap::new())
+            .unwrap();
+    enumerate_choices(&inventory, usize::MAX)
+        .into_iter()
+        .map(|choice| {
+            let roots = compose_logical_candidate(&inventory, &choice)
+                .unwrap_or_else(|e| panic!("{choice:?} composes: {e}"));
+            let QueryRoot::Operator(root) = &roots[0].1 else {
+                panic!("operator root")
+            };
+            let label = summary_builds(root)
+                .iter()
+                .map(|build| {
+                    let Some(ASAPOp::SummaryAgg {
+                        family,
+                        grouping,
+                        filter,
+                        ..
+                    }) = build.asap()
+                    else {
+                        unreachable!()
+                    };
+                    assert!(filter.is_some(), "{choice:?} keeps the filter");
+                    let family = match family {
+                        asap_types::ir::schema::FieldDataType::Sketch(kind, _) => {
+                            format!("{:?}", kind.algorithm())
+                        }
+                        other => format!("{other:?}"),
+                    };
+                    match grouping == &Default::default() {
+                        true => family,
+                        false => format!("Hydra{family}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("+");
+            (label, root.clone())
+        })
+        .collect()
+}
+
+/// Pass 1 offers a filtered single-measure aggregate the same alternatives
+/// as the unfiltered one, each with `SummaryAgg.filter` set. All compose;
+/// an alternative binds in the executor exactly when its unfiltered
+/// counterpart does. The exact `Count` accumulator and HydraCms execute to
+/// the exact plan's counts, `b` included.
+#[tokio::test]
+async fn pass1_offers_filtered_count_alternatives() {
+    // ε = 0.1 keeps the Hydra grid inside the default memory limit.
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.1,
+        delta: 0.01,
+    };
+    let filtered = alternatives(
+        "SELECT g, COUNT(*) FILTER (WHERE x > 0) AS c FROM events GROUP BY g",
+        target.clone(),
+    )
+    .await;
+    let plain = lower_sql(
+        "SELECT g, COUNT(*) AS c FROM events GROUP BY g",
+        &catalog(),
+        target.clone(),
+    )
+    .await
+    .unwrap();
+    let inventory =
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(plain))], &BTreeMap::new())
+            .unwrap();
+    let plain: Vec<_> = enumerate_choices(&inventory, usize::MAX)
+        .into_iter()
+        .map(|choice| {
+            let roots = compose_logical_candidate(&inventory, &choice).unwrap();
+            let QueryRoot::Operator(root) = &roots[0].1 else {
+                panic!("operator root")
+            };
+            root.clone()
+        })
+        .collect();
+    let labels: Vec<_> = filtered.iter().map(|(label, _)| label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "",
+            "ExactAggregate(Count, Count)",
+            "Cms",
+            "CountSketch",
+            "UnivMon",
+            "HydraCms"
+        ]
+    );
+    let expected = printed([
+        vec![s("a"), Value::Int64(2)],
+        vec![s("b"), Value::Int64(0)],
+        vec![s("c"), Value::Int64(1)],
+    ]);
+    for ((label, root), plain) in filtered.iter().zip(&plain) {
+        assert_eq!(binds(root).is_ok(), binds(plain).is_ok(), "{label}");
+        if matches!(
+            label.as_str(),
+            "" | "ExactAggregate(Count, Count)" | "HydraCms"
+        ) {
+            // Few groups in a wide grid: Hydra's estimate is exact here.
+            assert_eq!(sorted(root), expected, "{label}");
+        }
+    }
+}
+
+/// A filtered SUM and a filtered percentile: every alternative composes
+/// with the filter, and the exact `Sum` accumulator, KLL and DDSketch
+/// execute to the exact answer, reading NULL for `b`, which has no `x > 0`
+/// row.
+#[tokio::test]
+async fn pass1_filtered_sum_and_quantile_alternatives_execute() {
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.01,
+        delta: 0.01,
+    };
+    // SQL's exact percentile has no native implementation.
+    for (sql, expected, executable) in [
+        (
+            "SELECT g, SUM(x) FILTER (WHERE x > 0) AS v FROM events GROUP BY g",
+            ["a 3.0", "b NULL", "c 5.0"],
+            vec!["", "ExactAggregate(Sum, Sum)"],
+        ),
+        (
+            "SELECT g, approx_percentile_cont(x, 0.5) FILTER (WHERE x > 0) AS v FROM events GROUP BY g",
+            ["a 1.0", "b NULL", "c 5.0"],
+            vec!["Kll", "DDSketch"],
+        ),
+    ] {
+        let alternatives = alternatives(sql, target.clone()).await;
+        let mut executed = vec![];
+        for (label, root) in &alternatives {
+            if binds(root).is_ok() {
+                let actual = sorted(root);
+                // Within 2%: DDSketch's relative-error guarantee at ε = 0.01.
+                let close = |a: &str, e: &str| {
+                    a == e
+                        || matches!((a.parse::<f64>(), e.parse::<f64>()),
+                            (Ok(a), Ok(e)) if (a - e).abs() <= 0.02 * e.abs())
+                };
+                assert!(
+                    actual.len() == expected.len()
+                        && actual.iter().zip(expected).all(|(a, e)| {
+                            a.split(' ').zip(e.split(' ')).all(|(a, e)| close(a, e))
+                        }),
+                    "{sql}: {label}: {actual:?}"
+                );
+                executed.push(label.as_str());
+            }
+        }
+        assert_eq!(executed, executable, "{sql}");
+    }
+}

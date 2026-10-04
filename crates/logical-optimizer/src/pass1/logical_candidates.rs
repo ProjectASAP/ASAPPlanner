@@ -628,11 +628,13 @@ fn realize(
             "multi-measure aggregate",
         ));
     };
-    if !filters.is_empty() || having.is_some() {
-        return Err(LogicalCandidateError::Unsupported(
-            "filtered or HAVING aggregate",
-        ));
+    if having.is_some() {
+        return Err(LogicalCandidateError::Unsupported("HAVING aggregate"));
     }
+    // A single measure's row filter (SQL `FILTER (WHERE …)`) becomes the
+    // summary's filter over the same input rows; every group is kept. A
+    // whole-expression target is never filtered.
+    let filter = filters.first().cloned().flatten();
     let whole =
         match absorbs {
             true => Some(whole_expression_input(target).ok_or(
@@ -679,14 +681,16 @@ fn realize(
             input: input.clone(),
             reduction: reduction.clone(),
             grouping: grouping.clone(),
-            filter: None,
+            filter: filter.clone(),
         }))?;
         Ok::<_, LogicalCandidateError>(Rc::new(state.with_coverage(coverage)?))
     };
     let state = match window {
         // Whole-source coverage is declared, not proven: Pass 1 trusts that
         // the state holds every observation of its source that reaches it
-        // (#570).
+        // (#570). A filtered state holds fewer, so this over-states its
+        // population; that only makes disjointness harder to prove, and the
+        // filter is part of the node, so sharing never confuses the two.
         WindowForm::Whole => {
             let coverage = SummaryCoverage {
                 source: single_source(&child)?,
