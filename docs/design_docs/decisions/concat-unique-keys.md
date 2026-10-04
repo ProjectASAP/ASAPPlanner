@@ -129,7 +129,7 @@ for why it's fine to ship unused.
   caller upstream of `resolve_root`, even though no such caller exists yet.
 - Every other match/construction site touching `Concat` across the DAG
   (`canonicalize.rs`, `cse.rs`, `schema_resolver.rs`, `dag_export.rs`,
-  `asap-aware-mapping`'s `replacement.rs`/`explanation.rs`, and every
+  `asap-logical-optimizer`'s `replacement.rs`/`explanation.rs`, and every
   test/tooling AST walker) was mechanically updated to bind or ignore the new
   field — most just added `, ..`; the two places that *rebuild* a `Concat`
   node (`cse.rs`'s `rebuild_children`, part of CSE interning) thread

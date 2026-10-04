@@ -205,7 +205,7 @@ see [code architecture §3](asap-aware-mapping-architecture.md#3-how-the-current
 
 `CostModel` covers deployment-specific preference and cost decisions. It is consulted only at selection time (`cost_sorted`, `global_selection` and their `_with_recurrence` variants), never during candidate generation: sketch parameters come from the analytical estimators (`accuracy::estimators::size_params`), and extension intents stay pass-through.
 
-The crate cannot hardcode real deployment costs: `asap-aware-mapping` uses `asap-types` and the `asap_sketchlib` mapping
+The crate cannot hardcode real deployment costs: `asap-plan-selection` uses `asap-types` and the `asap_sketchlib` mapping
 bounds, but does not execute workloads or own deployment measurements. Most hooks therefore provide the crate's built-in static behavior as a default. Override only the decisions your deployment needs to change.
 
 | Hook | Use it to | Default? |

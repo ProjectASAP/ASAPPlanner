@@ -364,7 +364,7 @@ Example for `filters`:
   `count(CASE WHEN p THEN x END)` (`p`, plus `x IS NOT NULL` when `x` is nullable), and from
   `count(expr)` over any other nullable `expr` (`expr IS NOT NULL`), because canonical `Count`
   counts rows and never consults its argument. A filtered measure has no summary binding yet:
-  `asap-aware-mapping` retains such an `Aggregate` as an ordinary exact sub-DAG, and canonicalization does
+  `asap-logical-optimizer` retains such an `Aggregate` as an ordinary exact sub-DAG, and canonicalization does
   not promote a filtered count ranking to a heavy-hitter `TopK`.
 
 Example for `having`:

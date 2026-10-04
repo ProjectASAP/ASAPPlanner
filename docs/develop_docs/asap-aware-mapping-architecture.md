@@ -17,7 +17,7 @@ defined in [mapping contracts](asap-aware-mapping-contracts.md).
 Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are
 illustrative; they do not ship with this crate. Samples that use real public
 types and functions follow the APIs exported by `asap-logical-optimizer`
-(Stage 1 candidate search) and `asap-aware-mapping` (cost models and selection).
+(Stage 1 candidate search) and `asap-plan-selection` (cost models and selection).
 
 If you only need to find the right extension point, start with the [extension map](extend-asap-aware-mapping.md#7-current-extension-map). If you are implementing a strategy, read this mental model, the [mapping contracts](asap-aware-mapping-contracts.md), and the [extension guide](extend-asap-aware-mapping.md).
 

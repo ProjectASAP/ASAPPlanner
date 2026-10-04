@@ -4,7 +4,7 @@
 //! Drives the full staged pipeline this issue lands: two independently
 //! lowered `OperatorNode` DAGs → `share_common_sub_dags` (stage 1,
 //! `asap-types::ir::cse`, run internally by `search_workload`) →
-//! `search_workload` (stage 2, `asap-aware-mapping`) — and asserts the
+//! `search_workload` (stage 2, `asap-logical-optimizer`) — and asserts the
 //! sharing that stage 1 decides survives into stage 2's discovered
 //! `CandidateLogicalASAPDAGs` as one genuinely shared `TargetSubDAGCandidates`, not just one shared
 //! `Rc<OperatorNode>`. This is the "real caller" the issue's landing plan
@@ -15,9 +15,9 @@
 //! Committing to one final, physically-materialized answer for a whole
 //! workload (the former `implement_workload`/`implement_workload_with`,
 //! which this test file used to drive instead of `search_workload`) is out
-//! of `asap-aware-mapping`'s scope — see that crate's `lib.rs` `## Status`
+//! of `asap-logical-optimizer`'s scope — see that crate's `lib.rs` `## Status`
 //! section — so these tests assert on the discovered `CandidateLogicalASAPDAGs` shape
-//! directly, the same way `asap-aware-mapping::replacement`'s own
+//! directly, the same way `asap-logical-optimizer::pass1::replacement`'s own
 //! `shared_aggregate_across_two_roots_gets_both_strategies_candidates` test
 //! does, just exercised through the crate's public API from this external
 //! integration-test crate.
@@ -70,7 +70,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // TargetSubDAGCandidates with consumer_count 2 — ASAPStrategies's one
     // ExactAggregate candidate *and* SharedSubDAGStrategy's share-vs-
     // recompute pair, exactly as `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
-    // (asap-aware-mapping::replacement's own equivalent, internal test)
+    // (asap-logical-optimizer::pass1::replacement's own equivalent, internal test)
     // pins for the same fixture shape.
     let group = space
         .candidates_for_target(&space.roots[0].1)

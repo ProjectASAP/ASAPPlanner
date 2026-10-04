@@ -2,7 +2,7 @@
 // (or pipe via stdin: cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt)
 //
 // Lowers a batch of ad-hoc SQL/PromQL queries to pre-ASAP IR, then runs the
-// `asap-aware-mapping` pre-ASAP → post-ASAP binding pass and prints the
+// `asap-logical-optimizer` pre-ASAP → post-ASAP binding pass and prints the
 // resulting **post-ASAP IR** (the sketch-bound IR: an `OperatorNode` DAG in
 // which `ASAPOp` operators — the concrete summary family/params committed per
 // aggregate — replace the bound aggregates, while whatever the pass left
