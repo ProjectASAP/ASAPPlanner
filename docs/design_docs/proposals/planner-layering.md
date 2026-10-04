@@ -234,7 +234,7 @@ Stage details: [0. Frontends](#0-language-specific-frontends) ·
 
  
 
-## Stages and their decisions
+## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
 Stages 0 to 2 each output a candidate set holding every semantically equivalent
 and legal candidate DAG of that stage; stage 3 is the only step that chooses
