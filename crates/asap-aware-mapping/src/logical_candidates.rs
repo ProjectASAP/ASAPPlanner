@@ -352,6 +352,59 @@ fn statistic(intent: &AggIntent) -> Result<SketchStatistic, LogicalCandidateErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::lower_promql;
+
+    /// Every realization of a top-k returns the same selected-rows schema, so
+    /// an aggregate over a pass-through top-k composes like one over a sketch.
+    #[test]
+    fn aggregate_over_any_topk_realization_composes() {
+        let root = lower_promql(
+            "count(topk by (job) (10, sum_over_time(m[1m])))",
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.001,
+            },
+        );
+        let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+        let inventory =
+            enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let topk = inventory
+            .targets
+            .iter()
+            .position(|t| {
+                matches!(t.target.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
+                    if matches!(measures.as_slice(), [AggIntent::TopK { .. }]))
+            })
+            .unwrap();
+        let mut schemas = Vec::new();
+        for (count, alternatives) in inventory.targets.iter().enumerate() {
+            if count == topk {
+                continue;
+            }
+            for outer in 0..alternatives.alternatives.len() {
+                for inner in 0..inventory.targets[topk].alternatives.len() {
+                    let mut choice = vec![0; inventory.targets.len()];
+                    choice[count] = outer;
+                    choice[topk] = inner;
+                    compose_logical_candidate(&inventory, &choice)
+                        .unwrap_or_else(|e| panic!("{choice:?}: {e}"));
+                }
+            }
+        }
+        for inner in 0..inventory.targets[topk].alternatives.len() {
+            let mut choice = vec![0; inventory.targets.len()];
+            choice[topk] = inner;
+            let roots = compose_logical_candidate(&inventory, &choice).unwrap();
+            let QueryRoot::Operator(root) = &roots[0].1 else {
+                panic!("operator root")
+            };
+            let NonASAPOp::Aggregate { child, .. } = root.expect_non_asap() else {
+                panic!("count over top-k")
+            };
+            schemas.push(child.schema.clone());
+        }
+        assert!(schemas.windows(2).all(|w| w[0] == w[1]), "{schemas:#?}");
+    }
     /// Approximate requests must retain the exact execution alternative too.
     #[test]
     fn approximate_count_keeps_exact_and_universal_choices() {

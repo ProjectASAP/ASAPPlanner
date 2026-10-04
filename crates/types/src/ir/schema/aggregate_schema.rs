@@ -92,6 +92,10 @@ pub fn aggregate_output_schema(
         return without_output_schema(in_schema, by.keys(), measures, output_names);
     }
 
+    if let [AggIntent::TopK { .. }] = measures {
+        return ranked_rows_schema(in_schema, by.keys());
+    }
+
     let mut out_cols: Vec<Field> = Vec::with_capacity(by.len() + measures.len());
     for &id in by.keys() {
         let c = in_schema
@@ -177,6 +181,63 @@ pub fn aggregate_output_schema(
         // A cross-series aggregate enumerates exactly `by ++ measures`, so its output
         // is closed even over an open input — this is where an open schema
         // freezes to closed.
+        closed: true,
+    })
+}
+
+/// A top-k returns the selected rows, the shape every realization of it
+/// produces (exact Sort → Limit, a sketch readout): the partition keys, the
+/// ranked item's identity, and its ranking `value`. A PromQL item is its
+/// series: the identity column when rows carry it, else the encoded label set
+/// a sketch readout returns. A SQL item is every other non-time column.
+fn ranked_rows_schema(
+    in_schema: &Schema,
+    keys: &[ColumnId],
+) -> Result<Schema, SchemaDerivationError> {
+    use crate::ir::schema::PROMQL_SERIES_IDENTITY;
+    let field = |id: ColumnId| {
+        in_schema
+            .fields
+            .get(id)
+            .cloned()
+            .ok_or(SchemaDerivationError::InvalidGroupByColumn(
+                id,
+                in_schema.fields.len(),
+            ))
+    };
+    let mut fields = keys
+        .iter()
+        .map(|&id| field(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let identity = in_schema
+        .fields
+        .iter()
+        .position(|f| f.name == PROMQL_SERIES_IDENTITY);
+    match identity {
+        Some(id) if in_schema.has_promql_series_identity() => fields.push(field(id)?),
+        _ if !in_schema.closed => {
+            fields.push(Field::plain(PROMQL_SERIES_IDENTITY, DataType::Utf8, false))
+        }
+        _ => {
+            let value = crate::ir::scalar::column_resolution::resolve_column_ref(
+                &ColumnRef::SampleValue,
+                in_schema,
+            )
+            .ok()
+            .or_else(|| (0..in_schema.fields.len()).rfind(|i| !keys.contains(i)));
+            for id in 0..in_schema.fields.len() {
+                if !keys.contains(&id) && Some(id) != value && Some(id) != in_schema.time_index {
+                    fields.push(field(id)?);
+                }
+            }
+        }
+    }
+    let key = (0..fields.len()).collect();
+    fields.push(Field::plain("value", DataType::Float64, false));
+    Ok(Schema {
+        fields,
+        time_index: None,
+        unique_keys: vec![key],
         closed: true,
     })
 }

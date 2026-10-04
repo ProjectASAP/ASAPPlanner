@@ -126,12 +126,14 @@ fn inventories(query: &str, accuracy: AccuracyTarget) -> (Vec<InventoryDAG>, Vec
     (enumerate(&full), enumerate(&logical))
 }
 
+/// Whether an operator below the root carries series identity. A top-k root
+/// returns its selected series' identity whatever realizes it.
 fn carries_identity(dag: &InventoryDAG) -> bool {
     dag.iter().any(|(_, root)| {
-        compile_physical_asap_dag(root)
-            .unwrap()
-            .nodes
+        let dag = compile_physical_asap_dag(root).unwrap();
+        dag.nodes
             .iter()
+            .filter(|node| !dag.roots.contains(&node.id))
             .any(|node| {
                 node.output_schema
                     .fields
