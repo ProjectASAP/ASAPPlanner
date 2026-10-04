@@ -150,3 +150,44 @@ fn example3b_lists_tumbling_candidates() {
         assert_eq!(merges, 1, "{}", candidate["label"]);
     }
 }
+
+/// Example 4, Pattern A repeated monthly: the same 486 candidates as the ad
+/// hoc batch (3a), and none maintained at ingestion time. The windows (1–5 y)
+/// are longer than the month between runs and no pane width fits, so
+/// nothing is maintainable. The selected plan is 3a's, now amortized over
+/// monthly runs instead of one run per hour of horizon.
+#[test]
+fn example4a_repeats_monthly_with_nothing_maintainable() {
+    let once = generate(&[
+        "--example",
+        "planner-layering-3a",
+        "--max-candidates",
+        "600",
+    ]);
+    let monthly = generate(&[
+        "--example",
+        "planner-layering-4a",
+        "--max-candidates",
+        "600",
+    ]);
+    let physical = monthly["stage2_physical_asap"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(physical.len(), 486);
+    assert!(physical
+        .iter()
+        .all(|p| !p["label"].as_str().unwrap().contains("ingestion time")));
+    let selected = |d: &Value| {
+        d["stage3_selection"]["selected"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(selected(&monthly), selected(&once));
+    let cost = |d: &Value| {
+        d["stage3_selection"]["costs"][selected(d)]["total"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!(cost(&monthly) < cost(&once));
+}

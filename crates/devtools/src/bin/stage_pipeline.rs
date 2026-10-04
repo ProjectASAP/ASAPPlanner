@@ -1,7 +1,8 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --example planner-layering-1 --max-candidates 128 --out planner-layering-example1.json
 // (also planner-layering-3a and planner-layering-3b: #509 Example 3,
-// Patterns A and B)
+// Patterns A and B; planner-layering-4a: Example 4, Pattern A repeated
+// monthly)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 //
@@ -58,7 +59,7 @@ use asap_types::workload::{
 use serde_json::{json, Value};
 
 const USAGE: &str =
-    "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | --promql <query>... \
+    "usage: stage_pipeline (--example planner-layering-{1,3a,3b,4a} | --promql <query>... \
 [--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) [--max-candidates <n>] --out <file>";
 
 fn main() {
@@ -93,6 +94,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         (Some("planner-layering-1"), true) => planner_layering_example1(),
         (Some("planner-layering-3a"), true) => planner_layering_example3a(),
         (Some("planner-layering-3b"), true) => planner_layering_example3b(),
+        (Some("planner-layering-4a"), true) => planner_layering_example4a(),
         (Some(other), true) => return Err(format!("unknown example {other}")),
         (None, false) => {
             let accuracy = match (epsilon, delta) {
@@ -445,45 +447,52 @@ fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
     }
 }
 
+const YEAR_MS: u64 = 365 * 24 * 3_600_000;
+/// Pattern A's batch time T (2026-01-01T00:00:00Z).
+const T_MS: u64 = 1_767_225_600_000;
+/// #509 Example 3, Pattern A: five p99 reports, (PromQL, lookback, T − as_of).
+const PATTERN_A: [(&str, u64, u64); 5] = [
+    ("quantile_over_time(0.99, latency_ms[5y])", 5 * YEAR_MS, 0),
+    ("quantile_over_time(0.99, latency_ms[1y])", YEAR_MS, 0),
+    (
+        "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
+        YEAR_MS,
+        YEAR_MS,
+    ),
+    (
+        "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
+        YEAR_MS,
+        2 * YEAR_MS,
+    ),
+    (
+        "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
+        3 * YEAR_MS,
+        2 * YEAR_MS,
+    ),
+];
+
+fn pattern_a_requirements() -> QueryRequirements {
+    QueryRequirements {
+        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+            epsilon: 0.005,
+            delta: 0.01,
+        }),
+        response_latency: LatencyRequirement::Unspecified,
+    }
+}
+
 /// #509 Example 3, Pattern A: an ad hoc batch of five p99 reports over
 /// historical intervals, run once at T (2026-01-01), over mixed data.
 fn planner_layering_example3a() -> PlanningWorkload {
-    const YEAR_MS: u64 = 365 * 24 * 3_600_000;
-    const T_MS: u64 = 1_767_225_600_000;
-    let queries = [
-        ("quantile_over_time(0.99, latency_ms[5y])", 5 * YEAR_MS, 0),
-        ("quantile_over_time(0.99, latency_ms[1y])", YEAR_MS, 0),
-        (
-            "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
-            YEAR_MS,
-            YEAR_MS,
-        ),
-        (
-            "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
-            YEAR_MS,
-            2 * YEAR_MS,
-        ),
-        (
-            "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
-            3 * YEAR_MS,
-            2 * YEAR_MS,
-        ),
-    ];
     PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: Some(
-                queries
+                PATTERN_A
                     .into_iter()
                     .map(|(query, lookback, before_t)| BatchEntry {
                         query: Query(query.into()),
-                        requirements: QueryRequirements {
-                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                                epsilon: 0.005,
-                                delta: 0.01,
-                            }),
-                            response_latency: LatencyRequirement::Unspecified,
-                        },
+                        requirements: pattern_a_requirements(),
                         predictability: Predictability::AdHoc,
                         invocations: 1,
                         execute_at: Some(TimestampMs(T_MS)),
@@ -496,6 +505,40 @@ fn planner_layering_example3a() -> PlanningWorkload {
                     .collect(),
             ),
             repeating_queries: None,
+        },
+        data_workload: Some(shared_data_workload(DataArrival::Mixed)),
+    }
+}
+
+/// #509 Example 4, Pattern A repeated monthly and `Predictable { known_at: T }`:
+/// each run reads the intervals ending at its own evaluation time, over mixed
+/// data. Example 4's other variants are Example 3's workloads (Pattern B is
+/// `planner-layering-3b`).
+fn planner_layering_example4a() -> PlanningWorkload {
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(
+                PATTERN_A
+                    .into_iter()
+                    .map(|(query, lookback, _)| RepeatingEntry {
+                        query: Query(query.into()),
+                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(
+                            30 * 24 * 3_600_000,
+                        )),
+                        requirements: pattern_a_requirements(),
+                        predictability: Predictability::Predictable {
+                            known_at: Some(TimestampMs(T_MS)),
+                        },
+                        time_selection: TimeSelection {
+                            scope: QueryTimeScope::Longitudinal,
+                            lookback: Some(DurationMs(lookback)),
+                            as_of: None,
+                        },
+                    })
+                    .collect(),
+            ),
         },
         data_workload: Some(shared_data_workload(DataArrival::Mixed)),
     }
