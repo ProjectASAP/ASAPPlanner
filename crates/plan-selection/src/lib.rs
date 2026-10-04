@@ -1,4 +1,11 @@
-//! #509 Stage 3 (MVP): plan selection, the only stage that computes cost.
+//! `asap-plan-selection` — #509 Stage 3 (MVP): plan selection, the only stage
+//! that computes cost. Cargo enforces the stage order: this crate depends on
+//! `asap-types`, Stage 1 and Stage 2, never on the facade or the executor.
+//!
+//! - [`cost`] — the [`CostModel`] trait, analytical and evidence-based
+//!   pricing, recurrence, and the physical lowering and storage I/O they price.
+//! - [`candidate_selection`] — the legacy cost-ranked selection over a Stage 1
+//!   search (deleted under #580).
 //!
 //! Each Stage 2 candidate is checked against every query's accuracy target
 //! with the accuracy model, and Count-Min is admitted only over weights proven
@@ -9,7 +16,7 @@
 //! cannot be built or priced is rejected with its reason; it does not fail
 //! the selection.
 //!
-//! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
+//! Prices come from [`crate::cost::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! rows read out. These numbers are illustrative, not calibrated. Latency
@@ -20,6 +27,23 @@
 //! [`select_exhaustive`] builds and prices every combination, for display and
 //! for checking the program.
 pub mod candidate_selection;
+pub mod cost;
+#[cfg(test)]
+mod test_support;
+
+pub use candidate_selection::{
+    CompositionDecision, CostedGlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap,
+};
+pub use cost::cost_model::{
+    maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
+    CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, ValueOperationCapabilities,
+};
+pub use cost::recurrence::{
+    evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
+    Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
+    UpdateRate,
+};
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -38,11 +62,10 @@ use asap_types::types::AccuracyTarget;
 use asap_types::workload::DataWorkload;
 use thiserror::Error;
 
-use crate::analytical_cost::{
+use crate::cost::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
-use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::physical_operator_statistics::{
+use crate::cost::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use asap_logical_optimizer::accuracy::{

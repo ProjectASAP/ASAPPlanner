@@ -307,12 +307,9 @@ dependencies = [
 name = "asap-aware-mapping"
 version = "0.1.0"
 dependencies = [
- "asap-frontend-promql",
  "asap-logical-optimizer",
- "asap-physical-optimizer",
+ "asap-plan-selection",
  "asap-types",
- "serde",
- "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -320,10 +317,10 @@ dependencies = [
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-logical-optimizer",
+ "asap-plan-selection",
  "asap-types",
  "serde",
  "serde_json",
@@ -354,9 +351,9 @@ dependencies = [
 name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-common",
  "asap-logical-optimizer",
+ "asap-plan-selection",
  "asap-types",
  "promql-parser",
 ]
@@ -365,7 +362,6 @@ dependencies = [
 name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-common",
  "asap-logical-optimizer",
  "asap-sql-function-catalog",
@@ -381,12 +377,12 @@ dependencies = [
 name = "asap-integration-tests"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-logical-optimizer",
  "asap-physical-operators",
  "asap-physical-optimizer",
+ "asap-plan-selection",
  "asap-planner",
  "asap-types",
  "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
@@ -410,9 +406,9 @@ dependencies = [
 name = "asap-physical-operators"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-logical-optimizer",
+ "asap-plan-selection",
  "asap-types",
  "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
  "chrono",
@@ -436,6 +432,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-plan-selection"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-logical-optimizer",
+ "asap-physical-optimizer",
+ "asap-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "asap-planner"
 version = "0.1.0"
 dependencies = [
@@ -444,6 +453,7 @@ dependencies = [
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-logical-optimizer",
+ "asap-plan-selection",
  "asap-types",
  "thiserror 2.0.18",
  "tokio",

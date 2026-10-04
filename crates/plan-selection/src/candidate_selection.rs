@@ -13,11 +13,11 @@ use std::rc::Rc;
 use asap_types::ir::schema::{FieldDataType, GroupingStrategy, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
-use crate::cost_model::{
+use crate::cost::cost_model::{
     raw_recompute_cost_rate, CostModel, CseCandidate, ExactCompositionCostInputs,
     ExactCompositionCostRequest, ShareDecision,
 };
-use crate::recurrence::{
+use crate::cost::recurrence::{
     CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
 };
 use asap_logical_optimizer::pass1::exact_composition::OperationPlacement;
@@ -261,22 +261,22 @@ pub fn recurrence_profiles<Id>(
     space: &CandidateLogicalASAPDAGs<Id>,
     root_recurrence: &[RootRecurrence],
     update_rate: Option<UpdateRate>,
-) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
+) -> Result<RecurrenceProfileMap, crate::cost::recurrence::RecurrenceError> {
     if root_recurrence.len() != space.roots.len() {
-        return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
-            expected: space.roots.len(),
-            got: root_recurrence.len(),
-        });
+        return Err(
+            crate::cost::recurrence::RecurrenceError::RootCountMismatch {
+                expected: space.roots.len(),
+                got: root_recurrence.len(),
+            },
+        );
     }
     if let Some(rate) = update_rate {
-        crate::recurrence::validate_update_rate(rate)?;
+        crate::cost::recurrence::validate_update_rate(rate)?;
     }
     for recurrence in root_recurrence {
         if let RootRecurrence::Repeating(rate) = recurrence {
             if !rate.0.is_finite() || rate.0 < 0.0 {
-                return Err(crate::recurrence::RecurrenceError::InvalidEvaluationRate(
-                    *rate,
-                ));
+                return Err(crate::cost::recurrence::RecurrenceError::InvalidEvaluationRate(*rate));
             }
         }
     }
@@ -328,7 +328,7 @@ pub fn recurrence_profiles<Id>(
     let mut profiles = HashMap::with_capacity(space.order().len());
     for ptr in space.order() {
         let rate = rates.get(ptr).copied().unwrap_or(0.0);
-        let evaluation_rate = (rate > 0.0).then_some(crate::recurrence::EvaluationRate(rate));
+        let evaluation_rate = (rate > 0.0).then_some(crate::cost::recurrence::EvaluationRate(rate));
         let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
         // Bug 2 fix (see "Unreachable sites" above): only a reached
         // site carries the caller-supplied `update_rate`.
@@ -480,7 +480,8 @@ fn rank_group<'a>(
             })
             .collect();
         if let Some(kinds) = kinds {
-            let order = crate::cost_model::validated_candidate_ranking(cost_model, intent, &kinds);
+            let order =
+                crate::cost::cost_model::validated_candidate_ranking(cost_model, intent, &kinds);
             ranked.sort_by_key(|c| {
                 let kind = match &c.replacement {
                     Replacement::SubDAG(node) => sketch_kind_of(node),
@@ -547,7 +548,7 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
 /// [`ASAPStrategies::replacements`] returns — so this just reuses
 /// [`realize_child`], the same rank-and-take-first helper
 /// `construct_summary_agg`'s own recursion and
-/// [`crate::cost_model::DefaultCostModel::estimate_cost`] already use,
+/// [`crate::cost::cost_model::DefaultCostModel::estimate_cost`] already use,
 /// wrapped to swallow the (here, uninteresting) error into `None`.
 fn realize_one(target: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
     realize_child(target).ok()
@@ -1355,7 +1356,7 @@ fn topological_order(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cost_model::{Cost, DefaultCostModel};
+    use crate::cost::cost_model::{Cost, DefaultCostModel};
     use crate::test_support::{agg, lower_promql, metric_scan};
     use asap_logical_optimizer::accuracy::{
         AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,

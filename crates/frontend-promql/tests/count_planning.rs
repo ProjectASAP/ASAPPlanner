@@ -1,11 +1,11 @@
 //! Query text through summary selection: counts use observations, never value weights.
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_logical_optimizer::accuracy::DefaultAccuracyModel;
 use asap_logical_optimizer::{
     default_strategies, search_workload_with_targets, ASAPStrategies, Replacement,
     ReplacementStrategy, TargetSubDAG,
 };
+use asap_plan_selection::candidate_selection::global_selection;
+use asap_plan_selection::cost::cost_model::DefaultCostModel;
 mod support;
 use asap_types::ir::export::PhysicalASAPOperatorPayload;
 use asap_types::ir::schema::{
