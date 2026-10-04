@@ -30,6 +30,10 @@
 // The deployment inputs are the built-in cost and accuracy models and the
 // reference executor's capabilities (`asap_executor::capabilities`).
 //
+//   - deployment: the deployment inputs Stage 3 used (the executor's
+//     capabilities, summarized; the cost model and its Stage3Calibration;
+//     the accuracy model's name).
+//
 // Everything is the library's `plan_selection::plan_stages`, the function the
 // facade runs; this tool only serializes it. Stage 3 here is over every
 // displayed candidate; the facade's dynamic program selects the same winner
@@ -46,7 +50,9 @@ use asap_logical_optimizer::pass1::logical_candidates::{
 };
 use asap_logical_optimizer::Realization;
 use asap_plan_selection::PlanningModels;
-use asap_plan_selection::{plan_stages, Selection, Sharing, MAX_ENUMERATED_CANDIDATES};
+use asap_plan_selection::{
+    plan_stages, Selection, Sharing, COST_MODEL, COST_PER_SECOND, MAX_ENUMERATED_CANDIDATES,
+};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
 use asap_types::ir::schema_support::with_promql_series_identity;
@@ -136,11 +142,12 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let capabilities = asap_executor::capabilities();
+    let models = PlanningModels::builtin().with_capabilities(&capabilities);
     let run = plan_stages(
         roots.into_iter().enumerate().collect(),
         &demand,
         &data,
-        PlanningModels::builtin().with_capabilities(&capabilities),
+        models,
         max_candidates.max(1),
     )
     .map_err(|e| format!("planning: {e}"))?;
@@ -188,6 +195,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     Ok(json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": workload_queries(workload) },
+        "deployment": deployment_json(&models),
         "stage0_logical": { "dag": stage0 },
         "stage1_logical_asap": {
             "combinations": combinations,
@@ -197,6 +205,47 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         "stage2_physical_asap": { "candidates": stage2 },
         "stage3_selection": stage3_json(&enumeration.selection),
     }))
+}
+
+/// The deployment inputs Stage 3 used: the executor's capabilities, one
+/// line per summary, and the cost and accuracy models.
+fn deployment_json(models: &PlanningModels<'_>) -> Value {
+    let caps = models.capabilities;
+    let summaries = caps.summaries.as_ref().map(|summaries| {
+        summaries
+            .iter()
+            .map(|s| {
+                let readouts: Vec<_> = s.readouts.iter().map(|r| format!("{r:?}")).collect();
+                json!({ "summary": s.name(), "readouts": readouts })
+            })
+            .collect::<Vec<_>>()
+    });
+    let c = &models.calibration;
+    json!({
+        "capabilities": {
+            "source": "asap_executor::capabilities",
+            "summaries": summaries,
+            "ingestion_time": caps.ingestion_time,
+            "query_time_retention": caps.query_time_retention,
+            "memory_budget_bytes": caps.memory_budget_bytes,
+            "raw_data_retained": caps.raw_data_retained,
+            "raw_bytes_per_sample": caps.raw_bytes_per_sample,
+        },
+        "cost_model": {
+            "name": COST_MODEL,
+            "unit": COST_PER_SECOND,
+            "calibration": {
+                "version": c.version,
+                "cost_per_cpu_op": c.cost_per_cpu_op,
+                "cost_per_scan_byte": c.cost_per_scan_byte,
+                "cost_per_retained_byte_second": c.cost_per_retained_byte_second,
+                "horizon_s": c.horizon_s,
+                "latency_ms_per_cost_unit": c.latency_ms_per_cost_unit,
+            },
+        },
+        // `PlanningModels::builtin()`'s accuracy model and evidence.
+        "accuracy_model": { "name": "DefaultAccuracyModel", "evidence": "none" },
+    })
 }
 
 fn stage3_json(selection: &Selection) -> Value {
