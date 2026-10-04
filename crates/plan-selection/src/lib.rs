@@ -80,10 +80,10 @@ use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
     read_targets, LocalLogicalCandidates, LogicalCandidateError,
 };
-pub use asap_logical_optimizer::pass2::identical_expressions::SharingVariant;
 use asap_logical_optimizer::pass2::identical_expressions::{
     share_identical_expressions, stage1_logical_candidates,
 };
+pub use asap_logical_optimizer::pass2::identical_expressions::{Sharing, SharingVariant};
 use asap_physical_optimizer::implementation::physical_candidates::{
     stage2_physical, PhysicalCandidate,
 };
@@ -358,8 +358,7 @@ fn assess(
 /// stay unique across variants.
 struct Variant<'a, Id> {
     inventory: &'a LocalLogicalCandidates<Id>,
-    /// Identical sub-DAGs are merged, after composition too.
-    shared: bool,
+    sharing: Sharing,
     /// Candidates numbered before this variant's.
     offset: usize,
 }
@@ -379,7 +378,7 @@ fn variants<Id>(stage1: &[SharingVariant<Id>]) -> Vec<Variant<'_, Id>> {
         .map(|v| {
             let variant = Variant {
                 inventory: &v.inventory,
-                shared: v.shared,
+                sharing: v.sharing,
                 offset,
             };
             offset = offset.saturating_add(combination_count(&v.inventory));
@@ -398,7 +397,7 @@ impl<Id> Variant<'_, Id> {
 /// The independent variant alone: Pass 1 without Pass 2.
 pub fn independent<Id>(inventory: LocalLogicalCandidates<Id>) -> Vec<SharingVariant<Id>> {
     vec![SharingVariant {
-        shared: false,
+        sharing: Sharing::Independent,
         inventory,
     }]
 }
@@ -413,14 +412,14 @@ pub fn realize_choice<Id: Clone>(
     realize(
         Variant {
             inventory,
-            shared: false,
+            sharing: Sharing::Independent,
             offset: 0,
         },
         choice,
     )
 }
 
-/// Stage 1 → Stage 2 for `choice` in `variant`. A shared variant also
+/// Stage 1 → Stage 2 for `choice` in `variant`. A sharing variant also
 /// merges identical sub-DAGs after composition, so queries that chose the
 /// same summary producer reach one node; the returned Stage 1 candidate is
 /// the merged one.
@@ -431,7 +430,7 @@ fn realize<Id: Clone>(
     let index = variant.number(choice);
     let mut logical = compose_logical_candidate(variant.inventory, choice)
         .map_err(|e| format!("Stage 1: {e}"))?;
-    if variant.shared {
+    if variant.sharing.merges_after_composition() {
         if let Some(merged) = share_identical_expressions(&logical) {
             logical = merged;
         }
@@ -453,8 +452,8 @@ fn realize<Id: Clone>(
 /// One built combination; `physical` is `None` when it could not be built.
 #[derive(Debug, Clone)]
 pub struct EnumeratedCandidate<Id> {
-    /// From the shared variant (Pass 2's identical-expression rule).
-    pub shared: bool,
+    /// The Pass 2 variant it comes from.
+    pub sharing: Sharing,
     pub choice: Vec<usize>,
     pub logical: Option<Vec<(Id, QueryRoot)>>,
     pub physical: Option<PhysicalCandidate>,
@@ -510,7 +509,7 @@ fn exhaustive<Id: Clone>(
                 }
             };
             candidates.push(EnumeratedCandidate {
-                shared: variant.shared,
+                sharing: variant.sharing,
                 choice,
                 logical,
                 physical,
@@ -544,10 +543,11 @@ fn exhaustive<Id: Clone>(
 /// The plan [`select_plan`] chose.
 #[derive(Debug, Clone)]
 pub struct SelectedPlan<Id> {
-    /// From the shared variant (Pass 2's identical-expression rule).
-    pub shared: bool,
+    /// The Pass 2 variant it comes from.
+    pub sharing: Sharing,
     pub choice: Vec<usize>,
-    /// The chosen Stage 1 candidate (identical sub-DAGs merged when `shared`).
+    /// The chosen Stage 1 candidate (identical sub-DAGs merged unless
+    /// `sharing` is independent).
     pub logical: Vec<(Id, QueryRoot)>,
     /// Stage 2 of `logical`; `roots` follow `logical`'s order.
     pub physical: PhysicalCandidate,
@@ -646,10 +646,11 @@ fn costlier(id: &str, total: f64, best: f64) -> Rejection {
 /// not depend on choices. Stage 3 prices per node and sizes every
 /// realization of a target alike, so these hold unless a target's choice
 /// changes what a target reading its output costs or whether it can be
-/// built, or, in a shared variant, two targets reading one input build
+/// built, or, in a sharing variant, two targets reading one input build
 /// identical producers that are then merged. That coupling is checked:
-/// every pair of choices for a target and a target beneath it (and, when
-/// shared, for two targets reading a common input) is built, and must cost
+/// every pair of choices for a target and a target beneath it (and, in a
+/// sharing variant, for two targets reading a common or equal input) is
+/// built, and must cost
 /// the sum of their single changes and be admissible exactly when both are.
 /// On coupling, or when the winner fails the full check, every combination
 /// of the variant is built instead if there are at most
@@ -699,21 +700,27 @@ fn select_variant<Id: Clone>(
                 .collect()
         })
         .collect();
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    // `(t, u, nested)`: `u` is read by `t`, or (not nested) both read a
+    // common input.
+    let mut pairs: Vec<(usize, usize, bool)> = Vec::new();
     for (t, by_choice) in reads.iter().enumerate() {
         for &u in by_choice.iter().flatten() {
-            if !pairs.contains(&(t, u)) {
-                pairs.push((t, u));
+            if !pairs.contains(&(t, u, true)) {
+                pairs.push((t, u, true));
             }
         }
     }
-    if variant.shared {
-        pairs.extend(common_input_pairs(inventory, &beneath));
+    if variant.sharing.merges_after_composition() {
+        pairs.extend(
+            common_input_pairs(inventory, &beneath)
+                .into_iter()
+                .map(|(t, u)| (t, u, false)),
+        );
     }
     let mut coupling = None;
-    'pairs: for &(t, u) in &pairs {
+    'pairs: for &(t, u, nested) in &pairs {
         for c in 1..local[t].len() {
-            if !reads[t][c].contains(&u) {
+            if nested && !reads[t][c].contains(&u) {
                 // `c` does not read `u`'s output (it absorbs it, or reads a
                 // target beneath it only through another).
                 continue;
@@ -766,21 +773,26 @@ fn select_variant<Id: Clone>(
 }
 
 /// Pairs of targets, neither beneath the other, that read a common input
-/// node: in a shared variant their producers may be merged.
+/// node, or equal ones: in a sharing variant their producers may be merged.
 fn common_input_pairs<Id>(
     inventory: &LocalLogicalCandidates<Id>,
     beneath: &[Vec<usize>],
 ) -> Vec<(usize, usize)> {
-    let inputs: Vec<Vec<*const OperatorNode>> = inventory
+    let inputs: Vec<Vec<&Rc<OperatorNode>>> = inventory
         .targets
         .iter()
-        .map(|t| t.target.children().into_iter().map(Rc::as_ptr).collect())
+        .map(|t| t.target.children())
         .collect();
+    let same = |a: &Rc<OperatorNode>, b: &Rc<OperatorNode>| Rc::ptr_eq(a, b) || a == b;
     let mut pairs = Vec::new();
     for t in 0..inputs.len() {
         for u in t + 1..inputs.len() {
             let nested = beneath[t].contains(&u) || beneath[u].contains(&t);
-            if !nested && inputs[t].iter().any(|p| inputs[u].contains(p)) {
+            if !nested
+                && inputs[t]
+                    .iter()
+                    .any(|a| inputs[u].iter().any(|b| same(a, b)))
+            {
                 pairs.push((t, u));
             }
         }
@@ -833,7 +845,7 @@ fn finish<Id: Clone>(
     let (logical, physical) = realize(variant, &choice)?;
     let cost = assess(&physical, demand, data, models)?;
     Ok(SelectedPlan {
-        shared: variant.shared,
+        sharing: variant.sharing,
         choice,
         logical,
         selection: Selection {
@@ -914,7 +926,7 @@ pub struct StagePipelineRun<Id> {
 }
 
 /// The #509 stage pipeline over `roots`: Stage 1 (Pass 1 and Pass 2's
-/// identical-expression rule), Stage 2 and Stage 3. The facade and the
+/// identical-expression and summary-capability rules), Stage 2 and Stage 3. The facade and the
 /// `stage_pipeline` devtool both run this. `display` builds and prices up to
 /// that many candidates for display as well (0: none).
 pub fn plan_stages<Id: Clone>(
@@ -1748,7 +1760,7 @@ mod tests {
         let plan = select_variant(
             Variant {
                 inventory: &inventory,
-                shared: false,
+                sharing: Sharing::Independent,
                 offset: 0,
             },
             &targets,
@@ -1784,7 +1796,7 @@ mod tests {
         let plan = select_variant(
             Variant {
                 inventory: &inventory,
-                shared: false,
+                sharing: Sharing::Independent,
                 offset: 0,
             },
             &targets,
@@ -1860,7 +1872,7 @@ mod tests {
             let plan = select_variant(
                 Variant {
                     inventory: &inventory,
-                    shared: false,
+                    sharing: Sharing::Independent,
                     offset: 0,
                 },
                 &targets,
@@ -1903,7 +1915,7 @@ mod tests {
         let plan = finish(
             Variant {
                 inventory: &inventory,
-                shared: true,
+                sharing: Sharing::IdenticalExpressions,
                 offset: 0,
             },
             &no_targets(&inventory),
