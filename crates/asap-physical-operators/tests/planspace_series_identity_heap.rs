@@ -6,6 +6,7 @@ mod common;
 use common::compile_physical_asap_dag;
 use planner_types::ir::OperatorNode;
 
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::{
     accuracy::{AccuracyEvidenceProvider, DefaultAccuracyModel, PropagationStats},
     cost_model::DefaultCostModel,
@@ -220,8 +221,7 @@ fn global_selection_never_commits_a_series_identity_heap() {
         &strategies,
         &DefaultAccuracyModel,
     );
-    let selected = space
-        .global_selection(&DefaultCostModel)
+    let selected = global_selection(&space, &DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();
