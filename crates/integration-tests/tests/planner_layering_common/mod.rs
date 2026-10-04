@@ -591,7 +591,8 @@ pub fn assert_valid_and_uniquely_named(run: &Run) {
     }
 }
 
-/// Stage 2 maps the logical candidates one-to-one onto physical ones.
+/// Stage 2 gives every logical candidate exactly one all-query-time
+/// physical candidate, and possibly more that materialize summaries.
 pub fn assert_stage2_bijection(run: &Run) {
     let sources: BTreeSet<_> = run
         .physical
@@ -600,7 +601,12 @@ pub fn assert_stage2_bijection(run: &Run) {
         .collect();
     let logical: BTreeSet<_> = run.logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(sources, logical);
-    assert_eq!(run.physical.len(), run.logical.len());
+    let query_time = run
+        .physical
+        .iter()
+        .filter(|p| p.stage2.materialization.is_empty())
+        .count();
+    assert_eq!(query_time, run.logical.len());
 }
 
 /// One selected id; every other candidate rejected once, with a reason.
@@ -731,9 +737,10 @@ pub enum Materialization {
     NotMaterialized,
 }
 
-/// Pending (needs Stage 2 materialization): the export records only the
-/// execution timing, so a query-time node is never kept.
-pub fn materialization(p: &Physical, node: PhysicalASAPNodeId) -> Materialization {
+/// Stage 2 runs a node at ingestion time or at query time, recomputed at
+/// each evaluation; it does not keep query-time output yet (Example 4 B3),
+/// so `QueryTimeKept` does not occur.
+pub fn materialization(p: &Physical, node: NodeId) -> Materialization {
     let n = p.dag.nodes.iter().find(|n| n.id == node).expect("node");
     match n.output_state.timing {
         ExecutionTiming::IngestionTime => Materialization::IngestionTime,
@@ -741,10 +748,50 @@ pub fn materialization(p: &Physical, node: PhysicalASAPNodeId) -> Materializatio
     }
 }
 
-/// Pending (needs Stage 2 materialization): how long a materialized node's
-/// output is kept, in event time. `None` until Stage 2 records retention.
-pub fn retention_ms(_p: &Physical, _node: PhysicalASAPNodeId) -> Option<u64> {
-    None
+/// How long a materialized node's output is kept, in event time. The export
+/// records no retention, so this derives it as Stage 3 prices it
+/// (`stage3-cost-model.md`): ingestion-time work read at query time through
+/// a merge of `N` panes of width `w` keeps `(N + 1) · w`; read directly, the
+/// window being built and the completed one, `2 · window`. Taken over every
+/// query-time reader the node's ingestion-time work feeds. `None` for a
+/// query-time node.
+pub fn retention_ms(p: &Physical, node: NodeId) -> Option<u64> {
+    if !runs_at_ingestion(p, node) {
+        return None;
+    }
+    // The longest raw range an ingestion-time node reads.
+    let window = |id: NodeId| {
+        closure(&p.dag, id)
+            .into_iter()
+            .filter_map(|n| match p.dag.payload(n) {
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => Some(range.as_millis() as u64),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    let mut kept = 0;
+    let mut stack = vec![node];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for consumer in p.dag.consumers(id) {
+            if runs_at_ingestion(p, consumer) {
+                stack.push(consumer);
+            } else if matches!(
+                p.dag.payload(consumer),
+                Operator::ASAP(ASAPOp::SummaryMerge { .. })
+            ) {
+                let panes = p.dag.producers(consumer).len() as u64;
+                kept = kept.max((panes + 1) * window(id));
+            } else {
+                kept = kept.max(2 * window(id));
+            }
+        }
+    }
+    Some(kept)
 }
 
 pub fn runs_at_ingestion(p: &Physical, node: PhysicalASAPNodeId) -> bool {
