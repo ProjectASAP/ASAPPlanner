@@ -124,6 +124,7 @@ async fn example2_design_candidates_all_build() {
                 execute_at: None,
             },
             predictability: Predictability::default(),
+            latency_ms: None,
         };
         roots.len()
     ];
