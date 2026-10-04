@@ -11,7 +11,7 @@ Choose the path that matches what you need to do.
 
 ## Run or inspect a query
 
-Follow [Run and inspect a query](user_guide_docs/run-a-query.md). Tool-specific setup stays with the tool, including the [DAG viewer instructions](../tools/dag-viewer/RUNNING.md).
+Follow [Run and inspect a query](user_guide_docs/run-a-query.md). Tool-specific setup stays with the tool, including the [Stage Viewer instructions](../tools/dag-viewer/RUNNING.md).
 
 ## Embed the library
 
