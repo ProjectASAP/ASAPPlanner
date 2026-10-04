@@ -9,6 +9,7 @@
 
 use std::rc::Rc;
 
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::{search_workload, DefaultCostModel};
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
@@ -53,7 +54,7 @@ async fn plan(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
     let space = search_workload(vec![("query", pre)]);
-    let selection = space.global_selection(&DefaultCostModel);
+    let selection = global_selection(&space, &DefaultCostModel);
     selection
         .assemble_selected_dag(&space.roots[0].1)
         .expect("materialization failed")

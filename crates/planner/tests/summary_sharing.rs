@@ -9,6 +9,7 @@ use asap_aware_mapping::accuracy::{
     AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
 };
 use asap_aware_mapping::pass::{PlanOutput, PlanningModels, QueryPlan};
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_aware_mapping::{
     search_workload_with_targets, ASAPStrategies, CostModel, DefaultCostModel, Replacement,
@@ -477,7 +478,7 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
         ASAPStrategies::new_with_planning_inputs(&UnivMonEvidence, &EqualSplitAllocator),
     )];
     let space = search_workload_with_targets(roots, &strategies, &UnivMonEvidence);
-    let selection = space.global_selection(&PREFER_UNIVMON);
+    let selection = global_selection(&space, &PREFER_UNIVMON);
     let assembled = space
         .roots
         .iter()

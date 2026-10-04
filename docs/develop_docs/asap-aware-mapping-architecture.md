@@ -109,7 +109,7 @@ flowchart TB
 
   subgraph RANKING[Optional ranked view]
     CM(["CostModel<br/>selection-time preferences and costs"]):::choose
-    SORT["CandidateLogicalASAPDAGs::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
+    SORT["candidate_selection::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
     CM -.-> SORT
     RANKED["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
     SPACE --> SORT -->|"reorder only; preserve every candidate"| RANKED
@@ -238,7 +238,7 @@ rejection reasons. This
 compact representation preserves independent choices without enumerating a flat
 list of `2^N` complete plans for `N` replaceable targets.
 
-`CandidateLogicalASAPDAGs::cost_sorted` ranks each target's existing candidates with the
+`candidate_selection::cost_sorted` ranks each target's existing candidates with the
 supplied `CostModel`. It returns the same candidates in preferred order, with
 costs aligned by index; ranking does not select or remove a candidate.
 
@@ -257,7 +257,7 @@ order. Constructing all candidates before taking the first costs more than
 constructing only one, but it keeps the strategy
 contract consistent and preserves the full choice set for other callers.
 
-`CandidateLogicalASAPDAGs::global_selection` optionally coordinates cross-target sharing and
+`candidate_selection::global_selection` optionally coordinates cross-target sharing and
 composition choices. `GlobalSelection::assemble_selected_dag` constructs the selected
 semantic DAG. These APIs do not decide materialization or establish physical
 deployment feasibility. Recurrence-aware variants require the corresponding
