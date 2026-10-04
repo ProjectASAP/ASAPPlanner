@@ -1,5 +1,7 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --example planner-layering-1 --out planner-layering-example1.json
+// (also planner-layering-3a and planner-layering-3b: #509 Example 3,
+// Patterns A and B)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 //
@@ -46,11 +48,12 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
     Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
+    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection, TimestampMs,
 };
 use serde_json::{json, Value};
 
-const USAGE: &str = "usage: stage_pipeline (--example planner-layering-1 | --promql <query>... \
+const USAGE: &str =
+    "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | --promql <query>... \
 [--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) [--max-candidates <n>] --out <file>";
 
 fn main() {
@@ -83,6 +86,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     let workload = match (example.as_deref(), queries.is_empty()) {
         (Some("planner-layering-1"), true) => planner_layering_example1(),
+        (Some("planner-layering-3a"), true) => planner_layering_example3a(),
+        (Some("planner-layering-3b"), true) => planner_layering_example3b(),
         (Some(other), true) => return Err(format!("unknown example {other}")),
         (None, false) => {
             let accuracy = match (epsilon, delta) {
@@ -399,13 +404,102 @@ fn planner_layering_example1() -> PlanningWorkload {
                 ),
             ]),
         },
-        data_workload: Some(DataWorkload {
-            arrival: DataArrival::ContinuouslyIngesting,
-            data_ingestion_interval: declared(DurationMs(15_000)),
-            ingestion_volume: Evidence::default(),
-            ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
-            input_cardinality: declared(1_000_000),
-            distribution: declared(DataDistribution::Zipf),
-        }),
+        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+    }
+}
+
+/// The shared data workload of #509 with `arrival`.
+fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
+    DataWorkload {
+        arrival,
+        data_ingestion_interval: declared(DurationMs(15_000)),
+        ingestion_volume: Evidence::default(),
+        ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
+        input_cardinality: declared(1_000_000),
+        distribution: declared(DataDistribution::Zipf),
+    }
+}
+
+/// #509 Example 3, Pattern A: an ad hoc batch of five p99 reports over
+/// historical intervals, run once at T (2026-01-01), over mixed data.
+fn planner_layering_example3a() -> PlanningWorkload {
+    const YEAR_MS: u64 = 365 * 24 * 3_600_000;
+    const T_MS: u64 = 1_767_225_600_000;
+    let queries = [
+        ("quantile_over_time(0.99, latency_ms[5y])", 5 * YEAR_MS, 0),
+        ("quantile_over_time(0.99, latency_ms[1y])", YEAR_MS, 0),
+        (
+            "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
+            YEAR_MS,
+            YEAR_MS,
+        ),
+        (
+            "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
+            YEAR_MS,
+            2 * YEAR_MS,
+        ),
+        (
+            "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
+            3 * YEAR_MS,
+            2 * YEAR_MS,
+        ),
+    ];
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(
+                queries
+                    .into_iter()
+                    .map(|(query, lookback, before_t)| BatchEntry {
+                        query: Query(query.into()),
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                                epsilon: 0.005,
+                                delta: 0.01,
+                            }),
+                            response_latency: LatencyRequirement::Unspecified,
+                        },
+                        predictability: Predictability::AdHoc,
+                        invocations: 1,
+                        execute_at: Some(TimestampMs(T_MS)),
+                        time_selection: TimeSelection {
+                            scope: QueryTimeScope::Longitudinal,
+                            lookback: Some(DurationMs(lookback)),
+                            as_of: Some(TimestampMs(T_MS - before_t)),
+                        },
+                    })
+                    .collect(),
+            ),
+            repeating_queries: None,
+        },
+        data_workload: Some(shared_data_workload(DataArrival::Mixed)),
+    }
+}
+
+/// #509 Example 3, Pattern B: a p99 panel over the last 5 min, every minute.
+fn planner_layering_example3b() -> PlanningWorkload {
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(vec![RepeatingEntry {
+                query: Query("quantile_over_time(0.99, latency_ms[5m])".into()),
+                demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                        epsilon: 0.01,
+                        delta: 0.01,
+                    }),
+                    response_latency: LatencyRequirement::ExplicitMaxMs(200.0),
+                },
+                predictability: Predictability::Predictable { known_at: None },
+                time_selection: TimeSelection {
+                    scope: QueryTimeScope::RealTime,
+                    lookback: Some(DurationMs(300_000)),
+                    as_of: None,
+                },
+            }]),
+        },
+        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
     }
 }
