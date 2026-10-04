@@ -157,7 +157,7 @@ impl<'a> EstimatorAccuracy<'a> {
         target: Option<&AccuracyTarget>,
     ) -> Self {
         let (epsilon, delta) = target
-            .map(crate::replacement::accuracy_budget)
+            .map(crate::pass1::replacement::accuracy_budget)
             .unwrap_or((0.0, 0.0));
         Self {
             base,

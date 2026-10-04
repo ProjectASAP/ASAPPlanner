@@ -1,12 +1,14 @@
 use std::rc::Rc;
 
-use asap_aware_mapping::accuracy::{
-    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-};
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
-use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
+use asap_logical_optimizer::accuracy::{
+    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+};
+use asap_logical_optimizer::pass1::replacement::{
+    default_strategies, search_workload_with_targets,
+};
+use asap_logical_optimizer::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::properties::{

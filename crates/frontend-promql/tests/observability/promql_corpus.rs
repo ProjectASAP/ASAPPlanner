@@ -15,11 +15,11 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{retain_exact, RealizationError};
-use asap_aware_mapping::{
+use asap_frontend_promql::PromqlError as LoweringError;
+use asap_logical_optimizer::pass1::replacement::{retain_exact, RealizationError};
+use asap_logical_optimizer::{
     ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
 use asap_types::ir::OperatorNode;

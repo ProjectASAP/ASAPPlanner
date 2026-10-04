@@ -1,9 +1,9 @@
 //! Numeric regression fixtures: actual PromQL lowering plus numeric update/evaluation checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
-use asap_aware_mapping::replacement::is_logical_rewrite;
-use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::post_asap_dag;
+use asap_logical_optimizer::pass1::replacement::is_logical_rewrite;
+use asap_logical_optimizer::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{ExactKind, FieldDataType, SummaryInputExpr, SummaryUpdate};
@@ -21,7 +21,7 @@ fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
             Replacement::SubDAG(n) if !is_logical_rewrite(&n) => Some(n),
             _ => None,
         })
-        .unwrap_or_else(|| asap_aware_mapping::replacement::retain_exact(&pre).unwrap())
+        .unwrap_or_else(|| asap_logical_optimizer::pass1::replacement::retain_exact(&pre).unwrap())
 }
 fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction) {
     match &node.operator {
@@ -173,19 +173,19 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
 }
 
 struct OneKeyTopKEvidence;
-impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEvidence {
+impl asap_logical_optimizer::accuracy::AccuracyEvidenceProvider for OneKeyTopKEvidence {
     fn propagation_stats(
         &self,
         op: &asap_types::ir::properties::CompositionOperator,
         _family: &FieldDataType,
         _query: Option<&asap_types::ir::schema::SketchStatistic>,
-    ) -> asap_aware_mapping::accuracy::PropagationStats {
+    ) -> asap_logical_optimizer::accuracy::PropagationStats {
         // Single-key fixture: no excluded keys; bounds cover every value below.
         if matches!(
             op,
             asap_types::ir::properties::CompositionOperator::TopKSelection
         ) {
-            asap_aware_mapping::accuracy::PropagationStats {
+            asap_logical_optimizer::accuracy::PropagationStats {
                 topk_selected_lower_bound: Some(-1000.),
                 topk_excluded_upper_bound: Some(-1001.),
                 topk_interval_failure_probability: Some(0.001),
@@ -199,7 +199,7 @@ impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEviden
 
 #[test]
 fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
-    use asap_aware_mapping::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
+    use asap_logical_optimizer::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
     use asap_types::ir::schema::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultAccuracyModel,

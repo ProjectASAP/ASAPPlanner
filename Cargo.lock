@@ -318,8 +318,8 @@ name = "asap-aware-mapping"
 version = "0.1.0"
 dependencies = [
  "asap-frontend-promql",
+ "asap-logical-optimizer",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -332,6 +332,7 @@ dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-frontend-sql",
+ "asap-logical-optimizer",
  "asap-types",
  "serde",
  "serde_json",
@@ -364,6 +365,7 @@ version = "0.1.0"
 dependencies = [
  "asap-aware-mapping",
  "asap-frontend-common",
+ "asap-logical-optimizer",
  "asap-types",
  "promql-parser",
 ]
@@ -374,6 +376,7 @@ version = "0.1.0"
 dependencies = [
  "asap-aware-mapping",
  "asap-frontend-common",
+ "asap-logical-optimizer",
  "asap-sql-function-catalog",
  "asap-types",
  "datafusion",
@@ -390,6 +393,7 @@ dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-frontend-sql",
+ "asap-logical-optimizer",
  "asap-physical-operators",
  "asap-planner",
  "asap-types",
@@ -400,11 +404,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-logical-optimizer"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-types",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "asap-physical-operators"
 version = "0.1.0"
 dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
+ "asap-logical-optimizer",
  "asap-types",
  "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
  "chrono",
@@ -425,6 +441,7 @@ dependencies = [
  "asap-frontend-metricsql",
  "asap-frontend-promql",
  "asap-frontend-sql",
+ "asap-logical-optimizer",
  "asap-types",
  "thiserror 2.0.18",
  "tokio",
