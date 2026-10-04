@@ -17,7 +17,7 @@
 //     merges something, again with identical sub-DAGs shared ("· shared
 //     input"), and, when the summary-capability rule applies, again with
 //     one summary sized for its strictest consumer ("· shared summary"); in
-//     enumeration order and capped by `--max-candidates` (default 64). A
+//     enumeration order, only those with a written physical candidate. A
 //     repeating query's mergeable alternatives also come in tumbling panes
 //     (Pass 2's window-composition rule), e.g. "Q1 Kll · tumbling 1m panes";
 //   - stage2_physical_asap: per logical candidate, its physical candidates
@@ -25,9 +25,15 @@
 //     down-closed set of summaries maintained at ingestion time, labeled
 //     e.g. "· ingestion time: Kll ×5 panes"), no cost;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
-//     every other candidate as rejected (`valid: false`: inaccurate, over a
-//     latency bound, needing a capability the deployment lacks, or could not
-//     be built) or costlier.
+//     every other written candidate as rejected (`valid: false`: inaccurate,
+//     over a latency bound, needing a capability the deployment lacks, or
+//     could not be built) or costlier.
+//   - shown_of: present when not every plan is written, the totals.
+//
+// Stage 3 prices every candidate (up to PRICE_LIMIT combinations), so the
+// selection does not depend on `--max-candidates`; that flag only limits
+// how many plans the document carries (default 64): the cheapest first,
+// then invalid ones in enumeration order.
 //
 // The deployment inputs are the built-in cost and accuracy models and the
 // reference executor's capabilities (`asap_executor::capabilities`; without
@@ -46,6 +52,7 @@
 // query; without them the queries are exact. `--interval-ms` is the source
 // cadence PromQL needs (default 15000).
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_logical_optimizer::pass1::logical_candidates::{
@@ -132,6 +139,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))
 }
 
+/// Most Stage 1 combinations built and priced; beyond it the selection is
+/// over the first PRICE_LIMIT only, and the tool warns.
+const PRICE_LIMIT: usize = 4096;
+
 fn stage_pipeline(
     workload: &PlanningWorkload,
     capabilities: &DeploymentCapabilities,
@@ -178,11 +189,34 @@ fn stage_pipeline(
         &demand,
         &data,
         models,
-        max_candidates.max(1),
+        PRICE_LIMIT,
     )
     .map_err(|e| format!("planning: {e}"))?;
     let enumeration = run.enumeration.expect("display was requested");
     let combinations = enumeration.combinations;
+    if combinations > PRICE_LIMIT {
+        eprintln!("stage_pipeline: priced the first {PRICE_LIMIT} of {combinations} combinations");
+    }
+    let selection = &enumeration.selection;
+    // Every plan id, physical candidates then those that could not be
+    // built; the cheapest `max_candidates` are written.
+    let physical_ids: Vec<&str> = enumeration
+        .candidates
+        .iter()
+        .flat_map(|c| c.physical.iter().map(|p| p.id.as_str()))
+        .collect();
+    let mut ranked = physical_ids.clone();
+    let known: HashSet<&str> = ranked.iter().copied().collect();
+    ranked.extend(
+        selection
+            .rejected
+            .iter()
+            .map(|r| r.id.as_str())
+            .filter(|id| !known.contains(id)),
+    );
+    let total = |id: &str| selection.costs.get(id).map_or(f64::INFINITY, |c| c.total);
+    ranked.sort_by(|a, b| total(a).total_cmp(&total(b)));
+    let shown: HashSet<&str> = ranked.iter().take(max_candidates.max(1)).copied().collect();
     let mut candidates = Vec::new();
     let mut stage2 = Vec::new();
     for candidate in &enumeration.candidates {
@@ -207,12 +241,24 @@ fn stage_pipeline(
             Sharing::IdenticalExpressions => " · shared input",
             Sharing::SummaryCapability => " · shared summary",
         };
+        let written = candidate
+            .physical
+            .iter()
+            .any(|p| shown.contains(p.id.as_str()))
+            || shown.contains(format!("P{index}").as_str());
+        if !written {
+            continue;
+        }
         if let Some(logical) = &candidate.logical {
             let roots: Vec<_> = logical.iter().map(|(_, root)| root.clone()).collect();
             candidates
                 .push(json!({ "id": format!("L{index}"), "label": label, "dag": export(&roots)? }));
         }
-        for p in &candidate.physical {
+        for p in candidate
+            .physical
+            .iter()
+            .filter(|p| shown.contains(p.id.as_str()))
+        {
             let label = match p.materialization.as_str() {
                 "" => label.clone(),
                 m => format!("{label} · {m}"),
@@ -222,19 +268,27 @@ fn stage_pipeline(
             );
         }
     }
-    Ok(json!({
+    let mut document = json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": workload_queries(workload) },
         "deployment": deployment_json(&models),
         "stage0_logical": { "dag": stage0 },
         "stage1_logical_asap": {
             "combinations": combinations,
-            "capped": combinations > max_candidates,
+            "capped": shown.len() < ranked.len(),
             "candidates": candidates,
         },
         "stage2_physical_asap": { "candidates": stage2 },
-        "stage3_selection": stage3_json(&enumeration.selection),
-    }))
+        "stage3_selection": stage3_json(selection, &shown),
+    });
+    if shown.len() < ranked.len() {
+        document["shown_of"] = json!({
+            "logical": enumeration.candidates.len(),
+            "physical": physical_ids.len(),
+            "priced": selection.costs.len(),
+        });
+    }
+    Ok(document)
 }
 
 /// The deployment inputs Stage 3 used: the executor's capabilities, one
@@ -278,10 +332,12 @@ fn deployment_json(models: &PlanningModels<'_>) -> Value {
     })
 }
 
-fn stage3_json(selection: &Selection) -> Value {
+/// Stage 3's outcome for the written plans `shown`.
+fn stage3_json(selection: &Selection, shown: &HashSet<&str>) -> Value {
     let costs: serde_json::Map<_, _> = selection
         .costs
         .iter()
+        .filter(|(id, _)| shown.contains(id.as_str()))
         .map(|(id, cost)| {
             let per_node: serde_json::Map<_, _> = cost
                 .per_node
@@ -302,6 +358,7 @@ fn stage3_json(selection: &Selection) -> Value {
     let rejected: Vec<_> = selection
         .rejected
         .iter()
+        .filter(|r| shown.contains(r.id.as_str()))
         .map(|r| json!({ "id": r.id, "valid": r.valid, "reason": r.reason }))
         .collect();
     json!({ "costs": costs, "selected": selection.selected, "rejected": rejected })
