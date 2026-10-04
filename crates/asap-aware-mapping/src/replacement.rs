@@ -3076,6 +3076,12 @@ fn construct_summary_agg(
     if keyed_heap {
         let mut state = state_schema.fields[state_idx].clone();
         state.dtype = family.clone();
+        // A top-k's output row holds the ranked item at `state_idx`; the
+        // state column is the heap itself.
+        if let AggIntent::TopK { k, .. } = intent {
+            state.name = format!("topk_{k}");
+            state.nullable = false;
+        }
         let mut fields = if snapshot_weighted {
             evaluation_schema.fields[..reduction.group_keys().map_or(0, |keys| keys.len())].to_vec()
         } else {
