@@ -8,12 +8,14 @@
 //!
 //! MVP scope: Stage 1 = Pass 1 + the identical-expression rule + the
 //! window-composition rule's tumbling windows; Stage 2 = physical operator
-//! implementation only (no materialization). Counts follow the planner's
-//! output (user decision): 1 → 88 → 88 → 1, because Pass 1 also offers exact
-//! accumulators and whole-expression top-k sketches, Q2's exact sum also
-//! comes in 10-s tumbling panes (44 combinations; rates and top-k heaps do
-//! not merge, #580), and Pass 2 adds a shared-input variant of each. The
-//! doc's 1 → 54 → 156 → 1 needs sliding windows, Hydra and materialization.
+//! implementation and materialization (ingestion time or query time per
+//! summary). Counts follow the planner's output (user decision):
+//! 1 → 88 → 112 → 1, because Pass 1 also offers exact accumulators and
+//! whole-expression top-k sketches, Q2's exact sum also comes in 10-s
+//! tumbling panes (44 combinations; rates and top-k heaps do not merge,
+//! #580), Pass 2 adds a shared-input variant of each, and Stage 2 adds a
+//! maintained-pane candidate for each of the 24 with panes. The doc's
+//! 1 → 54 → 156 → 1 needs sliding windows and Hydra.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -173,7 +175,11 @@ mod stages {
             .candidates
             .into_iter()
             .map(|c| {
-                let physical = c.physical.expect("every Example 1 candidate builds");
+                let physical = c
+                    .physical
+                    .into_iter()
+                    .next()
+                    .expect("every Example 1 candidate builds");
                 let label = format!(
                     "{:?}{}",
                     c.choice,
@@ -193,31 +199,52 @@ mod stages {
             .collect()
     }
 
-    /// Stage 2: physical operator implementation of every logical candidate
-    /// (no materialization in the MVP).
+    /// Stage 2: physical operator implementation of every logical candidate,
+    /// and one candidate per materialization choice (all query time first,
+    /// `P<n>`; then `P<n>-m<k>`).
     pub fn stage2_physical(
-        _workload: &PlanningWorkload,
+        workload: &PlanningWorkload,
         logical: &[LogicalCandidate],
     ) -> Vec<PhysicalCandidate> {
+        let demand: Vec<_> = workload
+            .query_workload
+            .entries()
+            .map(|entry| asap_types::workload::RootDemand::from(&entry))
+            .collect();
+        let data = workload.data_workload.as_ref().expect("data workload");
         logical
             .iter()
             .enumerate()
-            .map(|(index, l)| {
-                let mut stage2 =
+            .flat_map(|(index, l)| {
+                let stage2 =
                     asap_physical_optimizer::implementation::physical_candidates::stage2_physical(
-                        &l.id, &l.roots,
+                        &l.id,
+                        &l.roots,
+                        &demand,
+                        data,
+                        &|_| None,
                     )
                     .unwrap_or_else(|e| panic!("{}: {e}", l.id));
-                stage2.id = format!("P{}", index + 1);
-                stage2.label = l.label.clone();
-                PhysicalCandidate {
-                    id: stage2.id.clone(),
-                    from_logical: stage2.from_logical.clone(),
-                    label: stage2.label.clone(),
-                    dag: stage2.dag.clone(),
-                    query_roots: stage2.dag.roots.clone(),
-                    stage2,
-                }
+                assert!(stage2.exhaustive, "{}", l.id);
+                stage2
+                    .candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(k, mut stage2)| {
+                        stage2.id = match k {
+                            0 => format!("P{}", index + 1),
+                            k => format!("P{}-m{k}", index + 1),
+                        };
+                        stage2.label = l.label.clone();
+                        PhysicalCandidate {
+                            id: stage2.id.clone(),
+                            from_logical: stage2.from_logical.clone(),
+                            label: stage2.label.clone(),
+                            dag: stage2.dag.clone(),
+                            query_roots: stage2.dag.roots.clone(),
+                            stage2,
+                        }
+                    })
             })
             .collect()
     }
@@ -292,6 +319,9 @@ use stages::*;
 // ── Example 1 workload ───────────────────────────────────────────────────
 
 const Q1: &str = "sum by (job) (rate(http_requests_total[1m]))";
+/// Count-Min + heap candidates: 32 logical, 8 of them also with Q2's sum
+/// panes maintained.
+const COUNT_MIN_WITHIN_LATENCY: usize = 40;
 const Q2: &str = "topk by (job) (10, sum_over_time(http_requests_total[1m]))";
 
 fn declared<T>(value: T) -> Evidence<T> {
@@ -797,11 +827,25 @@ fn stage1_candidates_are_valid_and_uniquely_named() {
 
 // ── Stage 2 ──────────────────────────────────────────────────────────────
 
-/// No candidate is discarded before Stage 3: Stage 2 maps the 88 logical candidates one-to-one.
+/// No candidate is discarded before Stage 3: each of the 88 logical
+/// candidates keeps its all-query-time physical candidate, and the 24 whose
+/// Q2 sum comes in 10-s panes also get one with the panes at ingestion time
+/// (the panels repeat predictably over arriving data): 112.
 #[test]
 fn stage2_keeps_every_logical_candidate() {
     let (_, logical, physical) = pipeline();
-    assert_eq!(physical.len(), 88);
+    assert_eq!(physical.len(), 112);
+    let maintained: Vec<_> = physical
+        .iter()
+        .filter(|p| !p.stage2.materialization.is_empty())
+        .collect();
+    assert_eq!(maintained.len(), 24);
+    for p in maintained {
+        assert_eq!(
+            p.stage2.materialization,
+            "ingestion time: exact Sum ×6 panes"
+        );
+    }
     let sources: BTreeSet<_> = physical.iter().map(|p| p.from_logical.as_str()).collect();
     let logical_ids: BTreeSet<_> = logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(sources, logical_ids);
@@ -809,15 +853,19 @@ fn stage2_keeps_every_logical_candidate() {
     assert_eq!(ids.len(), physical.len());
 }
 
-/// Stage 2 preserves each logical candidate's Q2 option and input sharing.
+/// Stage 2 preserves each logical candidate's Q2 option and input sharing,
+/// except that maintained panes cannot share the scan with Q1, which reads it
+/// at query time: the scan is copied per phase.
 #[test]
 fn stage2_preserves_logical_choices() {
     let (_, logical, physical) = pipeline();
     for p in &physical {
         let source = logical.iter().find(|c| c.id == p.from_logical).unwrap();
+        let (option, shared) = classify(&source.dag, &source.query_roots);
+        let maintained = !p.stage2.materialization.is_empty();
         assert_eq!(
             classify(&p.dag, &p.query_roots),
-            classify(&source.dag, &source.query_roots),
+            (option, shared && !maintained),
             "{} vs {}",
             p.id,
             source.id
@@ -833,7 +881,8 @@ fn stage2_exact_topk_is_sort_then_limit() {
         .iter()
         .filter(|p| classify(&p.dag, &p.query_roots).0 == Q2Option::Exact)
         .collect();
-    assert_eq!(exact.len(), 24);
+    // 24 logical, 8 of which also maintain Q2's sum panes.
+    assert_eq!(exact.len(), 32);
     for p in exact {
         let sort_then_limit = p.dag.edges.iter().any(|e| {
             relational(payload(&p.dag, e.producer)).as_deref() == Some("sort")
@@ -888,19 +937,32 @@ fn stage2_summary_topk_is_build_then_estimate() {
     }
 }
 
-/// With no materialization in the MVP, every node runs at query time.
+/// Only Q2's sum panes and their inputs run at ingestion time, and only in
+/// the candidates that maintain them; every other node runs at query time.
 #[test]
-fn stage2_everything_runs_at_query_time() {
+fn stage2_only_maintained_panes_run_at_ingestion_time() {
     let (_, _, physical) = pipeline();
     for p in &physical {
+        let maintained = !p.stage2.materialization.is_empty();
+        let mut panes = 0;
         for n in &p.dag.nodes {
-            assert!(
-                !runs_at_ingestion(p, n.id),
-                "{}: {:?} at ingestion",
-                p.id,
-                n.id
-            );
+            if !runs_at_ingestion(p, n.id) {
+                continue;
+            }
+            assert!(maintained, "{}: {:?} at ingestion", p.id, n.id);
+            match &n.payload {
+                LogicalASAPOperatorPayload::SummaryAgg { .. } => panes += 1,
+                other => assert!(
+                    matches!(
+                        relational(other).as_deref(),
+                        Some("scan" | "time_shift" | "time_range")
+                    ),
+                    "{}: {other:?} at ingestion",
+                    p.id
+                ),
+            }
         }
+        assert_eq!(panes, if maintained { 6 } else { 0 }, "{}", p.id);
     }
 }
 
@@ -957,14 +1019,16 @@ fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
 
 /// The physical planner compiles every candidate Stage 3 finds valid, and
 /// rejects the invalid ones (Count-Min over weights not proven non-negative)
-/// for the same reason Stage 3 gives. Returns the number of invalid ones.
+/// for the same reason Stage 3 gives. A candidate over Q2's 100 ms latency
+/// bound compiles; the bound is Stage 3's alone. Returns the number of
+/// candidates invalid for their weights.
 fn assert_runtime_agrees_with_stage3(workload: PlanningWorkload) -> usize {
     let (workload, _, physical) = pipeline_for(workload);
     let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
     let invalid: BTreeMap<_, _> = selection
         .rejected
         .iter()
-        .filter(|r| !r.valid)
+        .filter(|r| !r.valid && !r.reason.contains("latency bound"))
         .map(|r| (r.id.as_str(), r.reason.as_str()))
         .collect();
     for p in &physical {
@@ -997,13 +1061,14 @@ fn stage2_runtime_compiles_every_candidate_over_a_declared_counter() {
 }
 
 /// Without the counter declaration, or with a gauge, the Count-Min + heap
-/// candidates are invalid in Stage 3 and the runtime rejects them.
+/// candidates are invalid in Stage 3 and the runtime rejects them (those
+/// within Q2's latency bound; the rest are rejected for latency first).
 #[test]
 fn stage2_count_min_needs_a_counter_declaration() {
     for metric_type in [None, Some(MetricType::Gauge)] {
         assert_eq!(
             assert_runtime_agrees_with_stage3(example1_workload_with(metric_type)),
-            32,
+            COUNT_MIN_WITHIN_LATENCY,
             "{metric_type:?}: the Count-Min + heap candidates"
         );
     }
@@ -1082,10 +1147,42 @@ fn stage3_selects_cheapest_valid() {
     }
 }
 
+/// Q2 asks for 100 ms (S6): Stage 3 rejects exactly the candidates whose
+/// query-time work for Q2 takes longer in one evaluation, at one cost unit
+/// (a CPU-ms) per ms. Count-Sketch + heap is over the bound in every form;
+/// the selected plan is within it.
+#[test]
+fn stage3_rejects_candidates_over_the_latency_bound() {
+    let (workload, _, physical) = pipeline();
+    let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    let over: BTreeSet<_> = selection
+        .rejected
+        .iter()
+        .filter(|r| !r.valid && r.reason.contains("latency bound"))
+        .map(|r| {
+            assert!(r.reason.starts_with("q2: "), "{}: {}", r.id, r.reason);
+            r.id.as_str()
+        })
+        .collect();
+    assert!(!over.is_empty());
+    assert!(!over.contains(selection.selected.as_str()));
+    for p in &physical {
+        let count_sketch = p.dag.nodes.iter().any(|n| {
+            matches!(&n.payload, LogicalASAPOperatorPayload::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _), ..
+            } if *kind.algorithm() == SketchAlgorithm::CountSketchWithHeap)
+        });
+        if count_sketch {
+            assert!(over.contains(p.id.as_str()), "{}", p.id);
+        }
+    }
+}
+
 /// Per-second cost keeps Example 1's ranking: both panels repeat every
-/// 10 s and everything runs at query time, so every candidate costs 0.1 ×
-/// its per-evaluation cost, and P82 (P60 before Q2's tumbling sums
-/// renumbered the candidates) still wins at 46.201 × 0.1 per second.
+/// 10 s, so every all-query-time candidate costs 0.1 × its per-evaluation
+/// cost, and P82 (P60 before Q2's tumbling sums renumbered the candidates)
+/// still wins at 46.201 × 0.1 per second. A candidate that maintains panes
+/// pays ingestion-time work and memory that do not depend on the cadence.
 #[test]
 fn stage3_per_second_cost_keeps_the_ranking() {
     let (workload, _, physical) = pipeline();
@@ -1103,7 +1200,7 @@ fn stage3_per_second_cost_keeps_the_ranking() {
     let per_evaluation = stage3_select(&every_second, &physical, PlanningModels::builtin());
     assert_eq!(per_second.selected, "P82");
     assert_eq!(per_evaluation.selected, "P82");
-    for (id, cost) in &per_second.costs {
+    for (id, cost) in per_second.costs.iter().filter(|(id, _)| !id.contains("-m")) {
         let expected = 0.1 * per_evaluation.costs[id].total;
         assert!((cost.total - expected).abs() <= 1e-9 * expected, "{id}");
     }
@@ -1152,20 +1249,21 @@ fn stage3_charges_each_node_once() {
 fn stage3_shared_input_is_not_costlier() {
     let (workload, _, physical) = pipeline();
     let selection = stage3_select(&workload, &physical, PlanningModels::builtin());
+    // All query time: a maintained-pane candidate cannot share the scan.
     let by_combo: BTreeMap<_, _> = physical
         .iter()
+        .filter(|p| p.stage2.materialization.is_empty())
         .filter_map(|p| {
             let cost = selection.costs.get(&p.id)?.total;
             let shared = classify(&p.dag, &p.query_roots).1;
             Some(((choices(&p.dag, &p.query_roots), shared), cost))
         })
         .collect();
+    // Count-Sketch + heap misses Q2's 100 ms latency bound in every form.
     for option in [
         Q2Option::Exact,
         Q2Option::CountMinHeapPerJob,
-        Q2Option::CountSketchHeapPerJob,
         Q2Option::WholeCountMinHeapPerJob,
-        Q2Option::WholeCountSketchHeapPerJob,
     ] {
         assert!(
             by_combo.keys().any(|((_, o, _), _)| *o == option),

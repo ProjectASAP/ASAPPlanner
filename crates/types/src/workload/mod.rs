@@ -430,13 +430,15 @@ impl From<&RepeatingEntry> for QueryWorkloadEntry {
 }
 
 /// What planning needs of one query root beyond its DAG: Stage 3 checks
-/// `accuracy` (`None` imposes no target) and prices by `recurrence`;
-/// Stage 2's ingestion-time eligibility also reads `predictability`.
+/// `accuracy` (`None` imposes no target) and `latency_ms` (`None`: no bound)
+/// and prices by `recurrence`; Stage 2's ingestion-time eligibility also
+/// reads `predictability`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RootDemand {
     pub accuracy: Option<AccuracyTarget>,
     pub recurrence: QueryRecurrence,
     pub predictability: Predictability,
+    pub latency_ms: Option<f64>,
 }
 
 impl From<&QueryWorkloadEntry> for RootDemand {
@@ -445,6 +447,10 @@ impl From<&QueryWorkloadEntry> for RootDemand {
             accuracy: Some(entry.requirements.accuracy.target()),
             recurrence: entry.recurrence.clone(),
             predictability: entry.predictability.clone(),
+            latency_ms: match entry.requirements.response_latency {
+                LatencyRequirement::ExplicitMaxMs(ms) => Some(ms),
+                LatencyRequirement::Unspecified => None,
+            },
         }
     }
 }

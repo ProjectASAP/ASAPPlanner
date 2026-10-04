@@ -1,6 +1,7 @@
-//! #509 Stage 2 (MVP): physical operator implementation of one logical
-//! candidate. No materialization choice is made: every node runs at query
-//! time, so each logical candidate yields exactly one physical candidate.
+//! #509 Stage 2: physical operator implementation of one logical candidate,
+//! and its materialization choices ([`crate::materialization`]). Each
+//! logical candidate yields one physical candidate per down-closed set of
+//! ingestion-time summaries, all query time first.
 //!
 //! The runtime has one implementation per logical operator except exact
 //! top-k, which it cannot run as `Aggregate{[TopK]}`. Stage 2 records that
@@ -8,21 +9,25 @@
 //! per-group limit, the shape the PromQL frontend uses for generic `topk`.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate.
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
+use asap_types::ir::physical_export::{
+    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::physical_export::{
-    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
-};
+    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG};
 use asap_types::ir::properties::ExecutionDataStateError;
 use asap_types::ir::scalar::resolve_column_ref;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
+    apply_materialization_timings, split_shared_by_phase, ASAPOp, MaterializationAssignment,
+    NonASAPOp, Operator, OperatorNode, ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
 };
+use asap_types::workload::{DataWorkload, RootDemand};
 use thiserror::Error;
+
+use crate::materialization::{MaterializationSpace, MAX_PHYSICAL_PER_LOGICAL};
 
 /// One Stage 2 candidate, derived from exactly one Stage 1 candidate.
 /// `roots` are the timed operator roots (one per query, in workload order)
@@ -32,8 +37,21 @@ pub struct PhysicalCandidate {
     pub id: String,
     pub from_logical: String,
     pub label: String,
+    /// Which summaries run at ingestion time, e.g. "ingestion time: Kll ×5
+    /// panes"; empty when everything runs at query time.
+    pub materialization: String,
     pub roots: Vec<Rc<OperatorNode>>,
     pub dag: PhysicalASAPDAG,
+}
+
+/// Stage 2's physical candidates of one logical candidate.
+#[derive(Debug, Clone)]
+pub struct Stage2Candidates {
+    /// All query time first.
+    pub candidates: Vec<PhysicalCandidate>,
+    /// `false` when there were more than [`MAX_PHYSICAL_PER_LOGICAL`]
+    /// materialization choices and they were searched greedily.
+    pub exhaustive: bool,
 }
 
 #[derive(Debug, Error)]
@@ -46,33 +64,111 @@ pub enum Stage2Error {
     NoValueColumn(String),
     #[error("maintained populations run at ingestion time, which Stage 2 does not plan yet")]
     IngestionTimeOnly,
+    #[error("a summary assigned to ingestion time reads query-time work")]
+    NotMaintainable,
 }
 
-/// Implement every operator of one logical candidate and time it at query
-/// time. `id` and `label` are left empty for the caller to name. Sharing
-/// between `roots` is preserved: one memo serves the whole workload.
+/// Implement every operator of one logical candidate and enumerate its
+/// materialization choices: one candidate per down-closed set of
+/// ingestion-time summaries, all query time first. `id` and `label` are left
+/// empty for the caller to name. Sharing between `roots` is preserved: one
+/// memo serves the whole workload, and a node shared by an ingestion-time and
+/// a query-time consumer is copied per phase.
+///
+/// `demand[i]` is the demand of `roots[i]`. Above
+/// [`MAX_PHYSICAL_PER_LOGICAL`] choices, the choices are searched greedily
+/// by `score` (lower is better; `None`: not admissible): starting from all
+/// query time, move the unit whose move improves the score most, until none
+/// does. The candidates on that path are returned and flagged not
+/// exhaustive.
 pub fn stage2_physical(
     from_logical: &str,
     roots: &[Rc<OperatorNode>],
-) -> Result<PhysicalCandidate, Stage2Error> {
+    demand: &[RootDemand],
+    data: &DataWorkload,
+    score: &dyn Fn(&PhysicalCandidate) -> Option<f64>,
+) -> Result<Stage2Candidates, Stage2Error> {
     let mut memo = HashMap::new();
     let implemented = roots
         .iter()
         .map(|root| implement(root, &mut memo))
         .collect::<Result<Vec<_>, _>>()?;
     reject_maintained_populations(&implemented)?;
-    // The default assignment computes every summary state at query time.
-    let assignment = MaterializationAssignment::default();
+    let space = MaterializationSpace::new(&implemented, demand, data);
+    let build = |set: &BTreeSet<usize>| materialize(from_logical, &implemented, &space, set);
+    // All query time must build; an ingestion-time choice that the timing
+    // rules reject is not a candidate.
+    let base = build(&BTreeSet::new())?;
+    if let Some(sets) = space.down_closed_sets(MAX_PHYSICAL_PER_LOGICAL) {
+        let mut candidates = vec![base];
+        candidates.extend(sets.iter().skip(1).filter_map(|set| build(set).ok()));
+        return Ok(Stage2Candidates {
+            candidates,
+            exhaustive: true,
+        });
+    }
+    let mut set = BTreeSet::new();
+    let mut best = score(&base);
+    let mut candidates = vec![base];
+    loop {
+        let step = (0..space.units.len())
+            .filter(|&u| space.can_add(&set, u))
+            .filter_map(|u| {
+                let mut next = set.clone();
+                next.insert(u);
+                let candidate = build(&next).ok()?;
+                let value = score(&candidate)?;
+                Some((value, next, candidate))
+            })
+            .filter(|(value, ..)| best.is_none_or(|best| *value < best))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let Some((value, next, candidate)) = step else {
+            break;
+        };
+        best = Some(value);
+        set = next;
+        candidates.push(candidate);
+    }
+    Ok(Stage2Candidates {
+        candidates,
+        exhaustive: false,
+    })
+}
+
+/// Time the implemented roots with the summaries of `set` at ingestion time.
+fn materialize(
+    from_logical: &str,
+    implemented: &[Rc<OperatorNode>],
+    space: &MaterializationSpace,
+    set: &BTreeSet<usize>,
+) -> Result<PhysicalCandidate, Stage2Error> {
+    let (roots, assignment): (Vec<_>, MaterializationAssignment) =
+        split_shared_by_phase(implemented, &space.assignment(set));
     let mut timing = TimingMemo::new();
-    let timed = implemented
+    let timed = roots
         .iter()
         .map(|root| apply_materialization_timings(root, &assignment, &mut timing))
         .collect::<Result<Vec<_>, _>>()?;
     let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
+    // A summary over query-time work stays at query time whatever the
+    // assignment says; such a set is not a distinct candidate.
+    let assigned: usize = set.iter().map(|&u| space.units[u].summaries.len()).sum();
+    let maintained = dag
+        .nodes
+        .iter()
+        .filter(|n| {
+            matches!(n.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. }))
+                && !n.output_state.timing.is_query_time()
+        })
+        .count();
+    if maintained != assigned {
+        return Err(Stage2Error::NotMaintainable);
+    }
     Ok(PhysicalCandidate {
         id: String::new(),
         from_logical: from_logical.to_string(),
         label: String::new(),
+        materialization: space.label(set),
         roots: timed,
         dag,
     })
@@ -162,6 +258,14 @@ mod tests {
     use asap_types::ir::QueryRoot;
     use asap_types::types::AccuracyTarget;
 
+    /// The all-query-time candidate, for data with no ingestion.
+    fn all_query_time(from: &str, roots: &[Rc<OperatorNode>]) -> PhysicalCandidate {
+        stage2_physical(from, roots, &[], &DataWorkload::default(), &|_| None)
+            .unwrap()
+            .candidates
+            .remove(0)
+    }
+
     /// Exact `topk by (job)` becomes Limit(Sort) partitioned by `job`, and a
     /// child shared by two roots stays one node (one `Rc`, one DAG node).
     #[test]
@@ -174,7 +278,7 @@ mod tests {
             panic!("topk aggregate")
         };
         let sum = Rc::new(sum.with_new_children(|_| shared.clone()).unwrap());
-        let candidate = stage2_physical("L1", &[topk, sum]).unwrap();
+        let candidate = all_query_time("L1", &[topk, sum]);
 
         let NonASAPOp::Limit {
             n: Some(10),
@@ -265,7 +369,7 @@ mod tests {
                 QueryRoot::Scalar(_) => panic!("operator root"),
             })
             .collect();
-        let candidate = stage2_physical("L1", &roots).unwrap();
+        let candidate = all_query_time("L1", &roots);
         assert!(candidate
             .dag
             .nodes

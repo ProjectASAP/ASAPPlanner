@@ -299,6 +299,7 @@ mod tests {
                 RepetitionInterval(ms),
             )),
             predictability: Predictability::Unknown,
+            latency_ms: None,
         }
     }
 

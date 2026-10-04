@@ -118,6 +118,7 @@ async fn example2_plans_through_the_stage_pipeline() {
                 execute_at: None,
             },
             predictability: Predictability::default(),
+            latency_ms: None,
         })
         .collect();
     let data = DataWorkload {
