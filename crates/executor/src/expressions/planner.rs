@@ -127,6 +127,16 @@ pub(super) fn evaluate(
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Value::Float64(promql_function(name, &values)?));
             }
+            if name.eq_ignore_ascii_case("sqrt") {
+                return match evaluate(&args[0], row, schema)? {
+                    Value::Null => Ok(Value::Null),
+                    Value::Float64(value) => Ok(Value::Float64(value.sqrt())),
+                    Value::Int64(value) => Ok(Value::Float64((value as f64).sqrt())),
+                    _ => Err(Error::Invalid(
+                        "SQL sqrt requires a numeric argument".into(),
+                    )),
+                };
+            }
             if name == "promql_drop_metric_name" {
                 let Value::Utf8(encoded) = evaluate(&args[0], row, schema)? else {
                     return Err(Error::Invalid("series identity must be Utf8".into()));
@@ -646,7 +656,19 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
             Ok(())
         }
         ScalarExpr::FunctionCall { name, args } => {
-            if name != "promql_drop_metric_name"
+            if name.eq_ignore_ascii_case("sqrt") {
+                if args.len() != 1
+                    || !matches!(
+                        args[0]
+                            .scalar_type(schema)
+                            .map_err(|e| Error::Invalid(e.to_string()))?
+                            .0,
+                        DataType::Int64 | DataType::Float64 | DataType::Null
+                    )
+                {
+                    return Err(invalid());
+                }
+            } else if name != "promql_drop_metric_name"
                 && planner_types::ir::scalar::scalar_type_rules::promql_function_arity(name)
                     .is_none()
                 && name != "asap_struct_field"
