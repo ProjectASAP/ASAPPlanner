@@ -555,6 +555,22 @@ fn compile_internal(
                     continue;
                 }
             }
+            if matches!(node.payload, Payload::SummaryMerge) && output.time_index.is_some() {
+                // Pane timestamps describe their individual builds. A merged
+                // per-series state represents this evaluation's entire window,
+                // so merge by series identity and attach the execution scope's
+                // timestamp after merging, as per-series SummaryAgg does.
+                let merged = bind_operation(node, &schemas)?;
+                let compact = merged.schema();
+                let merge_id = helper_id(id, 1);
+                physical_dag.add(merge_id, inputs, merged)?;
+                physical_dag.add(
+                    id,
+                    vec![merge_id],
+                    Operator::scope_timestamp(compact, output)?,
+                )?;
+                continue;
+            }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_evaluation() {
