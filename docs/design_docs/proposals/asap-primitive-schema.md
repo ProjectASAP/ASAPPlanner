@@ -80,7 +80,7 @@ SummaryEstimate(query = SketchStatistic::Quantile { q: 0.99 })
   ──Relation(job Utf8, quantile Float64)──▶      (planner may rename to p99)
 ```
 
-- Output schema: the input schema with the one non-plain field replaced by a non-nullable plain field. Its name and type come from the statistic: `quantile`/`frequency_l2`/`frequency_entropy` Float64, `cardinality`/`count` Int64 (Float64 if the producer is a `PerEntity` `SummaryAgg`), and `topk` Utf8. Keys and metadata pass through.
+- Output schema: the input schema with the one non-plain field replaced by a non-nullable plain field. Its name and type come from the statistic: `quantile`/`frequency_l2`/`frequency_entropy` Float64, `cardinality`/`count` Int64 (Float64 if the producer is a `PerEntity` `SummaryAgg`). Keys and metadata pass through. A top-k readout is the exception: it returns the selected rows, one per ranked item, with the partition keys, the item identity columns, and a `value` Float64 score (#579). This is the same row shape as an exact Sort → Limit top-k, so the plans for one query share a root schema.
 - Result kind: the value kind of the source the state was built from (`Relation` here).
 - Checks: input is `State` with exactly one non-plain field, that field is `Sketch`, and its category accepts the statistic (§3). For example, `Cardinality` on KLL is rejected.
 - Coverage: **absent**. The output is a value, and `with_coverage` returns `NotState`.
