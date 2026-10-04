@@ -63,13 +63,11 @@
 //!
 //! [`crate::replacement::accuracy_budget`] resolves *every* `AccuracyTarget`
 //! (`Epsilon`/`EpsilonDelta`) to the literal `(eps, delta)` pair
-//! `realizations_for_intent`'s `sketch_realizations` feeds into
-//! `CostModel::size_params` — the same numbers `default_size_params`'
+//! `realizations_for_intent`'s `sketch_realizations` feeds into the
+//! analytical sizing — the same numbers `default_size_params`'
 //! `kll_k` / `cms_width` / `cms_depth` / `hll_precision` / `kmv_k` / DDSketch's
 //! own `alpha == eps` invert. Every shipped formula is monotonic in its
-//! input, and custom [`crate::cost_model::CostModel::size_params`]
-//! implementations are contractually required to return parameters that
-//! satisfy their supplied budget. So a sketch satisfying budget `(e1, d1)`
+//! input. So a sketch satisfying budget `(e1, d1)`
 //! also satisfies any
 //! requirement `(e2, d2)` with `e1 <= e2 && d1 <= d2` — [`dominates`]'s exact
 //! check — regardless of which of `Epsilon`/`EpsilonDelta` either side is

@@ -52,7 +52,7 @@ impl AccuracyModel for TestEvidence {
 
 fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy).unwrap();
-    ASAPStrategies::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
+    ASAPStrategies::new_with_planning_inputs(&TestEvidence, &EqualSplitAllocator)
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| {
@@ -136,8 +136,7 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             },
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
-            let candidates =
-                ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
+            let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
             let unknown = candidates
                 .iter()
                 .filter(|candidate| {
