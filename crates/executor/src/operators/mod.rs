@@ -135,9 +135,10 @@ enum Kind {
         kind: planner_types::ir::operator::JoinKind,
         predicate: Box<crate::expressions::CompiledExpression>,
     },
+    /// `value: None`: every row adds a unit weight (SQL `COUNT(*)`).
     SummaryBuild {
         family: SummaryFamilyType,
-        value: usize,
+        value: Option<usize>,
         time: Option<usize>,
         groups: Vec<usize>,
     },
