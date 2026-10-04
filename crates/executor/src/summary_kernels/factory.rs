@@ -48,6 +48,21 @@ pub trait AccumulatorUpdater: Send {
         }
     }
 
+    /// Update from the typed native row. Numeric kernels retain their existing
+    /// Float64 contract; frequency kernels may accept nonnumeric identities.
+    fn update_value(
+        &mut self,
+        value: &crate::values::Value,
+        timestamp_ms: i64,
+    ) -> Result<(), String> {
+        let crate::values::Value::Float64(value) = value else {
+            return Err("summary update requires Float64".into());
+        };
+        self.validate_single_input(*value)?;
+        self.update_single(*value, timestamp_ms);
+        Ok(())
+    }
+
     /// Feed a single (value, timestamp_ms) pair — for SingleSubpopulation types.
     fn update_single(&mut self, value: f64, timestamp_ms: i64);
 
@@ -690,6 +705,11 @@ impl AccumulatorUpdater for HllUpdater {
 }
 
 impl AccumulatorUpdater for UnivMonUpdater {
+    fn update_value(&mut self, value: &crate::values::Value, _: i64) -> Result<(), String> {
+        self.acc
+            .insert_value(value)
+            .map_err(|error| error.to_string())
+    }
     fn is_keyed(&self) -> bool {
         false
     }

@@ -99,8 +99,14 @@ impl Operator {
     ) -> Result<Self, Error> {
         crate::values::validate_family(&family)?;
         validate_groups(&input, &groups)?;
-        if plain(&input, value)?.0 != &DataType::Float64 {
-            return Err(invalid("summary numeric update requires Float64"));
+        let dtype = plain(&input, value)?.0;
+        let typed_frequency = matches!(&family,
+            SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::UnivMon);
+        if *dtype != DataType::Float64
+            && !(typed_frequency
+                && matches!(dtype, DataType::Utf8 | DataType::Int64 | DataType::Bool))
+        {
+            return Err(invalid("summary update type is unsupported by its family"));
         }
         if let Some(time) = time {
             if plain(&input, time)? != (&DataType::Timestamp, false) {
@@ -435,11 +441,10 @@ async fn build_summary(
                 states.get_mut(&key).expect("inserted group");
             // SQL aggregates ignore NULL samples while retaining the group.
             // A missing counter sample also contributes no observation.
-            let value = match row[value] {
-                Value::Float64(value) => value,
-                Value::Null => continue,
-                _ => return Err(invalid("summary update type")),
-            };
+            let value = &row[value];
+            if matches!(value, Value::Null) {
+                continue;
+            }
             let timestamp = if let Some(time) = time {
                 let Value::Timestamp(time) = row[time] else {
                     return Err(invalid("summary time type"));
@@ -455,9 +460,8 @@ async fn build_summary(
                 ));
             }
             updater
-                .validate_single_input(value)
+                .update_value(value, timestamp)
                 .map_err(Error::Operator)?;
-            updater.update_single(value, timestamp);
             *previous = Some(timestamp);
             memory.resize(updater.memory_usage_bytes() + *overhead)?;
         }

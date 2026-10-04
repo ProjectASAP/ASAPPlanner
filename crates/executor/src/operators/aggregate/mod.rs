@@ -13,6 +13,17 @@ impl Operator {
         for (name, reduction) in &measures {
             let (t, n) = match reduction {
                 Reduction::Count => (DataType::Int64, false),
+                Reduction::Cardinality(columns) => {
+                    if columns.is_empty() {
+                        return Err(invalid(
+                            "distinct aggregate requires at least one identity column",
+                        ));
+                    }
+                    for column in columns {
+                        plain(&input, *column)?;
+                    }
+                    (DataType::Int64, false)
+                }
                 Reduction::Sum(i) | Reduction::Avg(i) => {
                     let (t, _) = plain(&input, *i)?;
                     if !matches!(t, DataType::Int64 | DataType::Float64) {
@@ -31,6 +42,15 @@ impl Operator {
                 Reduction::Quantile { column, q } => {
                     if plain(&input, *column)?.0 != &DataType::Float64 || q.is_nan() {
                         return Err(invalid("quantile requires Float64 input and a numeric q"));
+                    }
+                    (DataType::Float64, false)
+                }
+                Reduction::FrequencyL2(i) | Reduction::FrequencyEntropy(i) => {
+                    if !matches!(
+                        plain(&input, *i)?.0,
+                        DataType::Bool | DataType::Int64 | DataType::Float64 | DataType::Utf8
+                    ) {
+                        return Err(invalid("frequency aggregate requires a Boolean, Int64, Float64 or Utf8 identity"));
                     }
                     (DataType::Float64, false)
                 }
@@ -125,10 +145,16 @@ impl Operator {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Reduction {
     Count,
+    /// Exact distinct tuple count; a tuple with any NULL component is skipped.
+    Cardinality(Vec<usize>),
     Sum(usize),
     Avg(usize),
     Min(usize),
     Max(usize),
+    /// L2 norm of unit-update frequencies; NULL identities are skipped.
+    FrequencyL2(usize),
+    /// Shannon entropy in bits; NULL identities are skipped.
+    FrequencyEntropy(usize),
     /// PromQL `quantile`: linear interpolation between closest ranks.
     Quantile {
         column: usize,
@@ -205,7 +231,7 @@ async fn reduce(
             .map(|&i| rows[0][i].clone())
             .collect::<Vec<_>>();
         for measure in measures {
-            result.push(reduce_one(&rows, measure, input, &mut work).await?);
+            result.push(reduce_one(&rows, measure, input, &mut work, context).await?);
         }
         workspace.grow(row_bytes(&result))?;
         output.push(result);
@@ -243,6 +269,7 @@ async fn reduce_one(
     measure: &Reduction,
     input: &SchemaRef,
     work: &mut Cooperative,
+    context: &RunContext,
 ) -> Result<Value, Error> {
     let column = match measure {
         Reduction::Count => {
@@ -251,6 +278,66 @@ async fn reduce_one(
             ))
         }
         Reduction::Sum(i) | Reduction::Avg(i) | Reduction::Min(i) | Reduction::Max(i) => *i,
+        Reduction::Cardinality(columns) => {
+            let mut workspace = Workspace::new(context)?;
+            let mut identities = std::collections::BTreeSet::new();
+            for row in rows {
+                work.checkpoint().await?;
+                if columns
+                    .iter()
+                    .any(|column| matches!(row[*column], Value::Null))
+                {
+                    continue;
+                }
+                let key = group_key(row, columns)?;
+                if !identities.contains(&key) {
+                    workspace.grow(key_bytes(&key))?;
+                    identities.insert(key);
+                }
+            }
+            return Ok(Value::Int64(
+                i64::try_from(identities.len()).map_err(|_| invalid("distinct count overflow"))?,
+            ));
+        }
+        Reduction::FrequencyL2(column) | Reduction::FrequencyEntropy(column) => {
+            let mut workspace = Workspace::new(context)?;
+            let mut counts = BTreeMap::<Vec<u8>, u64>::new();
+            let mut total = 0_u64;
+            for row in rows {
+                work.checkpoint().await?;
+                let value = &row[*column];
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                if matches!(value, Value::Float64(v) if !v.is_finite()) {
+                    return Err(invalid(
+                        "frequency aggregate requires a finite floating identity",
+                    ));
+                }
+                let key = value.key()?;
+                if !counts.contains_key(&key) {
+                    workspace.grow(
+                        64 + std::mem::size_of::<Vec<u8>>()
+                            + key.len()
+                            + std::mem::size_of::<u64>(),
+                    )?;
+                }
+                *counts.entry(key).or_default() += 1;
+                total += 1;
+            }
+            let mut result = 0.0_f64;
+            for count in counts.into_values() {
+                work.checkpoint().await?;
+                let count = count as f64;
+                if matches!(measure, Reduction::FrequencyL2(_)) {
+                    result = result.hypot(count);
+                } else {
+                    let probability = count / total as f64;
+                    result -= probability * probability.log2();
+                }
+            }
+            return Ok(Value::Float64(result));
+        }
         Reduction::Quantile { column, q } => {
             let mut values = Vec::with_capacity(rows.len());
             for row in rows {

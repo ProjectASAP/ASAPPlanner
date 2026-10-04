@@ -712,3 +712,205 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         assert!(matches!(rows[0][0], Value::Null));
     }
 }
+
+// Exact frequency intents bind to native reducers without a sketch or numeric key conversion.
+#[test]
+fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
+    use asap_executor::physical_planner::compile_node;
+    use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlanReduction};
+    use planner_types::ir::properties::*;
+    use planner_types::types::AccuracyTarget;
+    for (dtype, values) in [
+        (
+            DataType::Utf8,
+            vec![Value::Utf8("a".into()), Value::Utf8("b".into())],
+        ),
+        (
+            DataType::Int64,
+            vec![
+                Value::Int64(9_007_199_254_740_992),
+                Value::Int64(9_007_199_254_740_993),
+            ],
+        ),
+        (DataType::Bool, vec![Value::Bool(false), Value::Bool(true)]),
+        (
+            DataType::Float64,
+            vec![Value::Float64(-0.0), Value::Float64(1.0)],
+        ),
+    ] {
+        let input = schema(&[("key", dtype, true)]);
+        for (measure, name, expected) in [
+            (
+                AggIntent::FrequencyL2 {
+                    col: Some(0),
+                    accuracy: AccuracyTarget::Exact,
+                },
+                "frequency_l2",
+                8.0_f64.sqrt(),
+            ),
+            (
+                AggIntent::FrequencyEntropy {
+                    col: Some(0),
+                    accuracy: AccuracyTarget::Exact,
+                },
+                "frequency_entropy",
+                1.0,
+            ),
+        ] {
+            let node = PhysicalASAPDAGNode {
+                coverage: None,
+                id: planner_types::ir::export::LogicalASAPNodeId(1),
+                payload: PhysicalASAPOperatorPayload::Relational {
+                    operator: ValueOperation::Aggregate {
+                        reduction: PlanReduction::Reduce(GroupKeys::none()),
+                        measures: vec![measure],
+                        output_names: vec![name.into()],
+                        filters: vec![],
+                        having: None,
+                    },
+                },
+                output_state: ExecutionDataState::QUERY_ROWS,
+                output_schema: (*schema(&[(name, DataType::Float64, false)])).clone(),
+                guarantee: None,
+            };
+            let operator = compile_node(&node, std::slice::from_ref(&input))
+                .expect("exact frequency intent binds");
+            let rows = values
+                .iter()
+                .flat_map(|v| [vec![v.clone()], vec![v.clone()]])
+                .chain([vec![Value::Null]])
+                .collect();
+            let result = unary(input.clone(), vec![rows], operator.clone());
+            assert!(matches!(result[0][0], Value::Float64(v) if (v - expected).abs() < 1e-12));
+            for batches in [vec![], vec![vec![vec![Value::Null]]]] {
+                let result = unary(input.clone(), batches, operator.clone());
+                assert!(matches!(result[0][0], Value::Float64(0.0)));
+            }
+        }
+    }
+}
+
+// Each group gets its own frequency population, including one canonical signed-zero identity.
+#[test]
+fn exact_frequency_grouping_and_entropy_bits() {
+    let input = schema(&[
+        ("group", DataType::Int64, false),
+        ("key", DataType::Float64, true),
+    ]);
+    let operator = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![
+            ("l2".into(), Reduction::FrequencyL2(1)),
+            ("entropy".into(), Reduction::FrequencyEntropy(1)),
+        ],
+    )
+    .unwrap();
+    let rows = vec![
+        vec![Value::Int64(1), Value::Float64(-0.0)],
+        vec![Value::Int64(1), Value::Float64(0.0)],
+        vec![Value::Int64(1), Value::Float64(0.0)],
+        vec![Value::Int64(1), Value::Float64(1.0)],
+        vec![Value::Int64(2), Value::Float64(2.0)],
+        vec![Value::Int64(2), Value::Null],
+        vec![Value::Int64(3), Value::Null],
+    ];
+    let result = unary(input.clone(), vec![rows], operator.clone());
+    assert_eq!(result.len(), 3);
+    let expected_entropy = -0.75_f64 * 0.75_f64.log2() - 0.25_f64 * 0.25_f64.log2();
+    for (row, l2, entropy) in [
+        (&result[0], 10.0_f64.sqrt(), expected_entropy),
+        (&result[1], 1.0, 0.0),
+        (&result[2], 0.0, 0.0),
+    ] {
+        assert!(matches!(row[1], Value::Float64(v) if (v - l2).abs() < 1e-12));
+        assert!(matches!(row[2], Value::Float64(v) if (v - entropy).abs() < 1e-12));
+    }
+    assert!(unary(input, vec![], operator).is_empty());
+}
+
+// Exact distinct binding preserves typed tuples, skips NULLs and returns zero on empty input.
+#[test]
+fn exact_cardinality_binds_and_executes_typed_tuples() {
+    use asap_executor::physical_planner::compile_node;
+    use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlanReduction};
+    use planner_types::ir::properties::*;
+    use planner_types::types::AccuracyTarget;
+    let input = schema(&[
+        ("key", DataType::Int64, true),
+        ("tag", DataType::Utf8, true),
+    ]);
+    for (cols, expected) in [(vec![0], 2), (vec![0, 1], 3)] {
+        let node = PhysicalASAPDAGNode {
+            coverage: None,
+            id: planner_types::ir::export::LogicalASAPNodeId(1),
+            payload: PhysicalASAPOperatorPayload::Relational {
+                operator: ValueOperation::Aggregate {
+                    reduction: PlanReduction::Reduce(GroupKeys::none()),
+                    measures: vec![AggIntent::Cardinality {
+                        cols,
+                        accuracy: AccuracyTarget::Exact,
+                    }],
+                    output_names: vec!["distinct".into()],
+                    filters: vec![],
+                    having: None,
+                },
+            },
+            output_state: ExecutionDataState::QUERY_ROWS,
+            output_schema: (*schema(&[("distinct", DataType::Int64, false)])).clone(),
+            guarantee: None,
+        };
+        let operator =
+            compile_node(&node, std::slice::from_ref(&input)).expect("exact distinct intent binds");
+        let rows = vec![
+            vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("a".into())],
+            vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("a".into())],
+            vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("b".into())],
+            vec![Value::Int64(9_007_199_254_740_993), Value::Utf8("a".into())],
+            vec![Value::Null, Value::Utf8("c".into())],
+        ];
+        let result = unary(input.clone(), vec![rows], operator.clone());
+        assert!(matches!(result[0][0], Value::Int64(v) if v == expected));
+        for rows in [vec![], vec![vec![Value::Null, Value::Null]]] {
+            let result = unary(input.clone(), vec![rows], operator.clone());
+            assert!(matches!(result[0][0], Value::Int64(0)));
+        }
+    }
+}
+
+// Distinct uses grouped equality: signed zero and NaN payloads each form one identity.
+#[test]
+fn exact_cardinality_grouping_normalizes_float_identities() {
+    let input = schema(&[
+        ("group", DataType::Int64, false),
+        ("key", DataType::Float64, true),
+    ]);
+    let operator = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![("distinct".into(), Reduction::Cardinality(vec![1]))],
+    )
+    .unwrap();
+    let result = unary(
+        input,
+        vec![vec![
+            vec![Value::Int64(1), Value::Float64(0.0)],
+            vec![Value::Int64(1), Value::Float64(-0.0)],
+            vec![Value::Int64(1), Value::Float64(f64::NAN)],
+            vec![
+                Value::Int64(1),
+                Value::Float64(f64::from_bits(f64::NAN.to_bits() + 1)),
+            ],
+            vec![Value::Int64(2), Value::Null],
+        ]],
+        operator,
+    );
+    assert!(matches!(
+        result[0].as_slice(),
+        [Value::Int64(1), Value::Int64(2)]
+    ));
+    assert!(matches!(
+        result[1].as_slice(),
+        [Value::Int64(2), Value::Int64(0)]
+    ));
+}

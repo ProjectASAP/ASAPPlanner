@@ -281,6 +281,14 @@ fn evaluations(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
             .map(|q| state.estimate(&SketchStatistic::Quantile { q }).unwrap())
             .collect(),
         SketchAlgorithm::Hll => vec![state.estimate(&SketchStatistic::Cardinality).unwrap()],
+        SketchAlgorithm::UnivMon => [
+            SketchStatistic::Cardinality,
+            SketchStatistic::FrequencyL2,
+            SketchStatistic::FrequencyEntropy,
+        ]
+        .iter()
+        .map(|statistic| state.estimate(statistic).unwrap())
+        .collect(),
         other => panic!("unexpected unkeyed sketch {other:?}"),
     }
 }
@@ -318,7 +326,7 @@ fn check(
     let stored_only = matches!(family, FieldDataType::Sketch(kind, _)
         if kind.algorithm() == &asap_types::ir::schema::SketchAlgorithm::Cms);
     if stored_only || asap_executor::capability::validate_native_family(family).is_err() {
-        // Families without a native state (e.g. UnivMon), or with native
+        // Families without a native state, or with native
         // stored state only (plain CMS), are outside precompute execution;
         // their compile must fail.
         assert!(precompute::compile(dag, &[source], &[root]).is_err());
@@ -331,7 +339,13 @@ fn check(
         other => format!("{other:?}"),
     };
     if let FieldDataType::Sketch(kind, _) = family {
-        if let (Some(keyed), false) = (&input.item, kind.algorithm() == &SketchAlgorithm::Hll) {
+        if let (Some(keyed), false) = (
+            &input.item,
+            matches!(
+                kind.algorithm(),
+                SketchAlgorithm::Hll | SketchAlgorithm::UnivMon
+            ),
+        ) {
             // Keyed heaps: every item's estimated weight is its exact
             // total at this scale (no collisions in the fixture).
             let mut expected = BTreeMap::<Series, BTreeMap<String, f64>>::new();
