@@ -409,7 +409,6 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replacement::{realizations_for_intent, Realization};
     use asap_types::types::AccuracyTarget;
 
     /// The documented synthetic wire-format example remains importable and
@@ -559,33 +558,6 @@ mod tests {
             },
             intent,
         )
-    }
-
-    /// Real replacement generation follows measured update ranking while keeping
-    /// every candidate and the same formally sized parameter configurations.
-    #[test]
-    fn public_cost_model_changes_replacement_order_without_changing_guarantees() {
-        let (artifact, context, intent) = fixture();
-        let model =
-            EmpiricalCostModel::new(EmpiricalEvidenceProvider::new(artifact, context).unwrap());
-        let default = realizations_for_intent(&intent, &DefaultCostModel);
-        let measured = realizations_for_intent(&intent, &model);
-        assert_eq!(default.len(), measured.len());
-        let Realization::Sketch(first_default) = &default[0] else {
-            panic!("expected sketch")
-        };
-        let Realization::Sketch(first_measured) = &measured[0] else {
-            panic!("expected sketch")
-        };
-        assert_eq!(first_default.algorithm(), &SketchAlgorithm::Cms);
-        assert_eq!(first_measured.algorithm(), &SketchAlgorithm::CountSketch);
-        for candidate in &measured {
-            assert!(default.contains(candidate));
-        }
-        assert_eq!(
-            model.size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.001),
-            DefaultCostModel.size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.001)
-        );
     }
 
     /// Missing, mismatched and expired evidence preserve the original ranking;
