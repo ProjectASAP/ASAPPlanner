@@ -291,3 +291,19 @@ fn frequency_dictionary_enforces_memory_budget() {
         assert_eq!(run.retained_bytes(), 0);
     }
 }
+
+// A complete SUM window accounts for its expanded output and frees memory on failure.
+#[test]
+fn complete_window_sum_enforces_workspace_budget() {
+    let sources = source(64);
+    let run = context(12_000);
+    let inputs = sources.execute(&[0], run.clone()).unwrap();
+    let operator = Operator::sql_window_sum(schema(1), 0, "total".into()).unwrap();
+    let mut output = operator.start(inputs, run.clone()).unwrap();
+    assert!(matches!(
+        block_on(output.next()),
+        Some(Err(Error::MemoryLimit))
+    ));
+    drop(output);
+    assert_eq!(run.retained_bytes(), 0);
+}

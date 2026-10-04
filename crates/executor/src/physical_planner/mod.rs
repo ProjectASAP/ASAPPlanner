@@ -11,8 +11,7 @@ use crate::{
 use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlannerReduction};
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
-    PhysicalASAPOperatorPayload as Payload,
-};
+    PhysicalASAPOperatorPayload as Payload};
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::DataType;
 use planner_types::ir::schema::{FieldDataType, SketchStatistic, SummaryInputExpr};
@@ -827,6 +826,39 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 *offset as u64,
                 groups(input, partition_by)?,
             ),
+            NonASAPOp::SQLWindowFunc {
+                func: planner_types::ir::operator::WindowFuncKind::Sum,
+                args,
+                partition_by,
+                order_by,
+                frame: Some(frame),
+                output_name,
+            } => {
+                use planner_types::ir::{
+                    operator::{WindowFrameBound, WindowFrameOffset},
+                    scalar::ScalarValue,
+                };
+                let [ScalarExpr::Column(column)] = args.as_slice() else {
+                    return Err(invalid("SQL window SUM requires one column"));
+                };
+                if partition_by.is_without()
+                    || !partition_by.keys().is_empty()
+                    || !order_by.is_empty()
+                    || !matches!(
+                        frame.start_bound,
+                        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Null))
+                    )
+                    || !matches!(
+                        frame.end_bound,
+                        WindowFrameBound::Following(WindowFrameOffset::Scalar(ScalarValue::Null))
+                    )
+                {
+                    return Err(invalid(
+                        "native SQL window SUM requires the complete unordered relation",
+                    ));
+                }
+                Operator::sql_window_sum(input.clone(), *column, output_name.clone())
+            }
             NonASAPOp::Aggregate {
                 reduction,
                 measures,
