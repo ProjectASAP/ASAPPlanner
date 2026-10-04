@@ -1,7 +1,7 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
 //! the deployment supplies only raw rows at the ingestion frontier.
 mod common;
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
@@ -115,7 +115,7 @@ fn execute(
     dag: &PhysicalASAPDAG,
     samples: &[Sample],
     end: i64,
-) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
+) -> Result<Vec<asap_executor::runtime::SharedValue<Batch>>, String> {
     execute_relabeled(dag, samples, end, &BTreeMap::new())
 }
 
@@ -126,7 +126,7 @@ fn execute_relabeled(
     samples: &[Sample],
     end: i64,
     relabel: &BTreeMap<&str, (&str, &str)>,
-) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
+) -> Result<Vec<asap_executor::runtime::SharedValue<Batch>>, String> {
     let inputs = raw_inputs(dag);
     let program = compile(
         dag,
@@ -624,8 +624,8 @@ fn population_sums_and_averages_are_compensated() {
 // returns the sketch's total update weight, including colliding items.
 #[test]
 fn stored_count_min_bare_count_compiles_to_a_evaluation() {
+    use asap_executor::summary_kernels::CountMinSketchAccumulator;
     use asap_logical_optimizer::{Replacement, ReplacementStrategy, TargetSubDAG};
-    use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
     let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
     let dag = asap_logical_optimizer::ASAPStrategies::default()
         .replacements(&TargetSubDAG::new(&root))
