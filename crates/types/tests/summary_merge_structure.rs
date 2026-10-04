@@ -37,7 +37,7 @@ fn state(k: u32) -> Rc<OperatorNode> {
                     },
                     regions: vec![
                         asap_types::ir::properties::summary_coverage::CoverageRegion {
-                            time_ms: Some(0..1),
+                            time_ms: Some((0..1).into()),
                             population: Default::default(),
                         },
                     ],
@@ -57,7 +57,7 @@ fn compatible_panes_merge_structurally() {
     assert_eq!(root.schema.fields.len(), 1);
     assert_eq!(
         root.coverage.as_ref().unwrap().regions[0].time_ms,
-        Some(0..2)
+        Some((0..2).into())
     );
 }
 /// An empty merge, raw rows and differently sized state cannot masquerade as compatible panes.
@@ -77,7 +77,7 @@ fn incompatible_merge_inputs_fail() {
 fn shifted_state(k: u32, start: i64, end: i64) -> Rc<OperatorNode> {
     let mut node = (*state(k)).clone();
     let region = &mut node.coverage.as_mut().unwrap().regions[0];
-    region.time_ms = Some(start..end);
+    region.time_ms = Some((start..end).into());
     Rc::new(node)
 }
 /// Schema equality cannot authorize overlapping or unknown observation coverage.
@@ -104,6 +104,6 @@ fn merge_derives_coverage_and_validates_retained_metadata() {
     .unwrap();
     assert_eq!(root.coverage.as_ref().unwrap().regions.len(), 2);
     let mut forged = (*root).clone();
-    forged.coverage.as_mut().unwrap().regions[0].time_ms = Some(0..2);
+    forged.coverage.as_mut().unwrap().regions[0].time_ms = Some((0..2).into());
     assert!(Rc::new(forged).validate_structure().is_err());
 }

@@ -51,7 +51,7 @@ fn region_is(value: &str) -> Predicate {
 
 fn region(time_ms: Option<std::ops::Range<i64>>, population: &[(&str, &str)]) -> CoverageRegion {
     CoverageRegion {
-        time_ms,
+        time_ms: time_ms.map(Into::into),
         population: population
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -13,7 +13,7 @@ fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> SummaryCoverag
     SummaryCoverage {
         source: table("flows"),
         regions: vec![CoverageRegion {
-            time_ms: Some(start..end),
+            time_ms: Some((start..end).into()),
             population: population
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -26,7 +26,7 @@ fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> SummaryCoverag
 fn time_union_preserves_gaps() {
     let merged =
         SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), coverage(1, 2, &[])]).unwrap();
-    assert_eq!(merged.regions[0].time_ms, Some(0..2));
+    assert_eq!(merged.regions[0].time_ms, Some((0..2).into()));
     assert_eq!(merged.regions.len(), 1);
     let gapped =
         SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), coverage(2, 3, &[])]).unwrap();
@@ -144,5 +144,83 @@ fn regions_without_time_bounds() {
     assert_eq!(
         SummaryCoverage::merge_disjoint(&[tabular, coverage(5, 6, &[("region", "us")])]),
         Err(CoverageError::PossibleOverlap)
+    );
+}
+
+fn relative(start: i64, end: i64) -> SummaryCoverage {
+    let mut coverage = coverage(0, 1, &[]);
+    coverage.regions[0].time_ms = Some(CoverageTime::RelativeToEvaluation(start..end));
+    coverage
+}
+const MINUTE: i64 = 60_000;
+/// Pane i of width w covers `[-(i+1)w, -iw)`; five adjacent 1 m panes
+/// coalesce into the 5 m window ending at evaluation time.
+#[test]
+fn adjacent_relative_panes_coalesce() {
+    let panes: Vec<_> = (0..5)
+        .map(|i| relative(-(i + 1) * MINUTE, -i * MINUTE))
+        .collect();
+    let merged = SummaryCoverage::merge_disjoint(&panes).unwrap();
+    assert_eq!(
+        merged.regions[0].time_ms,
+        Some(CoverageTime::RelativeToEvaluation(-5 * MINUTE..0))
+    );
+    assert_eq!(merged.regions.len(), 1);
+}
+/// A missing relative pane leaves a gap instead of a hull.
+#[test]
+fn relative_gap_is_kept() {
+    let merged = SummaryCoverage::merge_disjoint(&[
+        relative(-3 * MINUTE, -2 * MINUTE),
+        relative(-MINUTE, 0),
+    ])
+    .unwrap();
+    assert_eq!(merged.regions.len(), 2);
+}
+/// Overlapping relative panes would count observations twice.
+#[test]
+fn overlapping_relative_regions_are_rejected() {
+    assert_eq!(
+        SummaryCoverage::merge_disjoint(&[relative(-2 * MINUTE, 0), relative(-MINUTE, 0)]),
+        Err(CoverageError::PossibleOverlap)
+    );
+}
+/// Relative and absolute time are incomparable without an evaluation time, so
+/// even numerically disjoint ranges cannot be proven disjoint.
+#[test]
+fn mixing_relative_and_absolute_time_is_rejected() {
+    assert_eq!(
+        SummaryCoverage::merge_disjoint(&[relative(-MINUTE, 0), coverage(0, MINUTE, &[])]),
+        Err(CoverageError::MixedTimeAnchors)
+    );
+    let mut mixed = relative(-MINUTE, 0);
+    mixed.regions.extend(coverage(0, MINUTE, &[]).regions);
+    assert_eq!(mixed.validate(), Err(CoverageError::MixedTimeAnchors));
+}
+/// Relative time round-trips through serde, and a legacy plain `time_ms`
+/// range still deserializes as absolute.
+#[test]
+fn time_anchor_serde_round_trip_and_legacy_json() {
+    let pane = relative(-MINUTE, 0);
+    let json = serde_json::to_value(&pane).unwrap();
+    assert_eq!(
+        json["regions"][0]["time_ms"],
+        serde_json::json!({"relative_to_evaluation": {"start": -MINUTE, "end": 0}})
+    );
+    assert_eq!(
+        serde_json::from_value::<SummaryCoverage>(json).unwrap(),
+        pane
+    );
+    let absolute = coverage(0, MINUTE, &[]);
+    let json = serde_json::to_value(&absolute).unwrap();
+    assert_eq!(
+        json["regions"][0]["time_ms"],
+        serde_json::json!({"start": 0, "end": MINUTE})
+    );
+    let legacy = r#"{"source":{"Table":{"table_ref":"flows"}},
+        "regions":[{"time_ms":{"start":0,"end":60000},"population":{}}]}"#;
+    assert_eq!(
+        serde_json::from_str::<SummaryCoverage>(legacy).unwrap(),
+        absolute
     );
 }

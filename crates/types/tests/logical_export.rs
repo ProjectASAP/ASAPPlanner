@@ -105,7 +105,7 @@ fn merged_summary_preserves_typed_state() {
                     },
                     regions: vec![
                         asap_types::ir::properties::summary_coverage::CoverageRegion {
-                            time_ms: Some(start..start + 1),
+                            time_ms: Some((start..start + 1).into()),
                             population: Default::default(),
                         },
                     ],

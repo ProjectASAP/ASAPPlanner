@@ -40,7 +40,7 @@ fn plan() -> Rc<OperatorNode> {
     .with_coverage(SummaryCoverage {
         source,
         regions: vec![CoverageRegion {
-            time_ms: Some(0..60_000),
+            time_ms: Some((0..60_000).into()),
             population: Default::default(),
         }],
     })
