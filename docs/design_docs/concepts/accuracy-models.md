@@ -280,7 +280,7 @@ rule or a different estimator configuration would be needed in those cases.
 
 ## Organization and extension contract
 
-The `asap-aware-mapping::accuracy` module separates these responsibilities:
+The `asap-logical-optimizer::accuracy` module separates these responsibilities:
 
 ```text
 accuracy/

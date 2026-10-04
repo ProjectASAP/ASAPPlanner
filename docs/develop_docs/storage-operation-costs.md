@@ -82,7 +82,7 @@ cache-adjusted bytes and CPU with uncached operation counts.
 Verification:
 
 ```sh
-cargo test -p asap-aware-mapping --test storage_io
-cargo test -p asap-aware-mapping --lib storage_io
+cargo test -p asap-plan-selection --test storage_io
+cargo test -p asap-plan-selection --lib storage_io
 cargo test -p asap-devtools --bin dag_export storage_requests_export_and_change_plan_selection
 ```
