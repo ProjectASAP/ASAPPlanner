@@ -284,13 +284,22 @@ impl ASAPOp {
                 schema
             }
             FinalizeExactAccumulator { child } => {
+                // A merge's inputs have identical schemas (tumbling panes),
+                // so its first input names the finalized value.
+                let mut built = child;
+                while let Some(SummaryMerge { children }) = built.asap() {
+                    match children.first() {
+                        Some(first) => built = first,
+                        None => break,
+                    }
+                }
                 let value_result = if let Some(ASAPOp::SummaryAgg {
                     child: source,
                     family: FieldDataType::ExactAggregate(kind, _),
                     input,
                     reduction,
                     ..
-                }) = child.asap()
+                }) = built.asap()
                 {
                     {
                         use crate::ir::operator::AggIntent;

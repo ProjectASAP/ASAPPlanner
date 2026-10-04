@@ -10,16 +10,19 @@ use serde_json::Value;
 
 const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
 
-fn generate(extra: &[&str]) -> Value {
+/// Every Example 1 candidate (88) is displayed; the default cap is 64.
+const EXAMPLE1: [&str; 4] = ["--example", "planner-layering-1", "--max-candidates", "128"];
+
+fn generate(args: &[&str]) -> Value {
     let out = std::env::temp_dir().join(format!(
         "stage_pipeline_{}_{}.json",
         std::process::id(),
-        extra.len()
+        args.join("_")
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .args(["--example", "planner-layering-1", "--out"])
+        .args(args)
+        .arg("--out")
         .arg(&out)
-        .args(extra)
         .status()
         .unwrap();
     assert!(status.success());
@@ -40,7 +43,7 @@ fn validated_dag(value: &Value, queries: usize) {
 /// fixture is current.
 #[test]
 fn example1_document_is_valid_and_committed_fixture_is_current() {
-    let document = generate(&[]);
+    let document = generate(&EXAMPLE1);
     let committed: Value = serde_json::from_str(
         &std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(COMMITTED))
             .unwrap(),
@@ -100,9 +103,48 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
 /// The Cartesian product is cut at `--max-candidates` and says so.
 #[test]
 fn candidate_cap_is_recorded() {
-    let document = generate(&["--max-candidates", "5"]);
+    let document = generate(&["--example", "planner-layering-1", "--max-candidates", "5"]);
     let stage1 = &document["stage1_logical_asap"];
     assert_eq!(stage1["capped"], true);
     assert_eq!(stage1["candidates"].as_array().unwrap().len(), 5);
     assert!(stage1["combinations"].as_u64().unwrap() > 5);
+}
+
+/// Example 3, Pattern B: the 5-min p99 every minute offers KLL and DDSketch
+/// over the whole window and in 1-min tumbling panes, each merged before its
+/// estimate.
+#[test]
+fn example3b_lists_tumbling_candidates() {
+    let document = generate(&["--example", "planner-layering-3b"]);
+    let stage1 = &document["stage1_logical_asap"];
+    let labels: Vec<_> = stage1["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Q1 exact",
+            "Q1 Kll",
+            "Q1 DDSketch",
+            "Q1 Kll · tumbling 1m panes",
+            "Q1 DDSketch · tumbling 1m panes"
+        ]
+    );
+    for candidate in &stage1["candidates"].as_array().unwrap()[3..] {
+        let dag: LogicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
+        let merges = dag
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.payload,
+                    asap_types::ir::export::LogicalASAPOperatorPayload::SummaryMerge
+                )
+            })
+            .count();
+        assert_eq!(merges, 1, "{}", candidate["label"]);
+    }
 }

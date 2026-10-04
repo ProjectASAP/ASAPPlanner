@@ -83,6 +83,7 @@ use asap_logical_optimizer::pass2::identical_expressions::{
     share_identical_expressions, stage1_logical_candidates,
 };
 pub use asap_logical_optimizer::pass2::identical_expressions::{Sharing, SharingVariant};
+use asap_logical_optimizer::pass2::window_composition::{pane_source, WindowForm};
 use asap_physical_optimizer::implementation::physical_candidates::{
     stage2_physical, PhysicalCandidate,
 };
@@ -772,7 +773,8 @@ fn select_variant<Id: Clone>(
 }
 
 /// Pairs of targets, neither beneath the other, that read a common input
-/// node, or equal ones: in a sharing variant their producers may be merged.
+/// node, or equal ones, or whose tumbling forms read one scan: in a sharing
+/// variant their producers (or panes) may be merged.
 fn common_input_pairs<Id>(
     inventory: &LocalLogicalCandidates<Id>,
     beneath: &[Vec<usize>],
@@ -783,14 +785,26 @@ fn common_input_pairs<Id>(
         .map(|t| t.target.children())
         .collect();
     let same = |a: &Rc<OperatorNode>, b: &Rc<OperatorNode>| Rc::ptr_eq(a, b) || a == b;
+    let panes: Vec<Option<&Rc<OperatorNode>>> = inventory
+        .targets
+        .iter()
+        .map(|t| {
+            t.windows
+                .iter()
+                .any(|w| *w != WindowForm::Whole)
+                .then(|| pane_source(&t.target))
+                .flatten()
+        })
+        .collect();
     let mut pairs = Vec::new();
     for t in 0..inputs.len() {
         for u in t + 1..inputs.len() {
             let nested = beneath[t].contains(&u) || beneath[u].contains(&t);
             if !nested
-                && inputs[t]
+                && (inputs[t]
                     .iter()
                     .any(|a| inputs[u].iter().any(|b| same(a, b)))
+                    || panes[t].zip(panes[u]).is_some_and(|(a, b)| same(a, b)))
             {
                 pairs.push((t, u));
             }
@@ -925,7 +939,9 @@ pub struct StagePipelineRun<Id> {
 }
 
 /// The #509 stage pipeline over `roots`: Stage 1 (Pass 1 and Pass 2's
-/// identical-expression and summary-capability rules), Stage 2 and Stage 3. The facade and the
+/// identical-expression and summary-capability rules and the
+/// window-composition rule's tumbling panes, from each root's `demand`),
+/// Stage 2 and Stage 3. The facade and the
 /// `stage_pipeline` devtool both run this. `display` builds and prices up to
 /// that many candidates for display as well (0: none).
 pub fn plan_stages<Id: Clone>(
@@ -935,7 +951,7 @@ pub fn plan_stages<Id: Clone>(
     models: PlanningModels<'_>,
     display: usize,
 ) -> Result<StagePipelineRun<Id>, SelectionError> {
-    let stage1 = stage1_logical_candidates(roots, &data.metric_types)?;
+    let stage1 = stage1_logical_candidates(roots, &data.metric_types, demand)?;
     let plan = select_plan(&stage1, demand, data, models)?;
     let enumeration = match display {
         0 => None,
@@ -966,38 +982,68 @@ fn accuracy_violation(
             else {
                 continue;
             };
-            let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &summary_input.operator
-            else {
+            let Some(builds) = summary_builds(summary_input) else {
                 return Some(format!("q{}: estimate over a non-summary input", query + 1));
             };
-            let name = family_name(family);
-            // Count-Min's one-sided error bound assumes no negative updates.
-            if matches!(family, FieldDataType::Sketch(kind, _)
-                    if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
-                && !matches!(input.weight_domain, WeightDomain::NonNegative { .. })
+            if let Some(reason) = builds
+                .iter()
+                .find_map(|build| build_violation(build, statistic, target, models))
             {
-                return Some(format!(
-                    "q{}: {name} needs non-negative update weights, and these are not proven \
-                     non-negative",
-                    query + 1
-                ));
-            }
-            let Some(guarantee) = models.accuracy.local_guarantee(family, statistic) else {
-                return Some(format!(
-                    "q{}: no accuracy model for {name}; target {target:?}",
-                    query + 1
-                ));
-            };
-            if !models.accuracy.satisfies(&guarantee, target) {
-                return Some(format!(
-                    "q{}: {name} guarantees bound {:?}, failure probability {:?}, which misses \
-                     target {target:?} (analytical guarantee; no accuracy evidence)",
-                    query + 1,
-                    guarantee.bound.evaluate(),
-                    guarantee.failure_probability.evaluate(),
-                ));
+                return Some(format!("q{}: {reason}", query + 1));
             }
         }
+    }
+    None
+}
+
+/// The `SummaryAgg`s whose states `state` holds: itself, or the inputs of
+/// a `SummaryMerge` (tumbling panes), recursively. `None` when another
+/// operator produces it.
+fn summary_builds(state: &Rc<OperatorNode>) -> Option<Vec<&Rc<OperatorNode>>> {
+    match &state.operator {
+        Operator::ASAP(ASAPOp::SummaryAgg { .. }) => Some(vec![state]),
+        Operator::ASAP(ASAPOp::SummaryMerge { children }) => children
+            .iter()
+            .map(summary_builds)
+            .collect::<Option<Vec<_>>>()
+            .map(|builds| builds.concat()),
+        _ => None,
+    }
+}
+
+/// Why one summary build cannot answer `statistic` within `target`. A
+/// merge of mergeable states keeps the family's guarantee
+/// ([`FieldDataType::family_merges`], which `SummaryMerge` requires), so
+/// each build is checked against the family's analytical guarantee.
+fn build_violation(
+    build: &OperatorNode,
+    statistic: &SketchStatistic,
+    target: &asap_types::types::AccuracyTarget,
+    models: &PlanningModels<'_>,
+) -> Option<String> {
+    let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &build.operator else {
+        unreachable!("summary_builds returns builds");
+    };
+    let name = family_name(family);
+    // Count-Min's one-sided error bound assumes no negative updates.
+    if matches!(family, FieldDataType::Sketch(kind, _)
+            if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
+        && !matches!(input.weight_domain, WeightDomain::NonNegative { .. })
+    {
+        return Some(format!(
+            "{name} needs non-negative update weights, and these are not proven non-negative"
+        ));
+    }
+    let Some(guarantee) = models.accuracy.local_guarantee(family, statistic) else {
+        return Some(format!("no accuracy model for {name}; target {target:?}"));
+    };
+    if !models.accuracy.satisfies(&guarantee, target) {
+        return Some(format!(
+            "{name} guarantees bound {:?}, failure probability {:?}, which misses target \
+             {target:?} (analytical guarantee; no accuracy evidence)",
+            guarantee.bound.evaluate(),
+            guarantee.failure_probability.evaluate(),
+        ));
     }
     None
 }
@@ -1183,7 +1229,9 @@ fn price(
             output,
             promql: None,
         };
-        let groups = |reduction: &Reduction| {
+        // The groups a state keeps, bounded at query time by the rows (or,
+        // for a merge, the input states) it is built from.
+        let bounded_groups = |reduction: &Reduction, rows: u64| {
             let groups = match reduction {
                 Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
                 Reduction::Reduce(keys) if !keys.is_without() => DEFAULT_GROUP_COUNT,
@@ -1193,9 +1241,10 @@ fn price(
             // maintained state holds.
             match ingestion {
                 true => groups,
-                false => groups.min(input.rows.max(1)),
+                false => groups.min(rows.max(1)),
             }
         };
+        let groups = |reduction: &Reduction| bounded_groups(reduction, input.rows);
         let (out, estimate, detail) = match &node.payload {
             Payload::Relational { operator } => match operator {
                 NonASAPOpKind::Scan { .. } => {
@@ -1358,6 +1407,33 @@ fn price(
                     out,
                     Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
                     format!("estimate {} rows from {} states", out.rows, input.rows),
+                )
+            }
+            // One merge per input state. The output holds the union of the
+            // inputs' groups, bounded as one build over all their rows is,
+            // so readers see what they would see over the whole window.
+            Payload::SummaryMerge => {
+                let merged: u64 = inputs.iter().map(|edge| edge.rows).sum();
+                let reduction = dag
+                    .edges
+                    .iter()
+                    .filter(|e| e.consumer == node.id)
+                    .find_map(|e| match &nodes[&e.producer].payload {
+                        Payload::SummaryAgg { reduction, .. } => Some(reduction),
+                        _ => None,
+                    });
+                let rows = reduction.map_or(merged, |r| bounded_groups(r, merged));
+                let out = EdgeStatistics {
+                    rows,
+                    bytes: rows * (input.bytes / input.rows.max(1)),
+                };
+                (
+                    out,
+                    Ok(ResourceEstimate::new(merged as f64, 0, 0)),
+                    format!(
+                        "merge {merged} states from {} inputs into {rows}",
+                        inputs.len()
+                    ),
                 )
             }
             Payload::FinalizeExactAccumulator => (
@@ -2237,7 +2313,7 @@ mod tests {
                 (i, QueryRoot::Operator(root))
             })
             .collect();
-        let stage1 = stage1_logical_candidates(roots, &Default::default()).unwrap();
+        let stage1 = stage1_logical_candidates(roots, &Default::default(), &[]).unwrap();
         let data = DataWorkload {
             ingestion_rate: Evidence {
                 value: Some(Rate(1_000_000.0 / 15.0)),

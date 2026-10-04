@@ -13,9 +13,10 @@ use std::rc::Rc;
 
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::workload::MetricType;
+use asap_types::workload::{MetricType, RootDemand};
 
 use super::summary_capability::share_summary_capability;
+use super::window_composition::add_window_forms;
 use crate::pass1::logical_candidates::{
     enumerate_local_logical_candidates, LocalLogicalCandidates, LogicalCandidateError,
 };
@@ -53,9 +54,13 @@ pub struct SharingVariant<Id> {
 /// identical-expression variant when sharing merges at least one node, then
 /// the summary-capability variant when two targets can share a summary. The
 /// last is skipped when it would repeat the identical-expression variant.
+/// In every variant, the window-composition rule adds tumbling forms of
+/// mergeable alternatives for repeating queries (`demand[i]` is the demand
+/// of `roots[i]`; a root without one gets none).
 pub fn stage1_logical_candidates<Id: Clone>(
     roots: Vec<(Id, QueryRoot)>,
     metric_types: &BTreeMap<String, MetricType>,
+    demand: &[RootDemand],
 ) -> Result<Vec<SharingVariant<Id>>, LogicalCandidateError> {
     let shared = share_identical_expressions(&roots);
     let mut variants = vec![SharingVariant {
@@ -76,6 +81,9 @@ pub fn stage1_logical_candidates<Id: Clone>(
                 inventory: capability.inventory,
             });
         }
+    }
+    for variant in &mut variants {
+        add_window_forms(&mut variant.inventory, demand);
     }
     Ok(variants)
 }
@@ -144,6 +152,7 @@ mod tests {
                 "topk by (job) (10, sum_over_time(m[1m]))",
             ]),
             &BTreeMap::new(),
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -175,6 +184,7 @@ mod tests {
         let variants = stage1_logical_candidates(
             roots(&["sum(rate(a[1m]))", "sum(rate(b[1m]))"]),
             &BTreeMap::new(),
+            &[],
         )
         .unwrap();
         assert_eq!(variants.len(), 1);
