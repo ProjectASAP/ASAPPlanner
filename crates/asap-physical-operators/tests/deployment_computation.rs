@@ -624,7 +624,7 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
     use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
     let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
-    let dag = asap_aware_mapping::ASAPStrategies::new(&asap_aware_mapping::DefaultCostModel)
+    let dag = asap_aware_mapping::ASAPStrategies::default()
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| match candidate.replacement {

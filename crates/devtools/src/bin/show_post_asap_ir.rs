@@ -39,7 +39,7 @@ const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 /// If the strategy has none, preserve the single pre-ASAP fallback output.
 fn bind_all(root: &Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
     let target = TargetSubDAG::new(root);
-    let candidates = ASAPStrategies::default_cost_model()
+    let candidates = ASAPStrategies::default()
         .replacements(&target)
         .into_iter()
         .filter_map(|candidate| match candidate {
@@ -149,7 +149,7 @@ mod tests {
             1_000,
         )
         .expect("query lowers to pre-ASAP IR");
-        let expected = ASAPStrategies::default_cost_model()
+        let expected = ASAPStrategies::default()
             .replacements(&TargetSubDAG::new(&expr))
             .len();
 

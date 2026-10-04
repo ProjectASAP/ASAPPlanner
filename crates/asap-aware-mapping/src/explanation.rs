@@ -102,8 +102,7 @@
 //! produced. So this module ships no extension-point trait of its own:
 //! [`ReplacementStrategy`] already *is* that extension point, one layer
 //! down, and [`explain_replacements_with`]'s own `strategies`
-//! parameter is where a caller plugs in a custom one (or a custom
-//! `CostModel`, via [`crate::replacement::ASAPStrategies::new`]) — the identical spot
+//! parameter is where a caller plugs in a custom one — the identical spot
 //! [`crate::replacement::search_workload_with`] itself exposes.
 //!
 //! ## Two guarantees the old traversal made, re-verified against the new one
@@ -163,7 +162,7 @@
 //! |---|---|---|
 //! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::SubDAG` rewrite candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_candidate_logical_asap_dags` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
 //! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::SubDAG` rewrite candidate that rolls a coarse aggregate up from a compatible finer aggregate |
-//! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Realization::Wavelet` |
+//! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), not reachable (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` for it, once some intent shape actually maps to `Realization::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
 //! | Deep generative compression | No representation at all — no `Realization`/`FieldDataType` variant | Needs a new summary family added to `asap_types::ir::schema::state_type` first |
 //! | Approximation frameworks for windows | No representation — `TimeRange`/`PromqlSubquery` windows are always evaluated exactly | Would key off those node types once an approximate-window operator exists |
@@ -271,10 +270,7 @@ pub fn explain_replacements<Id: Display>(
 
 /// Like [`explain_replacements`], but searches with `strategies`
 /// instead of [`crate::replacement::default_strategies`] — the extension
-/// point for a deployment-specific [`ReplacementStrategy`], or a custom
-/// `CostModel` plugged into
-/// [`crate::replacement::ASAPStrategies::new`] (e.g. via
-/// [`crate::replacement::default_strategies_with`]).
+/// point for a deployment-specific [`ReplacementStrategy`].
 ///
 /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
 pub fn explain_replacements_with<'s, Id: Display>(
@@ -813,38 +809,5 @@ mod tests {
         );
         assert!(reuse[0].location.contains('a'));
         assert!(reuse[0].location.contains('b'));
-    }
-
-    // ── Custom strategy set / cost model plumbing ───────────────────────
-
-    struct AlwaysDDSketch;
-    impl crate::cost_model::CostModel for AlwaysDDSketch {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[asap_types::ir::schema::SketchAlgorithm],
-        ) -> Vec<asap_types::ir::schema::SketchAlgorithm> {
-            let mut v = candidates.to_vec();
-            if let Some(pos) = v
-                .iter()
-                .position(|k| *k == asap_types::ir::schema::SketchAlgorithm::DDSketch)
-            {
-                let dd = v.remove(pos);
-                v.insert(0, dd);
-            }
-            v
-        }
-    }
-
-    #[test]
-    fn custom_cost_model_changes_the_reported_sketch_kind() {
-        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let custom_model = AlwaysDDSketch;
-        let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
-            crate::replacement::ASAPStrategies::new(&custom_model),
-        )];
-        let findings = explain_replacements_with(vec![("q", q)], &strategies);
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].reason.to_lowercase().contains("ddsketch"));
     }
 }

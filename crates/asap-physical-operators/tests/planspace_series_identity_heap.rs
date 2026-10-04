@@ -111,12 +111,11 @@ fn inventories(query: &str, accuracy: AccuracyTarget) -> (Vec<InventoryDAG>, Vec
         ),
         (1, lower(query, &accuracy), Some(accuracy)),
     ];
-    let full = default_strategies_with_evidence(&DefaultCostModel, &Evidence);
-    let logical: Vec<Box<dyn ReplacementStrategy>> =
-        default_strategies_with_evidence(&DefaultCostModel, &Evidence)
-            .into_iter()
-            .map(|strategy| Box::new(LogicalOnly(strategy)) as Box<dyn ReplacementStrategy>)
-            .collect();
+    let full = default_strategies_with_evidence(&Evidence);
+    let logical: Vec<Box<dyn ReplacementStrategy>> = default_strategies_with_evidence(&Evidence)
+        .into_iter()
+        .map(|strategy| Box::new(LogicalOnly(strategy)) as Box<dyn ReplacementStrategy>)
+        .collect();
     let enumerate = |strategies: &[Box<dyn ReplacementStrategy>]| {
         search_workload_with_targets(roots.clone(), strategies, &DefaultAccuracyModel)
             .enumerate_candidate_dags_for_root(&1, 65_536)
@@ -215,7 +214,7 @@ fn unrelated_queries_keep_their_inventory() {
 fn global_selection_never_commits_a_series_identity_heap() {
     let accuracy = AccuracyTarget::Epsilon(0.1);
     let root = lower(CURRENT_SERIES_TOPK, &accuracy);
-    let strategies = default_strategies_with_evidence(&DefaultCostModel, &Evidence);
+    let strategies = default_strategies_with_evidence(&Evidence);
     let space = search_workload_with_targets(
         vec![(0, root, Some(accuracy))],
         &strategies,
@@ -233,7 +232,7 @@ fn global_selection_never_commits_a_series_identity_heap() {
 #[test]
 fn repeated_roots_do_not_duplicate_alternatives() {
     let accuracy = AccuracyTarget::Epsilon(0.1);
-    let strategies = default_strategies_with_evidence(&DefaultCostModel, &Evidence);
+    let strategies = default_strategies_with_evidence(&Evidence);
     let count = |copies: usize| {
         let roots = (0..copies)
             .map(|id| {

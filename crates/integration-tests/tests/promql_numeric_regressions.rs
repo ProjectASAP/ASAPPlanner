@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let pre = lower_promql(query, accuracy).unwrap();
-    ASAPStrategies::default_cost_model()
+    ASAPStrategies::default()
         .replacements(&TargetSubDAG::new(&pre))
         .into_iter()
         .find_map(|r| match r.replacement {
@@ -200,10 +200,8 @@ impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEviden
 #[test]
 fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
     use asap_aware_mapping::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
-    use asap_aware_mapping::cost_model::DefaultCostModel;
     use asap_types::ir::schema::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &OneKeyTopKEvidence,

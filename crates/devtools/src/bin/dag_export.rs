@@ -1236,7 +1236,7 @@ fn run_post_asap_with_progress(
         .collect();
     let strategies;
     let space = if let Some(evidence) = evidence {
-        strategies = default_strategies_with_evidence(cost_model, evidence);
+        strategies = default_strategies_with_evidence(evidence);
         search_workload_with(roots, &strategies)
     } else {
         search_workload(roots)

@@ -534,7 +534,7 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
     if group.consumer_count < 2 {
         return None;
     }
-    let bound = realize_one(&group.target, cost_model)?;
+    let bound = realize_one(&group.target)?;
     let candidate = CseCandidate {
         sub_dag: &group.target,
         bound_summary: &bound,
@@ -554,8 +554,8 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
 /// `construct_summary_agg`'s own recursion and
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] already use,
 /// wrapped to swallow the (here, uninteresting) error into `None`.
-fn realize_one(target: &Rc<OperatorNode>, cost_model: &dyn CostModel) -> Option<Rc<OperatorNode>> {
-    realize_child(target, cost_model).ok()
+fn realize_one(target: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+    realize_child(target).ok()
 }
 
 /// The `SketchAlgorithm` a bound [`Replacement::SubDAG`] candidate ultimately
@@ -1569,7 +1569,7 @@ fn decide_with_effective_count(
     effective_consumer_count: usize,
     cost_model: &dyn CostModel,
 ) -> Option<ShareDecision> {
-    let bound = realize_child(&group.target, cost_model).ok()?;
+    let bound = realize_child(&group.target).ok()?;
     let candidate = CseCandidate {
         sub_dag: &group.target,
         bound_summary: &bound,
@@ -1585,7 +1585,7 @@ fn decide_group_with_recurrence(
     horizon: Option<Horizon>,
     cost_model: &dyn CostModel,
 ) -> Result<Option<ShareDecision>, RecurrenceError> {
-    let Some(bound) = realize_child(&group.target, cost_model).ok() else {
+    let Some(bound) = realize_child(&group.target).ok() else {
         return Ok(None);
     };
     let candidate = CseCandidate {
@@ -1761,8 +1761,8 @@ mod tests {
     use crate::accuracy::DefaultAccuracyModel;
     use crate::cost_model::{Cost, DefaultCostModel};
     use crate::replacement::{
-        default_strategies, default_strategies_with, discover_targets, search_workload,
-        search_workload_with, search_workload_with_targets, ASAPStrategies, ReplacementStrategy,
+        default_strategies, discover_targets, search_workload, search_workload_with,
+        search_workload_with_targets, ASAPStrategies, ReplacementStrategy,
     };
     use crate::test_support::{agg, lower_promql, metric_scan};
     use asap_types::ir::operator::agg_intent::default_quantile;
@@ -1788,7 +1788,7 @@ mod tests {
     }
 
     fn realize(expr: &OperatorNode) -> Result<Rc<OperatorNode>, RealizationError> {
-        realize_child(&Rc::new(expr.clone()), &DefaultCostModel)
+        realize_child(&Rc::new(expr.clone()))
     }
 
     #[test]
@@ -1959,8 +1959,7 @@ mod tests {
                 },
             };
             let root = agg(vec![2, 3], intent, metric_scan(&["tenant_id", "endpoint"]));
-            let strategies = default_strategies_with(&model);
-            let space = search_workload_with(vec![("tenant_endpoint_count", root)], &strategies);
+            let space = search_workload(vec![("tenant_endpoint_count", root)]);
             let ranked = space.cost_sorted(&model);
             let aggregate = ranked
                 .iter()
@@ -2623,8 +2622,7 @@ mod tests {
     #[test]
     fn grouped_temporal_sum_has_one_summary_producer_candidate() {
         let root = lower_promql("sum by(job)(sum_over_time(a[1m]))", AccuracyTarget::Exact);
-        let candidates =
-            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
         assert!(candidates
             .iter()
             .any(|candidate| matches!(&candidate.replacement,

@@ -41,7 +41,7 @@ use asap_types::types::AccuracyTarget;
 /// single-answer pins below don't all repeat it by hand.
 fn realize(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     let target = TargetSubDAG::new(root);
-    match ASAPStrategies::default_cost_model()
+    match ASAPStrategies::default()
         .replacements(&target)
         .into_iter()
         .next()
@@ -69,7 +69,7 @@ fn distinct_over_time_offers_hll_cardinality_evaluation() {
         AccuracyTarget::Epsilon(0.02),
     )
     .unwrap();
-    let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
     for candidate in &candidates {
         if let Replacement::SubDAG(node) = &candidate.replacement {
             node.validate_structure().unwrap();
@@ -269,7 +269,6 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &SeparatedTopK,
@@ -333,7 +332,6 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &NoPopulationBound,
@@ -356,7 +354,7 @@ fn weighted_topk_exports_symbolic_evidence_requirements() {
         },
     )
     .unwrap();
-    let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.rationale.contains("CmsWithHeap"))
@@ -387,7 +385,6 @@ fn weighted_topk_rejects_invalid_population_evidence() {
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &InvalidPopulation,
@@ -412,7 +409,6 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         )
         .unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopK,
@@ -575,10 +571,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
     };
     let space = search_workload_with_targets(
         vec![("ratio", query, Some(target.clone()))],
-        &asap_aware_mapping::replacement::default_strategies_with_evidence(
-            &DefaultCostModel,
-            &evidence,
-        ),
+        &asap_aware_mapping::replacement::default_strategies_with_evidence(&evidence),
         &DefaultAccuracyModel,
     );
     let root = &space.roots[0].1;
@@ -640,7 +633,6 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
         )
         .expect("lower temporal Top-K");
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopK,
@@ -809,7 +801,6 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
         )
         .unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &SeparatedTopK,
@@ -1228,7 +1219,6 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
         )
         .unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &evidence,
@@ -1269,7 +1259,6 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &PartialUnsafeDomain,
@@ -1291,7 +1280,6 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
         )
         .unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &evidence,
@@ -1367,7 +1355,6 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
     for count in [0, (1u64 << 53) + 1] {
         let evidence = PopulationEvidence(count);
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &evidence,
