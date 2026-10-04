@@ -548,6 +548,14 @@ impl NonASAPOp {
                                 field.nullable = nullable;
                             }
                         }
+                        // A quantile over no matching row is NULL.
+                        if matches!(measure, AggIntent::Quantile { .. })
+                            && filters.get(index).is_some_and(Option::is_some)
+                        {
+                            if let Some(field) = output.fields.get_mut(offset + index) {
+                                field.nullable = true;
+                            }
+                        }
                     }
                 }
                 output

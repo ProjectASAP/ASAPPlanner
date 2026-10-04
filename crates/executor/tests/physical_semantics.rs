@@ -1001,3 +1001,126 @@ fn sql_ln_executes_numeric_and_null_arguments() {
         ));
     }
 }
+
+/// Rows of `g`, `x` and a nullable Boolean `keep`; `b` has no kept row,
+/// and a NULL `keep` drops its row as SQL FILTER does.
+fn filtered_input() -> (SchemaRef, Vec<Vec<Value>>) {
+    let input = schema(&[
+        ("g", DataType::Utf8, false),
+        ("x", DataType::Float64, false),
+        ("keep", DataType::Bool, true),
+    ]);
+    let rows = [
+        ("a", 1.0, Some(true)),
+        ("a", 2.0, None),
+        ("b", 3.0, Some(false)),
+        ("c", 4.0, Some(true)),
+    ]
+    .into_iter()
+    .map(|(g, x, keep)| {
+        vec![
+            Value::Utf8(g.into()),
+            Value::Float64(x),
+            keep.map_or(Value::Null, Value::Bool),
+        ]
+    })
+    .collect();
+    (input, rows)
+}
+
+fn printed(rows: &[Vec<Value>]) -> Vec<String> {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|v| match v {
+                    Value::Utf8(s) => s.to_string(),
+                    Value::Int64(n) => n.to_string(),
+                    Value::Float64(x) => format!("{x:?}"),
+                    Value::Null => "NULL".into(),
+                    other => panic!("unexpected value {other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Per-measure filters keep every group: a filtered COUNT reads 0 and a
+/// filtered SUM reads NULL (declared nullable) for a group with no kept
+/// row, and an unfiltered measure beside them still sees every row. The
+/// filters survive serialization.
+#[test]
+fn measure_filters_keep_groups_without_matching_rows() {
+    let (input, rows) = filtered_input();
+    let operator = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![
+            ("c".into(), Reduction::Count),
+            ("s".into(), Reduction::Sum(1)),
+            ("all".into(), Reduction::Count),
+        ],
+    )
+    .unwrap()
+    .with_measure_filters(vec![
+        Some(Expression::Column(2)),
+        Some(Expression::Column(2)),
+        None,
+    ])
+    .unwrap();
+    assert!(operator.schema().fields[2].nullable);
+    assert!(!operator.schema().fields[1].nullable);
+    let operator: Operator =
+        serde_json::from_slice(&serde_json::to_vec(&operator).unwrap()).unwrap();
+    assert_eq!(
+        printed(&unary(input, vec![rows], operator)),
+        ["a 1 1.0 2", "b 0 NULL 1", "c 1 4.0 1"]
+    );
+}
+
+/// A filtered KLL build keeps a state for every group; the group with no
+/// kept row reads NULL when its result is declared nullable. The filter
+/// survives serialization.
+#[test]
+fn filtered_summary_build_keeps_empty_groups() {
+    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
+    let (input, rows) = filtered_input();
+    let family = FieldDataType::Sketch(
+        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+        Default::default(),
+    );
+    let build = Operator::summary_build(input.clone(), family, 1, None, vec![0])
+        .unwrap()
+        .with_row_filter(Expression::Column(2))
+        .unwrap();
+    let build: Operator = serde_json::from_slice(&serde_json::to_vec(&build).unwrap()).unwrap();
+    let evaluation = Operator::evaluation(
+        build.schema(),
+        1,
+        asap_executor::operators::SummaryEvaluation::Sketch(
+            planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 },
+        ),
+    )
+    .unwrap();
+    // Declare the result nullable, as the Planner does for a filtered quantile.
+    let mut wire = serde_json::to_value(&evaluation).unwrap();
+    wire["output"]["fields"][1]["nullable"] = true.into();
+    let evaluation: Operator = serde_json::from_value(wire).unwrap();
+    let mut dag = PhysicalDAG::default();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(
+            input.clone(),
+            vec![Batch::try_new(input.clone(), rows).unwrap()],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    dag.add(1, vec![0], build).unwrap();
+    dag.add(2, vec![1], evaluation).unwrap();
+    assert_eq!(printed(&collect(&dag, 2)), ["a 1.0", "b NULL", "c 4.0"]);
+}
