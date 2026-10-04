@@ -64,6 +64,50 @@ mod tests {
         ));
     }
 
+    /// A shared HydraCms grid adds its collision term to the inner sketch's
+    /// error: sized like one per-group sketch for ε it misses ε, and sized
+    /// for ε/2 and δ/2 (Pass 1's split) it meets it.
+    #[test]
+    fn hydra_guarantee_adds_the_shared_grid_term() {
+        use crate::pass1::replacement::default_size_params;
+        use asap_types::ir::schema::{
+            default_hydra_params, GroupingStrategy, HydraKind, SketchKind,
+        };
+        let count = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let group_count = SketchStatistic::PointCount {
+            key: asap_types::ir::scalar::ColumnRef::SampleValue,
+            value: None,
+        };
+        let guarantee = |epsilon: f64, delta: f64, hydra: bool| {
+            let params = default_size_params(SketchAlgorithm::Cms, &count, epsilon, delta);
+            let grouping = match hydra {
+                true => GroupingStrategy::SharedMultiSubpopulation {
+                    kind: HydraKind::HydraCms,
+                    params: default_hydra_params(HydraKind::HydraCms, &params).unwrap(),
+                },
+                false => GroupingStrategy::default(),
+            };
+            DefaultAccuracyModel
+                .local_guarantee(
+                    &FieldDataType::Sketch(SketchKind::new(SketchAlgorithm::Cms, params), grouping),
+                    &group_count,
+                )
+                .unwrap()
+        };
+        assert!(DefaultAccuracyModel.satisfies(&guarantee(0.01, 0.01, false), &target));
+        assert!(!DefaultAccuracyModel.satisfies(&guarantee(0.01, 0.01, true), &target));
+        assert!(DefaultAccuracyModel.satisfies(&guarantee(0.005, 0.005, true), &target));
+    }
+
     #[test]
     fn heap_evaluation_retains_frequency_metric() {
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
