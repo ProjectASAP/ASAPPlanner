@@ -16,9 +16,11 @@
 //!   ([`accuracy::allocation`]). Candidates no analytical rule can prove
 //!   invalid are kept.
 //!
-//! **Common sub-expression elimination (CSE) of identical sub-DAGs is not this
-//! crate's job.** It runs over the pre-ASAP IR itself
-//! (`asap_types::ir::cse`, issues #222/#223) before search. Pass 2 recognizes
+//! **Common sub-expression elimination (CSE) of identical sub-DAGs is not
+//! implemented here.** It runs over the pre-ASAP IR itself
+//! (`asap_types::ir::cse`, issues #222/#223). Pass 2's identical-expression
+//! rule ([`pass2::identical_expressions`]) decides when to use it: the stage
+//! pipeline keeps a variant with and without it. Pass 2 also recognizes
 //! sharing that is invisible at that level, such as `Quantile(x, 0.99)` and
 //! `Quantile(x, 0.95)` reading one built sketch.
 //!

@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates;
+use asap_logical_optimizer::pass2::identical_expressions::stage1_logical_candidates;
 use asap_plan_selection::{select_exhaustive, PlanningModels, MAX_ENUMERATED_CANDIDATES};
 use asap_planner::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
@@ -126,7 +126,7 @@ async fn facade_plans_match_exhaustive_stage_pipeline_selection() {
         roots.push((index, QueryRoot::Operator(expr)));
         targets.push(Some(accuracy));
     }
-    let inventory = enumerate_local_logical_candidates(roots).expect("Stage 1");
+    let inventory = stage1_logical_candidates(roots).expect("Stage 1");
     let data = workload.data_workload.clone().unwrap_or_default();
     let enumeration = select_exhaustive(
         &inventory,
