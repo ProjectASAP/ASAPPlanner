@@ -22,10 +22,11 @@
 //! rows read out. These numbers are illustrative, not calibrated. Latency
 //! bounds and deployment capabilities are not checked yet.
 //!
-//! [`select_plan`] chooses over a whole Stage 1 inventory without building
-//! every combination: a dynamic program over target nesting (see there).
-//! [`select_exhaustive`] builds and prices every combination, for display and
-//! for checking the program.
+//! [`select_plan`] chooses over Stage 1's sharing variants without building
+//! every combination: per variant, a dynamic program over target nesting (see
+//! there). [`select_exhaustive`] builds and prices every combination, for
+//! display and for checking the program. [`plan_stages`] runs the whole
+//! pipeline from the frontends' roots.
 pub mod candidate_selection;
 pub mod cost;
 #[cfg(test)]
@@ -48,7 +49,6 @@ pub use cost::recurrence::{
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::export::{
     NonASAPOpKind, PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
@@ -73,7 +73,11 @@ use asap_logical_optimizer::accuracy::{
 };
 use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
-    LocalLogicalCandidates,
+    LocalLogicalCandidates, LogicalCandidateError,
+};
+pub use asap_logical_optimizer::pass2::identical_expressions::SharingVariant;
+use asap_logical_optimizer::pass2::identical_expressions::{
+    share_identical_expressions, stage1_logical_candidates,
 };
 use asap_physical_optimizer::implementation::physical_candidates::{
     stage2_physical, PhysicalCandidate,
@@ -211,6 +215,8 @@ impl Selection {
 pub enum SelectionError {
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),
+    #[error("Stage 1: {0}")]
+    Stage1(#[from] LogicalCandidateError),
 }
 
 /// Reject candidates that miss a query's accuracy target or cannot be priced,
@@ -283,37 +289,96 @@ fn assess(
     price(&candidate.dag, data).map_err(|(node, error)| format!("node {node:?}: {error}"))
 }
 
-/// Stage 1 → Stage 2 for `choice`, named `P<index+1>` from `L<index+1>`.
-/// `Err` is the reason the candidate cannot be built.
+/// One Stage 1 sharing variant as selection sees it: candidates of variant
+/// `v` are numbered after every candidate of the variants before it, so ids
+/// stay unique across variants.
+struct Variant<'a, Id> {
+    inventory: &'a LocalLogicalCandidates<Id>,
+    /// Identical sub-DAGs are merged, after composition too.
+    shared: bool,
+    /// Candidates numbered before this variant's.
+    offset: usize,
+}
+
+// Manual impls: a derive would require `Id: Copy`.
+impl<Id> Clone for Variant<'_, Id> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<Id> Copy for Variant<'_, Id> {}
+
+fn variants<Id>(stage1: &[SharingVariant<Id>]) -> Vec<Variant<'_, Id>> {
+    let mut offset = 0;
+    stage1
+        .iter()
+        .map(|v| {
+            let variant = Variant {
+                inventory: &v.inventory,
+                shared: v.shared,
+                offset,
+            };
+            offset = offset.saturating_add(combination_count(&v.inventory));
+            variant
+        })
+        .collect()
+}
+
+impl<Id> Variant<'_, Id> {
+    /// 1-based candidate number of `choice`: `L<n>` and `P<n>`.
+    fn number(&self, choice: &[usize]) -> usize {
+        self.offset + choice_index(self.inventory, choice) + 1
+    }
+}
+
+/// The independent variant alone: Pass 1 without Pass 2.
+pub fn independent<Id>(inventory: LocalLogicalCandidates<Id>) -> Vec<SharingVariant<Id>> {
+    vec![SharingVariant {
+        shared: false,
+        inventory,
+    }]
+}
+
+/// Stage 1 → Stage 2 for `choice` in the independent variant, named
+/// `P<index+1>` from `L<index+1>`. `Err` is the reason the candidate cannot
+/// be built.
 pub fn realize_choice<Id: Clone>(
     inventory: &LocalLogicalCandidates<Id>,
     choice: &[usize],
 ) -> Result<(Vec<(Id, QueryRoot)>, PhysicalCandidate), String> {
-    realize(inventory, choice, false)
+    realize(
+        Variant {
+            inventory,
+            shared: false,
+            offset: 0,
+        },
+        choice,
+    )
 }
 
-/// As [`realize_choice`]; `merge` first interns structurally identical
-/// sub-DAGs across roots, so queries that chose the same summary producer
-/// reach one node.
+/// Stage 1 → Stage 2 for `choice` in `variant`. A shared variant also
+/// merges identical sub-DAGs after composition, so queries that chose the
+/// same summary producer reach one node; the returned Stage 1 candidate is
+/// the merged one.
 fn realize<Id: Clone>(
-    inventory: &LocalLogicalCandidates<Id>,
+    variant: Variant<'_, Id>,
     choice: &[usize],
-    merge: bool,
 ) -> Result<(Vec<(Id, QueryRoot)>, PhysicalCandidate), String> {
-    let index = choice_index(inventory, choice) + 1;
-    let logical =
-        compose_logical_candidate(inventory, choice).map_err(|e| format!("Stage 1: {e}"))?;
-    let mut operators = logical
+    let index = variant.number(choice);
+    let mut logical = compose_logical_candidate(variant.inventory, choice)
+        .map_err(|e| format!("Stage 1: {e}"))?;
+    if variant.shared {
+        if let Some(merged) = share_identical_expressions(&logical) {
+            logical = merged;
+        }
+    }
+    let roots = logical
         .iter()
-        .map(|(id, root)| match root {
-            QueryRoot::Operator(node) => Ok((id.clone(), node.clone())),
+        .map(|(_, root)| match root {
+            QueryRoot::Operator(node) => Ok(node.clone()),
             QueryRoot::Scalar(_) => Err("Stage 2: scalar query roots are not physical yet"),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if merge {
-        operators = share_common_sub_dags(operators);
-    }
-    let roots: Vec<Rc<OperatorNode>> = operators.into_iter().map(|(_, node)| node).collect();
     let mut candidate =
         stage2_physical(&format!("L{index}"), &roots).map_err(|e| format!("Stage 2: {e}"))?;
     candidate.id = format!("P{index}");
@@ -324,6 +389,8 @@ fn realize<Id: Clone>(
 /// One built combination; `physical` is `None` when it could not be built.
 #[derive(Debug, Clone)]
 pub struct EnumeratedCandidate<Id> {
+    /// From the shared variant (Pass 2's identical-expression rule).
+    pub shared: bool,
     pub choice: Vec<usize>,
     pub logical: Option<Vec<(Id, QueryRoot)>>,
     pub physical: Option<PhysicalCandidate>,
@@ -332,15 +399,27 @@ pub struct EnumeratedCandidate<Id> {
 /// Every combination [`select_exhaustive`] built, and Stage 3 over them.
 #[derive(Debug, Clone)]
 pub struct Enumeration<Id> {
+    /// Over every variant.
     pub combinations: usize,
     pub candidates: Vec<EnumeratedCandidate<Id>>,
     pub selection: Selection,
 }
 
-/// Build the first `max` combinations in enumeration order and select over
-/// them. One that cannot be built is rejected with its reason.
+/// Build the first `max` combinations, variant by variant in enumeration
+/// order, and select over them. One that cannot be built is rejected with
+/// its reason.
 pub fn select_exhaustive<Id: Clone>(
-    inventory: &LocalLogicalCandidates<Id>,
+    stage1: &[SharingVariant<Id>],
+    targets: &[Option<AccuracyTarget>],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    max: usize,
+) -> Result<Enumeration<Id>, SelectionError> {
+    exhaustive(&variants(stage1), targets, data, models, max)
+}
+
+fn exhaustive<Id: Clone>(
+    variants: &[Variant<'_, Id>],
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -348,25 +427,31 @@ pub fn select_exhaustive<Id: Clone>(
 ) -> Result<Enumeration<Id>, SelectionError> {
     let mut candidates = Vec::new();
     let mut failed = Vec::new();
-    for choice in enumerate_choices(inventory, max) {
-        let (logical, physical) = match realize_choice(inventory, &choice) {
-            Ok((logical, physical)) => (Some(logical), Some(physical)),
-            Err(reason) => {
-                let index = choice_index(inventory, &choice) + 1;
-                failed.push(Rejection {
-                    id: format!("P{index}"),
-                    valid: false,
-                    reason,
-                });
-                // Composition may have succeeded: keep it for display.
-                (compose_logical_candidate(inventory, &choice).ok(), None)
-            }
-        };
-        candidates.push(EnumeratedCandidate {
-            choice,
-            logical,
-            physical,
-        });
+    for variant in variants {
+        let left = max.saturating_sub(candidates.len());
+        for choice in enumerate_choices(variant.inventory, left) {
+            let (logical, physical) = match realize(*variant, &choice) {
+                Ok((logical, physical)) => (Some(logical), Some(physical)),
+                Err(reason) => {
+                    failed.push(Rejection {
+                        id: format!("P{}", variant.number(&choice)),
+                        valid: false,
+                        reason,
+                    });
+                    // Composition may have succeeded: keep it for display.
+                    (
+                        compose_logical_candidate(variant.inventory, &choice).ok(),
+                        None,
+                    )
+                }
+            };
+            candidates.push(EnumeratedCandidate {
+                shared: variant.shared,
+                choice,
+                logical,
+                physical,
+            });
+        }
     }
     let physical: Vec<_> = candidates
         .iter()
@@ -381,9 +466,12 @@ pub fn select_exhaustive<Id: Clone>(
             rejected.extend(failed);
             return Err(SelectionError::NoValidCandidate(rejected));
         }
+        Err(other) => return Err(other),
     };
     Ok(Enumeration {
-        combinations: combination_count(inventory),
+        combinations: variants.iter().fold(0usize, |n, v| {
+            n.saturating_add(combination_count(v.inventory))
+        }),
         candidates,
         selection,
     })
@@ -392,11 +480,12 @@ pub fn select_exhaustive<Id: Clone>(
 /// The plan [`select_plan`] chose.
 #[derive(Debug, Clone)]
 pub struct SelectedPlan<Id> {
+    /// From the shared variant (Pass 2's identical-expression rule).
+    pub shared: bool,
     pub choice: Vec<usize>,
-    /// The chosen Stage 1 candidate, before identical producers are merged.
+    /// The chosen Stage 1 candidate (identical sub-DAGs merged when `shared`).
     pub logical: Vec<(Id, QueryRoot)>,
-    /// Stage 2 of `logical` after merging identical sub-DAGs across roots;
-    /// `roots` follow `logical`'s order.
+    /// Stage 2 of `logical`; `roots` follow `logical`'s order.
     pub physical: PhysicalCandidate,
     pub selection: Selection,
 }
@@ -404,8 +493,80 @@ pub struct SelectedPlan<Id> {
 /// Relative tolerance when checking that costs add up.
 const ADDITIVITY_TOLERANCE: f64 = 1e-9;
 
-/// Choose one alternative per target by a dynamic program over target
-/// nesting, then build the winner and check it in full.
+/// Choose a sharing variant and one alternative per target. Sharing prices a
+/// shared node once, which is not a sum of per-target changes, so the
+/// variant is an outer choice: the dynamic program of [`select_variant`]
+/// runs once per variant and the cheapest result wins (the first on ties).
+pub fn select_plan<Id: Clone>(
+    stage1: &[SharingVariant<Id>],
+    targets: &[Option<AccuracyTarget>],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<SelectedPlan<Id>, SelectionError> {
+    let mut best: Option<SelectedPlan<Id>> = None;
+    let mut costs = BTreeMap::new();
+    let mut rejected = Vec::new();
+    let mut not_optimal = None;
+    let mut failures = Vec::new();
+    for variant in variants(stage1) {
+        let evaluate = |choice: &[usize]| -> Result<f64, String> {
+            let (_, candidate) = realize(variant, choice)?;
+            assess(&candidate, targets, data, &models).map(|cost| cost.total)
+        };
+        let plan = match select_variant(variant, targets, data, models, &evaluate) {
+            Ok(plan) => plan,
+            Err(SelectionError::NoValidCandidate(reasons)) => {
+                failures.extend(reasons);
+                continue;
+            }
+            Err(other) => return Err(other),
+        };
+        if let SelectionMethod::TreeDpNotGuaranteedOptimal { reason } = &plan.selection.method {
+            not_optimal.get_or_insert_with(|| reason.clone());
+        }
+        costs.extend(plan.selection.costs.clone());
+        rejected.extend(plan.selection.rejected.clone());
+        let total = |p: &SelectedPlan<Id>| p.selection.costs[&p.selection.selected].total;
+        match &best {
+            Some(current) if total(current) <= total(&plan) => rejected.push(costlier(
+                &plan.selection.selected,
+                total(&plan),
+                total(current),
+            )),
+            _ => {
+                if let Some(previous) = best.take() {
+                    rejected.push(costlier(
+                        &previous.selection.selected,
+                        total(&previous),
+                        total(&plan),
+                    ));
+                }
+                best = Some(plan);
+            }
+        }
+    }
+    let Some(mut plan) = best else {
+        return Err(SelectionError::NoValidCandidate(failures));
+    };
+    rejected.extend(failures);
+    plan.selection.costs = costs;
+    plan.selection.rejected = rejected;
+    if let Some(reason) = not_optimal {
+        plan.selection.method = SelectionMethod::TreeDpNotGuaranteedOptimal { reason };
+    }
+    Ok(plan)
+}
+
+fn costlier(id: &str, total: f64, best: f64) -> Rejection {
+    Rejection {
+        id: id.to_string(),
+        valid: true,
+        reason: format!("costlier: {total:.3} vs {best:.3} {COST_UNIT}"),
+    }
+}
+
+/// Choose one alternative per target of one variant by a dynamic program
+/// over target nesting, then build the winner and check it in full.
 ///
 /// `best(t, c) = local(t, c) + Σ_{u beneath t, read by c} min_c' best(u, c')`,
 /// where `local(t, c)` is the change in workload cost when only `t` takes
@@ -419,33 +580,23 @@ const ADDITIVITY_TOLERANCE: f64 = 1e-9;
 /// not depend on choices. Stage 3 prices per node and sizes every
 /// realization of a target alike, so these hold unless a target's choice
 /// changes what a target reading its output costs or whether it can be
-/// built. That coupling is checked: every pair of choices for a target and a
-/// target beneath it is built, and must cost the sum of their single
-/// changes and be admissible exactly when both are. On coupling, or when the
-/// winner fails the full check, every combination is built instead if there
-/// are at most [`MAX_ENUMERATED_CANDIDATES`]; otherwise the result is
-/// flagged as not guaranteed optimal.
-pub fn select_plan<Id: Clone>(
-    inventory: &LocalLogicalCandidates<Id>,
-    targets: &[Option<AccuracyTarget>],
-    data: &DataWorkload,
-    models: PlanningModels<'_>,
-) -> Result<SelectedPlan<Id>, SelectionError> {
-    let evaluate = |choice: &[usize]| -> Result<f64, String> {
-        let (_, candidate) = realize_choice(inventory, choice)?;
-        assess(&candidate, targets, data, &models).map(|cost| cost.total)
-    };
-    select_plan_with(inventory, targets, data, models, &evaluate)
-}
-
-/// [`select_plan`] with the workload cost of a choice given by `evaluate`.
-fn select_plan_with<Id: Clone>(
-    inventory: &LocalLogicalCandidates<Id>,
+/// built, or, in a shared variant, two targets reading one input build
+/// identical producers that are then merged. That coupling is checked:
+/// every pair of choices for a target and a target beneath it (and, when
+/// shared, for two targets reading a common input) is built, and must cost
+/// the sum of their single changes and be admissible exactly when both are.
+/// On coupling, or when the winner fails the full check, every combination
+/// of the variant is built instead if there are at most
+/// [`MAX_ENUMERATED_CANDIDATES`]; otherwise the result is flagged as not
+/// guaranteed optimal.
+fn select_variant<Id: Clone>(
+    variant: Variant<'_, Id>,
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     evaluate: &dyn Fn(&[usize]) -> Result<f64, String>,
 ) -> Result<SelectedPlan<Id>, SelectionError> {
+    let inventory = variant.inventory;
     let width = inventory.targets.len();
     let with = |changes: &[(usize, usize)]| {
         let mut choice = vec![0; width];
@@ -458,7 +609,7 @@ fn select_plan_with<Id: Clone>(
     let base = match evaluate(&with(&[])) {
         Ok(base) => base,
         Err(reason) => {
-            return fallback(inventory, targets, data, models, with(&[]), reason);
+            return fallback(variant, targets, data, models, with(&[]), reason);
         }
     };
     let local: Vec<Vec<Result<f64, String>>> = inventory
@@ -475,28 +626,34 @@ fn select_plan_with<Id: Clone>(
         })
         .collect();
     let beneath = nested_targets(inventory);
+    let mut pairs: Vec<(usize, usize)> = beneath
+        .iter()
+        .enumerate()
+        .flat_map(|(t, inner)| inner.iter().map(move |&u| (t, u)))
+        .collect();
+    if variant.shared {
+        pairs.extend(common_input_pairs(inventory, &beneath));
+    }
     let mut coupling = None;
-    'pairs: for (t, inner) in beneath.iter().enumerate() {
-        for &u in inner {
-            for c in 1..local[t].len() {
-                for d in 1..local[u].len() {
-                    let joint = evaluate(&with(&[(t, c), (u, d)]));
-                    let coupled = match (&local[t][c], &local[u][d], &joint) {
-                        (Ok(a), Ok(b), Ok(joint)) => {
-                            let expected = base + a + b;
-                            (joint - expected).abs()
-                                > ADDITIVITY_TOLERANCE * joint.abs().max(expected.abs()).max(1.0)
-                        }
-                        (Ok(_), Ok(_), Err(_)) | (Err(_), _, Ok(_)) | (_, Err(_), Ok(_)) => true,
-                        _ => false,
-                    };
-                    if coupled {
-                        coupling = Some(format!(
-                            "target {t} alternative {c} and target {u} alternative {d} do not \
-                             combine additively"
-                        ));
-                        break 'pairs;
+    'pairs: for &(t, u) in &pairs {
+        for c in 1..local[t].len() {
+            for d in 1..local[u].len() {
+                let joint = evaluate(&with(&[(t, c), (u, d)]));
+                let coupled = match (&local[t][c], &local[u][d], &joint) {
+                    (Ok(a), Ok(b), Ok(joint)) => {
+                        let expected = base + a + b;
+                        (joint - expected).abs()
+                            > ADDITIVITY_TOLERANCE * joint.abs().max(expected.abs()).max(1.0)
                     }
+                    (Ok(_), Ok(_), Err(_)) | (Err(_), _, Ok(_)) | (_, Err(_), Ok(_)) => true,
+                    _ => false,
+                };
+                if coupled {
+                    coupling = Some(format!(
+                        "target {t} alternative {c} and target {u} alternative {d} do not \
+                         combine additively"
+                    ));
+                    break 'pairs;
                 }
             }
         }
@@ -507,10 +664,10 @@ fn select_plan_with<Id: Clone>(
     }
     let choice: Vec<usize> = best.iter().map(|b| b.map_or(0, |(_, c)| c)).collect();
     if let Some(reason) = coupling {
-        return fallback(inventory, targets, data, models, choice, reason);
+        return fallback(variant, targets, data, models, choice, reason);
     }
     match finish(
-        inventory,
+        variant,
         targets,
         data,
         &models,
@@ -518,8 +675,31 @@ fn select_plan_with<Id: Clone>(
         SelectionMethod::TreeDp,
     ) {
         Ok(plan) => Ok(plan),
-        Err(reason) => fallback(inventory, targets, data, models, choice, reason),
+        Err(reason) => fallback(variant, targets, data, models, choice, reason),
     }
+}
+
+/// Pairs of targets, neither beneath the other, that read a common input
+/// node: in a shared variant their producers may be merged.
+fn common_input_pairs<Id>(
+    inventory: &LocalLogicalCandidates<Id>,
+    beneath: &[Vec<usize>],
+) -> Vec<(usize, usize)> {
+    let inputs: Vec<Vec<*const OperatorNode>> = inventory
+        .targets
+        .iter()
+        .map(|t| t.target.children().into_iter().map(Rc::as_ptr).collect())
+        .collect();
+    let mut pairs = Vec::new();
+    for t in 0..inputs.len() {
+        for u in t + 1..inputs.len() {
+            let nested = beneath[t].contains(&u) || beneath[u].contains(&t);
+            if !nested && inputs[t].iter().any(|p| inputs[u].contains(p)) {
+                pairs.push((t, u));
+            }
+        }
+    }
+    pairs
 }
 
 /// `best(t) = min_c local(t, c) + Σ_{u beneath t} best(u)`, memoized; the
@@ -550,18 +730,19 @@ fn best_choice(
     cost
 }
 
-/// Build `choice` with identical producers merged and run Stage 3 on it.
+/// Build `choice` in `variant` and run Stage 3 on it.
 fn finish<Id: Clone>(
-    inventory: &LocalLogicalCandidates<Id>,
+    variant: Variant<'_, Id>,
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
     choice: Vec<usize>,
     method: SelectionMethod,
 ) -> Result<SelectedPlan<Id>, String> {
-    let (logical, physical) = realize(inventory, &choice, true)?;
+    let (logical, physical) = realize(variant, &choice)?;
     let cost = assess(&physical, targets, data, models)?;
     Ok(SelectedPlan {
+        shared: variant.shared,
         choice,
         logical,
         selection: Selection {
@@ -575,18 +756,18 @@ fn finish<Id: Clone>(
 }
 
 /// Selection when the dynamic program's result cannot be trusted: every
-/// combination if there are few, else `choice` flagged with `reason`.
+/// combination of the variant if there are few, else `choice` flagged with
+/// `reason`.
 fn fallback<Id: Clone>(
-    inventory: &LocalLogicalCandidates<Id>,
+    variant: Variant<'_, Id>,
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     choice: Vec<usize>,
     reason: String,
 ) -> Result<SelectedPlan<Id>, SelectionError> {
-    if combination_count(inventory) <= MAX_ENUMERATED_CANDIDATES {
-        let enumeration =
-            select_exhaustive(inventory, targets, data, models, MAX_ENUMERATED_CANDIDATES)?;
+    if combination_count(variant.inventory) <= MAX_ENUMERATED_CANDIDATES {
+        let enumeration = exhaustive(&[variant], targets, data, models, MAX_ENUMERATED_CANDIDATES)?;
         let winner = enumeration
             .candidates
             .iter()
@@ -597,7 +778,7 @@ fn fallback<Id: Clone>(
             })
             .expect("the selected candidate was built");
         let mut plan = finish(
-            inventory,
+            variant,
             targets,
             data,
             &models,
@@ -621,12 +802,47 @@ fn fallback<Id: Clone>(
     let method = SelectionMethod::TreeDpNotGuaranteedOptimal {
         reason: reason.clone(),
     };
-    finish(inventory, targets, data, &models, choice.clone(), method).map_err(|failure| {
+    finish(variant, targets, data, &models, choice.clone(), method).map_err(|failure| {
         SelectionError::NoValidCandidate(vec![Rejection {
-            id: format!("P{}", choice_index(inventory, &choice) + 1),
+            id: format!("P{}", variant.number(&choice)),
             valid: false,
             reason: format!("{reason}; {failure}"),
         }])
+    })
+}
+
+/// What [`plan_stages`] produced.
+#[derive(Debug, Clone)]
+pub struct StagePipelineRun<Id> {
+    /// Stage 1: Pass 1's alternatives per sharing variant (Pass 2).
+    pub stage1: Vec<SharingVariant<Id>>,
+    /// Stages 2 and 3 for the selected candidate ([`select_plan`]).
+    pub plan: SelectedPlan<Id>,
+    /// Every candidate built and priced, when requested for display.
+    pub enumeration: Option<Enumeration<Id>>,
+}
+
+/// The #509 stage pipeline over `roots`: Stage 1 (Pass 1 and Pass 2's
+/// identical-expression rule), Stage 2 and Stage 3. The facade and the
+/// `stage_pipeline` devtool both run this. `display` builds and prices up to
+/// that many candidates for display as well (0: none).
+pub fn plan_stages<Id: Clone>(
+    roots: Vec<(Id, QueryRoot)>,
+    targets: &[Option<AccuracyTarget>],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    display: usize,
+) -> Result<StagePipelineRun<Id>, SelectionError> {
+    let stage1 = stage1_logical_candidates(roots)?;
+    let plan = select_plan(&stage1, targets, data, models)?;
+    let enumeration = match display {
+        0 => None,
+        max => Some(select_exhaustive(&stage1, targets, data, models, max)?),
+    };
+    Ok(StagePipelineRun {
+        stage1,
+        plan,
+        enumeration,
     })
 }
 
@@ -1212,8 +1428,12 @@ mod tests {
         let targets = no_targets(&inventory);
         let data = data();
         let evaluate = coupled(&inventory, &targets, &data, nested_pair(&inventory));
-        let plan = select_plan_with(
-            &inventory,
+        let plan = select_variant(
+            Variant {
+                inventory: &inventory,
+                shared: false,
+                offset: 0,
+            },
             &targets,
             &data,
             PlanningModels::builtin(),
@@ -1222,7 +1442,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.selection.method, SelectionMethod::Exhaustive);
         let exhaustive = select_exhaustive(
-            &inventory,
+            &independent(inventory.clone()),
             &targets,
             &data,
             PlanningModels::builtin(),
@@ -1244,8 +1464,12 @@ mod tests {
         let targets = no_targets(&inventory);
         let data = data();
         let evaluate = coupled(&inventory, &targets, &data, nested_pair(&inventory));
-        let plan = select_plan_with(
-            &inventory,
+        let plan = select_variant(
+            Variant {
+                inventory: &inventory,
+                shared: false,
+                offset: 0,
+            },
             &targets,
             &data,
             PlanningModels::builtin(),
@@ -1269,10 +1493,16 @@ mod tests {
     fn uncoupled_selection_uses_the_dynamic_program() {
         let inventory = inventory(&["count(topk by (job) (10, sum_over_time(m[1m])))"]);
         let targets = no_targets(&inventory);
-        let plan = select_plan(&inventory, &targets, &data(), PlanningModels::builtin()).unwrap();
+        let plan = select_plan(
+            &independent(inventory.clone()),
+            &targets,
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
         assert_eq!(plan.selection.method, SelectionMethod::TreeDp);
         let exhaustive = select_exhaustive(
-            &inventory,
+            &independent(inventory.clone()),
             &targets,
             &data(),
             PlanningModels::builtin(),
@@ -1282,8 +1512,8 @@ mod tests {
         assert_eq!(plan.selection.selected, exhaustive.selection.selected);
     }
 
-    /// Two queries that chose structurally identical summary producers reach
-    /// one state in the selected plan.
+    /// In a shared variant, two queries that chose structurally identical
+    /// summary producers reach one state.
     #[test]
     fn identical_producers_are_merged_after_composition() {
         let inventory = inventory(&[
@@ -1298,7 +1528,11 @@ mod tests {
         };
         let choice: Vec<_> = inventory.targets.iter().map(kll).collect();
         let plan = finish(
-            &inventory,
+            Variant {
+                inventory: &inventory,
+                shared: true,
+                offset: 0,
+            },
             &no_targets(&inventory),
             &data(),
             &PlanningModels::builtin(),
