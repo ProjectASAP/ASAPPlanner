@@ -163,6 +163,35 @@ function rankPhysicalCandidates(doc) {
     });
 }
 
+// The document's optional `deployment` section (#509 deployment inputs) as
+// [label, text] rows; an absent section yields no rows.
+function deploymentRows(deployment) {
+  if (!deployment || typeof deployment !== 'object') return [];
+  const rows = [];
+  const caps = deployment.capabilities;
+  if (caps) {
+    const summaries = Array.isArray(caps.summaries)
+      ? caps.summaries.map((entry) => `${entry.summary} (${(entry.readouts || []).join(', ')})`).join(' · ')
+      : 'unrestricted';
+    rows.push(['Summaries', summaries]);
+    if (caps.source) rows.push(['Capabilities from', String(caps.source)]);
+    rows.push(['Ingestion-time maintenance', caps.ingestion_time ? 'supported' : 'not supported']);
+    rows.push(['Keep query-time results across evaluations', caps.query_time_retention ? 'supported' : 'not supported']);
+    rows.push(['Memory budget', caps.memory_budget_bytes == null ? 'none' : `${caps.memory_budget_bytes} bytes`]);
+    rows.push(['Raw data', caps.raw_data_retained
+      ? 'kept by the deployment (not charged)'
+      : `not kept by the deployment: query-time plans pay for ${caps.raw_bytes_per_sample} bytes per sample`]);
+  }
+  const cost = deployment.cost_model;
+  if (cost) {
+    const calibration = Object.entries(cost.calibration || {}).map(([key, value]) => `${key} ${value}`).join(' · ');
+    rows.push(['Cost model', [cost.name, cost.unit, calibration].filter(Boolean).join(' · ')]);
+  }
+  const accuracy = deployment.accuracy_model;
+  if (accuracy) rows.push(['Accuracy model', `${accuracy.name}${accuracy.evidence ? ` · evidence: ${accuracy.evidence}` : ''}`]);
+  return rows;
+}
+
 function snakeToPascal(text) {
   return String(text).split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('');
 }

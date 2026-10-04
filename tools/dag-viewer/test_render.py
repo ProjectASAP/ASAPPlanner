@@ -648,6 +648,33 @@ class StagePipelineTests(unittest.TestCase):
                  "grouping": "PerSubpopulationInstance"}
         self.assertIn("summary: exact Sum", self.js.call("stageNodeLines", {"id": 0, "payload": exact}, None))
 
+    def test_deployment_inputs_are_listed(self):
+        """The document's deployment section reads as capability, cost-model and accuracy-model rows."""
+        deployment = {
+            "capabilities": {
+                "source": "asap_executor::capabilities",
+                "summaries": [{"summary": "Kll", "readouts": ["Quantile"]},
+                              {"summary": "CmsWithHeap", "readouts": ["TopK"]}],
+                "ingestion_time": True, "query_time_retention": False, "memory_budget_bytes": None,
+                "raw_data_retained": False, "raw_bytes_per_sample": 16,
+            },
+            "cost_model": {"name": "analytical-cost-v2", "unit": "cost_per_second",
+                           "calibration": {"version": "illustrative-v2", "cost_per_retained_byte_second": 1.25e-7}},
+            "accuracy_model": {"name": "DefaultAccuracyModel", "evidence": "none"},
+        }
+        rows = dict(self.js.call("deploymentRows", deployment))
+        self.assertEqual(rows["Summaries"], "Kll (Quantile) · CmsWithHeap (TopK)")
+        self.assertEqual(rows["Ingestion-time maintenance"], "supported")
+        self.assertEqual(rows["Memory budget"], "none")
+        self.assertEqual(rows["Raw data"], "not kept by the deployment: query-time plans pay for 16 bytes per sample")
+        self.assertIn("cost_per_retained_byte_second 1.25e-7", rows["Cost model"])
+        self.assertEqual(rows["Accuracy model"], "DefaultAccuracyModel · evidence: none")
+        unrestricted = dict(deployment, capabilities=dict(deployment["capabilities"], summaries=None, raw_data_retained=True))
+        rows = dict(self.js.call("deploymentRows", unrestricted))
+        self.assertEqual(rows["Summaries"], "unrestricted")
+        self.assertEqual(rows["Raw data"], "kept by the deployment (not charged)")
+        self.assertEqual(self.js.call("deploymentRows", None), [])
+
     def test_payload_kinds_map_onto_node_style_names(self):
         """Wire payload kinds reuse node-style.js categories."""
         cases = {
