@@ -354,7 +354,7 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
     let mut logical = Vec::new();
     let mut physical = Vec::new();
     for c in enumeration.candidates {
-        let p = c.physical.expect("every candidate builds");
+        assert!(!c.physical.is_empty(), "every candidate builds");
         let roots: Vec<_> = c
             .logical
             .expect("composes")
@@ -363,18 +363,20 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
             .collect();
         let (dag, query_roots) = export(&roots);
         logical.push(Logical {
-            id: p.from_logical.clone(),
+            id: c.physical[0].from_logical.clone(),
             shared_input: c.sharing.merges_after_composition(),
             dag,
             query_roots,
         });
-        physical.push(Physical {
-            id: p.id.clone(),
-            from_logical: p.from_logical.clone(),
-            dag: p.dag.clone(),
-            query_roots: p.dag.roots.clone(),
-            stage2: p,
-        });
+        for p in c.physical {
+            physical.push(Physical {
+                id: p.id.clone(),
+                from_logical: p.from_logical.clone(),
+                dag: p.dag.clone(),
+                query_roots: p.dag.roots.clone(),
+                stage2: p,
+            });
+        }
     }
     Run {
         stage0,

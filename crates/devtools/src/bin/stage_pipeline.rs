@@ -17,11 +17,13 @@
 //     enumeration order and capped by `--max-candidates` (default 64). A
 //     repeating query's mergeable alternatives also come in tumbling panes
 //     (Pass 2's window-composition rule), e.g. "Q1 Kll · tumbling 1m panes";
-//   - stage2_physical_asap: one physical candidate per logical candidate
-//     (operator implementation only, everything at query time), no cost;
+//   - stage2_physical_asap: per logical candidate, its physical candidates
+//     (operator implementation; everything at query time, then one per
+//     down-closed set of summaries maintained at ingestion time, labeled
+//     e.g. "· ingestion time: Kll ×5 panes"), no cost;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
-//     every other candidate as rejected (`valid: false`, including one that
-//     could not be built) or costlier.
+//     every other candidate as rejected (`valid: false`: inaccurate, over a
+//     latency bound, or could not be built) or costlier.
 //
 // Everything is the library's `plan_selection::plan_stages`, the function the
 // facade runs; this tool only serializes it. Stage 3 here is over every
@@ -168,7 +170,11 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             candidates
                 .push(json!({ "id": format!("L{index}"), "label": label, "dag": export(&roots)? }));
         }
-        if let Some(p) = &candidate.physical {
+        for p in &candidate.physical {
+            let label = match p.materialization.as_str() {
+                "" => label.clone(),
+                m => format!("{label} · {m}"),
+            };
             stage2.push(
                 json!({ "id": p.id, "from_logical": p.from_logical, "label": label, "dag": p.dag }),
             );

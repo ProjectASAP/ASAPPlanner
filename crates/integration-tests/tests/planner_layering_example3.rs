@@ -536,7 +536,10 @@ fn stage3_b_selects_cheapest_valid() {
 }
 
 /// Merged KLL and DDSketch panes keep the family's guarantee, so Stage 3
-/// finds every tumbling candidate valid and prices it.
+/// finds no tumbling candidate inaccurate. Rebuilding all five panes at
+/// every evaluation takes 310 ms of query-time work, over the 200 ms latency
+/// bound (S6); with the panes maintained at ingestion time, only the merge
+/// and the estimate remain and the candidate is valid and priced.
 #[test]
 fn stage3_b_tumbling_candidates_are_valid() {
     let run = run_b();
@@ -548,30 +551,43 @@ fn stage3_b_tumbling_candidates_are_valid() {
             .nodes
             .iter()
             .any(|n| matches!(n.payload, LogicalASAPOperatorPayload::SummaryMerge));
-        if merged {
-            tumbling += 1;
-            assert!(
-                !invalid.contains_key(p.id.as_str()),
+        if !merged {
+            continue;
+        }
+        tumbling += 1;
+        match p.stage2.materialization.as_str() {
+            "" => assert!(
+                invalid
+                    .get(p.id.as_str())
+                    .is_some_and(|r| r.contains("310.0 ms") && r.contains("200 ms latency")),
                 "{}: {:?}",
                 p.id,
-                invalid
-            );
-            assert!(run.cost(&p.id).is_some(), "{}", p.id);
+                invalid.get(p.id.as_str())
+            ),
+            _ => {
+                assert!(
+                    !invalid.contains_key(p.id.as_str()),
+                    "{}: {:?}",
+                    p.id,
+                    invalid
+                );
+                assert!(run.cost(&p.id).is_some(), "{}", p.id);
+            }
         }
     }
-    assert_eq!(tumbling, 2);
+    assert_eq!(tumbling, 4);
 }
 
 // ── Pattern B: runtime ───────────────────────────────────────────────────
 
-/// Run `p` in the executor at evaluation time [`EVALUATION_MS`]. Each raw
-/// `TimeRange` a summary reads is a deployment input holding the samples in
-/// its own window: `[T − offset − range, T − offset)`, so a pane gets its
-/// minute and the whole-window build gets all five.
-fn execute_b(p: &Physical) -> Vec<String> {
-    use asap_executor::physical_planner::InputContract;
-    use asap_executor::physical_planner::{compile, promql_rows::encode_series_identity};
-    use asap_executor::runtime::Scope;
+/// The deployment inputs of `p` at evaluation time [`EVALUATION_MS`]: each
+/// raw `TimeRange` a summary reads holds the samples in its own window,
+/// `[T − offset − range, T − offset)`, so a pane gets its minute and the
+/// whole-window build gets all five. Keyed by node, with the window.
+fn inputs_b(
+    p: &Physical,
+) -> std::collections::BTreeMap<u64, (asap_executor::values::Batch, std::ops::Range<i64>)> {
+    use asap_executor::physical_planner::promql_rows::encode_series_identity;
     use asap_executor::values::{Batch, Value};
     use asap_types::ir::export::NonASAPOpKind;
     use std::collections::BTreeMap;
@@ -622,26 +638,110 @@ fn execute_b(p: &Physical) -> Vec<String> {
             .collect();
         inputs.insert(
             u64::from(node.id.0),
-            Batch::try_new(schema, rows).expect("input batch"),
+            (Batch::try_new(schema, rows).expect("input batch"), window),
         );
     }
+    inputs
+}
+
+fn sorted_rows(batches: &[asap_executor::values::Batch]) -> Vec<String> {
+    let mut rows: Vec<String> = batches
+        .iter()
+        .flat_map(|batch| batch.rows().iter().map(|row| render(row)))
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn query_scope() -> asap_executor::runtime::Scope {
+    asap_executor::runtime::Scope::Query {
+        evaluation_time_ms: EVALUATION_MS,
+        revision: 1,
+    }
+}
+
+/// Run `p` in the executor at evaluation time [`EVALUATION_MS`], everything
+/// at query time over [`inputs_b`].
+fn execute_b(p: &Physical) -> Vec<String> {
+    use asap_executor::physical_planner::{compile, InputContract};
+
+    let inputs: std::collections::BTreeMap<_, _> = inputs_b(p)
+        .into_iter()
+        .map(|(id, (batch, _))| (id, batch))
+        .collect();
     let contracts = inputs
         .iter()
         .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
         .collect();
     let root = u64::from(p.dag.roots[0].0);
     let plan = compile(&p.dag, contracts, &[root]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
-    let scope = Scope::Query {
-        evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
+    sorted_rows(&physical_common::execute(&plan, inputs, query_scope()).remove(0))
+}
+
+/// Run `p`'s maintained plan: compile it once, cut it at the frontier its
+/// timing implies ([`frontier_from_timing`], [`cut_candidate`]), run the
+/// precompute once per pane over that pane's minute in an ingestion scope,
+/// as the pane's minute closes, then run the query over the kept panes.
+///
+/// [`frontier_from_timing`]: asap_executor::physical_planner::frontier_from_timing
+/// [`cut_candidate`]: asap_executor::physical_planner::cut_candidate
+fn execute_b_maintained(p: &Physical) -> Vec<String> {
+    use asap_executor::physical_planner::{
+        compile, cut_candidate, frontier_from_timing, InputContract,
     };
-    let mut rows: Vec<String> = physical_common::execute(&plan, inputs, scope)
-        .remove(0)
+    use asap_executor::runtime::Scope;
+    use asap_executor::values::Batch;
+    use std::collections::BTreeMap;
+
+    let inputs = inputs_b(p);
+    let contracts = inputs
         .iter()
-        .flat_map(|batch| batch.rows().iter().map(|row| render(row)))
+        .map(|(&id, (batch, _))| (id, InputContract::bounded(batch.schema().clone())))
         .collect();
-    rows.sort();
-    rows
+    let root = u64::from(p.dag.roots[0].0);
+    let compiled = compile(&p.dag, contracts, &[root]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
+    let frontier = frontier_from_timing(&p.dag).unwrap();
+    assert_eq!(frontier.len(), 5, "{}: the five panes", p.id);
+    let plan = cut_candidate(&compiled, &frontier).unwrap();
+    let precompute = plan.precompute.as_ref().expect("a precompute DAG");
+    let mut kept = BTreeMap::new();
+    for &pane in &frontier {
+        // The pane's own minute; the other inputs are empty in its run.
+        let (own, window) = p
+            .dag
+            .producers(asap_types::ir::export::LogicalASAPNodeId(pane as u32))
+            .into_iter()
+            .find_map(|range| {
+                inputs
+                    .get(&u64::from(range.0))
+                    .map(|(_, w)| (range, w.clone()))
+            })
+            .expect("the pane reads one raw time range");
+        let run_inputs = inputs
+            .iter()
+            .map(|(&id, (batch, _))| {
+                let batch = match id == u64::from(own.0) {
+                    true => batch.clone(),
+                    false => Batch::try_new(batch.schema().clone(), vec![]).unwrap(),
+                };
+                (id, batch)
+            })
+            .collect();
+        let scope = Scope::Ingestion {
+            window_start_ms: window.start,
+            window_end_ms: window.end,
+            revision: 1,
+        };
+        let outputs = physical_common::execute(precompute, run_inputs, scope);
+        let index = precompute.roots().iter().position(|&r| r == pane).unwrap();
+        let schema = plan.materialized_outputs[&pane].schema.clone();
+        let rows = outputs[index]
+            .iter()
+            .flat_map(|batch| batch.rows().iter().cloned())
+            .collect();
+        kept.insert(pane, Batch::try_new(schema, rows).unwrap());
+    }
+    sorted_rows(&physical_common::execute(&plan.query, kept, query_scope()).remove(0))
 }
 
 /// One output row as `ts=<ms> <value> <series identity>`.
@@ -706,4 +806,44 @@ fn runtime_b_tumbling_kll_matches_the_whole_window() {
         ]
     );
     assert_eq!(execute_b(kll(true)), whole);
+}
+
+/// Runtime (Pattern B, B1): Stage 2's candidate with the tumbling KLL panes
+/// at ingestion time compiles into a precompute and a query plan; building
+/// each pane in its own ingestion run and merging the kept panes at query
+/// time returns what the whole-window KLL returns.
+#[test]
+fn runtime_b_maintained_panes_match_the_whole_window() {
+    let run = run_b();
+    let is_kll = |p: &&Physical| {
+        p.dag.nodes.iter().any(|n| {
+            matches!(&n.payload, LogicalASAPOperatorPayload::SummaryAgg {
+                family: asap_types::ir::schema::FieldDataType::Sketch(kind, _), ..
+            } if *kind.algorithm() == SketchAlgorithm::Kll)
+        })
+    };
+    let whole = run
+        .physical
+        .iter()
+        .filter(is_kll)
+        .find(|p| {
+            !p.dag
+                .nodes
+                .iter()
+                .any(|n| matches!(n.payload, LogicalASAPOperatorPayload::SummaryMerge))
+        })
+        .expect("whole-window KLL");
+    let maintained = run
+        .physical
+        .iter()
+        .filter(is_kll)
+        .find(|p| !p.stage2.materialization.is_empty())
+        .expect("maintained KLL panes");
+    assert_eq!(
+        maintained.stage2.materialization,
+        "ingestion time: Kll ×5 panes"
+    );
+    let expected = execute_b(whole);
+    assert_eq!(expected.len(), 2, "{expected:?}");
+    assert_eq!(execute_b_maintained(maintained), expected);
 }
