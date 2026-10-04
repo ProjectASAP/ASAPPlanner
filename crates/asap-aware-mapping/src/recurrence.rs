@@ -75,7 +75,7 @@
 //!
 //! - [`EvaluationRate`]: derived from [`asap_types::workload::RepeatingEntry::demand`]
 //!   values of every repeating consumer reaching a target (via
-//!   [`evaluation_rate_of`], or [`crate::replacement::CandidateLogicalASAPDAGs::recurrence_profiles`]
+//!   [`evaluation_rate_of`], or [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles)
 //!   for a whole workload). A one-shot ([`asap_types::workload::BatchEntry`])
 //!   consumer contributes to [`RecurrenceProfile::one_shot_consumers`]
 //!   instead, never to this rate.
@@ -216,7 +216,7 @@ pub enum RecurrenceError {
          CostRate with a one-shot Cost without distorting the comparison"
     )]
     InvalidHorizon(Horizon),
-    /// [`crate::replacement::CandidateLogicalASAPDAGs::recurrence_profiles`] was called
+    /// [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles) was called
     /// with a `root_recurrence` slice whose length doesn't match the
     /// `CandidateLogicalASAPDAGs`'s own root count — a caller error, but recoverable
     /// (this method's whole signature promises a `Result`, so this is
@@ -239,7 +239,7 @@ pub enum RecurrenceError {
 /// applied at every point an `UpdateRate` enters a [`RecurrenceProfile`]
 /// ([`RecurrenceProfile::with_update_rate`],
 /// [`update_rate_from_data_workload`],
-/// [`crate::replacement::CandidateLogicalASAPDAGs::recurrence_profiles`]'s own parameter)
+/// [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles)'s own parameter)
 /// *and*, as a backstop that can't be bypassed by constructing a
 /// `RecurrenceProfile` via its public fields directly, inside [`decide`]
 /// itself before any comparison uses it.
@@ -373,7 +373,7 @@ impl RecurrenceProfile {
 }
 
 /// How one workload root recurs — the opaque per-root tag
-/// [`crate::replacement::CandidateLogicalASAPDAGs::recurrence_profiles`] threads down to
+/// [`recurrence_profiles`](crate::plan_selection::candidate_selection::recurrence_profiles) threads down to
 /// every target reachable from that root. Mirrors
 /// [`asap_types::workload::QueryWorkload`]'s own `query_batch` (one-shot)
 /// vs. `repeating_queries` (an interval each) split, but at the
@@ -633,6 +633,9 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
 mod tests {
     use super::*;
     use crate::cost_model::DefaultCostModel;
+    use crate::plan_selection::candidate_selection::cost_sorted_with_recurrence;
+    use crate::plan_selection::candidate_selection::global_selection_with_recurrence;
+    use crate::plan_selection::candidate_selection::recurrence_profiles;
 
     fn interval(ms: u32) -> RepetitionInterval {
         RepetitionInterval(ms)
@@ -1196,7 +1199,7 @@ mod tests {
 
     /// Three workload roots share one underlying `sum_agg()` sub-DAG: two
     /// repeating consumers with different intervals, one one-shot batch
-    /// consumer. `CandidateLogicalASAPDAGs::recurrence_profiles` must aggregate all three
+    /// consumer. `candidate_selection::recurrence_profiles` must aggregate all three
     /// onto the shared sub-DAG's own profile: `evaluation_rate = 1/t1 +
     /// 1/t2`, `one_shot_consumers = 1` — issue #287's "support a shared
     /// sub-DAG consumed by queries with different intervals" and "multiple
@@ -1233,9 +1236,8 @@ mod tests {
             repeating(10_000), // 0.1 Hz
             RootRecurrence::OneShotCount(1),
         ];
-        let profiles = space
-            .recurrence_profiles(&root_recurrence, Some(UpdateRate(5.0)))
-            .unwrap();
+        let profiles =
+            recurrence_profiles(&space, &root_recurrence, Some(UpdateRate(5.0))).unwrap();
 
         let profile = profiles.for_target(&shared_group.target);
         let expected_rate = 1.0 / 1.0 + 1.0 / 10.0; // Hz
@@ -1276,19 +1278,21 @@ mod tests {
             .expect("the aggregate is shared by both roots");
         let update_rate = Some(UpdateRate(10.0));
 
-        let frequent = space
-            .recurrence_profiles(&[repeating(10), repeating(10)], update_rate)
-            .unwrap();
-        let infrequent = space
-            .recurrence_profiles(&[repeating(100_000), repeating(100_000)], update_rate)
-            .unwrap();
+        let frequent =
+            recurrence_profiles(&space, &[repeating(10), repeating(10)], update_rate).unwrap();
+        let infrequent = recurrence_profiles(
+            &space,
+            &[repeating(100_000), repeating(100_000)],
+            update_rate,
+        )
+        .unwrap();
 
-        let frequent_ranked = space
-            .cost_sorted_with_recurrence(&DeterministicUnitCostModel, &frequent, None)
-            .unwrap();
-        let infrequent_ranked = space
-            .cost_sorted_with_recurrence(&DeterministicUnitCostModel, &infrequent, None)
-            .unwrap();
+        let frequent_ranked =
+            cost_sorted_with_recurrence(&space, &DeterministicUnitCostModel, &frequent, None)
+                .unwrap();
+        let infrequent_ranked =
+            cost_sorted_with_recurrence(&space, &DeterministicUnitCostModel, &infrequent, None)
+                .unwrap();
         let first_provenance =
             |ranked: &[crate::plan_selection::candidate_selection::RankedTargetSubDAGCandidates<'_>]| {
                 ranked
@@ -1306,12 +1310,16 @@ mod tests {
             Some(crate::replacement::ReplacementProvenance::CseRecompute)
         );
 
-        let frequent_selected = space
-            .global_selection_with_recurrence(&DeterministicUnitCostModel, &frequent, None)
-            .unwrap();
-        let infrequent_selected = space
-            .global_selection_with_recurrence(&DeterministicUnitCostModel, &infrequent, None)
-            .unwrap();
+        let frequent_selected =
+            global_selection_with_recurrence(&space, &DeterministicUnitCostModel, &frequent, None)
+                .unwrap();
+        let infrequent_selected = global_selection_with_recurrence(
+            &space,
+            &DeterministicUnitCostModel,
+            &infrequent,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             frequent_selected
                 .for_target(&shared.target)
@@ -1333,9 +1341,12 @@ mod tests {
         let root = scan();
         let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
         let space = search_workload(roots);
-        let err = space
-            .recurrence_profiles(&[RootRecurrence::Repeating(EvaluationRate(f64::NAN))], None)
-            .unwrap_err();
+        let err = recurrence_profiles(
+            &space,
+            &[RootRecurrence::Repeating(EvaluationRate(f64::NAN))],
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, RecurrenceError::InvalidEvaluationRate(_)));
     }
 
@@ -1347,7 +1358,7 @@ mod tests {
         let root = scan();
         let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
         let space = search_workload(roots);
-        let err = space.recurrence_profiles(&[], None).unwrap_err();
+        let err = recurrence_profiles(&space, &[], None).unwrap_err();
         assert_eq!(
             err,
             RecurrenceError::RootCountMismatch {
@@ -1362,12 +1373,12 @@ mod tests {
         let root = scan();
         let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
         let space = search_workload(roots);
-        let err = space
-            .recurrence_profiles(
-                &[RootRecurrence::OneShotCount(1)],
-                Some(UpdateRate(f64::NAN)),
-            )
-            .unwrap_err();
+        let err = recurrence_profiles(
+            &space,
+            &[RootRecurrence::OneShotCount(1)],
+            Some(UpdateRate(f64::NAN)),
+        )
+        .unwrap_err();
         assert!(matches!(err, RecurrenceError::InvalidUpdateRate(_)));
     }
 
@@ -1416,9 +1427,8 @@ mod tests {
             );
 
         let root_recurrence = vec![repeating(1_000)];
-        let profiles = space
-            .recurrence_profiles(&root_recurrence, Some(UpdateRate(5.0)))
-            .unwrap();
+        let profiles =
+            recurrence_profiles(&space, &root_recurrence, Some(UpdateRate(5.0))).unwrap();
 
         let count_profile = profiles.for_target(&count_group.target);
         assert_eq!(
@@ -1472,7 +1482,7 @@ mod tests {
         );
 
         let root_recurrence = vec![repeating(1_000)]; // 1 Hz
-        let profiles = space.recurrence_profiles(&root_recurrence, None).unwrap();
+        let profiles = recurrence_profiles(&space, &root_recurrence, None).unwrap();
         let profile = profiles.for_target(&shared_group.target);
 
         // Referenced twice from the one root: evaluation_rate should be

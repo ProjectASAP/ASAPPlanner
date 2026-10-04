@@ -1253,8 +1253,11 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
                     Replacement::SubDAG(node) if !node.contains_asap() && node.operator == root.operator)),
                 "{query}: {candidates:?}"
             );
-            let selected = space
-                .global_selection(&DefaultCostModel)
+            let selected =
+                asap_aware_mapping::plan_selection::candidate_selection::global_selection(
+                    &space,
+                    &DefaultCostModel,
+                )
                 .assemble_selected_dag(planned)
                 .unwrap()
                 .unwrap();

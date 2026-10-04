@@ -26,7 +26,7 @@
 // additionally runs `asap_aware_mapping::replacement::search_workload` (this
 // binary took no strategies of its own — `default_strategies()` already
 // includes `AvgToSumOverCountStrategy` as of #282) over every lowered query
-// and ranks each discovered `TargetSubDAGCandidates` via `CandidateLogicalASAPDAGs::cost_sorted`. The
+// and ranks each discovered `TargetSubDAGCandidates` via `candidate_selection::cost_sorted`. The
 // best-ranked
 // candidate per group feeds two additive outputs:
 //
@@ -86,6 +86,7 @@ use asap_aware_mapping::physical_operator_statistics::ComparisonScope;
 use asap_aware_mapping::physical_plan_cost_model::{
     PhysicalEvidenceSnapshot, PhysicalPlanCostModel, PlannerPhysicalPlanProvider,
 };
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::query_physical_lowering::PhysicalNodeRequest;
 use asap_aware_mapping::replacement::{
     default_strategies_with_evidence, is_logical_rewrite, search_workload, search_workload_with,
@@ -1214,7 +1215,7 @@ fn assign_workload_node_ids(dags: &mut [&mut ExportDAG]) {
 /// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
 /// #282 — is exactly the strategy set this binary wants; no custom list
 /// needed) over every lowered query, rank each discovered `TargetSubDAGCandidates` via
-/// `CandidateLogicalASAPDAGs::global_selection`, and build both `--post-asap` outputs from the
+/// `candidate_selection::global_selection`, and build both `--post-asap` outputs from the
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_dag` can never disagree about
 /// which candidate won for a given target.
@@ -1241,7 +1242,7 @@ fn run_post_asap_with_progress(
     } else {
         search_workload(roots)
     };
-    let selection = space.global_selection(cost_model);
+    let selection = global_selection(&space, cost_model);
 
     // A group's top candidate can be `retain_exact`'s own conservative
     // fallback — the *whole target* itself, unbound, carrying only an exact
@@ -2664,7 +2665,7 @@ mod tests {
         let model = ExportPlannerCostModel {
             document: &document,
         };
-        let selection = space.global_selection(&model);
+        let selection = global_selection(&space, &model);
         let chosen = selection
             .target_selections()
             .find(|selected| *selected.target == query)
