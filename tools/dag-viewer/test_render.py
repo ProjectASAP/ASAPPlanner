@@ -628,6 +628,26 @@ class StagePipelineTests(unittest.TestCase):
             if "source" not in node["data"]:
                 self.assertNotIn("cost", node["data"]["label"])
 
+    def test_summary_nodes_print_their_configuration(self):
+        """A summary node names its family's parameters and whether it keeps one state per group or one shared state."""
+        per_group = {
+            "kind": "summary_agg",
+            "family": {"Sketch": [{"algorithm": "CmsWithHeap", "category": "TopK",
+                                   "params": {"CmsWithHeap": {"depth": 7, "heap_size": 100, "width": 272}}},
+                                  "PerSubpopulationInstance"]},
+            "grouping": "PerSubpopulationInstance",
+        }
+        lines = self.js.call("stageNodeLines", {"id": 0, "payload": per_group}, None)
+        self.assertIn("summary: CmsWithHeap · depth 7 · heap 100 · width 272", lines)
+        self.assertIn("instances: one per group", lines)
+        shared = dict(per_group, grouping={"SharedMultiSubpopulation": {
+            "kind": "HydraCms", "params": {"HydraCms": {"width": 272, "depth": 7}}}})
+        lines = self.js.call("stageNodeLines", {"id": 0, "payload": shared}, None)
+        self.assertIn("instances: one shared HydraCms · width 272 · depth 7", lines)
+        exact = {"kind": "summary_agg", "family": {"ExactAggregate": ["Sum", "Sum"]},
+                 "grouping": "PerSubpopulationInstance"}
+        self.assertIn("summary: exact Sum", self.js.call("stageNodeLines", {"id": 0, "payload": exact}, None))
+
     def test_payload_kinds_map_onto_node_style_names(self):
         """Wire payload kinds reuse node-style.js categories."""
         cases = {
