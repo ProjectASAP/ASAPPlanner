@@ -9,7 +9,10 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, Schema, SketchAlgorithm};
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataArrival, DataWorkload, Evidence, EvidenceSource, Rate};
+use asap_types::workload::{
+    DataArrival, DataWorkload, Evidence, EvidenceSource, Predictability, QueryRecurrence, Rate,
+    RootDemand,
+};
 use std::rc::Rc;
 
 const WINDOW: &str = "ts >= now() - INTERVAL '1 minute'";
@@ -106,7 +109,17 @@ async fn example2_time_filter_is_a_scan_predicate() {
 #[tokio::test]
 async fn example2_plans_through_the_stage_pipeline() {
     let roots = workload().await;
-    let targets: Vec<_> = roots.iter().map(|(_, t)| Some(t.clone())).collect();
+    let demand: Vec<_> = roots
+        .iter()
+        .map(|(_, t)| RootDemand {
+            accuracy: Some(t.clone()),
+            recurrence: QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            predictability: Predictability::default(),
+        })
+        .collect();
     let data = DataWorkload {
         arrival: DataArrival::ContinuouslyIngesting,
         data_ingestion_interval: Evidence::default(),
@@ -114,6 +127,7 @@ async fn example2_plans_through_the_stage_pipeline() {
         ingestion_rate: declared(Rate(100_000.0)),
         input_cardinality: declared(10_000_000),
         distribution: Evidence::default(),
+        metric_types: Default::default(),
     };
     let run = plan_stages(
         roots
@@ -121,7 +135,7 @@ async fn example2_plans_through_the_stage_pipeline() {
             .enumerate()
             .map(|(i, (root, _))| (i, QueryRoot::Operator(root)))
             .collect(),
-        &targets,
+        &demand,
         &data,
         PlanningModels::builtin(),
         0,
