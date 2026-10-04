@@ -22,7 +22,7 @@
 //! [`Replacement::ExactComposition`] carries only the child *target*
 //! (`ExactComposition::child_target`, the same `Rc<OperatorNode>` whose
 //! `TargetSubDAGCandidates` in `CandidateLogicalASAPDAGs` already holds every candidate for it). It is
-//! [`CandidateLogicalASAPDAGs::global_selection`](crate::replacement::CandidateLogicalASAPDAGs::global_selection)
+//! `candidate_selection::global_selection`
 //! that commits the compatible parent/child pair — so the child's own
 //! cost-model ranking, workload-wide effective consumer count, and shared
 //! `Rc` identity (one inner summary serving two outer folds) all stay
@@ -266,7 +266,7 @@ impl ExactComposition {
 
     /// Structural identity for `TargetSubDAGCandidates` dedup: same placement, same
     /// operator, same child `Rc`.
-    pub(crate) fn same_as(&self, other: &Self) -> bool {
+    pub fn same_as(&self, other: &Self) -> bool {
         self.placement == other.placement
             && self.op == other.op
             && Rc::ptr_eq(&self.child_target, &other.child_target)

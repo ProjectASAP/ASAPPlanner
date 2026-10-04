@@ -168,8 +168,8 @@ search_workload_with_targets<'s, Id>(
     accuracy_model: &dyn AccuracyModel,
 ) -> CandidateLogicalASAPDAGs<Id>
 
-CandidateLogicalASAPDAGs::cost_sorted(&self, cost_model: &dyn CostModel)
-    -> Vec<RankedTargetSubDAGCandidates<'_>>
+candidate_selection::cost_sorted<'a, Id>(space: &'a CandidateLogicalASAPDAGs<Id>, cost_model: &dyn CostModel)
+    -> Vec<RankedTargetSubDAGCandidates<'a>>
 ```
 
 | Argument | Choices / meaning | Required? |
@@ -203,6 +203,7 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
+use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
 use asap_aware_mapping::{
     default_strategies, search_workload_with_targets,
     DefaultAccuracyModel, DefaultCostModel,
@@ -243,7 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &strategies,
         &DefaultAccuracyModel,
     );
-    for group in space.cost_sorted(&cost_model) {
+    for group in cost_sorted(&space, &cost_model) {
         for (candidate, cost) in group.candidates.iter().zip(&group.costs) {
             println!("candidate={candidate:?}, reported_cost={cost:?}");
         }
@@ -257,8 +258,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `search_workload` | `(query_id, Rc<OperatorNode>)` roots | `CandidateLogicalASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `CandidateLogicalASAPDAGs`; callers choose context-free replacement strategies |
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
-| `CandidateLogicalASAPDAGs::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
-| `CandidateLogicalASAPDAGs::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
+| `candidate_selection::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
+| `candidate_selection::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `ASAPStrategies::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
 
 `cost_sorted` is a ranking view, not a request to discard all but the first
@@ -351,6 +352,7 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
+use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
 use asap_aware_mapping::{
     search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
     ReplacementStrategy, ASAPStrategies, SharedSubDAGStrategy,
@@ -392,7 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let space = search_workload_with_targets(
         vec![("q1", root, Some(accuracy))], &strategies, &DefaultAccuracyModel,
     );
-    println!("{:#?}", space.cost_sorted(&model));
+    println!("{:#?}", cost_sorted(&space, &model));
     Ok(())
 }
 ```
@@ -550,10 +552,10 @@ Plain `global_selection()` does not decide materialization or establish
 physical deployment feasibility. Stage 2 materialization (#509) will own
 materialization; downstream still owns physical commitment.
 
-| Method on `CandidateLogicalASAPDAGs` / `GlobalSelection` | Behavior |
+| Function or method | Behavior |
 | --- | --- |
-| `CandidateLogicalASAPDAGs::global_selection(&model)` | Compatible structural selection across targets; no recurrence or materialization planning implied |
-| `CandidateLogicalASAPDAGs::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no materialization commitments implied |
+| `candidate_selection::global_selection(&space, &model)` | Compatible structural selection across targets; no recurrence or materialization planning implied |
+| `candidate_selection::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no materialization commitments implied |
 | `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<OperatorNode>>, RealizationError>`; constructs untimed semantic IR, not stored summary data |
 
 Use a target associated with the searched space; DAG assembly can return `None`
@@ -565,7 +567,8 @@ for checking complete physical alternatives and deployment constraints.
 ### API definition and example
 
 ```text
-CandidateLogicalASAPDAGs::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
+candidate_selection::global_selection<'a, Id>(space: &'a CandidateLogicalASAPDAGs<Id>, cost_model: &dyn CostModel)
+    -> CostedGlobalSelection<'a>  // derefs to GlobalSelection
 GlobalSelection::assemble_selected_dag(&self, target: &Rc<OperatorNode>)
     -> Result<Option<Rc<OperatorNode>>, RealizationError>
 ```
@@ -580,6 +583,7 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::{search_workload, DefaultCostModel};
 use asap_types::types::AccuracyTarget;
 
@@ -610,7 +614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let root = lower_promql_workload(&workload, 0)?.remove(0);
     let space = search_workload(vec![("q1", root)]);
-    let selection = space.global_selection(&DefaultCostModel);
+    let selection = global_selection(&space, &DefaultCostModel);
     // Search may canonicalize roots; use the root returned by CandidateLogicalASAPDAGs.
     if let Some(summary) = selection.assemble_selected_dag(&space.roots[0].1)? {
         let dag = asap_types::dag_export::export_summary(&summary);

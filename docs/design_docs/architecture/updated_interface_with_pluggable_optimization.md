@@ -195,7 +195,7 @@ let strategies = default_strategies_with_evidence(&cost_model, &evidence);
 let space = search_workload_with_targets(roots, &strategies, &accuracy_model);
 
 // 3. Select once for the whole workload.
-let selection = space.global_selection(&cost_model);
+let selection = global_selection(&space, &cost_model);
 
 // 4. Assemble once per root, then share common sub-DAGs across roots.
 let mut assembled = Vec::new();

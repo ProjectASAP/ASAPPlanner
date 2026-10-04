@@ -1,5 +1,6 @@
 //! SQL frontend, candidate selection, physical compilation and fresh-run execution.
 mod physical_common;
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::{search_workload, DefaultCostModel};
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_physical_operators::{
@@ -35,8 +36,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .await
             .unwrap();
         let space = search_workload(vec![("sql", logical)]);
-        let selected = space
-            .global_selection(&DefaultCostModel)
+        let selected = global_selection(&space, &DefaultCostModel)
             .assemble_selected_dag(&space.roots[0].1)
             .unwrap()
             .unwrap();

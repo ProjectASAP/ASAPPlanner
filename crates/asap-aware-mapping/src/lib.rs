@@ -37,9 +37,9 @@
 //!
 //! Integrators choose among these workflows:
 //!
-//! - Inspect the candidate space, optionally using [`CandidateLogicalASAPDAGs::cost_sorted`]
+//! - Inspect the candidate space, optionally using [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)
 //!   to obtain ranked views, and perform selection downstream.
-//! - Call [`CandidateLogicalASAPDAGs::global_selection`] once for the workload, then
+//! - Call [`global_selection`](crate::plan_selection::candidate_selection::global_selection) once for the workload, then
 //!   [`GlobalSelection::assemble_selected_dag`] for each query root. This
 //!   coordinates logical choices and preserves shared nodes. Whether and when
 //!   a summary state is materialized is not decided here: every summary runs
@@ -196,8 +196,7 @@ pub use pass::{
     PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan, StagePipeline,
 };
 pub use plan_selection::candidate_selection::{
-    CompositionDecision, GlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap,
-    TargetSubDAGSelection,
+    CompositionDecision, CostedGlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap,
 };
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
@@ -207,9 +206,10 @@ pub use recurrence::{
 pub use replacement::{
     default_strategies, is_logical_rewrite, search_workload, search_workload_with,
     search_workload_with_targets, summary_candidates, ASAPStrategies, CandidateLogicalASAPDAGs,
-    Matcher, Proposals, Realization, RealizationError, RejectedCandidate, Replacement,
-    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SharedSubDAGStrategy,
-    TargetSubDAG, TargetSubDAGCandidates, MAX_SEARCH_ITERATIONS,
+    GlobalSelection, Matcher, Proposals, Realization, RealizationError, RejectedCandidate,
+    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
+    SharedSubDAGStrategy, TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection,
+    MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use topk_reuse::TopKLimitReuseStrategy;

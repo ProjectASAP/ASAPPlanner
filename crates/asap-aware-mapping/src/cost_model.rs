@@ -31,7 +31,7 @@
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic).
-//! [`CandidateLogicalASAPDAGs::cost_sorted`](crate::replacement::CandidateLogicalASAPDAGs::cost_sorted)
+//! [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)
 //! (via [`crate::replacement`]'s own `cse_preference`) and
 //! [`DefaultCostModel::estimate_cost`] are this crate's own callers.
 
@@ -122,7 +122,7 @@ pub struct ExactCompositionCostRequest<'a> {
     /// formula charges.
     pub summary: &'a OperatorNode,
     /// How many times this site actually runs once ancestors' own choices
-    /// are accounted for (see `CandidateLogicalASAPDAGs::global_selection`).
+    /// are accounted for (see `candidate_selection::global_selection`).
     pub effective_consumer_count: usize,
 }
 
@@ -251,7 +251,7 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 
 /// A CSE-detected, legality-gated shared sub-DAG with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
-/// [`CandidateLogicalASAPDAGs::cost_sorted`](crate::replacement::CandidateLogicalASAPDAGs::cost_sorted)
+/// [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)
 /// (via [`crate::replacement`]'s own `cse_preference`) the first time it
 /// needs a representative bound node for a sub-DAG that
 /// [`asap_types::ir::cse::share_common_sub_dags`] already collapsed
@@ -619,7 +619,7 @@ pub trait CostModel {
     /// [`ReplacementSubDAG`] candidate at `target` — a real `f64`, not just a
     /// relative rank, meant for a caller that wants to *display* "candidate A
     /// costs ≈ X, candidate B costs ≈ Y" (e.g. a DAG-visualization view built
-    /// on [`CandidateLogicalASAPDAGs::cost_sorted`](crate::replacement::CandidateLogicalASAPDAGs::cost_sorted)),
+    /// on [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)),
     /// not just order candidates against each other — that ordering job
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
     /// [`ASAPStrategies`](crate::replacement::ASAPStrategies)
@@ -710,7 +710,7 @@ pub trait CostModel {
     ///
     /// Default: every input unknown ([`ExactCompositionCostInputs::unknown`])
     /// — unknown is never zero, and with no rate derivable
-    /// `CandidateLogicalASAPDAGs::global_selection` keeps the conservative keep-as-is
+    /// `candidate_selection::global_selection` keeps the conservative keep-as-is
     /// behavior for the site. A deployment that wants defaults must supply
     /// them here explicitly.
     fn exact_composition_cost_inputs(
@@ -887,7 +887,7 @@ impl CostModel for DefaultCostModel {
                 }
             }
             // A composed candidate is costed in cost-units-per-second by
-            // `CandidateLogicalASAPDAGs::global_selection` against the child decision it
+            // `candidate_selection::global_selection` against the child decision it
             // is committed with — a different unit from this structural
             // estimate, and unknowable here without that child. `NaN`
             // keeps it from ever out-ranking a real estimate by accident.

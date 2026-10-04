@@ -58,7 +58,7 @@ This decision does not need search infrastructure of its own. Issue #252's
 MEMO-based search engine (`CandidateLogicalASAPDAGs`/`TargetSubDAGCandidates` in `replacement.rs`) already
 enumerates and ranks the larger, workload-wide candidate space. The choice
 between sharing and recomputing one already-detected CSE candidate is binary,
-so `CandidateLogicalASAPDAGs::cost_sorted` reuses one direct
+so `candidate_selection::cost_sorted` reuses one direct
 `CostModel::cse_share_decision` comparison per group. This preserves the
 policy described here—compare costs rather than applying a fixed rule—inside
 the larger search engine. `search_workload_with`'s
@@ -78,7 +78,7 @@ gate) and the cost-aware decision is applied downstream, in
 
 ## Where it hooks in
 
-[`CandidateLogicalASAPDAGs::cost_sorted`](../../../crates/asap-aware-mapping/src/replacement.rs)
+`candidate_selection::cost_sorted`(../../../crates/asap-aware-mapping/src/replacement.rs)
 is where this hooks in today. `search_workload_with` computes each shared
 sub-DAG's true `consumer_count` across the whole workload up front (the same
 role `implement_workload_with`'s pre-pass used to play, before that function
@@ -116,7 +116,7 @@ either or both, same as `size_params` already lets a deployment override
 
 ## Scope
 
-This decision, and `cse_share_decision`'s wiring into `CandidateLogicalASAPDAGs::cost_sorted`
+This decision, and `cse_share_decision`'s wiring into `candidate_selection::cost_sorted`
 (originally into `implement_workload_with`, before `bind.rs` was retired —
 see above), close out #223's stage 4 and #212's original "add CSE" tracking
 issue. Stage 3 (`dag_export::structural_hash` unification) landed separately

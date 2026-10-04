@@ -319,7 +319,7 @@ Replacement::SubDAG(
 This strategy does **not** decide whether sharing is cheaper.
 
 That preference belongs to the cost model.
-`CandidateLogicalASAPDAGs::cost_sorted` calls `CostModel::cse_share_decision` when it ranks a
+`candidate_selection::cost_sorted` calls `CostModel::cse_share_decision` when it ranks a
 share-versus-recompute candidate pair. The strategy still returns both
 alternatives because enumeration and ranking are separate steps:
 
@@ -536,8 +536,8 @@ Then pass it to the selection-time APIs that accept a `&dyn CostModel`:
 let model = PreferDDSketch;
 
 let space = search_workload_with(roots, &default_strategies());
-let ranked = space.cost_sorted(&model);
-let selection = space.global_selection(&model);
+let ranked = cost_sorted(&space, &model);
+let selection = global_selection(&space, &model);
 ```
 
 Important: `rank_candidates` changes only the selection-time ordering; `ASAPStrategies` still enumerates every valid sketch candidate, in `summary_candidates` order, sized analytically.
@@ -634,7 +634,7 @@ fn estimate_cost(
 ) -> f64;
 ```
 
-The default returns `f64::NAN`, making the absence of a numeric model explicit. Override this hook when passing the model to `CandidateLogicalASAPDAGs::cost_sorted` if downstream code displays or otherwise consumes the `costs` values. Prefer to derive the result from the same inputs used by `rank_candidates` and the CSE cost hooks so numeric costs do not disagree with relative ordering.
+The default returns `f64::NAN`, making the absence of a numeric model explicit. Override this hook when passing the model to `candidate_selection::cost_sorted` if downstream code displays or otherwise consumes the `costs` values. Prefer to derive the result from the same inputs used by `rank_candidates` and the CSE cost hooks so numeric costs do not disagree with relative ordering.
 
 ---
 
@@ -664,7 +664,7 @@ For example:
 
 ```rust
 let ranked =
-    space.cost_sorted(&model);
+    cost_sorted(&space, &model);
 ```
 
 The important assertion is usually not that other valid candidates disappeared. They should not.
@@ -898,9 +898,9 @@ Use this table to find the right place for a change.
 | Produce the first-listed post-ASAP summary for one target (unranked, `summary_candidates` order) | `ASAPStrategies::replacements(...).into_iter().next()` |
 | Search a whole workload for supported legal candidates | `search_workload`/`search_workload_with` |
 | Enforce per-root result accuracy requirements | `search_workload_with_targets` |
-| Coordinate compatible choices across groups | `CandidateLogicalASAPDAGs::global_selection` |
+| Coordinate compatible choices across groups | `candidate_selection::global_selection` |
 | Assemble the selected logical DAG | `GlobalSelection::assemble_selected_dag` |
-| Get every candidate ranked best-first, across a whole workload | `CandidateLogicalASAPDAGs::cost_sorted` |
+| Get every candidate ranked best-first, across a whole workload | `candidate_selection::cost_sorted` |
 | Get a real numeric cost per candidate, not just a relative rank | `CostModel::estimate_cost` |
 | Enumerate valid sketch algorithms | `summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |

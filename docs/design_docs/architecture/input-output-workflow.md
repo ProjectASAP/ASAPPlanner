@@ -369,7 +369,7 @@ Then choose the operation matching the caller's responsibility:
 
 ### Ranked view
 
-`CandidateLogicalASAPDAGs::cost_sorted` returns one `RankedTargetSubDAGCandidates` for each
+`candidate_selection::cost_sorted` returns one `RankedTargetSubDAGCandidates` for each
 `TargetSubDAGCandidates` entry. Conceptually, it is the same target's
 alternatives in cost-model preference order where the model defines one
 (otherwise discovery order), with one displayed cost per alternative. It is
@@ -395,7 +395,7 @@ physical deployability.
 ### Selection and DAG assembly
 
 The input is `CandidateLogicalASAPDAGs` and a cost model. Call
-`CandidateLogicalASAPDAGs::global_selection(&cost_model)` once for the workload, then
+`candidate_selection::global_selection(&space, &cost_model)` once for the workload, then
 `GlobalSelection::assemble_selected_dag(root)` for each wanted query root.
 These are two public APIs, not one combined call: N roots require one selection
 and N assembly calls. Each successful assembly returns one DAG root; the caller

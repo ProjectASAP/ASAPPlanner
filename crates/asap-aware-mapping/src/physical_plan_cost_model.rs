@@ -356,6 +356,7 @@ impl CostModel for PhysicalPlanCostModel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan_selection::candidate_selection::global_selection;
     use std::cell::Cell;
     use std::collections::HashMap;
 
@@ -821,7 +822,7 @@ mod tests {
             &crate::replacement::default_strategies(),
         );
         let model = PhysicalPlanCostModel::new(&provider, zero_base.clone()).unwrap();
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(selected
             .for_target(&space.roots[0].1)
             .unwrap()
@@ -836,8 +837,7 @@ mod tests {
                 .calibration
                 .cost_per_network_byte = coefficient;
             let model = PhysicalPlanCostModel::new(&provider, zero_base.clone()).unwrap();
-            assert!(space
-                .global_selection(&model)
+            assert!(global_selection(&space, &model)
                 .for_target(&space.roots[0].1)
                 .unwrap()
                 .chosen
@@ -845,8 +845,7 @@ mod tests {
         }
         provider.handoffs = None;
         let model = PhysicalPlanCostModel::new(&provider, zero_base).unwrap();
-        assert!(space
-            .global_selection(&model)
+        assert!(global_selection(&space, &model)
             .for_target(&space.roots[0].1)
             .unwrap()
             .chosen
@@ -864,7 +863,7 @@ mod tests {
         let provider = TestProvider::new(true, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(
             selected.for_target(&planned_root).unwrap().chosen.is_some(),
             "a fully bound build-once summary cheaper than ten raw scans must be selected"
@@ -937,7 +936,7 @@ mod tests {
             },
         )
         .unwrap();
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(
             selected
                 .for_target(&space.roots[0].1)
@@ -975,7 +974,7 @@ mod tests {
         let provider = TestProvider::new(false, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(
             selected.for_target(&planned_root).unwrap().chosen.is_none(),
             "missing physical summary evidence must not fall back to a structural estimate"
@@ -1084,7 +1083,7 @@ mod tests {
         let provider = TestProvider::new(true, 100_000);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(selected.for_target(&planned_root).unwrap().chosen.is_none());
     }
 
