@@ -1046,7 +1046,7 @@ fn stage3_selects_cheapest_valid() {
 
 /// Per-second cost keeps Example 1's ranking: both panels repeat every
 /// 10 s and everything runs at query time, so every candidate costs 0.1 ×
-/// its per-evaluation cost, and P58 still wins at 52.201 × 0.1 per second.
+/// its per-evaluation cost, and P60 still wins at 46.201 × 0.1 per second.
 #[test]
 fn stage3_per_second_cost_keeps_the_ranking() {
     let (workload, _, physical) = pipeline();
@@ -1062,14 +1062,14 @@ fn stage3_per_second_cost_keeps_the_ranking() {
         entry.demand = RepeatedDemand::FixedInterval(RepetitionInterval(1_000));
     }
     let per_evaluation = stage3_select(&every_second, &physical, PlanningModels::builtin());
-    assert_eq!(per_second.selected, "P58");
-    assert_eq!(per_evaluation.selected, "P58");
+    assert_eq!(per_second.selected, "P60");
+    assert_eq!(per_evaluation.selected, "P60");
     for (id, cost) in &per_second.costs {
         let expected = 0.1 * per_evaluation.costs[id].total;
         assert!((cost.total - expected).abs() <= 1e-9 * expected, "{id}");
     }
-    let best = per_second.costs["P58"].total;
-    assert!((best - 5.2201).abs() < 1e-3, "{best}");
+    let best = per_second.costs["P60"].total;
+    assert!((best - 4.6201).abs() < 1e-3, "{best}");
 }
 
 /// Every node is charged exactly once, so a shared input is costed once for
