@@ -170,10 +170,18 @@ function deploymentRows(deployment) {
   const rows = [];
   const caps = deployment.capabilities;
   if (caps) {
-    const summaries = Array.isArray(caps.summaries)
-      ? caps.summaries.map((entry) => `${entry.summary} (${(entry.readouts || []).join(', ')})`).join(' · ')
-      : 'unrestricted';
-    rows.push(['Summaries', summaries]);
+    // Exact aggregates answer themselves; a sketch lists the estimates
+    // (readouts) the executor can read from it.
+    if (Array.isArray(caps.summaries)) {
+      const exact = caps.summaries.filter((entry) => /^exact /.test(entry.summary));
+      const sketches = caps.summaries.filter((entry) => !/^exact /.test(entry.summary));
+      if (exact.length) rows.push(['Exact aggregates', exact.map((entry) => entry.summary.replace(/^exact /, '')).join(', ')]);
+      if (sketches.length) {
+        rows.push(['Sketches → estimates', sketches.map((entry) => `${entry.summary} → ${(entry.readouts || []).join(', ') || 'none'}`).join(' · ')]);
+      }
+    } else {
+      rows.push(['Summaries', 'unrestricted']);
+    }
     if (caps.source) rows.push(['Capabilities from', String(caps.source)]);
     rows.push(['Ingestion-time maintenance', caps.ingestion_time ? 'supported' : 'not supported']);
     rows.push(['Keep query-time results across evaluations', caps.query_time_retention ? 'supported' : 'not supported']);

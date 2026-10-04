@@ -653,7 +653,8 @@ class StagePipelineTests(unittest.TestCase):
         deployment = {
             "capabilities": {
                 "source": "asap_executor::capabilities",
-                "summaries": [{"summary": "Kll", "readouts": ["Quantile"]},
+                "summaries": [{"summary": "exact Sum", "readouts": []}, {"summary": "exact Count", "readouts": []},
+                              {"summary": "Kll", "readouts": ["Quantile"]},
                               {"summary": "CmsWithHeap", "readouts": ["TopK"]}],
                 "ingestion_time": True, "query_time_retention": False, "memory_budget_bytes": None,
                 "raw_data_retained": False, "raw_bytes_per_sample": 16,
@@ -663,7 +664,8 @@ class StagePipelineTests(unittest.TestCase):
             "accuracy_model": {"name": "DefaultAccuracyModel", "evidence": "none"},
         }
         rows = dict(self.js.call("deploymentRows", deployment))
-        self.assertEqual(rows["Summaries"], "Kll (Quantile) · CmsWithHeap (TopK)")
+        self.assertEqual(rows["Exact aggregates"], "Sum, Count")
+        self.assertEqual(rows["Sketches → estimates"], "Kll → Quantile · CmsWithHeap → TopK")
         self.assertEqual(rows["Ingestion-time maintenance"], "supported")
         self.assertEqual(rows["Memory budget"], "none")
         self.assertEqual(rows["Raw data"], "not kept by the deployment: query-time plans pay for 16 bytes per sample")
