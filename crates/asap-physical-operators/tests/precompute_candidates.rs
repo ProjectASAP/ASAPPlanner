@@ -1,5 +1,6 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
 mod common;
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::{cost_model::DefaultCostModel, search_workload};
 use asap_physical_operators::{
     factory::create_planner_accumulator,
@@ -55,8 +56,7 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static
 
 fn grouped_rate() -> PhysicalASAPDAG {
     let space = grouped_rate_space();
-    let selected = space
-        .global_selection(&DefaultCostModel)
+    let selected = global_selection(&space, &DefaultCostModel)
         .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();

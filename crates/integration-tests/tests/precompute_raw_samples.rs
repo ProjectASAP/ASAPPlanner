@@ -7,6 +7,7 @@ use physical_common::compile_maintained_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::{
     search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
     TargetSubDAG,
@@ -69,9 +70,8 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
         })
         .collect::<Vec<_>>();
     let space = search_workload(vec![("query", root)]);
-    if let Ok(Some(selected)) = space
-        .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+    if let Ok(Some(selected)) =
+        global_selection(&space, &DefaultCostModel).assemble_selected_dag(&space.roots[0].1)
     {
         result.push(selected);
     }

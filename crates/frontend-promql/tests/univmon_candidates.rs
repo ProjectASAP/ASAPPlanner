@@ -4,6 +4,7 @@ use asap_aware_mapping::accuracy::{
     AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
 use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 mod support;
@@ -164,8 +165,7 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
                     .candidates
                     .iter()
                     .any(|candidate| candidate.has_missing_accuracy_evidence()));
-                assert!(!space
-                    .global_selection(&DefaultCostModel)
+                assert!(!global_selection(&space, &DefaultCostModel)
                     .for_target(&space.roots[0].1)
                     .unwrap()
                     .chosen
