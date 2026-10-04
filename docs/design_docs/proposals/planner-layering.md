@@ -3,16 +3,20 @@
 Status: proposal. Audience: designers and developers of ASAPPlanner and of deployments such
 as ASAPQuery-backend.
 
-Read Goal for the motivation and assumptions, Stages for the overview, the
-stage sections for the rules, the examples for why the rules are needed, and
-Scenarios for how the design is extended.
+Read Problem Definition for the motivation and requirements, ASAPPlanner Design
+for the design intuition, assumptions and stage overview, the stage sections for
+the rules, the examples for why the rules are needed, and Scenarios for how the
+design is extended.
 
 ## Contents
 
-- [Goal](#goal)
+- [Problem Definition](#problem-definition)
   - [Motivation](#motivation)
+  - [Design Requirements for ASAPPlanner](#design-requirements-for-asapplanner)
+- [ASAPPlanner Design](#asapplanner-design)
+  - [Design Intuition](#design-intuition)
   - [Assumptions](#assumptions)
-- [Stages](#stages)
+  - [ASAPPlanner Stages](#asapplanner-stages)
 - [Stages and their decisions](#stages-and-their-decisions)
   - [0. Language-specific frontends](#0-language-specific-frontends)
   - [1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization)
@@ -35,48 +39,123 @@ Scenarios for how the design is extended.
   - [Adding a new summary family](#adding-a-new-summary-family)
   - [Adding a better cost or accuracy estimation](#adding-a-better-cost-or-accuracy-estimation)
 
-## Goal
+## Problem Definition
 
 ### Motivation
 
-* Existing database query engines and optimizers do not consider ASAP
-  primitives for optimizing the queries: summaries such as sketches that trade bounded error for lower
-  cost.
-* They also do not consider the query and data workloads of different use
-  cases, which have the potential to share the common optimization with ASAP primitives. Example use case workloads can be streaming or batch data input, and repeated, batch or ad hoc queries.
-* So existing query planners miss the opportunity to share the benefits of ASAP primitives across
-  domains and use cases.
+* Existing query planners miss the opportunity to share the benefits of ASAP primitives across domains and use cases. ASAP Primitives can be sketches, sampling, statistical models, wavelets, machine learning generative models, etc, such algorithms preserving the a certain semantic information from the raw data. 
 
-In order to achieve the goals, ASAPPlanner needs to abstract the modeling the following for use cases:
+* ASAP Primitives can accelerate query execution, but the existing efforts are pretty ad-hoc and a point solution to a point use case scenario. For example, sketch for network monitoring, wavelets or sampling for AQP Query. There is no unified framework for leveraging the acceleration and cost-reduction benefits from mulitple primitive types. 
+  * Lacking a unified way / systematical way to leverage existing primitives for benefits, where the primitives are already a lot of algorithms proposed in the literature. 
+  * Duplicated efforts will be rediscovered when various use case scenarios trying to optimize with ASAP Primitives, they will re-discover and add the similar optimization rules again and again. But among use cases, they have the potential to share the common optimization with ASAP primitives, benefiting more use cases.
+
+* Therefore, ASAPPlanner aims for building a framework with the capbility to support ASAP Primitives within query execution plans, preserving the original query semantics, as well as fitting to differnet use case scenarios, for reusing the primitive acceleration ideas.
+
+### Design Requirements for ASAPPlanner
+
+* Query planner/optimizer should consider the query and data workloads of different use cases when doing query optimization. 
+  * Example use case workloads can be streaming or batch data input, and repeated, batch or ad hoc queries. The query engine and optimzer should be more specialized for targeted workload modeling. (This is not a novelty argument but we should model the workloads and optimize based on specific workload.)
+  * For example, repeated dashboard queries over time should be optimized by considering the overlapping computation between two same query expression over time, which is partially considered in time series databases. Modeling the workloads is the first step for futher optimization plan generation. 
+
+* In order to preserve the query semantics/application semantics and generate valid query plans, ASAPPlanner should model:
+  * *Logical Plan*: what data is needed and what computation is needed over the data.
+  * *Physical Plan*: How to retrieve/process data and what algorithm to use for a computation.
+  * We assume the use case deployment will generate the *execution plan* given a physical plan for now, given different use cases have different deployment constraints. 
+
+* In order to leverage the benefits from ASAP Primitives for query acceleration and cost reduction, we need to 
+  - (a) express the operations over ASAP Primitives, as well as
+  - (b) constructing the rules (replacement strategies) for replacing the original logical query plan with ASAP Primitive aware logical plans, where in this stage, summary/synopsis built from raw data is needed and computation over them is needed, in addition to over raw data. 
+
+* ASAPPlanner should selecting the optimal physical plan. 
+  * The optimization goals include reducing total query execution costs, obeying the application accuracy target.
+  * The use case deployment can take the physical plan and determine how the engines runs the plan at runtime (execution). So deployment constraints can be the input to ASAPPlanner for some invalid plans early pruning (e.g., if the deployment has no materialized view computation engine, MV is not an optimziation option).
+  * *Efficiency of selecting optimal physical plan*: ASAPPlanner currently doesn't consider how to early prune sub-optimal plans but just generates all possible candidates and then select an optimal one among all of them.
+  
+> --> VS: not clear what this means. it may be useful to have concrete use csaes and requirements 
+
+As a summary, in order to achieve the requirements, ASAPPlanner needs to abstract the following modeling:
 
 | Modeling | Contents |
 |---|---|
 | Query workload | Queries with recurrence (repeated, batch, ad hoc), predictability, time selection, and accuracy and latency requirements |
 | Data workload | Arrival (streaming, at rest, or both), volume, rate, cardinality and distribution |
 | Deployment inputs | Empirical cost model, empirical accuracy model and execution capabilities |
-| ASAP replacement strategies | Rules that replace a sub-DAG of the query expression with summary expressions, and the summary families each computation may use |
+| ASAP Primitive operators | Supported operation abstraction over ASAP Primitives, such as SummaryCreation, SummaryUpdate, SummaryMerge, SummaryDeletion, SummarySubtraction|
+| ASAP Primitive operation replacement strategies | Rules that replace a sub-DAG of the query expression with summary operators, forming a new ASAP-primitive-aware sub-DAG, preserving the same query semantic |
 
-ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
-inputs (TODO: define this data structure, [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how
-it is computed, and which plan is best. The deployment only supplies inputs and
-executes the plan: it provides its empirical cost model, empirical accuracy
-model and capabilities, but never plans queries or selects plans.
+> -> VS not clear what a replacement strategy means 
+
+
+## ASAPPlanner Design
+
+### Design Intuition 
+
+The design of ASAPPlanner is largely inspired by the existing DB Query engine work. 
+
+* *Semantic preserving*: We should borrow the DB Query Engine plan stages, i.e., the logical planning, physical planning separation. 
+  * So that we can have a framework for analyzing the semantics of the queries, and easily design replacement strategies for replacing a query intent with a set of ASAP Primitive operations with the same semantic. 
+  * We can add information of workload patterns over the planning framework and adds our own optimization rules targeting specific workloads.
+
+* *Materialized View (MV)*: Given that ASAP Primitives mostly work as summary over data, we leverage the idea of Materilzed View (MV) in Database world, and treat ASAP Primitives as MV, and automatically design optimization rules for rewriting queries, mapping queries, based on the operations ASAP primitives can support. 
+  * MV serves as an good integration opportunity for ASAP Primitives to work for semantic-preserving query computation. ASAPPlanner designs MV rules with aware of ASAP Primitives, as well as workload, e.g., we can build MV/incremental MV for repeated queries over time, specifically considering the window summary in ASAP Primitive library. The assumption that we can leverage MV is also, we observed the query and data workloads, where querie can be repated or sharing computation among a batch of queries, the query patterns persist long enough, and queries can be answered by the stored information based on ASAP primitives. 
+  * ASAPPlanner also provides the option of not computing materialized view at all but just execute the query over ASAP Primitive operators once and no reusing; this can potentially accelerate the queries as well due to the algorithmic complexity of ASAP Primitive computation and space is usually smaller than computing from raw data exactly. 
+
+> --> VS: i imagine the closest related work is actually in creating materialized views automatically given a workload. i think all we are doing is creating Semantic Preserving Materialzied Views instead of Raw Materialized Views
+
+
+> https://dl.acm.org/doi/10.1145/376284.375706
+> https://cloudberry.apache.org/docs/performance/optimize-queries/use-auto-materialized-view-to-answer-queries/
+> https://www.alibabacloud.com/blog/detailed-explanation-of-query-rewriting-based-on-materialized-views_598129
+> https://docs.aws.amazon.com/redshift/latest/dg/materialized-view-auto-rewrite.html
+
+
+
+* *Common Subexpression Elimination (CSE)*: In DB, CSE refers to identifying the common sub-query-expression within a query or multiple queires, and compute the same subexpression once and reuse to eliminate redundant processing.
+  * One example can be the `(price * (1 - discount))` is computed once and being reused, rather than twice. 
+
+    ```SQL
+    SELECT (price * (1 - discount)) AS net_price
+    FROM orders
+    WHERE (price * (1 - discount)) > 100;
+    ```
+
+  * CSE also serves as a good integration opportunity for ASAP Primitives, because many ASAP Primitives support the pattern of one data structure supporting multiple query intent. For example, one UnivMon sketch supports L2 norm, entropy, and cardinality 3 query intents; one arbitrary sub-window query framework, e.g., Exponential Histogram suports queries within arbitrary sub-window within the outter-most window; wavelets coefficients set in a way can support all linear operations, such as sum, avg, count; and many other examples.  
+
+
+
+
+
 
 ### Assumptions
 
 ASAPPlanner relies on the assumptions below. 
 
-1. **Query rewrite rules are given.** Rewrite and replacement rules (for
-   example, `avg` as `sum`/`count`, or a TopK as a Count-Min Sketch with a
-   heap) are written by developers or algorithm designers. ASAPPlanner applies them; it does not
-   discover or generate them.
-2. **Summary-family capabilities are given.** For each summary family, a
+1. **Summary-family capabilities are given.** For each summary family, an algorithm
    developer declares which computations it can answer, which estimates it can
    read out, how it is sized for an accuracy target, its error bound, and
    whether it can be merged, subtracted or deleted. ASAPPlanner does not
    automatically discover these capabilities.
-3. **Frontend semantics are given.** Each frontend preserves its source
+
+> --> VS: isnt this before 1?
+
+2. **Query replacement strategies are given, ASAPPlanner implements some strategies as a default set of strategies** Rewrite and replacement strategies (for
+   example, `avg` as `sum`/`count`, or a TopK as a Count-Min Sketch with a
+   heap) are written by developers or algorithm designers. ASAPPlanner does not automatically discover or generate them. 
+   * For ASAPPlanner, given one batch of queries (as a multi-root DAG), the strategies can be applied to a sub-DAG inside the DAG, one sub-DAG (part of the query execution) can be mapped to different candidates based on the strategies, this gives us an initial brute-force version of plan candidate generation.  
+   * The semantic/structure of the strategies (rules) are based on the logical DAG representation, where a pattern of a sub-DAG in the DAG can be identified, and being replace by another sub-DAG with ASAP-aware operators (primitive operators).
+   * These strategies can be potentially shared in different use cases and workloads, we depend on the cost model to rank all possible plans. For example, both the repeated dashboard query over time series data, and the batch query execution over data at rest, can leverage the TopK as a Count-Min Sketch replacement strategy. 
+   The strategies we have applied in ASAPPlanner, see Section [Stages and their decisions](#stages-and-their-decisions). 
+ 
+> --> VS: are there priorities across rules, is the mapping from query to rule one to one or one to many?
+
+> --> VS: is there an example of the schema/structure of these rules? do these rules apply to both streaming/recurrent and batch? 
+
+3. **Query-language frontend (e.g., SQL or PromQL query language themselves) semantics are given.** Each frontend preserves its source
    language's behavior, and ASAPPlanner obeys their semantic behavior.
+
+> --> VS: what is a frontend?  frontend usually refers to some graphic/user interface? 
+ 
+
 4. **Workload descriptions are inputs.** Recurrence, predictability,
    requirements and the data workload are supplied with the workload.
    ASAPPlanner does not infer them from traffic.
@@ -87,12 +166,22 @@ ASAPPlanner relies on the assumptions below.
    cheapest valid plan among the candidates produced by the given rules and
    capabilities, as estimated by the given models. It is not optimal over
    plans those rules cannot produce.
-7. **The deployment executes the plan as given.** It does not change summary
+7. **Efficiency of selecting optimal physical plan**: ASAPPlanner currently doesn't consider how to early prune sub-optimal plans but just generates all possible candidates and then select an optimal one among all of them.
+8. **The deployment executes the plan as given.** It does not change summary
    choices or materialization.
 
-## Stages
+### ASAPPlanner Stages
 
-In the diagram, × means the Cartesian product: each stage combines every option along one dimension with every option along the others.
+
+ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
+inputs (TODO: define this data structure, issue [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how it is computed, and which plan is best. The deployment only supplies data and query inputs and
+executes the plan: it provides its empirical cost model, empirical accuracy
+model and capabilities, but never optimize queries.
+
+> --> VS: what does physical plan mean? is this something the DB engine can run? also what does it mean to not plan queries? you mean schedule the order of query execution?
+
+
+In the diagram, × means the Cartesian product: each stage combines every option based on the replacement strategies along one dimension with every option along the others.
 
 ```text
  Query workload
@@ -112,51 +201,51 @@ In the diagram, × means the Cartesian product: each stage combines every option
     deployment capabilities)
                          │
                          ▼
-┌────────────────────────────── ASAPPlanner ──────────────────────────────┐
-│                                                                        │
-│ 0. Language-specific frontends                                         │
-│    Parse and convert source-language queries into a common logical     │
-│    representation. Reject unsupported query expressions.               │
-│                                                                        │
-│    Output: CandidateLogicalDAGs                                        │
-│                                                                        │
-│                         │                                              │
-│                         ▼                                              │
-│ Logical planning — what to compute                                     │
-│                                                                        │
-│ 1. Logical ASAP-aware optimization                                     │
-│    Explore semantically equivalent and legal logical candidates:       │
-│                                                                        │
-│      summary families                                                  │
-│      × query rewrites                                                  │
-│      × sharing one summary across multiple computations                │
-│                                                                        │
-│    Output: CandidateLogicalASAPDAGs                                    │
-│                                                                        │
-│                         │                                              │
-│                         ▼                                              │
-│ Physical planning — how to compute                                     │
-│                                                                        │
-│ 2. Physical ASAP-aware optimization                                    │
-│    Explore physical implementations of each logical candidate:         │
-│                                                                        │
-│      materialization decisions                                         │
-│      × physical operator implementations                               │
-│      × parallelism and partitioning                                    │
-│      × resource management                                             │
-│                                                                        │
-│    Output: CandidatePhysicalASAPDAGs                                   │
-│                                                                        │
-│                         │                                              │
-│                         ▼                                              │
-│ 3. Plan selection                                                      │
-│    Evaluate complete physical candidates using the deployment's        │
-│    empirical cost and accuracy models. Reject candidates that violate  │
-│    accuracy, latency, or capability constraints.                       │
-│                                                                        │
-│    Choose the cheapest valid plan for the whole workload.              │
-│                                                                        │
-└────────────────────────────────┬───────────────────────────────────────┘
+┌────────────────────────────── ASAPPlanner ───────────────────────────-----───┐
+│                                                                              │
+│ 0. Query-language-specific frontends                                         │
+│    Parse and convert source-language queries into a common logical           │
+│    representation. Reject unsupported query expressions.                     │
+│                                                                              │
+│    Output: CandidateLogicalDAGs (a set of LogicalDAG)                        │
+│                                                                              │
+│                         │                                                    │
+│                         ▼                                                    │
+│ Logical planning — what to compute                                           │
+│                                                                              │
+│ 1. Logical ASAP-aware optimization                                           │
+│    Explore semantically equivalent and legal logical candidates:             │
+│                                                                              │
+│      summary families, summary operations                                    │
+│      × query rewrites                                                        │
+│      × sharing one common subexpresion/summary across multiple computations  │
+│                                                                              │
+│    Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)                │
+│                                                                              │
+│                         │                                                    │
+│                         ▼                                                    │
+│ Physical planning — how to compute                                           │
+│                                                                              │
+│ 2. Physical ASAP-aware optimization                                          │
+│    Explore physical implementations of each logical candidate:               │
+│                                                                              │
+│      materialization decisions                                               │
+│      × physical operator implementations                                     │
+│      × parallelism and partitioning                                          │
+│      × resource management                                                   │
+│                                                                              │
+│    Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)              │
+│                                                                              │
+│                         │                                                    │
+│                         ▼                                                    │
+│ 3. Plan selection                                                            │
+│    Evaluate complete physical candidates using the deployment's              │
+│    empirical cost and accuracy models. Reject candidates that violate        │
+│    accuracy, latency, or capability constraints.                             │
+│                                                                              │
+│    Choose the cheapest valid plan for the whole workload.                    │
+│                                                                              │
+└────────────────────────────────┬─────────────────────────────────────------──┘
                                  │
                                  ▼
                     one selected PhysicalASAPDAG
@@ -170,13 +259,12 @@ In the diagram, × means the Cartesian product: each stage combines every option
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-The planner receives three groups of inputs:
 
-| Input | Contents |
-|---|---|
-| Query workload | Source-language expressions, recurrence, predictability, time selection, accuracy requirements, and latency requirements |
-| Data workload | Data arrival pattern, sampling cadence, ingestion volume and rate, cardinality, and distribution |
-| Deployment inputs | Empirical cost model, empirical accuracy model, and execution capabilities |
+> --> VS: this sounds good. it may be useful to say "why" we decouple into stages or if the decoupling loses some functionality or optimality? 
+> is it mostly to make problem simple/tractable? 
+
+
+ 
 
 ## Stages and their decisions
 
@@ -200,14 +288,18 @@ selection picks one. Example 1 traces this growth step by step.
 | Stage | Input | Decides | Output |
 |---|---|---|---|
 | 0. Frontends | `query`, `language` | Parse and convert to a common logical form; reject what cannot be represented | `CandidateLogicalDAGs` |
-| 1. Logical ASAP-aware optimization | Logical DAGs; accuracy requirements, `time_selection`, repetition interval | Summary replacement (Pass 1); ASAP-aware CSE (Pass 2) | `CandidateLogicalASAPDAGs` |
+| 1. Logical ASAP-aware optimization | Logical DAGs; accuracy requirements, `time_selection`, repetition interval | Summary replacement (Pass 1); ASAP-aware Common Subexpression Elimination (CSE) (Pass 2) | `CandidateLogicalASAPDAGs` |
 | 2. Physical ASAP-aware optimization | Logical ASAP DAGs; `recurrence`, `predictability`, `DataWorkload` | Materialization; physical operators; parallelism and resources (TODO) | `CandidatePhysicalASAPDAGs` |
 | 3. Plan selection | Physical candidates; `requirements`; cost model, accuracy model, capabilities | Reject invalid candidates; pick the cheapest plan for the whole workload | One `PhysicalASAPDAG` |
 | 4. Execution (deployment) | The selected `PhysicalASAPDAG` | Run ingestion, storage and query-time computation | Query results |
 
 The sections below describe each stage.
 
+--> VS: What is CSE? expand on first use?
+
+
 ### 0. Language-specific frontends
+
 
 The frontend converts each query into a `LogicalDAG`. Nodes represent logical
 query operations, including selectors, transformations, aggregations, grouping
@@ -430,10 +522,22 @@ which is what lets one shared summary beat several cheaper independent ones:
 the cost of a shared summary is estimated once, with the demand of all its
 consumers.
 
+--> VS: I still dont understand the "actual algorithm" that the planner is using. or is the planner just doing some 
+ brute force ?
+
+--> VS: I would also like to see end to end examples of this in action with the use csaes -- Hamna, DQC, netflow, turboprom, agentic analytics?
+
 ### 4. Execution
 
 Execution runs outside ASAPPlanner. The deployment runs the selected plan as
 given: it does not choose among summaries or decide what to materialize.
+
+
+--> VS: feel like using the DAG viewer that Hamna and others were using to showcase these examples will be a 
+good forcing function to use that tool and also see the intuition for what this planner is doing 
+ 
+
+
 
 ## End-to-end examples
 
