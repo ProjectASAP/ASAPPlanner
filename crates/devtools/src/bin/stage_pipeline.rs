@@ -240,7 +240,9 @@ fn target_owners(inventory: &LocalLogicalCandidates<usize>) -> Vec<usize> {
         .collect()
 }
 
-/// E.g. "Q1 exact · Q2 CMS+heap"; exact accumulators are listed in parentheses.
+/// E.g. "Q1 exact · Q2 CMS+heap"; exact accumulators are listed in
+/// parentheses. A sketch that absorbs the aggregate beneath it is
+/// "whole-expression".
 fn label(inventory: &LocalLogicalCandidates<usize>, owners: &[usize], choice: &[usize]) -> String {
     (0..inventory.roots.len())
         .map(|query| {
@@ -257,11 +259,18 @@ fn label(inventory: &LocalLogicalCandidates<usize>, owners: &[usize], choice: &[
                     Realization::ExactAggregate { kind, .. } => {
                         accumulators.push(format!("{kind:?} acc"))
                     }
-                    Realization::Sketch(kind) => sketches.push(match kind.algorithm() {
-                        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-                        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-                        other => format!("{other:?}"),
-                    }),
+                    Realization::Sketch(kind) => {
+                        let name = match kind.algorithm() {
+                            SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
+                            SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
+                            other => format!("{other:?}"),
+                        };
+                        // The sketch reads the inner aggregate's input and replaces it.
+                        sketches.push(match target.absorbs[index] {
+                            Some(_) => format!("whole-expression {name}"),
+                            None => name,
+                        });
+                    }
                     other => sketches.push(format!("{other:?}")),
                 }
             }
