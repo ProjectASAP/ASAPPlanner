@@ -99,7 +99,7 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
                     .with_coverage(SummaryCoverage {
                         source: source.clone(),
                         regions: vec![CoverageRegion {
-                            time_ms: Some(end - PANE_MS..end),
+                            time_ms: Some((end - PANE_MS..end).into()),
                             population: BTreeMap::new(),
                         }],
                     })
