@@ -184,7 +184,7 @@ model and capabilities, but never optimize queries.
 In the diagram, × means the Cartesian product: each stage combines every option based on the replacement strategies along one dimension with every option along the others.
 
 ```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 900, "nodeSpacing": 40, "rankSpacing": 40}}}%%
+%%{init: {"flowchart": {"wrappingWidth": 900, "nodeSpacing": 30, "rankSpacing": 25}}}%%
 flowchart TB
   subgraph INPUTS["Inputs"]
     direction LR
@@ -195,55 +195,48 @@ flowchart TB
 
   subgraph PLANNER["ASAPPlanner"]
     direction TB
+    TOP[" "]:::anchor
+    TOP ~~~ H0
     subgraph ST0[" "]
-      direction TB
       H0["0. Query-language-specific frontends"]:::title
       B0["Parse and convert source-language queries into a common logical<br/>representation. Reject unsupported query expressions.<br/><br/>Output: CandidateLogicalDAGs (a set of LogicalDAG)"]:::body
       H0 ~~~ B0
     end
 
     subgraph LOGICAL["Logical planning — what to compute"]
-      direction TB
-      subgraph ST1[" "]
-        direction TB
-        H1["1. Logical ASAP-aware optimization"]:::title
-        B1["Explore semantically equivalent and legal logical candidates:<br/><br/>summary families, summary operations<br/>× query rewrites<br/>× sharing one common subexpresion/summary across multiple computations<br/><br/>Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)"]:::body
-        H1 ~~~ B1
-      end
+      H1["1. Logical ASAP-aware optimization"]:::title
+      B1["Explore semantically equivalent and legal logical candidates:<br/><br/>summary families, summary operations<br/>× query rewrites<br/>× sharing one common subexpresion/summary across multiple computations<br/><br/>Output: CandidateLogicalASAPDAGs (a set of LogicalASAPDAG)"]:::body
+      H1 ~~~ B1
     end
 
     subgraph PHYSICAL["Physical planning — how to compute"]
-      direction TB
-      subgraph ST2[" "]
-        direction TB
-        H2["2. Physical ASAP-aware optimization"]:::title
-        B2["Explore physical implementations of each logical candidate:<br/><br/>materialization decisions<br/>× physical operator implementations<br/>× parallelism and partitioning<br/>× resource management<br/><br/>Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)"]:::body
-        H2 ~~~ B2
-      end
+      H2["2. Physical ASAP-aware optimization"]:::title
+      B2["Explore physical implementations of each logical candidate:<br/><br/>materialization decisions<br/>× physical operator implementations<br/>× parallelism and partitioning<br/>× resource management<br/><br/>Output: CandidatePhysicalASAPDAGs (a set of PhysicalASAPDAG)"]:::body
+      H2 ~~~ B2
     end
 
     subgraph ST3[" "]
-      direction TB
       H3["3. Plan selection"]:::title
       B3["Evaluate complete physical candidates using the deployment's<br/>empirical cost and accuracy models. Reject candidates that violate<br/>accuracy, latency, or capability constraints.<br/><br/>Choose the cheapest valid plan for the whole workload."]:::body
       H3 ~~~ B3
     end
 
-    ST0 --> LOGICAL --> PHYSICAL --> ST3
+    B0 --> H1
+    B1 --> H2
+    B2 --> H3
   end
 
   subgraph DEPLOY["Deployment"]
-    direction TB
-    subgraph ST4[" "]
-      direction TB
-      H4["4. Execution"]:::title
-      B4["deployment executes the selected DAG (plan)."]:::body
-      H4 ~~~ B4
-    end
+    H4["4. Execution"]:::title
+    B4["deployment executes the selected DAG (plan)."]:::body
+    H4 ~~~ B4
   end
 
-  INPUTS --> PLANNER
-  ST3 -- "one selected PhysicalASAPDAG" --> DEPLOY
+  QW ~~~ TOP
+  DW ~~~ TOP
+  DI ~~~ TOP
+  INPUTS --> TOP
+  B3 -- "one selected PhysicalASAPDAG" --> H4
 
   click H0 href "#0-language-specific-frontends"
   click H1 href "#1-logical-asap-aware-optimization"
@@ -253,13 +246,14 @@ flowchart TB
 
   classDef input fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef title fill:none,stroke:none,color:#0969da,font-weight:bold;
+  classDef anchor fill:none,stroke:none,font-size:1px;
   classDef body fill:none,stroke:none,color:#000;
   style INPUTS fill:#fff,stroke:#5f6368;
   style ST0 fill:#fff,stroke:#5f6368;
-  style ST1 fill:#fff,stroke:#5f6368;
-  style ST2 fill:#fff,stroke:#5f6368;
+  style LOGICAL fill:#fff,stroke:#5f6368;
+  style PHYSICAL fill:#fff,stroke:#5f6368;
   style ST3 fill:#fff,stroke:#5f6368;
-  style ST4 fill:#fff,stroke:#5f6368;
+  style DEPLOY fill:#fff,stroke:#5f6368;
 ```
 
 Stage details: 
