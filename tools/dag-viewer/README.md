@@ -91,6 +91,21 @@ editor") and go to
 parameter takes any JSON file path served next to `index.html`. You can also
 load a stage document with the file picker.
 
+To see the planner's own output for all six #509 examples (1, 2, 3a, 3b, 4a
+and 4b), generate them next to `index.html` and open, for example,
+<http://127.0.0.1:8000/?doc=out/example4b.json>:
+
+```bash
+mkdir -p tools/dag-viewer/out
+for e in 1 2 3a 3b 4a 4b; do
+  cargo run -q -p asap-devtools --bin stage_pipeline -- \
+    --example planner-layering-$e --out tools/dag-viewer/out/example$e.json
+done
+```
+
+Stage 3 prices every plan; `--max-candidates` (default 64) only limits how
+many plans a document carries, cheapest first, and the list says so.
+
 The sample, `examples/stage-pipeline.sample.json`, is hand-written. It
 follows #509's Example 1 with both queries:
 

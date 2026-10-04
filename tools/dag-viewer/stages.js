@@ -163,6 +163,15 @@ function rankPhysicalCandidates(doc) {
     });
 }
 
+// When the document carries only some plans (`shown_of`, written by
+// `stage_pipeline --max-candidates`), how many of how many; otherwise ''.
+function shownOfText(doc) {
+  const of = doc && doc.shown_of;
+  const shown = doc && doc.stage2_physical_asap && doc.stage2_physical_asap.candidates;
+  if (!of || !Array.isArray(shown)) return '';
+  return `showing ${shown.length} of ${of.physical} plans, cheapest first; Stage 3 priced ${of.priced} and selected among all of them`;
+}
+
 // The document's optional `deployment` section (#509 deployment inputs) as
 // [label, text] rows; an absent section yields no rows.
 function deploymentRows(deployment) {

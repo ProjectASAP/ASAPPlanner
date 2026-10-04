@@ -677,6 +677,14 @@ class StagePipelineTests(unittest.TestCase):
         self.assertEqual(rows["Raw data"], "kept by the deployment (not charged)")
         self.assertEqual(self.js.call("deploymentRows", None), [])
 
+    def test_partial_documents_say_how_many_plans_they_carry(self):
+        """`shown_of` from `stage_pipeline --max-candidates` reads as N of M plans."""
+        doc = {"shown_of": {"logical": 486, "physical": 486, "priced": 486},
+               "stage2_physical_asap": {"candidates": [{"id": "P1"}, {"id": "P2"}]}}
+        self.assertEqual(self.js.call("shownOfText", doc),
+                         "showing 2 of 486 plans, cheapest first; Stage 3 priced 486 and selected among all of them")
+        self.assertEqual(self.js.call("shownOfText", {"stage2_physical_asap": {"candidates": []}}), "")
+
     def test_payload_kinds_map_onto_node_style_names(self):
         """Wire payload kinds reuse node-style.js categories."""
         cases = {
