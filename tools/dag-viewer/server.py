@@ -43,16 +43,58 @@ def write_examples(force: bool) -> None:
         )
 
 
+COLUMN_TYPES = {"timestamp", "utf8", "string", "float64", "double", "int64", "bigint"}
+
+
+def table_args(tables: object) -> list[str]:
+    """`--table <json>` for each SQL table of an editor request."""
+    if not isinstance(tables, list) or len(tables) > 50:
+        raise ValueError("tables must be a list of at most 50 tables")
+    args, names = [], set()
+    for index, table in enumerate(tables, 1):
+        name = table.get("name") if isinstance(table, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"table #{index} needs a name")
+        if name in names:
+            raise ValueError(f"table {name} is declared twice")
+        names.add(name)
+        columns = table.get("columns")
+        if not isinstance(columns, list) or not 1 <= len(columns) <= 500:
+            raise ValueError(f"table {name} must have 1–500 columns")
+        for column in columns:
+            if not isinstance(column, dict) or not isinstance(column.get("name"), str) or not column["name"].strip():
+                raise ValueError(f"table {name}: every column needs a name")
+            if str(column.get("type", "")).lower() not in COLUMN_TYPES:
+                raise ValueError(f"table {name}: column {column['name']} has type {column.get('type')!r}, "
+                                 f"not one of {', '.join(sorted(COLUMN_TYPES))}")
+            if not isinstance(column.get("nullable", True), bool):
+                raise ValueError(f"table {name}: column {column['name']}.nullable must be true or false")
+        time_index = table.get("time_index")
+        if time_index is not None and (not isinstance(time_index, int) or isinstance(time_index, bool)
+                                       or not 0 <= time_index < len(columns)):
+            raise ValueError(f"table {name}: time_index must be a column index")
+        args.extend(["--table", json.dumps(table)])
+    return args
+
+
 def plan_args(payload: dict, out: str) -> list[str]:
     """The `stage_pipeline` arguments for an editor request."""
+    language = payload.get("language", "promql")
+    if language not in ("promql", "sql"):
+        raise ValueError("language must be promql or sql")
+    label = "PromQL" if language == "promql" else "SQL"
     queries = payload.get("queries")
     if not isinstance(queries, list) or not 1 <= len(queries) <= 20:
-        raise ValueError("queries must contain 1–20 PromQL queries")
+        raise ValueError(f"queries must contain 1–20 {label} queries")
     args = [str(BINARY)]
+    if language == "sql":
+        args.extend(table_args(payload.get("tables", [])))
+    elif payload.get("tables"):
+        raise ValueError("tables apply only to SQL")
     for index, query in enumerate(queries, 1):
         if not isinstance(query, str) or not query.strip() or len(query) > 10_000:
             raise ValueError(f"query #{index} must contain 1–10000 characters")
-        args.extend(["--promql", query])
+        args.extend([f"--{language}", query])
     epsilon, delta = payload.get("epsilon"), payload.get("delta")
     if delta is not None and epsilon is None:
         raise ValueError("δ needs ε")
