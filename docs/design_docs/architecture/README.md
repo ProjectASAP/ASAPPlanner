@@ -53,7 +53,8 @@ an unsupported physical alternative into a deployable plan.
 | Shared IR | `asap-types` | The unified operator IR (`ir`: one `OperatorNode` before and after ASAP optimization), schemas, workloads, guarantees, and exported plan data |
 | Front-end common | `frontend-common` | Name-based `UnresolvedOp` tree shared by the front ends, and `resolve_root` into the operator IR |
 | Query frontends | `frontend-sql`, `frontend-promql`, `frontend-metricsql` | Parse source languages and produce canonical Pre-ASAP queries |
-| ASAP-aware mapping | `asap-aware-mapping` | Candidate generation, CSE, legality, accuracy propagation, costing, and ranking |
+| ASAP-aware mapping | `asap-logical-optimizer`, `asap-physical-optimizer`, `asap-plan-selection` | #509 Stages 1–3: candidate generation, CSE, legality and accuracy propagation; physical candidates; costing and selection |
+| Planner facade | `asap-planner` | Lowering dispatch, the optimization pass (`OptimizationPass`, `StagePipeline`) and `optimize` |
 | Developer inspection | `devtools` | Expose planner DAGs, alternatives, decisions, and explanations for inspection |
 | End-to-end validation | `integration-tests` | Verify behavior across frontends, mapping, and output IR |
 
