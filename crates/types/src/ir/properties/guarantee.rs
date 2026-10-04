@@ -9,8 +9,7 @@
 //! failure-probability expressions, the provenance trail, and the typed
 //! rejection reasons. The *algebra* that composes these (the `AccuracyModel`
 //! trait, its default conservative rules, and budget allocation) lives one
-//! layer up in `asap_logical_optimizer::accuracy`, the same layering
-//! [`crate::dag_export`] keeps for cost decisions: this crate defines the
+//! layer up in `asap_logical_optimizer::accuracy`: this crate defines the
 //! shapes, the planning crate decides.
 //!
 //! ## What a guarantee says
