@@ -236,10 +236,10 @@ function summaryFamilyText(family) {
 }
 
 // Whether a summary keeps one state per group or one shared (Hydra) state for all groups.
-function summaryInstancesText(grouping) {
+function summaryInstancesText(grouping, reduction) {
   const shared = grouping && grouping.SharedMultiSubpopulation;
   if (shared) return [`one shared ${shared.kind}`].concat(wireParams(shared.params)).join(' · ');
-  if (grouping === 'PerSubpopulationInstance') return 'one per group';
+  if (grouping === 'PerSubpopulationInstance') return reduction === 'PerEntity' ? 'one per series' : 'one per group';
   return compactWire(grouping);
 }
 
@@ -272,7 +272,7 @@ function stageNodeLines(node, inputSchema) {
     case 'summary_agg':
       lines.push(`summary: ${summaryFamilyText(op.family)}`);
       if (wireGrouping(op.reduction, inputSchema)) lines.push(wireGrouping(op.reduction, inputSchema));
-      lines.push(`instances: ${summaryInstancesText(op.grouping)}`);
+      lines.push(`instances: ${summaryInstancesText(op.grouping, op.reduction)}`);
       break;
     case 'summary_estimate': lines.push(`query: ${compactWire(op.query)}`); break;
     default: break;
