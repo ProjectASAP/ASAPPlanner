@@ -75,6 +75,25 @@ impl UnivMonAccumulator {
         Ok(())
     }
 
+    /// SQL identities are kept in their original type: converting Int64 to
+    /// Float64 would collapse neighboring keys above 2^53.
+    pub fn insert_value(&mut self, value: &crate::values::Value) -> Result<(), Error> {
+        use crate::values::Value;
+        match value {
+            Value::Null => return Ok(()),
+            Value::Float64(number) if number.is_finite() => return self.insert_sample(*number),
+            Value::Bool(_) | Value::Int64(_) | Value::Utf8(_) => {}
+            _ => return Err("unsupported UnivMon identity type or nonfinite sample".into()),
+        }
+        let key = value.key()?;
+        self.inner
+            .bucket_size
+            .checked_add(1)
+            .ok_or("UnivMon count overflow")?;
+        self.inner.insert(&DataInput::Bytes(&key), 1);
+        Ok(())
+    }
+
     fn compatible(&self, other: &Self) -> bool {
         (
             self.inner.heap_size,
@@ -113,15 +132,25 @@ impl UnivMonAccumulator {
 
 impl AggregateCore for UnivMonAccumulator {
     fn approx_memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(
-            self.inner.layer_size.saturating_mul(
-                self.inner
-                    .sketch_row
-                    .saturating_mul(self.inner.sketch_col)
-                    .saturating_mul(16)
-                    .saturating_add(self.inner.heap_size.saturating_mul(256)),
-            ),
-        )
+        let key_bytes = (0..self.inner.layer_size)
+            .flat_map(|layer| self.inner.hh_layers[layer].heap())
+            .map(|item| match &item.key {
+                asap_sketchlib::HeapItem::String(key) => key.capacity(),
+                asap_sketchlib::HeapItem::Bytes(key) => key.capacity(),
+                _ => 0,
+            })
+            .fold(0usize, usize::saturating_add);
+        key_bytes
+            .saturating_add(std::mem::size_of::<Self>())
+            .saturating_add(
+                self.inner.layer_size.saturating_mul(
+                    self.inner
+                        .sketch_row
+                        .saturating_mul(self.inner.sketch_col)
+                        .saturating_mul(16)
+                        .saturating_add(self.inner.heap_size.saturating_mul(256)),
+                ),
+            )
     }
     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
         Box::new(self.clone())
@@ -218,5 +247,43 @@ mod tests {
         terminal.free();
         assert!(UnivMonAccumulator::from_sketch(terminal).is_ok());
         assert!(UnivMonAccumulator::from_sketch(UnivMon::init_univmon(4, 21, 16, 2)).is_err());
+    }
+    /// Typed keys remain distinct after merging and restoring persisted native state.
+    #[test]
+    fn typed_keys_merge_and_roundtrip() {
+        use crate::values::Value;
+        let mut left = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+        let mut right = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+        for _ in 0..2 {
+            left.insert_value(&Value::Utf8("192.0.2.1".into())).unwrap();
+            right
+                .insert_value(&Value::Utf8("192.0.2.2".into()))
+                .unwrap();
+        }
+        left.merge_in_place(&right).unwrap();
+        let bytes = left.sketch().serialize_to_bytes().unwrap();
+        let restored =
+            UnivMonAccumulator::from_sketch(UnivMon::deserialize_from_bytes(&bytes).unwrap())
+                .unwrap();
+        for (statistic, expected) in [
+            (SketchStatistic::Cardinality, 2.0),
+            (SketchStatistic::FrequencyL2, 8.0_f64.sqrt()),
+            (SketchStatistic::FrequencyEntropy, 1.0),
+        ] {
+            assert!((restored.estimate(&statistic).unwrap() - expected).abs() < 0.01);
+        }
+    }
+
+    /// Retained variable-length identities contribute to the runtime memory reservation.
+    #[test]
+    fn memory_accounts_for_string_identities() {
+        let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+        let empty = state.approx_memory_bytes();
+        state
+            .insert_value(&crate::values::Value::Utf8("x".repeat(4096).into()))
+            .unwrap();
+        assert!(state.approx_memory_bytes() >= empty + 4096);
+        state.clear();
+        assert_eq!(state.approx_memory_bytes(), empty);
     }
 }

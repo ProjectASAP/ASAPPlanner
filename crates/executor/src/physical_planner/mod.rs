@@ -856,8 +856,21 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                         };
                         let m = match m {
                             AggIntent::Count { .. } => Reduction::Count,
+                            AggIntent::Cardinality { cols, .. } => {
+                                Reduction::Cardinality(if cols.is_empty() {
+                                    vec![column(None)?]
+                                } else {
+                                    cols.clone()
+                                })
+                            }
                             AggIntent::Sum { col } => Reduction::Sum(column(*col)?),
                             AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
+                            AggIntent::FrequencyL2 { col, .. } => {
+                                Reduction::FrequencyL2(column(*col)?)
+                            }
+                            AggIntent::FrequencyEntropy { col, .. } => {
+                                Reduction::FrequencyEntropy(column(*col)?)
+                            }
                             AggIntent::Min { col } => Reduction::Min(column(*col)?),
                             AggIntent::Max { col } => Reduction::Max(column(*col)?),
                             _ => {
