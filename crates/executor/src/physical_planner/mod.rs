@@ -404,7 +404,13 @@ fn compile_internal(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                let Some(NonASAPOp::Scan { schema, .. }) = child.non_asap() else {
+                // A tumbling pane reads its window through a TimeShift (#580);
+                // the deployment supplies the shifted raw rows.
+                let source = match child.non_asap() {
+                    Some(NonASAPOp::TimeShift { child, .. }) => child,
+                    _ => child,
+                };
+                let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
                 if !schema.closed || update.item.is_some() {
