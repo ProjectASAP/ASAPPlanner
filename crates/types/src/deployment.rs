@@ -101,6 +101,13 @@ pub struct SummarySupport {
     pub readouts: BTreeSet<Readout>,
 }
 
+impl SummarySupport {
+    /// E.g. "Kll", "HydraCms" or "exact Sum".
+    pub fn name(&self) -> String {
+        name(&self.family, &self.layout)
+    }
+}
+
 /// A summary family, without its sizing parameters.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SummaryFamily {
