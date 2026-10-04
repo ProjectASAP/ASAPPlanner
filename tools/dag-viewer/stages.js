@@ -218,6 +218,31 @@ function formatTiming(timing) {
   return String(timing || 'unknown');
 }
 
+// `{"Variant": {"width": 272, ...}}` as "width 272 · ..."; `heap_size` reads as "heap".
+function wireParams(params) {
+  const inner = params && typeof params === 'object' ? Object.values(params)[0] : null;
+  if (!inner || typeof inner !== 'object') return [];
+  return Object.entries(inner).map(([key, value]) => `${key.replace(/_size$/, '')} ${compactWire(value)}`);
+}
+
+// A summary family with its configured parameters, e.g. "CmsWithHeap · depth 7 · heap 100 · width 272".
+function summaryFamilyText(family) {
+  if (family && Array.isArray(family.Sketch)) {
+    const kind = family.Sketch[0] || {};
+    return [kind.algorithm || 'sketch'].concat(wireParams(kind.params)).join(' · ');
+  }
+  if (family && Array.isArray(family.ExactAggregate)) return `exact ${family.ExactAggregate[0]}`;
+  return compactWire(family);
+}
+
+// Whether a summary keeps one state per group or one shared (Hydra) state for all groups.
+function summaryInstancesText(grouping) {
+  const shared = grouping && grouping.SharedMultiSubpopulation;
+  if (shared) return [`one shared ${shared.kind}`].concat(wireParams(shared.params)).join(' · ');
+  if (grouping === 'PerSubpopulationInstance') return 'one per group';
+  return compactWire(grouping);
+}
+
 // Box text from concrete payload fields; the sidebar shows the full payload.
 function stageNodeLines(node, inputSchema) {
   const payload = node.payload || {};
@@ -244,14 +269,11 @@ function stageNodeLines(node, inputSchema) {
       lines.push(`rows: ${op.n === null || op.n === undefined ? 'all' : op.n}${op.offset ? `, offset ${op.offset}` : ''}`);
       if (wirePartition(op.partition_by, inputSchema)) lines.push(wirePartition(op.partition_by, inputSchema));
       break;
-    case 'summary_agg': {
-      const sketch = op.family && Array.isArray(op.family.Sketch) ? op.family.Sketch : null;
-      lines.push(`family: ${sketch ? sketch[0].algorithm : compactWire(op.family)}`);
+    case 'summary_agg':
+      lines.push(`summary: ${summaryFamilyText(op.family)}`);
       if (wireGrouping(op.reduction, inputSchema)) lines.push(wireGrouping(op.reduction, inputSchema));
-      const shared = op.grouping && op.grouping.SharedMultiSubpopulation;
-      lines.push(`layout: ${shared ? shared.kind : compactWire(op.grouping)}`);
+      lines.push(`instances: ${summaryInstancesText(op.grouping)}`);
       break;
-    }
     case 'summary_estimate': lines.push(`query: ${compactWire(op.query)}`); break;
     default: break;
   }
