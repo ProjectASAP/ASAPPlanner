@@ -59,6 +59,16 @@ shows each outcome:
 Rejected plans also show Stage 3's reason. Without a Stage 3 result, the
 physical lane and the list show no costs.
 
+Summary nodes show their configuration, for example
+`summary: CmsWithHeap · depth 7 · heap 100 · width 272`, and whether they
+keep one state per group (or series) or one shared Hydra state.
+
+When the document has a `deployment` section, a **Deployment inputs** list
+shows what the deployment supplied: the summaries and readouts it can run,
+whether it maintains state at ingestion time, its memory budget, whether it
+keeps raw data (query-time plans pay for raw retention when it does not),
+the cost model with its calibration constants, and the accuracy model.
+
 Clicking a physical candidate shows it in lane 3, and shows the logical
 candidate it implements in lane 2. That logical candidate is outlined in
 the list and in the lane.
