@@ -1,4 +1,5 @@
 //! Pass 1 alternatives over SQL row sources compose, compile and execute.
+mod executor_models;
 mod physical_common;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -9,7 +10,7 @@ use asap_logical_optimizer::pass1::logical_candidates::{
     compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
     LocalLogicalCandidates,
 };
-use asap_plan_selection::{plan_stages, PlanningModels};
+use asap_plan_selection::plan_stages;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
@@ -17,6 +18,7 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Evidence, EvidenceSource, Predictability, QueryRecurrence, Rate,
     RootDemand,
 };
+use executor_models::executor_models;
 
 fn catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
@@ -134,7 +136,7 @@ async fn example2_design_candidates_all_build() {
         input_cardinality: declared(10_000_000),
         ..Default::default()
     };
-    let run = plan_stages(roots, &demand, &data, PlanningModels::builtin(), 4096).unwrap();
+    let run = plan_stages(roots, &demand, &data, executor_models(), 4096).unwrap();
     let enumeration = run.enumeration.unwrap();
     let unbuilt: Vec<_> = enumeration
         .selection
@@ -203,7 +205,7 @@ async fn grouped_count_offers_a_priced_executable_hydra_plan() {
         vec![(0, QueryRoot::Operator(root))],
         &demand,
         &data,
-        PlanningModels::builtin(),
+        executor_models(),
         4096,
     )
     .unwrap();

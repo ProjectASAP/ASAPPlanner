@@ -317,6 +317,7 @@ dependencies = [
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
+ "asap-executor",
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-logical-optimizer",

@@ -13,7 +13,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_physical_optimizer::implementation::physical_candidates::PhysicalCandidate;
-use asap_plan_selection::{plan_stages, PlanningModels, Selection};
+#[path = "../executor_models/mod.rs"]
+mod executor_models;
+
+use asap_plan_selection::{plan_stages, Selection};
 use asap_types::ir::export::{
     compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPNodeId, LogicalASAPOperatorPayload,
     LogicalASAPQueryRoot, NonASAPOpKind, PhysicalASAPDAG,
@@ -28,6 +31,7 @@ use asap_types::workload::{
     QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
     RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection, TimestampMs,
 };
+use executor_models::executor_models;
 
 /// Every enumerated candidate is built and displayed; the largest example
 /// (Example 3, Pattern A) has 486 today.
@@ -341,7 +345,7 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         roots.into_iter().enumerate().collect(),
         &demand,
         workload.data_workload.as_ref().expect("data workload"),
-        PlanningModels::builtin(),
+        executor_models(),
         MAX_CANDIDATES,
     )
     .expect("plans");

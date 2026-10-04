@@ -24,7 +24,11 @@
 //     e.g. "· ingestion time: Kll ×5 panes"), no cost;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
 //     every other candidate as rejected (`valid: false`: inaccurate, over a
-//     latency bound, or could not be built) or costlier.
+//     latency bound, needing a capability the deployment lacks, or could not
+//     be built) or costlier.
+//
+// The deployment inputs are the built-in cost and accuracy models and the
+// reference executor's capabilities (`asap_executor::capabilities`).
 //
 // Everything is the library's `plan_selection::plan_stages`, the function the
 // facade runs; this tool only serializes it. Stage 3 here is over every
@@ -133,11 +137,12 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         .map(|entry| RootDemand::from(&entry))
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
+    let capabilities = asap_executor::capabilities();
     let run = plan_stages(
         roots.into_iter().enumerate().collect(),
         &demand,
         &data,
-        PlanningModels::builtin(),
+        PlanningModels::builtin().with_capabilities(&capabilities),
         max_candidates.max(1),
     )
     .map_err(|e| format!("planning: {e}"))?;

@@ -328,7 +328,7 @@ fn stage2_b_sliding_kll_has_two_materialization_options() {
 
 /// B2 rebuilds all five tumbling KLLs at every evaluation, so it costs at least B1 and B3.
 #[test]
-#[ignore = "built-in model (#604): B2 rebuilds the panes in 310 ms, over the 200 ms latency bound, so it is not priced; and B1 retains 6 panes of 1M per-series KLLs (6.1 GB, 768 cost/s) against B2's 5.17 cost/s of rebuilds"]
+#[ignore = "built-in model (#604, Q49): B2 rebuilds the panes in 310 ms, over the 200 ms latency bound, so it is not priced; B1 retains 6 panes of 1M per-series KLLs (6.1 GB) for 768.58 cost/s, and B2 costs 5.17 cost/s, or 45.17 when the deployment does not keep raw data (5 min of raw samples, 320 MB, 40.0 cost/s)"]
 fn stage3_b_rebuilding_every_window_costs_most() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);
@@ -340,7 +340,7 @@ fn stage3_b_rebuilding_every_window_costs_most() {
 
 /// Repeating over arriving data, the built-in models pick B1 among the tumbling options.
 #[test]
-#[ignore = "built-in model (#604): B2 is over the 200 ms latency bound, so it is not priced; and B1 retains 6 panes of 1M per-series KLLs (6.1 GB, 768 cost/s) against B2's 5.17 cost/s"]
+#[ignore = "built-in model (#604, Q49): B2 is over the 200 ms latency bound, so it is not priced; B1 costs 768.58 cost/s against B2's 5.17, or 45.17 when the deployment does not keep raw data"]
 fn stage3_b_prefers_ingestion_time_tumbling_windows() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);
