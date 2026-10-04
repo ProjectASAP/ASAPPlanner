@@ -1,5 +1,5 @@
 //! Persisted precompute DAGs preserve group/window identity and execute state-to-state computation.
-use asap_physical_operators::{
+use asap_executor::{
     factory::create_planner_accumulator,
     operators::Operator,
     physical_planner::{precompute, CompiledPhysicalDAG, Source},
@@ -223,7 +223,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             assert_eq!(
                 state
                     .as_any()
-                    .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
+                    .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
                     .unwrap()
                     .evaluation(Statistic::Sum, None, None)
                     .unwrap()
@@ -318,9 +318,9 @@ fn state_dag(
 fn native_run(
     program: &CompiledPhysicalDAG,
     family: FieldDataType,
-    states: Vec<Arc<dyn asap_physical_operators::AggregateCore>>,
+    states: Vec<Arc<dyn asap_executor::AggregateCore>>,
     context: RunContext,
-) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
+) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
     let program =
         serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
             .unwrap();
@@ -363,8 +363,8 @@ fn ingestion_context(limits: Limits) -> RunContext {
     )
     .unwrap()
 }
-fn sum_state(value: f64) -> Arc<dyn asap_physical_operators::AggregateCore> {
-    let mut state = asap_physical_operators::summary_kernels::exact::ExactAccumulator::new(
+fn sum_state(value: f64) -> Arc<dyn asap_executor::AggregateCore> {
+    let mut state = asap_executor::summary_kernels::exact::ExactAccumulator::new(
         planner_types::ir::schema::FieldDataType::ExactAggregate(
             planner_types::ir::schema::ExactKind::Sum,
             planner_types::ir::schema::ExactParams::Sum,
@@ -434,7 +434,7 @@ fn precompute_rejects_nonfinite_and_nonpositive_dds_updates() {
 // An exact count must not silently lose units when exposed through Float64 rows.
 #[test]
 fn precompute_count_conversion_checks_precision() {
-    use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
+    use asap_executor::summary_kernels::exact::ExactAccumulator;
     let family = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let program = state_dag(family.clone(), None, false);
     for (count, valid) in [(3u64, true), ((1u64 << 53) + 1, false)] {
