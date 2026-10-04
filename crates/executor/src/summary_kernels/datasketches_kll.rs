@@ -62,10 +62,17 @@ impl AggregateCore for DatasketchesKLLAccumulator {
 
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
+            SketchStatistic::Quantile { .. } if self.is_empty() => {
+                Err("KLL quantile of an empty population".into())
+            }
             SketchStatistic::Quantile { q } if (0.0..=1.0).contains(q) => Ok(self.get_quantile(*q)),
             SketchStatistic::Quantile { .. } => Err("quantile must be in [0, 1]".into()),
             other => Err(format!("KLL does not answer {other:?}").into()),
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.count() == 0
     }
 
     fn approx_memory_bytes(&self) -> usize {
