@@ -822,6 +822,27 @@ fn stage2_every_candidate_compiles_in_the_physical_planner() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+/// A CountSketch+heap top-k readout compiles: the IR's derived readout schema
+/// is the ranked-rows shape the runtime's keyed evaluation produces.
+#[test]
+fn stage2_count_sketch_heap_topk_compiles_in_the_physical_planner() {
+    let (_, _, physical) = pipeline();
+    let count_sketch: Vec<_> = physical
+        .iter()
+        .filter(|p| {
+            p.dag.nodes.iter().any(|n| {
+                matches!(&n.payload, LogicalASAPOperatorPayload::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _), ..
+                } if *kind.algorithm() == SketchAlgorithm::CountSketchWithHeap)
+            })
+        })
+        .collect();
+    assert!(!count_sketch.is_empty());
+    for p in count_sketch {
+        compile_in_runtime(p).unwrap();
+    }
+}
+
 /// The plan Stage 3 selects compiles in the physical planner (added by the
 /// implementer, not part of the spec).
 #[test]
