@@ -1,8 +1,9 @@
-//! `asap-aware-mapping` — #509 Stage 2, Stage 3 and the planner facade, over
-//! the Stage 1 candidates of [`asap_logical_optimizer`].
+//! `asap-aware-mapping` — #509 Stage 3 and the planner facade, over the
+//! Stage 1 candidates of [`asap_logical_optimizer`] and the Stage 2
+//! candidates of [`asap_physical_optimizer`].
 //!
-//! It is being split into one crate per stage (#572): Stage 1 already lives in
-//! `asap-logical-optimizer`; Stage 2 (`physical_candidates`), Stage 3
+//! It is being split into one crate per stage (#572): Stage 1 lives in
+//! `asap-logical-optimizer` and Stage 2 in `asap-physical-optimizer`; Stage 3
 //! (`plan_selection`, the cost model and its inputs) and the facade (`pass`)
 //! remain here for now.
 //!
@@ -69,9 +70,6 @@ pub use recurrence::{
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
     UpdateRate,
 };
-
-/// #509 Stage 2 MVP: physical operator implementation, all at query time.
-pub mod physical_candidates;
 
 /// #509 Stage 3 MVP: accuracy check, analytical pricing, cheapest valid plan.
 pub mod plan_selection;

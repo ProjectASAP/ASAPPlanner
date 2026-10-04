@@ -63,7 +63,7 @@ mod stages {
         pub label: String,
         pub dag: PhysicalASAPDAG,
         pub query_roots: Vec<NodeId>,
-        pub stage2: asap_aware_mapping::physical_candidates::PhysicalCandidate,
+        pub stage2: asap_physical_optimizer::implementation::physical_candidates::PhysicalCandidate,
     }
 
     /// Whole-workload cost of one physical candidate; `per_node` has one
@@ -189,8 +189,10 @@ mod stages {
             .enumerate()
             .map(|(index, l)| {
                 let mut stage2 =
-                    asap_aware_mapping::physical_candidates::stage2_physical(&l.id, &l.roots)
-                        .unwrap_or_else(|e| panic!("{}: {e}", l.id));
+                    asap_physical_optimizer::implementation::physical_candidates::stage2_physical(
+                        &l.id, &l.roots,
+                    )
+                    .unwrap_or_else(|e| panic!("{}: {e}", l.id));
                 stage2.id = format!("P{}", index + 1);
                 stage2.label = l.label.clone();
                 PhysicalCandidate {
