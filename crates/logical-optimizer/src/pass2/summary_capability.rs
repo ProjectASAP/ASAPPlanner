@@ -29,11 +29,14 @@ use crate::pass1::logical_candidates::{
 };
 use crate::pass1::replacement::{accuracy_budget, accuracy_target};
 
-/// The estimates one summary serves: any quantile of one column from one
-/// quantile summary (KLL, DDSketch).
+/// The estimates one summary serves over one column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Capability {
+    /// Any quantile, from one KLL or DDSketch.
     Quantile,
+    /// Distinct count, L2 norm and entropy of the value frequencies, from one
+    /// UnivMon (#509 Example 2).
+    FrequencyMoments,
 }
 
 /// What a summary for a target would ingest and which estimates it would
@@ -77,6 +80,13 @@ fn key(node: &OperatorNode) -> Option<Key<'_>> {
     }
     let (capability, column) = match intent {
         AggIntent::Quantile { col, .. } => (Capability::Quantile, *col),
+        // A distinct-tuple count has no UnivMon alternative.
+        AggIntent::Cardinality { cols, .. } if cols.len() <= 1 => {
+            (Capability::FrequencyMoments, cols.first().copied())
+        }
+        AggIntent::FrequencyL2 { col, .. } | AggIntent::FrequencyEntropy { col, .. } => {
+            (Capability::FrequencyMoments, *col)
+        }
         _ => return None,
     };
     Some(Key {
@@ -257,6 +267,43 @@ mod tests {
         ]);
         let shared = share_summary_capability(&base).unwrap().expect("one key");
         assert!(!shared.resized);
+    }
+
+    /// Distinct count, entropy and L2 over one input form one key. UnivMon's
+    /// shape does not depend on the requirement, so all three alternatives
+    /// are the same state; the distinct count's other summaries are re-sized
+    /// for the strictest ε.
+    #[test]
+    fn frequency_moments_share_one_univmon() {
+        let base = inventory(&[
+            ("distinct_over_time(src[1m])", 0.02),
+            ("entropy_over_time(src[1m])", 0.05),
+            ("l2_over_time(src[1m])", 0.01),
+        ]);
+        let shared = share_summary_capability(&base).unwrap().expect("one key");
+        assert!(shared.resized);
+        let univmon: Vec<_> = shared
+            .inventory
+            .targets
+            .iter()
+            .map(|t| {
+                t.alternatives
+                    .iter()
+                    .find(|a| matches!(a, Realization::Sketch(kind) if *kind.algorithm() == SketchAlgorithm::UnivMon))
+                    .cloned()
+                    .expect("a UnivMon alternative")
+            })
+            .collect();
+        assert!(univmon.iter().all(|u| *u == univmon[0]));
+        let hll = |inv: &LocalLogicalCandidates<usize>| {
+            inv.targets[0].alternatives.iter().find_map(|a| match a {
+                Realization::Sketch(kind) if *kind.algorithm() == SketchAlgorithm::Hll => {
+                    Some(kind.clone())
+                }
+                _ => None,
+            })
+        };
+        assert_ne!(hll(&shared.inventory), hll(&base));
     }
 
     /// A different window, selector or estimate family is a different key.
