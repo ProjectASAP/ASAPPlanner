@@ -3,11 +3,13 @@ name = "asap-aware-mapping"
 version = "0.1.0"
 edition = "2021"
 
-# #509 Stage 2, Stage 3 and the planner facade over the Stage 1 candidates of
-# asap-logical-optimizer. Never depends on a front end.
+# #509 Stage 3 and the planner facade over the Stage 1 candidates of
+# asap-logical-optimizer and the Stage 2 candidates of asap-physical-optimizer.
+# Never depends on a front end.
 [dependencies]
 asap-types = { path = "../types" }
 asap-logical-optimizer = { path = "../logical-optimizer" }
+asap-physical-optimizer = { path = "../physical-optimizer" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

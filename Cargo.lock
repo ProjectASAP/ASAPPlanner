@@ -319,6 +319,7 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-promql",
  "asap-logical-optimizer",
+ "asap-physical-optimizer",
  "asap-types",
  "serde",
  "serde_json",
@@ -395,6 +396,7 @@ dependencies = [
  "asap-frontend-sql",
  "asap-logical-optimizer",
  "asap-physical-operators",
+ "asap-physical-optimizer",
  "asap-planner",
  "asap-types",
  "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
@@ -431,6 +433,16 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "asap-physical-optimizer"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-logical-optimizer",
+ "asap-types",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
