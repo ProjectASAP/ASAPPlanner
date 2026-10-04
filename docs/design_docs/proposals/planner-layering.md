@@ -186,7 +186,7 @@ In the diagram, × means the Cartesian product: each stage combines every option
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 900, "nodeSpacing": 40, "rankSpacing": 40}}}%%
 flowchart TB
-  subgraph INPUTS[" "]
+  subgraph INPUTS["Inputs"]
     direction LR
     QW["Query workload<br/>(PromQL / SQL / MetricsQL,<br/>query recurrence,<br/>accuracy requirements,<br/>latency requirements)"]:::input
     DW["+ Data workload<br/>(streaming vs. data at rest,<br/>data distribution,<br/>cardinality)"]:::input
@@ -242,7 +242,7 @@ flowchart TB
     end
   end
 
-  INPUTS --> ST0
+  INPUTS --> PLANNER
   ST3 -- "one selected PhysicalASAPDAG" --> DEPLOY
 
   click H0 href "#0-language-specific-frontends"
@@ -254,7 +254,7 @@ flowchart TB
   classDef input fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef title fill:none,stroke:none,color:#0969da,font-weight:bold;
   classDef body fill:none,stroke:none,color:#000;
-  style INPUTS fill:none,stroke:none;
+  style INPUTS fill:#fff,stroke:#5f6368;
   style ST0 fill:#fff,stroke:#5f6368;
   style ST1 fill:#fff,stroke:#5f6368;
   style ST2 fill:#fff,stroke:#5f6368;
