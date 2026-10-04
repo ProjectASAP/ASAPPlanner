@@ -1,9 +1,7 @@
-//! `tools/dag-viewer` ↔ `asap_types::dag_export` contract: the viewer's
-//! `KIND_CATEGORY_JSON` must categorize exactly the `kind` strings
-//! [`asap_types::dag_export::export`] can emit — `Operator::kind_name()` of
-//! every `NonASAPOp` and `ASAPOp` variant — no more (a stale kind the IR no
-//! longer has) and no less (an exported kind the viewer would render
-//! uncategorized).
+//! `tools/dag-viewer` ↔ IR contract: the viewer's `KIND_CATEGORY_JSON` must
+//! categorize exactly the `Operator::kind_name()` strings of every
+//! `NonASAPOp` and `ASAPOp` variant — no more (a stale kind the IR no longer
+//! has) and no less (a kind the viewer would render uncategorized).
 
 use std::collections::{BTreeMap, BTreeSet};
 

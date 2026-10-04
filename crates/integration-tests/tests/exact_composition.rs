@@ -1,7 +1,7 @@
 //! Issue #171 — composing exact operators with summary plans across
 //! explicit update/evaluation boundaries, end to end through
 //! `search_workload_with` → `candidate_selection::global_selection` →
-//! `GlobalSelection::assemble_selected_dag` → `dag_export`.
+//! `GlobalSelection::assemble_selected_dag`.
 //!
 //! Covers the issue's integration matrix: both nesting directions, grouped
 //! fine-to-coarse and identity folds, one inner summary shared by several
@@ -13,7 +13,7 @@
 use std::rc::Rc;
 
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::post_asap::{maintained, post_asap_dag, timed};
+use asap_integration_tests::post_asap::{maintained, timed};
 use asap_logical_optimizer::pass1::exact_composition::ExactOperation;
 use asap_logical_optimizer::pass1::replacement::{
     default_strategies, search_workload_with, ASAPStrategies, Replacement, ReplacementProvenance,
@@ -25,11 +25,9 @@ use asap_plan_selection::cost::cost_model::{
     CostProvenance, CostUnit, ExactCompositionCostInputs, ExactCompositionCostRequest,
 };
 use asap_plan_selection::{CostModel, DefaultCostModel, EvaluationRate};
-use asap_types::dag_export;
-use asap_types::ir::data_state;
-use asap_types::ir::operator::{default_quantile, AggIntent};
-use asap_types::ir::operator::{Reduction, Source};
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use asap_types::ir::operator::agg_intent::{default_quantile, AggIntent};
+use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::properties::timing::data_state;
 use asap_types::ir::properties::{ExecutionDataState, ExecutionTiming};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm, SummaryUpdate};
@@ -701,43 +699,6 @@ fn missing_cost_statistics_preserve_the_conservative_retain_exact() {
     assert!(explanations
         .iter()
         .any(|e| e.kind == ExplanationKind::ExactComposition));
-}
-
-// ── DAG export: explicit stage, schema, provenance ───────────────────────
-
-#[test]
-fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
-    let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
-    let space = plan(vec![("q", root)]);
-    let root = &space.roots[0].1;
-    let composed = global_selection(&space, &StatsModel)
-        .assemble_selected_dag(root)
-        .unwrap()
-        .unwrap();
-    let dag = dag_export::export_summary(&composed);
-    let node = &dag.nodes[dag.root as usize];
-    assert_eq!(node.kind, "aggregate");
-    assert!(node.detail["measures"].is_array());
-    // Timing is explicit in the wire-6 DAG: the root is a relational
-    // aggregate placed at query time.
-    let wire = post_asap_dag(&composed);
-    let wire_root = wire.nodes.iter().find(|n| n.id == wire.roots[0]).unwrap();
-    assert!(matches!(
-        wire_root.payload,
-        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate { .. })
-    ));
-    assert_eq!(wire_root.output_state.timing, ExecutionTiming::QueryTime);
-
-    // Pre-ASAP export of the same target still describes the same columns.
-    let pre = dag_export::export(root);
-    let pre_root = &pre.nodes[pre.root as usize];
-    let pre_cols: Vec<String> = pre_root.schema.as_ref().unwrap()["fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["name"].as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(pre_cols, names(&composed));
 }
 
 /// The PromQL front end produces the exact issue shape and it composes.

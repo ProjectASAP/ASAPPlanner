@@ -232,12 +232,10 @@ pub enum ExplanationKind {
 /// [`crate::pass1::replacement::ReplacementSubDAG::rationale`]).
 ///
 /// `node_hash` is [`structural_hash`](asap_types::ir::cse::structural_hash)
-/// of the `TargetSubDAG`'s own `target` sub-DAG — the same function, on the
-/// same `Rc<OperatorNode>` shape, that [`asap_types::dag_export::DAGNode::hash`]
-/// is computed with. A downstream consumer that independently exported the
-/// same node (e.g. via `asap_types::dag_export::export`) can match
-/// this explanation to a `DAGNode` by first comparing hashes and then
-/// confirming structural equality with [`ReplacementExplanation::target`].
+/// of the `TargetSubDAG`'s own `target` sub-DAG. A downstream consumer that
+/// hashed the same node can match this explanation by first comparing hashes
+/// and then confirming structural equality with
+/// [`ReplacementExplanation::target`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplacementExplanation {
     pub kind: ExplanationKind,
@@ -300,10 +298,9 @@ fn findings_from_candidate_logical_asap_dags(
     space: &CandidateLogicalASAPDAGs<String>,
 ) -> Vec<ReplacementExplanation> {
     let locations = collect_locations(&space.roots);
-    // One cache for the whole pass, mirroring `dag_export::export`'s own
-    // `HashCache` reuse — this is a bottom-up pass over every discovered
-    // group, so amortizing the cache across groups (rather than resetting it
-    // per group) is real, not just a micro-optimization.
+    // One cache for the whole pass — this is a bottom-up pass over every
+    // discovered group, so amortizing the cache across groups (rather than
+    // resetting it per group) is real, not just a micro-optimization.
     let mut hash_cache = HashCache::new();
     let mut findings = Vec::new();
     for group in space.target_subdag_candidates() {
@@ -579,30 +576,6 @@ mod tests {
         );
         assert!(sketch[0].location.contains("dashboard_p99"));
         assert!(sketch[0].reason.to_lowercase().contains("kll"));
-    }
-
-    /// `node_hash` must be the literal `structural_hash` a downstream
-    /// consumer would compute over the *same* `OperatorNode` sub-DAG via
-    /// `asap_types::dag_export::export` — the whole point of carrying it is
-    /// that two independent exports of the same DAG agree, with no
-    /// string-matching against `location` required.
-    #[test]
-    fn node_hash_matches_dag_export_hash_for_the_same_sub_dag() {
-        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let dag = asap_types::dag_export::export(&q);
-        let expected_hash = dag.nodes[dag.root as usize].hash;
-
-        let findings = explain_replacements(vec![("dashboard_p99", q)]);
-        let sketch = findings
-            .iter()
-            .find(|f| f.kind == ExplanationKind::SketchApproximation)
-            .expect("expected a sketch finding");
-        assert_eq!(
-            Some(sketch.node_hash),
-            expected_hash,
-            "ReplacementExplanation::node_hash must match dag_export's DAGNode::hash \
-             for the same OperatorNode sub_dag"
-        );
     }
 
     #[test]
