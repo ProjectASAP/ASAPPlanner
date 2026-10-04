@@ -13,6 +13,15 @@ use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.
 fn state(k: u32, region: &str) -> Rc<OperatorNode> {
+    family_state(
+        FieldDataType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
+            Default::default(),
+        ),
+        region,
+    )
+}
+fn family_state(family: FieldDataType, region: &str) -> Rc<OperatorNode> {
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: Source::Table {
             table_ref: "latencies".into(),
@@ -36,10 +45,7 @@ fn state(k: u32, region: &str) -> Rc<OperatorNode> {
     .unwrap();
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: only_region,
-        family: FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
-            Default::default(),
-        ),
+        family,
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![]),
         grouping: GroupingStrategy::default(),
@@ -68,5 +74,111 @@ fn incompatible_merge_inputs_fail() {
         assert!(
             OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children })).is_err()
         );
+    }
+}
+
+fn merge_regions(family: FieldDataType) -> Result<Rc<OperatorNode>, impl std::fmt::Debug> {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![
+            family_state(family.clone(), "us"),
+            family_state(family, "eu"),
+        ],
+    }))
+}
+/// Heap top-k states have no sound merge model, so disjoint states still cannot
+/// merge; KLL states with the same definition can.
+#[test]
+fn summary_merge_requires_a_mergeable_family() {
+    let heap = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CmsWithHeap,
+            SketchParams::CmsWithHeap {
+                width: 64,
+                depth: 4,
+                heap_size: 10,
+            },
+        ),
+        Default::default(),
+    );
+    let error = format!("{:?}", merge_regions(heap).unwrap_err());
+    assert!(error.contains("no sound merge"), "{error}");
+    let kll = FieldDataType::Sketch(
+        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+        Default::default(),
+    );
+    merge_regions(kll).unwrap().validate_structure().unwrap();
+}
+/// Sound-merge capability is a closed list per family (W6).
+#[test]
+fn family_merge_capability() {
+    use asap_types::ir::schema::{ExactKind, ExactParams};
+    let exact = |kind, params| FieldDataType::ExactAggregate(kind, params);
+    for family in [
+        exact(ExactKind::Sum, ExactParams::Sum),
+        exact(ExactKind::Count, ExactParams::Count),
+        exact(ExactKind::Min, ExactParams::Min),
+        exact(ExactKind::Max, ExactParams::Max),
+    ] {
+        assert!(family.family_merges(), "{family:?}");
+    }
+    for family in [
+        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Increase, ExactParams::Increase),
+        exact(ExactKind::IRate, ExactParams::IRate),
+        FieldDataType::Plain(DataType::Float64),
+    ] {
+        assert!(!family.family_merges(), "{family:?}");
+    }
+    let sketch = |algorithm, params| {
+        FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
+    };
+    use SketchAlgorithm as A;
+    use SketchParams as P;
+    let (width, depth, heap_size) = (64, 4, 10);
+    for (family, merges) in [
+        (sketch(A::Kll, P::Kll { k: 200 }), true),
+        (sketch(A::DDSketch, P::DDSketch { alpha: 0.01 }), true),
+        (sketch(A::Hll, P::Hll { precision: 12 }), true),
+        (sketch(A::Cms, P::Cms { width, depth }), true),
+        (
+            sketch(A::CountSketch, P::CountSketch { width, depth }),
+            true,
+        ),
+        (
+            sketch(
+                A::UnivMon,
+                P::UnivMon {
+                    heap_size,
+                    sketch_rows: depth,
+                    sketch_cols: width,
+                    layers: 8,
+                },
+            ),
+            true,
+        ),
+        (
+            sketch(
+                A::CmsWithHeap,
+                P::CmsWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            ),
+            false,
+        ),
+        (
+            sketch(
+                A::CountSketchWithHeap,
+                P::CountSketchWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            ),
+            false,
+        ),
+    ] {
+        assert_eq!(family.family_merges(), merges, "{family:?}");
     }
 }

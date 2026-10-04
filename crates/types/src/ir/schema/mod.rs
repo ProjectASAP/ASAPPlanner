@@ -159,6 +159,24 @@ impl FieldDataType {
         matches!(self, FieldDataType::Plain(_))
     }
 
+    /// Whether two states of this family over disjoint coverage merge into the
+    /// state of their union with the family's guarantee intact. Rate/Increase
+    /// accumulators depend on window edges, and merged heap top-k states have
+    /// no accuracy model yet; families not listed fail closed.
+    pub fn family_merges(&self) -> bool {
+        use state_type::{ExactKind as E, SketchAlgorithm as S};
+        match self {
+            FieldDataType::ExactAggregate(kind, _) => {
+                matches!(kind, E::Sum | E::Count | E::Min | E::Max)
+            }
+            FieldDataType::Sketch(kind, _) => matches!(
+                kind.algorithm(),
+                S::Kll | S::DDSketch | S::Hll | S::Cms | S::CountSketch | S::UnivMon
+            ),
+            _ => false,
+        }
+    }
+
     pub fn plain(&self) -> Option<&DataType> {
         match self {
             FieldDataType::Plain(dtype) => Some(dtype),
