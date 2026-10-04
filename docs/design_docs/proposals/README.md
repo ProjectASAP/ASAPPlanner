@@ -11,3 +11,4 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Operator sharing](operator-sharing.md)
 - [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
 - [ASAPPlanner layering](planner-layering.md)
+- [Stage 3 cost model](stage3-cost-model.md)

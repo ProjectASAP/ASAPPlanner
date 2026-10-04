@@ -114,70 +114,70 @@ Generated from `tools/dag-viewer/examples/planner-layering-example1.json`.
 
 | Id | Label | Q1 choice | Q2 choice | Input | Stage 3 outcome | Reason |
 |---|---|---|---|---|---|---|
-| P1 (L1) | Q1 exact · Q2 exact | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 86.401 vs 52.201 cpu ms |
-| P2 (L2) | Q1 exact · Q2 exact (Sum acc) | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 83.401 vs 52.201 cpu ms |
+| P1 (L1) | Q1 exact · Q2 exact | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 8.640 vs 5.220 cost/s |
+| P2 (L2) | Q1 exact · Q2 exact (Sum acc) | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 8.340 vs 5.220 cost/s |
 | P3 (L3) | Q1 exact · Q2 CMS+heap | rate: raw; sum: raw | top-k: Count-Min + heap; sum_over_time: raw | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P4 (L4) | Q1 exact · Q2 CMS+heap (Sum acc) | rate: raw; sum: raw | top-k: Count-Min + heap; sum_over_time: Sum acc | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P5 (L5) | Q1 exact · Q2 CountSketch+heap | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 198.401 vs 52.201 cpu ms |
-| P6 (L6) | Q1 exact · Q2 CountSketch+heap (Sum acc) | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 195.401 vs 52.201 cpu ms |
+| P5 (L5) | Q1 exact · Q2 CountSketch+heap | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 19.840 vs 5.220 cost/s |
+| P6 (L6) | Q1 exact · Q2 CountSketch+heap (Sum acc) | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 19.540 vs 5.220 cost/s |
 | P7 (L7) | Q1 exact · Q2 whole-expression CMS+heap | rate: raw; sum: raw | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P8 (L8) | Q1 exact · Q2 whole-expression CountSketch+heap | rate: raw; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 568.401 vs 52.201 cpu ms |
-| P9 (L9) | Q1 exact (Rate acc) · Q2 exact | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 83.401 vs 52.201 cpu ms |
-| P10 (L10) | Q1 exact (Rate acc) · Q2 exact (Sum acc) | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 80.401 vs 52.201 cpu ms |
+| P8 (L8) | Q1 exact · Q2 whole-expression CountSketch+heap | rate: raw; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 56.840 vs 5.220 cost/s |
+| P9 (L9) | Q1 exact (Rate acc) · Q2 exact | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 8.340 vs 5.220 cost/s |
+| P10 (L10) | Q1 exact (Rate acc) · Q2 exact (Sum acc) | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 8.040 vs 5.220 cost/s |
 | P11 (L11) | Q1 exact (Rate acc) · Q2 CMS+heap | rate: Rate acc; sum: raw | top-k: Count-Min + heap; sum_over_time: raw | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P12 (L12) | Q1 exact (Rate acc) · Q2 CMS+heap (Sum acc) | rate: Rate acc; sum: raw | top-k: Count-Min + heap; sum_over_time: Sum acc | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P13 (L13) | Q1 exact (Rate acc) · Q2 CountSketch+heap | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 195.401 vs 52.201 cpu ms |
-| P14 (L14) | Q1 exact (Rate acc) · Q2 CountSketch+heap (Sum acc) | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 192.401 vs 52.201 cpu ms |
+| P13 (L13) | Q1 exact (Rate acc) · Q2 CountSketch+heap | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 19.540 vs 5.220 cost/s |
+| P14 (L14) | Q1 exact (Rate acc) · Q2 CountSketch+heap (Sum acc) | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 19.240 vs 5.220 cost/s |
 | P15 (L15) | Q1 exact (Rate acc) · Q2 whole-expression CMS+heap | rate: Rate acc; sum: raw | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P16 (L16) | Q1 exact (Rate acc) · Q2 whole-expression CountSketch+heap | rate: Rate acc; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 565.401 vs 52.201 cpu ms |
-| P17 (L17) | Q1 exact (Sum acc) · Q2 exact | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 85.401 vs 52.201 cpu ms |
-| P18 (L18) | Q1 exact (Sum acc) · Q2 exact (Sum acc) | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 82.401 vs 52.201 cpu ms |
+| P16 (L16) | Q1 exact (Rate acc) · Q2 whole-expression CountSketch+heap | rate: Rate acc; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 56.540 vs 5.220 cost/s |
+| P17 (L17) | Q1 exact (Sum acc) · Q2 exact | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 8.540 vs 5.220 cost/s |
+| P18 (L18) | Q1 exact (Sum acc) · Q2 exact (Sum acc) | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 8.240 vs 5.220 cost/s |
 | P19 (L19) | Q1 exact (Sum acc) · Q2 CMS+heap | rate: raw; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: raw | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P20 (L20) | Q1 exact (Sum acc) · Q2 CMS+heap (Sum acc) | rate: raw; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: Sum acc | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P21 (L21) | Q1 exact (Sum acc) · Q2 CountSketch+heap | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 197.401 vs 52.201 cpu ms |
-| P22 (L22) | Q1 exact (Sum acc) · Q2 CountSketch+heap (Sum acc) | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 194.401 vs 52.201 cpu ms |
+| P21 (L21) | Q1 exact (Sum acc) · Q2 CountSketch+heap | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 19.740 vs 5.220 cost/s |
+| P22 (L22) | Q1 exact (Sum acc) · Q2 CountSketch+heap (Sum acc) | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 19.440 vs 5.220 cost/s |
 | P23 (L23) | Q1 exact (Sum acc) · Q2 whole-expression CMS+heap | rate: raw; sum: Sum acc | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P24 (L24) | Q1 exact (Sum acc) · Q2 whole-expression CountSketch+heap | rate: raw; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 567.401 vs 52.201 cpu ms |
-| P25 (L25) | Q1 exact (Sum acc, Rate acc) · Q2 exact | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 82.401 vs 52.201 cpu ms |
-| P26 (L26) | Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 79.401 vs 52.201 cpu ms |
+| P24 (L24) | Q1 exact (Sum acc) · Q2 whole-expression CountSketch+heap | rate: raw; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 56.740 vs 5.220 cost/s |
+| P25 (L25) | Q1 exact (Sum acc, Rate acc) · Q2 exact | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | separate | valid, costlier | 8.240 vs 5.220 cost/s |
+| P26 (L26) | Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | separate | valid, costlier | 7.940 vs 5.220 cost/s |
 | P27 (L27) | Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap | rate: Rate acc; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: raw | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P28 (L28) | Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap (Sum acc) | rate: Rate acc; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: Sum acc | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P29 (L29) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 194.401 vs 52.201 cpu ms |
-| P30 (L30) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc) | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 191.401 vs 52.201 cpu ms |
+| P29 (L29) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | separate | valid, costlier | 19.440 vs 5.220 cost/s |
+| P30 (L30) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc) | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | separate | valid, costlier | 19.140 vs 5.220 cost/s |
 | P31 (L31) | Q1 exact (Sum acc, Rate acc) · Q2 whole-expression CMS+heap | rate: Rate acc; sum: Sum acc | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | separate | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P32 (L32) | Q1 exact (Sum acc, Rate acc) · Q2 whole-expression CountSketch+heap | rate: Rate acc; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 564.401 vs 52.201 cpu ms |
-| P33 (L33) | Q1 exact · Q2 exact · shared input | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 59.201 vs 52.201 cpu ms |
-| P34 (L34) | Q1 exact · Q2 exact (Sum acc) · shared input | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | valid, costlier | 56.201 vs 52.201 cpu ms |
+| P32 (L32) | Q1 exact (Sum acc, Rate acc) · Q2 whole-expression CountSketch+heap | rate: Rate acc; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | separate | valid, costlier | 56.440 vs 5.220 cost/s |
+| P33 (L33) | Q1 exact · Q2 exact · shared input | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 5.920 vs 5.220 cost/s |
+| P34 (L34) | Q1 exact · Q2 exact (Sum acc) · shared input | rate: raw; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | valid, costlier | 5.620 vs 5.220 cost/s |
 | P35 (L35) | Q1 exact · Q2 CMS+heap · shared input | rate: raw; sum: raw | top-k: Count-Min + heap; sum_over_time: raw | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P36 (L36) | Q1 exact · Q2 CMS+heap (Sum acc) · shared input | rate: raw; sum: raw | top-k: Count-Min + heap; sum_over_time: Sum acc | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P37 (L37) | Q1 exact · Q2 CountSketch+heap · shared input | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 171.201 vs 52.201 cpu ms |
-| P38 (L38) | Q1 exact · Q2 CountSketch+heap (Sum acc) · shared input | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 168.201 vs 52.201 cpu ms |
+| P37 (L37) | Q1 exact · Q2 CountSketch+heap · shared input | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 17.120 vs 5.220 cost/s |
+| P38 (L38) | Q1 exact · Q2 CountSketch+heap (Sum acc) · shared input | rate: raw; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 16.820 vs 5.220 cost/s |
 | P39 (L39) | Q1 exact · Q2 whole-expression CMS+heap · shared input | rate: raw; sum: raw | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P40 (L40) | Q1 exact · Q2 whole-expression CountSketch+heap · shared input | rate: raw; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 541.201 vs 52.201 cpu ms |
-| P41 (L41) | Q1 exact (Rate acc) · Q2 exact · shared input | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 56.201 vs 52.201 cpu ms |
-| P42 (L42) | Q1 exact (Rate acc) · Q2 exact (Sum acc) · shared input | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | valid, costlier | 53.201 vs 52.201 cpu ms |
+| P40 (L40) | Q1 exact · Q2 whole-expression CountSketch+heap · shared input | rate: raw; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 54.120 vs 5.220 cost/s |
+| P41 (L41) | Q1 exact (Rate acc) · Q2 exact · shared input | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 5.620 vs 5.220 cost/s |
+| P42 (L42) | Q1 exact (Rate acc) · Q2 exact (Sum acc) · shared input | rate: Rate acc; sum: raw | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | valid, costlier | 5.320 vs 5.220 cost/s |
 | P43 (L43) | Q1 exact (Rate acc) · Q2 CMS+heap · shared input | rate: Rate acc; sum: raw | top-k: Count-Min + heap; sum_over_time: raw | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P44 (L44) | Q1 exact (Rate acc) · Q2 CMS+heap (Sum acc) · shared input | rate: Rate acc; sum: raw | top-k: Count-Min + heap; sum_over_time: Sum acc | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P45 (L45) | Q1 exact (Rate acc) · Q2 CountSketch+heap · shared input | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 168.201 vs 52.201 cpu ms |
-| P46 (L46) | Q1 exact (Rate acc) · Q2 CountSketch+heap (Sum acc) · shared input | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 165.201 vs 52.201 cpu ms |
+| P45 (L45) | Q1 exact (Rate acc) · Q2 CountSketch+heap · shared input | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 16.820 vs 5.220 cost/s |
+| P46 (L46) | Q1 exact (Rate acc) · Q2 CountSketch+heap (Sum acc) · shared input | rate: Rate acc; sum: raw | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 16.520 vs 5.220 cost/s |
 | P47 (L47) | Q1 exact (Rate acc) · Q2 whole-expression CMS+heap · shared input | rate: Rate acc; sum: raw | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P48 (L48) | Q1 exact (Rate acc) · Q2 whole-expression CountSketch+heap · shared input | rate: Rate acc; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 538.201 vs 52.201 cpu ms |
-| P49 (L49) | Q1 exact (Sum acc) · Q2 exact · shared input | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 58.201 vs 52.201 cpu ms |
-| P50 (L50) | Q1 exact (Sum acc) · Q2 exact (Sum acc) · shared input | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | valid, costlier | 55.201 vs 52.201 cpu ms |
+| P48 (L48) | Q1 exact (Rate acc) · Q2 whole-expression CountSketch+heap · shared input | rate: Rate acc; sum: raw | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 53.820 vs 5.220 cost/s |
+| P49 (L49) | Q1 exact (Sum acc) · Q2 exact · shared input | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 5.820 vs 5.220 cost/s |
+| P50 (L50) | Q1 exact (Sum acc) · Q2 exact (Sum acc) · shared input | rate: raw; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | valid, costlier | 5.520 vs 5.220 cost/s |
 | P51 (L51) | Q1 exact (Sum acc) · Q2 CMS+heap · shared input | rate: raw; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: raw | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P52 (L52) | Q1 exact (Sum acc) · Q2 CMS+heap (Sum acc) · shared input | rate: raw; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: Sum acc | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P53 (L53) | Q1 exact (Sum acc) · Q2 CountSketch+heap · shared input | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 170.201 vs 52.201 cpu ms |
-| P54 (L54) | Q1 exact (Sum acc) · Q2 CountSketch+heap (Sum acc) · shared input | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 167.201 vs 52.201 cpu ms |
+| P53 (L53) | Q1 exact (Sum acc) · Q2 CountSketch+heap · shared input | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 17.020 vs 5.220 cost/s |
+| P54 (L54) | Q1 exact (Sum acc) · Q2 CountSketch+heap (Sum acc) · shared input | rate: raw; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 16.720 vs 5.220 cost/s |
 | P55 (L55) | Q1 exact (Sum acc) · Q2 whole-expression CMS+heap · shared input | rate: raw; sum: Sum acc | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P56 (L56) | Q1 exact (Sum acc) · Q2 whole-expression CountSketch+heap · shared input | rate: raw; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 540.201 vs 52.201 cpu ms |
-| P57 (L57) | Q1 exact (Sum acc, Rate acc) · Q2 exact · shared input | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 55.201 vs 52.201 cpu ms |
-| P58 (L58) | Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared input | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | **selected** | cheapest valid (52.201 cpu ms) |
+| P56 (L56) | Q1 exact (Sum acc) · Q2 whole-expression CountSketch+heap · shared input | rate: raw; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 54.020 vs 5.220 cost/s |
+| P57 (L57) | Q1 exact (Sum acc, Rate acc) · Q2 exact · shared input | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: raw | shared | valid, costlier | 5.520 vs 5.220 cost/s |
+| P58 (L58) | Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc) · shared input | rate: Rate acc; sum: Sum acc | top-k: exact (sort → limit); sum_over_time: Sum acc | shared | **selected** | cheapest valid (5.220 cost/s) |
 | P59 (L59) | Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap · shared input | rate: Rate acc; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: raw | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
 | P60 (L60) | Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap (Sum acc) · shared input | rate: Rate acc; sum: Sum acc | top-k: Count-Min + heap; sum_over_time: Sum acc | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P61 (L61) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared input | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 167.201 vs 52.201 cpu ms |
-| P62 (L62) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc) · shared input | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 164.201 vs 52.201 cpu ms |
+| P61 (L61) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap · shared input | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: raw | shared | valid, costlier | 16.720 vs 5.220 cost/s |
+| P62 (L62) | Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc) · shared input | rate: Rate acc; sum: Sum acc | top-k: CountSketch + heap; sum_over_time: Sum acc | shared | valid, costlier | 16.420 vs 5.220 cost/s |
 | P63 (L63) | Q1 exact (Sum acc, Rate acc) · Q2 whole-expression CMS+heap · shared input | rate: Rate acc; sum: Sum acc | top-k and sum_over_time: whole-expression Count-Min + heap over raw samples | shared | invalid | q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative |
-| P64 (L64) | Q1 exact (Sum acc, Rate acc) · Q2 whole-expression CountSketch+heap · shared input | rate: Rate acc; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 537.201 vs 52.201 cpu ms |
+| P64 (L64) | Q1 exact (Sum acc, Rate acc) · Q2 whole-expression CountSketch+heap · shared input | rate: Rate acc; sum: Sum acc | top-k and sum_over_time: whole-expression CountSketch + heap over raw samples | shared | valid, costlier | 53.720 vs 5.220 cost/s |
 
 Count-Min + heap stays invalid, whole-expression or not: Q2 ranks
 `sum_over_time` of raw samples, and nothing in the workload declares
@@ -202,13 +202,16 @@ Invariants:
   input" winner. It saves exactly one scan and one range node over the same
   choices with separate inputs.
 
-Outcome with the built-in models: P58 (all exact, with exact accumulators for
-Q1's rate and sum and Q2's sum_over_time, over the shared input) at 52.201 cpu
-ms, against 79.401 for the same choices with separate inputs (P26). The scan
-(23.2) and range (4.0) are priced once instead of twice. The cheapest
-whole-expression CountSketch + heap plan, P64, costs 537.201: its sketch
-updates 4,000,000 raw samples × (depth 125 + 1 heap update) = 504.0, against
-19.001 for Q2's exact Sum accumulator (5.0) and sort + limit (14.001). The doc's other typical winners need
+Outcome with the built-in models, per evaluation (CPU-ms; Stage 3 reports
+these × 0.1 evaluations/s, as cost per second, see
+[Stage 3 cost model](stage3-cost-model.md)): P58 (all exact, with exact
+accumulators for Q1's rate and sum and Q2's sum_over_time, over the shared
+input) at 52.201, or 5.220 per second, against 79.401 for the same choices
+with separate inputs (P26). The scan (23.2) and range (4.0) are priced once
+instead of twice. The cheapest whole-expression CountSketch + heap plan, P64,
+costs 537.201: its sketch updates 4,000,000 raw samples × (depth 125 + 1 heap
+update) = 504.0, against 19.001 for Q2's exact Sum accumulator (5.0) and sort
++ limit (14.001). The doc's other typical winners need
 window forms or materialization and are out of MVP scope.
 
 ## Ambiguities and MVP deviations
