@@ -177,14 +177,15 @@ fn assert_dp_matches_exhaustive(
     exhaustive.selection.selected
 }
 
-/// #509 Example 1: the dynamic program picks the cheapest of its 48
-/// combinations (24 per sharing variant): P44, P20's choices with the range
-/// selector shared.
+/// #509 Example 1: the dynamic program picks the cheapest of its 64
+/// combinations (32 per sharing variant, including Q2's whole-expression
+/// top-k sketches, which absorb its `sum_over_time`): P58, all exact with
+/// the range selector shared.
 #[test]
 fn example1_dp_equals_exhaustive() {
     let workload = example1();
-    let selected = assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 48);
-    assert_eq!(selected, "P44");
+    let selected = assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 64);
+    assert_eq!(selected, "P58");
 }
 
 /// When sharing merges a whole target (`rate(x[1m])` read by both queries),
@@ -214,12 +215,12 @@ fn nested_sum_over_rate_dp_equals_exhaustive() {
 }
 
 /// An aggregate over a top-k, with inputs both below and above k × groups
-/// rows, selects the exhaustive minimum over all 30 combinations.
+/// rows, selects the exhaustive minimum over all 40 combinations.
 #[test]
 fn count_over_topk_dp_equals_exhaustive() {
     for series in [3, 1_000_000] {
         let workload = promql(&["count(topk by (job) (10, sum_over_time(m[1m])))"], series);
-        assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 30);
+        assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 40);
     }
 }
 
@@ -233,7 +234,7 @@ fn two_query_promql_dp_equals_exhaustive() {
         ],
         1_000,
     );
-    assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 48);
+    assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 64);
 }
 
 /// A SQL workload (distinct count and percentile) selects the exhaustive minimum.
@@ -273,7 +274,7 @@ async fn sql_dp_equals_exhaustive() {
     assert_dp_matches_exhaustive(&inventory, &workload, 15);
 }
 
-/// Through the facade, Example 1 selects the exhaustive winner, P44: both
+/// Through the facade, Example 1 selects the exhaustive winner, P58: both
 /// queries exact, Q1's rate and sum and Q2's sum as exact accumulators, over
 /// one shared range selector.
 #[tokio::test]
@@ -290,7 +291,7 @@ async fn facade_selects_the_example1_exhaustive_winner() {
     .await
     .expect("plans");
     let selection = output.selection.as_ref().expect("selection");
-    assert_eq!(selection.selected, "P44");
+    assert_eq!(selection.selected, "P58");
     assert_eq!(output.plans.len(), 2);
     let scans = |root: &std::rc::Rc<asap_types::ir::OperatorNode>| {
         asap_types::ir::OperatorNode::reachable(root)
