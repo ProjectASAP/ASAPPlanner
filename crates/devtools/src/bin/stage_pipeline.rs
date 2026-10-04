@@ -12,7 +12,12 @@
 //   - stage2_physical_asap: one physical candidate per logical candidate
 //     (operator implementation only, everything at query time), no cost;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
-//     every other candidate as rejected (`valid: false`) or costlier.
+//     every other candidate as rejected (`valid: false`, including one that
+//     could not be built) or costlier.
+//
+// The enumeration is the library's (`plan_selection::select_exhaustive`);
+// the facade's dynamic program selects the same winner when its
+// assumptions hold.
 //
 // `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
 // query; without them the queries are exact. `--interval-ms` is the source
@@ -21,10 +26,9 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::logical_candidates::{
-    compose_logical_candidate, enumerate_local_logical_candidates, LocalLogicalCandidates,
+    choice_index, enumerate_local_logical_candidates, LocalLogicalCandidates,
 };
-use asap_aware_mapping::physical_candidates::stage2_physical;
-use asap_aware_mapping::plan_selection::{stage3_select, Selection};
+use asap_aware_mapping::plan_selection::{select_exhaustive, Selection, MAX_ENUMERATED_CANDIDATES};
 use asap_aware_mapping::{PlanningModels, Realization};
 use asap_types::ir::export::{
     compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPDAGDocument,
@@ -55,7 +59,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let mut example = None;
     let mut queries = Vec::new();
     let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
-    let mut max_candidates = 64usize;
+    let mut max_candidates = MAX_ENUMERATED_CANDIDATES;
     let mut out = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -108,68 +112,48 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     let stage0 = export(&roots)?;
     let inventory = enumerate_local_logical_candidates(roots.into_iter().enumerate().collect())
         .map_err(|e| format!("Pass 1: {e}"))?;
-    let combinations = inventory
-        .targets
-        .iter()
-        .map(|target| target.alternatives.len())
-        .product::<usize>();
     let owners = target_owners(&inventory);
-    let mut candidates = Vec::new();
-    let mut physical = Vec::new();
-    let mut choice = vec![0; inventory.targets.len()];
-    for index in 0..combinations.min(max_candidates) {
-        let roots = compose_logical_candidate(&inventory, &choice)
-            .map_err(|e| format!("candidate {choice:?}: {e}"))?;
-        let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
-        let (id, label) = (
-            format!("L{}", index + 1),
-            label(&inventory, &owners, &choice),
-        );
-        candidates.push(json!({ "id": id, "label": label, "dag": export(&roots)? }));
-        let operators = roots
-            .into_iter()
-            .map(|root| match root {
-                QueryRoot::Operator(node) => Ok(node),
-                QueryRoot::Scalar(_) => Err("Stage 2: scalar query roots are not physical yet"),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut candidate =
-            stage2_physical(&id, &operators).map_err(|e| format!("Stage 2 {id}: {e}"))?;
-        candidate.id = format!("P{}", index + 1);
-        candidate.label = label;
-        physical.push(candidate);
-        // Mixed-radix increment: the last target varies fastest.
-        for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
-            *digit += 1;
-            if *digit < target.alternatives.len() {
-                break;
-            }
-            *digit = 0;
-        }
-    }
     let targets: Vec<_> = workload
         .query_workload
         .entries()
         .map(|entry| Some(entry.requirements.accuracy.target()))
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let selection = stage3_select(&physical, &targets, &data, PlanningModels::builtin())
-        .map_err(|e| format!("Stage 3: {e}"))?;
-    let stage2: Vec<_> = physical
-        .iter()
-        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
-        .collect();
+    let enumeration = select_exhaustive(
+        &inventory,
+        &targets,
+        &data,
+        PlanningModels::builtin(),
+        max_candidates,
+    )
+    .map_err(|e| format!("Stage 3: {e}"))?;
+    let mut candidates = Vec::new();
+    let mut stage2 = Vec::new();
+    for candidate in &enumeration.candidates {
+        let index = choice_index(&inventory, &candidate.choice) + 1;
+        let label = label(&inventory, &owners, &candidate.choice);
+        if let Some(logical) = &candidate.logical {
+            let roots: Vec<_> = logical.iter().map(|(_, root)| root.clone()).collect();
+            candidates
+                .push(json!({ "id": format!("L{index}"), "label": label, "dag": export(&roots)? }));
+        }
+        if let Some(p) = &candidate.physical {
+            stage2.push(
+                json!({ "id": p.id, "from_logical": p.from_logical, "label": label, "dag": p.dag }),
+            );
+        }
+    }
     Ok(json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": workload_queries(workload) },
         "stage0_logical": { "dag": stage0 },
         "stage1_logical_asap": {
-            "combinations": combinations,
-            "capped": combinations > max_candidates,
+            "combinations": enumeration.combinations,
+            "capped": enumeration.combinations > max_candidates,
             "candidates": candidates,
         },
         "stage2_physical_asap": { "candidates": stage2 },
-        "stage3_selection": stage3_json(&selection),
+        "stage3_selection": stage3_json(&enumeration.selection),
     }))
 }
 
