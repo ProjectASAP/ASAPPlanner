@@ -6,7 +6,7 @@ use std::path::Path;
 /// Crates Stage 2 must not depend on: Stage 3, the facade and the executor.
 const FORBIDDEN_CRATES: &[&str] = &[
     "asap-plan-selection",
-    "asap-aware-mapping",
+    "asap-planner",
     "asap-physical-operators",
 ];
 

@@ -3,13 +3,12 @@
 //!
 //! ```text
 //! PlanningWorkload ──lowering──▶ ParsedWorkload ──optimization pass──▶ PlanOutput
-//!                   (this crate)                 (asap-aware-mapping)
+//!                   (front ends)                 ([`pass`]: #509 Stages 1–3)
 //! ```
 //!
 //! [`e2e_plan`] runs both stages. A caller who already holds pre-ASAP IR — a
 //! new frontend, a deserialized plan, a test that does not want to build SQL
-//! and a catalog — skips this crate and calls
-//! [`asap_aware_mapping::optimize`] directly.
+//! and a catalog — calls [`optimize`] directly.
 
 use asap_types::workload::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
 use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
@@ -21,14 +20,16 @@ use asap_frontend_promql::{
 };
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 
+pub mod pass;
+
 // The optimization stage's vocabulary is this facade's vocabulary too: a caller
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
-pub use asap_aware_mapping::pass::{
-    optimize, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry, PlanOutput,
-    QueryPlan, StagePipeline,
-};
 pub use asap_plan_selection::PlanningModels;
+pub use pass::{
+    optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
+    PassNameConflict, PassRegistry, PlanOutput, QueryPlan, StagePipeline,
+};
 
 // ── Input ────────────────────────────────────────────────────────────────
 

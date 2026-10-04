@@ -70,11 +70,11 @@ same way a real cost-based optimizer would.
 ## Layering constraint
 
 `share_common_sub_dags` lives in `asap-types::pre_asap` — a lower layer that
-`asap-aware-mapping` (which owns `CostModel`) depends on, never the reverse.
+`asap-plan-selection` (which owns `CostModel`) depends on, never the reverse.
 Detection therefore cannot consult cost even if it wanted to. This is why
 stage 1/2's detection stays unconditional (correctly, as a legality-only
 gate) and the cost-aware decision is applied downstream, in
-`asap-aware-mapping`, after detection rather than fused into it.
+`asap-plan-selection`, after detection rather than fused into it.
 
 ## Where it hooks in
 
