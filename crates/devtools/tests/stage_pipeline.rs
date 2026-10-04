@@ -118,14 +118,29 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
     assert_eq!(accounted, all);
 }
 
-/// The Cartesian product is cut at `--max-candidates` and says so.
+/// `--max-candidates` limits the plans written, cheapest first, and says
+/// so; Stage 3 still prices every plan, so the selection does not change.
 #[test]
 fn candidate_cap_is_recorded() {
     let document = generate(&["--example", "planner-layering-1", "--max-candidates", "5"]);
+    let full = generate(&EXAMPLE1);
     let stage1 = &document["stage1_logical_asap"];
     assert_eq!(stage1["capped"], true);
-    assert_eq!(stage1["candidates"].as_array().unwrap().len(), 5);
+    assert!(stage1["candidates"].as_array().unwrap().len() <= 5);
     assert!(stage1["combinations"].as_u64().unwrap() > 5);
+    let physical = document["stage2_physical_asap"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(physical.len(), 5);
+    let selection = &document["stage3_selection"];
+    assert_eq!(selection["selected"], full["stage3_selection"]["selected"]);
+    let costs = selection["costs"].as_object().unwrap();
+    assert_eq!(costs.len(), 5, "the five cheapest plans are written");
+    let full_physical = full["stage2_physical_asap"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(document["shown_of"]["physical"], full_physical.len());
+    assert!(full.get("shown_of").is_none());
 }
 
 /// Example 3, Pattern B: the 5-min p99 every minute offers KLL and DDSketch
