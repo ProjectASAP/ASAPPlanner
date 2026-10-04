@@ -204,7 +204,7 @@ use asap_types::workload::{
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::{
-    default_strategies_with, search_workload_with_targets,
+    default_strategies, search_workload_with_targets,
     DefaultAccuracyModel, DefaultCostModel,
 };
 use asap_types::types::AccuracyTarget;
@@ -237,7 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let root = lower_promql_workload(&workload, 0)?.remove(0);
     let cost_model = DefaultCostModel;
-    let strategies = default_strategies_with(&cost_model);
+    let strategies = default_strategies();
     let space = search_workload_with_targets(
         vec![("q1", root, Some(accuracy))],
         &strategies,
@@ -301,11 +301,11 @@ pass. An omitted strategy contributes no proposals of its own.
 
 | Value to put inside `Box::new(...)` | Meaning | In default factories? |
 | --- | --- | --- |
-| `ASAPStrategies::new(&model)` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
-| `HydraGroupingStrategy::new(&model)` | Considers a shared multi-subpopulation structure for supported grouped sketch families, subject to accuracy evidence | Yes |
+| `ASAPStrategies::default()` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
+| `HydraGroupingStrategy::default()` | Considers a shared multi-subpopulation structure for supported grouped sketch families, subject to accuracy evidence | Yes |
 | `SharedSubDAGStrategy` | Proposes sharing versus independent recomputation at reused sub-DAGs | Yes |
 | `SemanticEquivalentRewriteStrategy` | Proposes supported equivalent aggregate rewrites, including decomposing average into sum/count | Yes |
-| `ExactCompositionStrategy::new(&model)` | Proposes supported exact operations around summary evaluations or in maintenance | Yes |
+| `ExactCompositionStrategy` | Proposes exact operations around summary evaluations or in maintenance; not filtered by runtime support; `global_selection` commits one only with positive (`Some(true)`) cost-model support evidence | Yes |
 | Your `ReplacementStrategy` implementation | Adds domain-specific legal replacement proposals | No |
 
 `AvgToSumOverCountStrategy` is an alias for `SemanticEquivalentRewriteStrategy`
@@ -329,19 +329,19 @@ whole-workload search. Selecting a strategy does not force its candidate to win.
 
 ```text
 default_strategies() -> Vec<Box<dyn ReplacementStrategy>>
-default_strategies_with<'a>(cost_model: &'a dyn CostModel)
-    -> Vec<Box<dyn ReplacementStrategy + 'a>>
 replacement::default_strategies_with_evidence<'a>(
-    cost_model: &'a dyn CostModel, evidence: &'a dyn AccuracyEvidenceProvider,
+    evidence: &'a dyn AccuracyEvidenceProvider,
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>>
 ```
 
 | Factory | Use when | Models used |
 | --- | --- | --- |
-| `default_strategies()` | Exploring with built-in defaults | Built-in cost/accuracy/allocation defaults |
-| `default_strategies_with(&model)` | Supplying deployment-specific costing/sizing | Supplied cost model; default accuracy/allocation |
-| `default_strategies_with_evidence(&model, &evidence)` | Supplying planning-time accuracy evidence as well | Supplied cost and evidence; default accuracy/allocation |
+| `default_strategies()` | Exploring with built-in defaults | Built-in accuracy/allocation defaults; no extra evidence |
+| `default_strategies_with_evidence(&evidence)` | Supplying planning-time accuracy evidence | Supplied evidence; default accuracy/allocation |
 | Explicit vector | Controlling which context-free strategies are supplied | Models passed into each constructor |
+
+No factory takes a cost model: candidate generation is cost-model independent.
+Pass the deployment cost model to `cost_sorted`/`global_selection`.
 
 ### Example: supply two strategies and run search
 
@@ -386,7 +386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = lower_promql_workload(&workload, 0)?.remove(0);
     let model = DefaultCostModel;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
-        Box::new(ASAPStrategies::new(&model)),
+        Box::new(ASAPStrategies::default()),
         Box::new(SharedSubDAGStrategy),
     ];
     let space = search_workload_with_targets(
@@ -408,7 +408,7 @@ Module-qualified paths below are relative to `asap_aware_mapping`.
 
 | Parameter | Available value / constructor | Meaning |
 | --- | --- | --- |
-| `&dyn CostModel` | `DefaultCostModel` | Built-in ordering/sizing and structural estimates; no measured deployment guarantee |
+| `&dyn CostModel` | `DefaultCostModel` | Built-in ordering and structural estimates; no measured deployment guarantee |
 | `&dyn CostModel` | `empirical_cost::EmpiricalCostModel::new(provider)` | Offline sketch-benchmark model: ranks algorithms using matching offline measurements |
 | `&dyn CostModel` | `physical_plan_cost_model::PhysicalPlanCostModel::new(&provider, calibration)?` | Deployment-specific physical-plan model: compares complete physical alternatives using provider evidence and resource calibration; evidence may be offline or online |
 | `&dyn AccuracyModel` | `DefaultAccuracyModel` | Built-in guarantee rules and satisfaction checks |
@@ -441,18 +441,17 @@ accuracy guarantees.
 
 ```rust
 use asap_aware_mapping::{
-    DefaultAccuracyModel, DefaultCostModel, EqualSplitAllocator,
+    DefaultAccuracyModel, EqualSplitAllocator,
     NoAccuracyEvidence, ReplacementStrategy, ASAPStrategies,
 };
 
 fn main() {
-    let cost = DefaultCostModel;
     let accuracy = DefaultAccuracyModel;
     let allocation = EqualSplitAllocator;
     let evidence = NoAccuracyEvidence;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
         ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &cost, &accuracy, &allocation, &evidence,
+            &accuracy, &allocation, &evidence,
         ),
     )];
     // Use &strategies and &accuracy in search_workload_with_targets.
@@ -464,7 +463,6 @@ Constructor definition:
 
 ```text
 ASAPStrategies::new_with_planning_inputs_and_evidence(
-    cost_model: &dyn CostModel,
     accuracy_model: &dyn AccuracyModel,
     allocator: &dyn AccuracyBudgetAllocator,
     evidence: &dyn AccuracyEvidenceProvider,
@@ -472,20 +470,21 @@ ASAPStrategies::new_with_planning_inputs_and_evidence(
 ```
 
 All provider arguments are required for this constructor. They must outlive the
-strategy vector. `ASAPStrategies::new(&cost_model)` is the shorter
-constructor using default accuracy/allocation and no extra evidence.
+strategy vector. `ASAPStrategies::default()` uses default accuracy/allocation
+and no extra evidence.
 
 | Extension point | What it controls | What it cannot establish alone |
 | --- | --- | --- |
 | `ReplacementStrategy` | Proposed semantic alternatives | Permission to violate query semantics or downstream support |
-| `CostModel` | Candidate ordering/sizing hooks and recurrence cost hooks | Correctness, measured costs without evidence, or installed runtime support |
+| `CostModel` | Selection-time ranking, cost, support-evidence and recurrence cost hooks | Correctness, measured costs without evidence, or installed runtime support |
 | `AccuracyModel` | Derivation, propagation and satisfaction of guarantees | A meaningful guarantee without its required assumptions/evidence |
 | `AccuracyBudgetAllocator` | Local accuracy requirements proposed within composition | End-to-end correctness without subsequent validation |
 | `AccuracyEvidenceProvider` | Planning-time statistics used by supported strategies | Authority to change query requirements |
 
-Models may be consumed during generation as well as ranking. Construct strategies
-with the intended model/evidence; replacing only the final sorting model does not
-regenerate parameter choices. For evidence-aware defaults, use
+Accuracy models, allocators and evidence are consumed during generation; the cost
+model is consumed only at selection (`cost_sorted`, `global_selection` and their
+`_with_recurrence` variants). Sketch parameters come from the analytical
+estimators, not the cost model. For evidence-aware defaults, use
 `asap_aware_mapping::replacement::default_strategies_with_evidence`.
 For custom accuracy/allocation/evidence on sketches,
 `ASAPStrategies::new_with_planning_inputs_and_evidence` exposes these providers.
@@ -506,7 +505,7 @@ ingestion rate. `PlanningWorkload::validate()` shares these checks.
 | `QueryRequirements::default()` | `ImplicitExact`, unspecified response latency | Pass approximation explicitly and thread per-root requirements into search |
 | `DataWorkload::default()` | Unknown arrival, unknown evidence | Supply facts needed for the requested comparisons |
 | `Evidence<T>::default()` | No value, unknown source | Unknown/stale evidence is not zero; provide scoped valid observations |
-| `DefaultCostModel` | Built-in ordering/sizing and structural cost hooks | Supply deployment evidence for calibrated comparisons |
+| `DefaultCostModel` | Built-in ordering and structural cost hooks | Supply deployment evidence for calibrated comparisons |
 
 `Default` is a Rust constructor contract, not a general serde omission rule.
 Several workload fields require explicit serialized values. A struct field being
