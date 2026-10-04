@@ -116,7 +116,8 @@ fn promql(queries: &[&str], series: u64) -> PlanningWorkload {
 }
 
 /// Stage 1 as the stage pipeline builds it: series identity, then Pass 1
-/// with and without identical sub-DAGs merged.
+/// with and without identical sub-DAGs merged, with tumbling forms for
+/// repeating entries.
 fn promql_inventory(workload: &PlanningWorkload) -> Inventory {
     let roots = asap_frontend_promql::lower_promql_query_workload(workload, 0)
         .expect("lowers")
@@ -130,7 +131,7 @@ fn promql_inventory(workload: &PlanningWorkload) -> Inventory {
             QueryRoot::Scalar(_) => panic!("operator roots"),
         })
         .collect();
-    stage1_logical_candidates(roots, &Default::default()).expect("Stage 1")
+    stage1_logical_candidates(roots, &Default::default(), &targets(workload)).expect("Stage 1")
 }
 
 fn targets(workload: &PlanningWorkload) -> Vec<RootDemand> {
@@ -169,7 +170,7 @@ fn selects_exhaustive_minimum(
         &targets,
         &data,
         models,
-        MAX_ENUMERATED_CANDIDATES,
+        combinations.max(MAX_ENUMERATED_CANDIDATES),
     )
     .expect("exhaustive selection");
     assert_eq!(exhaustive.combinations, combinations);
@@ -198,15 +199,109 @@ fn selects_exhaustive_minimum(
     )
 }
 
-/// #509 Example 1: the dynamic program picks the cheapest of its 64
-/// combinations (32 per sharing variant, including Q2's whole-expression
-/// top-k sketches, which absorb its `sum_over_time`): P58, all exact with
-/// the range selector shared.
+/// #509 Example 1: the dynamic program picks the cheapest of its 88
+/// combinations (44 per sharing variant, including Q2's whole-expression
+/// top-k sketches, which absorb its `sum_over_time`, and Q2's exact sum in
+/// 10-s tumbling panes): P79, all exact with the range selector shared and
+/// no panes (rebuilding every pane at each evaluation costs more until
+/// Stage 2 keeps them).
 #[test]
 fn example1_dp_equals_exhaustive() {
     let workload = example1();
-    let selected = assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 64);
-    assert_eq!(selected, "P58");
+    let stage1 = promql_inventory(&workload);
+    let selected = assert_dp_matches_exhaustive(&stage1, &workload, 88);
+    assert_eq!(selected, "P79");
+}
+
+/// PromQL queries repeated every `interval_ms`, each over the last 5 min.
+fn repeating(queries: &[&str], interval_ms: u32) -> PlanningWorkload {
+    let mut workload = promql(&[], 1_000);
+    workload.query_workload.query_batch = None;
+    workload.query_workload.repeating_queries = Some(
+        queries
+            .iter()
+            .map(|query| RepeatingEntry {
+                query: Query(query.to_string()),
+                demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                        epsilon: 0.01,
+                        delta: 0.01,
+                    }),
+                    ..Default::default()
+                },
+                predictability: Predictability::Predictable { known_at: None },
+                time_selection: TimeSelection::default(),
+            })
+            .collect(),
+    );
+    workload
+}
+
+/// #509 Example 3, Pattern B: the 5-min p99 every minute has exact, KLL
+/// and DDSketch, each sketch also in 1-min tumbling panes; the dynamic
+/// program picks the exhaustive minimum of the 5.
+#[test]
+fn tumbling_window_forms_dp_equals_exhaustive() {
+    let workload = repeating(&["quantile_over_time(0.99, x[5m])"], 60_000);
+    assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 5);
+}
+
+/// Pass 2 shares panes: a 5-min and a 3-min p99 every minute both build
+/// 1-min KLL panes over one scan, and the shared variant merges the 3 panes
+/// they have in common, so 5 pane builds serve both instead of 8. Selection
+/// over both variants still picks the exhaustive minimum.
+#[test]
+fn identical_panes_are_shared_across_queries() {
+    use asap_plan_selection::select_exhaustive;
+    use asap_types::ir::{ASAPOp, Operator, OperatorNode};
+    let workload = repeating(
+        &[
+            "quantile_over_time(0.99, x[5m])",
+            "quantile_over_time(0.99, x[3m])",
+        ],
+        60_000,
+    );
+    let stage1 = promql_inventory(&workload);
+    let data = workload.data_workload.clone().unwrap();
+    let enumeration = select_exhaustive(
+        &stage1,
+        &targets(&workload),
+        &data,
+        PlanningModels::builtin(),
+        usize::MAX,
+    )
+    .expect("enumerates");
+    // Both queries' targets choose KLL in tumbling panes (alternative 3).
+    let pane_builds = |sharing: Sharing| {
+        let candidate = enumeration
+            .candidates
+            .iter()
+            .find(|c| c.sharing == sharing && c.choice == [3, 3])
+            .expect("both in KLL panes");
+        let roots: Vec<_> = candidate
+            .logical
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(_, root)| match root {
+                QueryRoot::Operator(node) => node.clone(),
+                QueryRoot::Scalar(_) => unreachable!(),
+            })
+            .collect();
+        let mut builds: Vec<_> = roots
+            .iter()
+            .flat_map(OperatorNode::reachable)
+            .filter(|n| matches!(n.operator, Operator::ASAP(ASAPOp::SummaryAgg { .. })))
+            .map(|n| std::rc::Rc::as_ptr(&n))
+            .collect();
+        builds.sort();
+        builds.dedup();
+        builds.len()
+    };
+    assert_eq!(pane_builds(Sharing::Independent), 8);
+    assert_eq!(pane_builds(Sharing::IdenticalExpressions), 5);
+    selects_exhaustive_minimum(&stage1, &workload, enumeration.combinations);
 }
 
 /// When sharing merges a whole target (`rate(x[1m])` read by both queries),
@@ -291,7 +386,7 @@ async fn sql_dp_equals_exhaustive() {
             .expect("lowers");
         roots.push((index, QueryRoot::Operator(root)));
     }
-    let inventory = stage1_logical_candidates(roots, &Default::default()).expect("Stage 1");
+    let inventory = stage1_logical_candidates(roots, &Default::default(), &[]).expect("Stage 1");
     assert_dp_matches_exhaustive(&inventory, &workload, 15);
 }
 
@@ -390,7 +485,7 @@ async fn sql_summary_capability_dp_equals_exhaustive() {
             .expect("lowers");
         roots.push((index, QueryRoot::Operator(root)));
     }
-    let stage1 = stage1_logical_candidates(roots, &Default::default()).expect("Stage 1");
+    let stage1 = stage1_logical_candidates(roots, &Default::default(), &[]).expect("Stage 1");
     assert_eq!(
         stage1.iter().map(|v| v.sharing).collect::<Vec<_>>(),
         [Sharing::Independent, Sharing::SummaryCapability]
@@ -399,9 +494,9 @@ async fn sql_summary_capability_dp_equals_exhaustive() {
     assert_eq!(sharing, Sharing::SummaryCapability);
 }
 
-/// Through the facade, Example 1 selects the exhaustive winner, P58: both
+/// Through the facade, Example 1 selects the exhaustive winner, P79: both
 /// queries exact, Q1's rate and sum and Q2's sum as exact accumulators, over
-/// one shared range selector.
+/// one shared range selector, and no tumbling panes.
 #[tokio::test]
 async fn facade_selects_the_example1_exhaustive_winner() {
     let workload = example1();
@@ -416,8 +511,13 @@ async fn facade_selects_the_example1_exhaustive_winner() {
     .await
     .expect("plans");
     let selection = output.selection.as_ref().expect("selection");
-    assert_eq!(selection.selected, "P58");
+    assert_eq!(selection.selected, "P79");
     assert_eq!(output.plans.len(), 2);
+    assert!(output.plans.iter().all(|plan| {
+        asap_types::ir::OperatorNode::reachable(&plan.root)
+            .iter()
+            .all(|n| n.asap().is_none_or(|op| op.kind_name() != "SummaryMerge"))
+    }));
     let scans = |root: &std::rc::Rc<asap_types::ir::OperatorNode>| {
         asap_types::ir::OperatorNode::reachable(root)
             .into_iter()

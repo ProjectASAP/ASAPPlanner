@@ -23,6 +23,7 @@ use thiserror::Error;
 use crate::pass1::replacement::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates, Realization,
 };
+use crate::pass2::window_composition::{tumbling_state, WindowForm};
 
 /// All local realizations of one single-measure aggregate. The target retains
 /// source, grouping, filters, input expressions and evaluation context.
@@ -35,6 +36,11 @@ pub struct LocalLogicalTarget {
     /// not computed and has no choice of its own (#509 whole-expression
     /// realization). `None`: the alternative reads this target's input.
     pub absorbs: Vec<Option<usize>>,
+    /// Per alternative, how its summary covers the query window (Pass 2's
+    /// window-composition rule, [`add_window_forms`]).
+    ///
+    /// [`add_window_forms`]: crate::pass2::window_composition::add_window_forms
+    pub windows: Vec<WindowForm>,
     /// Whether the target's input values are [`counter_samples`]. Absorbing
     /// alternatives read the input's own input, which then is too.
     pub counter_input: bool,
@@ -136,6 +142,7 @@ pub fn enumerate_local_logical_candidates<Id>(
                         let alternatives = local_realizations_for_intent(intent)?;
                         targets.push(LocalLogicalTarget {
                             absorbs: vec![None; alternatives.len()],
+                            windows: vec![WindowForm::Whole; alternatives.len()],
                             alternatives,
                             counter_input: node
                                 .children()
@@ -193,6 +200,7 @@ fn add_whole_expression_alternatives(
         for heap in heaps {
             target.alternatives.push(heap);
             target.absorbs.push(Some(inner));
+            target.windows.push(WindowForm::Whole);
         }
     }
 }
@@ -421,7 +429,12 @@ pub fn compose_logical_candidate<Id: Clone>(
                     let absorbs = target.absorbs[index].is_some();
                     (
                         Rc::as_ptr(&target.target),
-                        (alternative, absorbs, target.counter_input),
+                        Chosen {
+                            realization: alternative,
+                            absorbs,
+                            counter_input: target.counter_input,
+                            window: target.windows[index],
+                        },
                     )
                 })
                 .ok_or(LogicalCandidateError::InvalidChoice)
@@ -451,13 +464,20 @@ pub fn compose_logical_candidate<Id: Clone>(
 }
 
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
-/// Each target's chosen alternative, whether it absorbs the target beneath,
-/// and its `counter_input`.
-type Chosen<'a> = HashMap<*const OperatorNode, (&'a Realization, bool, bool)>;
+
+/// One target's chosen alternative.
+struct Chosen<'a> {
+    realization: &'a Realization,
+    /// Whether it absorbs the target beneath.
+    absorbs: bool,
+    /// The target's [`LocalLogicalTarget::counter_input`].
+    counter_input: bool,
+    window: WindowForm,
+}
 
 fn rewrite(
     node: &Rc<OperatorNode>,
-    chosen: &Chosen<'_>,
+    chosen: &HashMap<*const OperatorNode, Chosen<'_>>,
     memo: &mut Memo,
 ) -> Result<Rc<OperatorNode>, LogicalCandidateError> {
     if let Some(done) = memo.get(&Rc::as_ptr(node)) {
@@ -471,10 +491,8 @@ fn rewrite(
         .iter()
         .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
     let rebuilt = match chosen.get(&Rc::as_ptr(node)) {
-        Some((realization, absorbs, counter_input))
-            if **realization != Realization::PassThrough =>
-        {
-            realize(node, realization, *absorbs, *counter_input, memo)?
+        Some(chosen) if *chosen.realization != Realization::PassThrough => {
+            realize(node, chosen, memo)?
         }
         _ if changed => Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?),
         _ => node.clone(),
@@ -485,11 +503,15 @@ fn rewrite(
 
 fn realize(
     target: &OperatorNode,
-    realization: &Realization,
-    absorbs: bool,
-    counter_input: bool,
+    chosen: &Chosen<'_>,
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, LogicalCandidateError> {
+    let Chosen {
+        realization,
+        absorbs,
+        counter_input,
+        window,
+    } = *chosen;
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -548,15 +570,22 @@ fn realize(
             proof: NonNegativeWeightProof::CounterSamples,
         };
     }
-    let state = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
-        child: child.clone(),
-        family,
-        input,
-        reduction: reduction.clone(),
-        grouping: GroupingStrategy::default(),
-        filter: None,
-    }))?;
-    let state = Rc::new(state);
+    let build = |child: Rc<OperatorNode>| {
+        Ok::<_, LogicalCandidateError>(OperatorNode::new_shared(Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                child,
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: GroupingStrategy::default(),
+                filter: None,
+            },
+        ))?)
+    };
+    let state = match window {
+        WindowForm::Whole => build(child)?,
+        WindowForm::Tumbling { pane_ms } => tumbling_state(&child, pane_ms, build)?,
+    };
     let evaluation = match query {
         Some(query) => ASAPOp::SummaryEstimate {
             summary_input: state,
