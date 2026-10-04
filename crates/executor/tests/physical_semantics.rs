@@ -915,3 +915,33 @@ fn exact_cardinality_grouping_normalizes_float_identities() {
         [Value::Int64(2), Value::Int64(0)]
     ));
 }
+
+// SQL SQRT propagates NULL and accepts numeric inputs with a floating result.
+#[test]
+fn sql_sqrt_executes_numeric_and_null_arguments() {
+    for (dtype, value, expected) in [
+        (DataType::Int64, Value::Int64(9), 3.0),
+        (DataType::Float64, Value::Float64(2.25), 1.5),
+    ] {
+        let input = schema(&[("v", dtype, true)]);
+        let expression = ScalarExpr::FunctionCall {
+            name: "sqrt".into(),
+            args: vec![ScalarExpr::Column(0)],
+        };
+        let compiled = CompiledExpression::compile(&expression, &input).unwrap();
+        assert!(matches!(compiled.evaluate(&[value]).unwrap(), Value::Float64(v) if v == expected));
+        assert!(matches!(
+            compiled.evaluate(&[Value::Null]).unwrap(),
+            Value::Null
+        ));
+    }
+    let input = schema(&[("v", DataType::Float64, false)]);
+    let expression = ScalarExpr::FunctionCall {
+        name: "sqrt".into(),
+        args: vec![ScalarExpr::Column(0)],
+    };
+    let compiled = CompiledExpression::compile(&expression, &input).unwrap();
+    assert!(
+        matches!(compiled.evaluate(&[Value::Float64(-1.0)]).unwrap(), Value::Float64(v) if v.is_nan())
+    );
+}
