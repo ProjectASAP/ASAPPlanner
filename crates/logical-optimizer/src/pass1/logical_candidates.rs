@@ -627,11 +627,13 @@ fn realize(
             "multi-measure aggregate",
         ));
     };
-    if !filters.is_empty() || having.is_some() {
-        return Err(LogicalCandidateError::Unsupported(
-            "filtered or HAVING aggregate",
-        ));
+    if having.is_some() {
+        return Err(LogicalCandidateError::Unsupported("HAVING aggregate"));
     }
+    // A single measure's row filter (SQL `FILTER (WHERE …)`) becomes the
+    // summary's filter over the same input rows; every group is kept. A
+    // whole-expression target is never filtered.
+    let filter = filters.first().cloned().flatten();
     let whole =
         match absorbs {
             true => Some(whole_expression_input(target).ok_or(
@@ -679,7 +681,7 @@ fn realize(
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
-                filter: None,
+                filter: filter.clone(),
             },
         ))?)
     };
