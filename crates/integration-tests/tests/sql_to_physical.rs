@@ -1,4 +1,6 @@
-//! SQL frontend, candidate selection, physical compilation and fresh-run execution.
+//! SQL frontend, the stage pipeline's selection, physical compilation and
+//! fresh-run execution.
+mod executor_models;
 mod physical_common;
 use asap_executor::{
     physical_planner::{compile, InputContract, Source},
@@ -7,9 +9,6 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_optimizer::search_workload;
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::DefaultCostModel;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::types::AccuracyTarget;
@@ -35,11 +34,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
         let logical = lower_sql(query, &catalog, AccuracyTarget::Exact)
             .await
             .unwrap();
-        let space = search_workload(vec![("sql", logical)]);
-        let selected = global_selection(&space, &DefaultCostModel)
-            .assemble_selected_dag(&space.roots[0].1)
-            .unwrap()
-            .unwrap();
+        let selected = executor_models::selected_dag(logical, AccuracyTarget::Exact);
         let dag = compile_physical_asap_dag(&selected).unwrap();
         let scan = dag
             .nodes

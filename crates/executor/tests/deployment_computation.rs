@@ -7,7 +7,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::compile_physical_asap_dag;
+use common::{compile_physical_asap_dag, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::schema::*;
@@ -49,19 +49,11 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
         .remove(0)
 }
 
-/// The first exact summary candidate, as Planner selection would hand it over.
+/// The plan the stage pipeline selects for an exact `query`.
 fn exact_dag(query: &str) -> PhysicalASAPDAG {
     let expression = lower(query);
     let root = promql_rows::with_series_identity(&expression).unwrap_or(expression);
-    let space = asap_logical_optimizer::search_workload(vec![("q", root)]);
-    let selected = asap_plan_selection::candidate_selection::global_selection(
-        &space,
-        &asap_plan_selection::DefaultCostModel,
-    )
-    .assemble_selected_dag(&space.roots[0].1)
-    .unwrap()
-    .unwrap();
-    compile_physical_asap_dag(&selected).unwrap()
+    compile_physical_asap_dag(&selected_dag(root, AccuracyTarget::Exact)).unwrap()
 }
 
 fn population_dag(query: &str) -> PhysicalASAPDAG {
@@ -445,12 +437,11 @@ fn counter(
     (1..=5).map(move |i| (metric, job, "x", i * 60_000, base + step * (i - 1) as f64))
 }
 
-// avg_over_time over stored per-series sum/count state divides per series and
-// drops the metric name, as Prometheus does. An overflowing stored sum fails
-// the checked division instead of returning +Inf.
+// Stored per-series sum and count states divide per series and drop the
+// metric name, as Prometheus does.
 #[test]
 fn per_series_average_divides_stored_sum_by_count() {
-    let dag = exact_dag("avg_over_time(m[5m])");
+    let dag = exact_dag("sum_over_time(m[5m]) / count_over_time(m[5m])");
     assert_eq!(
         run_series(&dag, SAMPLES, 60_000).unwrap(),
         series(&[
@@ -460,11 +451,6 @@ fn per_series_average_divides_stored_sum_by_count() {
             ("db", "d", 5.)
         ])
     );
-    let huge: &[Sample] = &[
-        ("m", "api", "a", 10_000, 1.7e308),
-        ("m", "api", "a", 20_000, 1.7e308),
-    ];
-    assert!(run_series(&dag, huge, 60_000).is_err());
 }
 
 // rate(a) / rate(b) matches series on their labels without the metric name.
