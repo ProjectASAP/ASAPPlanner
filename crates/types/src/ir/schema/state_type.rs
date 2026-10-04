@@ -593,6 +593,10 @@ pub enum NonNegativeWeightProof {
     /// PromQL counter reset correction produces a non-negative increase; rate
     /// divides that increase by a positive duration.
     ResetAwareCounterDerivative,
+    /// Samples of a metric declared a counter
+    /// ([`MetricType::Counter`](crate::workload::MetricType::Counter)), or
+    /// sums of them: a counter sample is never negative.
+    CounterSamples,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
