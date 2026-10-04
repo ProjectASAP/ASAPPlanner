@@ -191,6 +191,7 @@ async fn grouped_count_offers_a_priced_executable_hydra_plan() {
             execute_at: None,
         },
         predictability: Predictability::default(),
+        latency_ms: None,
     }];
     let data = DataWorkload {
         arrival: DataArrival::ContinuouslyIngesting,
@@ -219,7 +220,8 @@ async fn grouped_count_offers_a_priced_executable_hydra_plan() {
         .collect();
     assert!(!hydra.is_empty(), "a Hydra candidate is generated");
     for (candidate, root) in hydra {
-        let physical = candidate.physical.as_ref().expect("Stage 2 builds it");
+        // The all-query-time physical candidate comes first (#604).
+        let physical = candidate.physical.first().expect("Stage 2 builds it");
         assert!(
             enumeration.selection.costs.contains_key(&physical.id),
             "{} is priced: {:?}",
