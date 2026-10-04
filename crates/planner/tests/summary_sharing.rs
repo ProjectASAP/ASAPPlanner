@@ -503,8 +503,9 @@ impl AccuracyModel for UnivMonEvidence {
 
 /// Distinct count, entropy and L2 over one input, certified by an accuracy
 /// model and selected by a cost model preferring UnivMon, read one UnivMon state: #515 sharing is the summary-capability rule
-/// when the states are identical. The facade's stage pipeline does not plan
-/// UnivMon sharing, so this runs the legacy search with the test model.
+/// when the states are identical. This runs the legacy search; the stage
+/// pipeline's counterpart is
+/// `frequency_moments_share_one_univmon_in_the_stage_pipeline`.
 #[test]
 fn certified_frequency_evaluations_share_one_univmon_state() {
     let queries = [
@@ -553,4 +554,57 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
     }
     assert_eq!(states.len(), 3);
     assert!(states.iter().all(|state| Rc::ptr_eq(state, &states[0])));
+}
+
+/// #509 Example 2 through the stage pipeline: distinct count, entropy and L2
+/// of one input over one window, with requirements ε = 0.02, 0.05 and 0.01.
+/// The summary-capability variant gives the three targets one UnivMon.
+/// Certified by the synthetic model, that one state serves all three
+/// queries. The built-in model has no sound bound for these readouts, so
+/// Stage 3 rejects every UnivMon plan.
+#[tokio::test]
+async fn frequency_moments_share_one_univmon_in_the_stage_pipeline() {
+    let queries = [
+        ("distinct_over_time(src[1m])", 0.02),
+        ("entropy_over_time(src[1m])", 0.05),
+        ("l2_over_time(src[1m])", 0.01),
+    ];
+    let workload = promql_workload(&queries);
+    let plan = |models: PlanningModels<'static>| {
+        let workload = workload.clone();
+        async move {
+            let input = UserInput::new(
+                &workload,
+                FrontendInput::Promql {
+                    now_ms: NOW_MS,
+                    histograms: None,
+                },
+                models,
+            );
+            e2e_plan(input).await.expect("workload plans")
+        }
+    };
+    let univmon_states = |output: &PlanOutput| -> Vec<Rc<OperatorNode>> {
+        output
+            .plans
+            .iter()
+            .flat_map(plan_states)
+            .filter(|state| {
+                matches!(
+                    &state.operator,
+                    asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+                        if kind.algorithm() == &SketchAlgorithm::UnivMon
+                )
+            })
+            .collect()
+    };
+
+    let certified = plan(PlanningModels::builtin().with_accuracy(&UnivMonEvidence)).await;
+    let states = univmon_states(&certified);
+    assert_eq!(states.len(), 3, "{:?}", certified.selection);
+    assert!(states.iter().all(|state| Rc::ptr_eq(state, &states[0])));
+    assert_eq!(unique_deployments(&certified), 1);
+
+    let builtin = plan(PlanningModels::builtin()).await;
+    assert!(univmon_states(&builtin).is_empty());
 }
