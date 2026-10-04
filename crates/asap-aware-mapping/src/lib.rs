@@ -44,8 +44,10 @@
 //!   coordinates logical choices and preserves shared nodes. Whether and when
 //!   a summary state is materialized is not decided here: every summary runs
 //!   at query time until Stage 2 materialization (#509) owns that choice.
-//! - Run the whole pipeline through [`optimize`] with [`MajorPass`], which
-//!   performs the two steps above for every root of a parsed workload.
+//! - Run the #509 stage pipeline through [`optimize`] with [`StagePipeline`]:
+//!   Stage 1 local alternatives, Stage 2 physical candidates, and Stage 3
+//!   selection, the only stage that prices plans. It does not use the
+//!   candidate search above.
 //!
 //! Models and evidence determine which choices the helpers can justify.
 //! Physical operator binding, placement, storage, deployment, and execution
@@ -190,8 +192,8 @@ pub use explanation::{
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use pass::{
-    optimize, MajorPass, OptimizationInput, OptimizationInputError, OptimizationPass,
-    OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
+    optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
+    PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan, StagePipeline,
 };
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,

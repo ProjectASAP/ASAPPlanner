@@ -43,7 +43,7 @@ flowchart TD
         direction TB
         L["lowering"]
         O["OptimizationInput"]
-        PASS["OptimizationPass: MajorPass, or another implementation"]
+        PASS["OptimizationPass: StagePipeline, or another implementation"]
         L --> O --> PASS
     end
 
@@ -62,8 +62,8 @@ Details of these types are provided below.
 |---|---|
 | `workload` | `&PlanningWorkload` |
 | `frontend_specific` | `Sql { catalog }` / `Promql { now_ms, histograms }` / `Metricsql`; fixed by `query_workload.language` |
-| `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults |
-| `pass` | `None` uses `MajorPass` |
+| `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults. `StagePipeline` reads only the accuracy model (#580) |
+| `pass` | `None` uses `StagePipeline` |
 
 ### `OptimizationInput`
 
@@ -80,7 +80,9 @@ pub struct OptimizationInput<'a> {
 
 ```rust
 pub struct PlanOutput {
-    pub plans: Vec<QueryPlan>,   // one per workload entry, in entries() order
+    pub plans: Vec<QueryPlan>,   // one per operator entry, in entries() order
+    pub scalar_roots: Vec<(usize, ScalarExpr)>,
+    pub selection: Option<Selection>,  // how the plan was chosen, if the pass says
 }
 
 pub struct QueryPlan {
@@ -89,35 +91,40 @@ pub struct QueryPlan {
 }
 ```
 
-Plans carry no materialization decision. `PlanOutput::execution_timed_dag()`
-times every summary at query time until Stage 2 materialization (#509) decides
-per sub-DAG whether to materialize and whether at ingestion or query time.
+`StagePipeline` returns plans already timed at query time; for them
+`PlanOutput::execution_timed_dag()` re-times nothing. Every summary runs at
+query time until Stage 2 materialization (#509) decides per sub-DAG whether to
+materialize and whether at ingestion or query time.
 
 ---
 
 ## 3. The pluggable optimization pass
 
 The optimization pass is fully pluggable, as long as the end-to-end behavior is satisfied.
-The `MajorPass` described below will be used by default, which corresponds to the current optimization behavior of `ASAPPlanner`.
+The `StagePipeline` described below is used by default.
 
-### 3.1 `MajorPass` — the original optimization pass
+### 3.1 `StagePipeline` — the #509 planner stages
 
-`MajorPass` contains the original optimization algorithm the crate has always run, now behind the trait and registered under the name `major`. Its behaviour is unchanged:
+`StagePipeline` runs the #509 stages and is registered under the name
+`stage-pipeline`. It replaced `MajorPass`, the original replacement search
+(#572); the regressions this accepted are tracked in #580.
 
 | Step | Call |
 |---|---|
-| Build roots | `Id` is the entry's position in `entries()`; the accuracy target comes from its `requirements` |
-| Candidate search | `search_workload_with_targets` with `default_strategies_with_evidence` |
-| Select | `CandidateLogicalASAPDAGs::global_selection` |
-| Assemble, per root | `GlobalSelection::assemble_selected_dag` |
-| Share | `asap_types::ir::cse::share_common_sub_dags` across the assembled roots |
+| Prepare roots | PromQL roots carry series identity (`with_promql_series_identity`); identical sub-DAGs merged (`share_common_sub_dags`) |
+| Stage 1 | `enumerate_local_logical_candidates`: every target's local alternatives |
+| Select | `plan_selection::select_plan`: a dynamic program over target nesting, priced by Stage 2 + Stage 3 |
+| Build | `compose_logical_candidate`, identical producers merged, then `stage2_physical` |
+| Check | Stage 3 accuracy check and price of the built plan |
 
-Moving it behind the trait changes one thing for existing developers:
-**`ReplacementStrategy` is now a concept of `MajorPass`, not of the optimization
-stage.** Adding a rewrite or sharing rule to the shipped algorithm still means
-implementing `ReplacementStrategy`. Replacing the algorithm means implementing
-`OptimizationPass` instead — the two extension points no longer sit on top of
-each other.
+The dynamic program is exact when cost adds up per node and a target's choice
+changes only its own nodes. `select_plan` checks the second for every target
+and the target beneath it. When it fails, it builds every combination if
+there are at most 64, and otherwise flags `Selection::method` as not
+guaranteed optimal.
+
+`ReplacementStrategy` remains a concept of the legacy candidate search, which
+the default pass no longer uses.
 
 ### 3.2 Plugging in another pass
 
@@ -147,7 +154,7 @@ let output = e2e_plan(user_input.with_pass(&my_pass)).await?;  // the whole pipe
 Or through an optimization pass registry:
 
 ```rust
-let mut registry = PassRegistry::with_builtin();   // holds "major"
+let mut registry = PassRegistry::with_builtin();   // holds "stage-pipeline"
 registry.register(Box::new(my_pass))?;
 for name in registry.names() {
     optimize(registry.get(name).unwrap(), optimization_input)?;
@@ -209,15 +216,15 @@ let output = e2e_plan(
 ```
 
 Step 1 is where the binding lived: the `Id` carried through the roots tuple had
-to agree with `entries()` order, and nothing checked that it did. `MajorPass` still
-runs all four steps; another pass need not run any of them.
+to agree with `entries()` order, and nothing checked that it did. The default
+pass no longer runs these steps; another pass need not run any of them.
 
 ## 4. Code layout
 
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `MajorPass` |
+| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `StagePipeline` |
 | `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch |
 
 ```text
@@ -230,14 +237,14 @@ asap-planner ──┬──> asap-frontend-{sql, promql, metricsql}
 `asap-planner` is separate because it is the only crate depending on every
 frontend; before it, the sole facade re-exporting more than one was
 `asap-devtools`, a developer-tools crate. `PlanningModels` lives in
-`asap-aware-mapping` because both inputs use it, and `asap-planner` re-exports
-it.
+`asap-aware-mapping` (`plan_selection`) because both inputs use it, and
+`asap-planner` re-exports it.
 
 ---
 
 ## Related
 
 * [ASAPPlanner input, output, and workflows](input-output-workflow.md)
-* [Searching over plans](asap-aware-plan-search.md) — what `MajorPass` does inside
+* [Searching over plans](asap-aware-plan-search.md) — the legacy candidate search
 * [Planner/runtime responsibilities](planner-runtime-contract.md)
 * [Public library reference](../../develop_docs/library-api.md)

@@ -129,6 +129,81 @@ pub fn enumerate_local_logical_candidates<Id>(
     Ok(LocalLogicalCandidates { roots, targets })
 }
 
+/// Number of whole-workload candidates: one per choice of an alternative for
+/// every target. Saturates rather than overflowing.
+pub fn combination_count<Id>(inventory: &LocalLogicalCandidates<Id>) -> usize {
+    inventory
+        .targets
+        .iter()
+        .fold(1usize, |n, t| n.saturating_mul(t.alternatives.len()))
+}
+
+/// The first `max` choices in enumeration order: mixed radix, the last target
+/// varying fastest. `choice[i]` indexes `inventory.targets[i].alternatives`.
+pub fn enumerate_choices<Id>(
+    inventory: &LocalLogicalCandidates<Id>,
+    max: usize,
+) -> Vec<Vec<usize>> {
+    let count = combination_count(inventory).min(max);
+    let mut choices = Vec::with_capacity(count);
+    let mut choice = vec![0; inventory.targets.len()];
+    for _ in 0..count {
+        choices.push(choice.clone());
+        for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
+            *digit += 1;
+            if *digit < target.alternatives.len() {
+                break;
+            }
+            *digit = 0;
+        }
+    }
+    choices
+}
+
+/// Position of `choice` in [`enumerate_choices`] order.
+pub fn choice_index<Id>(inventory: &LocalLogicalCandidates<Id>, choice: &[usize]) -> usize {
+    inventory
+        .targets
+        .iter()
+        .zip(choice)
+        .fold(0usize, |index, (target, &digit)| {
+            index
+                .saturating_mul(target.alternatives.len())
+                .saturating_add(digit)
+        })
+}
+
+/// For each target, the targets directly beneath it: reachable from its input
+/// without passing through another target.
+pub fn nested_targets<Id>(inventory: &LocalLogicalCandidates<Id>) -> Vec<Vec<usize>> {
+    let position: HashMap<_, _> = inventory
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (Rc::as_ptr(&t.target), i))
+        .collect();
+    inventory
+        .targets
+        .iter()
+        .map(|target| {
+            let mut found = Vec::new();
+            let mut seen = HashSet::new();
+            let mut stack: Vec<_> = target.target.children().into_iter().cloned().collect();
+            while let Some(node) = stack.pop() {
+                if !seen.insert(Rc::as_ptr(&node)) {
+                    continue;
+                }
+                match position.get(&Rc::as_ptr(&node)) {
+                    Some(&index) => found.push(index),
+                    None => stack.extend(node.children().into_iter().cloned()),
+                }
+            }
+            found.sort_unstable();
+            found
+        })
+        .collect()
+}
+
 /// Build one whole-workload candidate (#509 Stage 1): `choice[i]` indexes
 /// `inventory.targets[i].alternatives`. Each chosen non-pass-through target is
 /// replaced by `SummaryAgg` followed by `SummaryEstimate` (sketch) or

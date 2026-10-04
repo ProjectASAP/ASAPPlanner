@@ -256,10 +256,12 @@ async fn sql_window_and_filtered_aggregate_types() {
     }
 }
 
-/// A real query batch selects one shared SUM producer, retains two result roots,
-/// and executes both selected plans. No replacement dag is constructed by the test.
+/// A real query batch retains two result roots and executes both selected
+/// plans. Stage 3 prices a query-time SUM state above the raw SUM it would
+/// replace, so each plan aggregates its scan directly. No replacement dag is
+/// constructed by the test.
 #[tokio::test]
-async fn batch_planning_replaces_and_shares_summary_operators() {
+async fn batch_planning_selects_and_executes_each_plan() {
     use asap_aware_mapping::pass::PlanningModels;
     use asap_physical_operators::{
         physical_planner::{compile, InputContract},
@@ -317,13 +319,10 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
         .into_iter()
         .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
         .collect();
-    assert_eq!(states.len(), 1, "the batch owns one shared SUM state");
+    assert!(states.is_empty(), "Stage 3 selects the raw SUM");
     for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
         let root = &plan.root;
         root.validate_structure().unwrap();
-        assert!(OperatorNode::reachable(root)
-            .iter()
-            .any(|n| Rc::ptr_eq(n, &states[0])));
         let wire = physical_common::compile_physical_asap_dag(root).unwrap();
         let scan = wire
             .nodes
@@ -367,8 +366,7 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
             rows
         );
     }
-    // The batch exports as one physical DAG: a root per query and the shared
-    // SUM state once.
+    // The batch exports as one physical DAG: a root per query, no state.
     let workload_dag = output.execution_timed_dag().unwrap();
     assert_eq!(workload_dag.roots.len(), 2);
     assert_ne!(workload_dag.roots[0], workload_dag.roots[1]);
@@ -383,6 +381,6 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
                 )
             ))
             .count(),
-        1
+        0
     );
 }
