@@ -5,18 +5,19 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, OperatorNode};
 use std::rc::Rc;
 
-use asap_aware_mapping::accuracy::{
-    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-};
 use asap_aware_mapping::pass::{PlanOutput, PlanningModels, QueryPlan};
 use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
-use asap_aware_mapping::{
-    search_workload_with_targets, ASAPStrategies, CostModel, DefaultCostModel, Replacement,
-    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
-};
+use asap_aware_mapping::{CostModel, DefaultCostModel};
 use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
+use asap_logical_optimizer::accuracy::{
+    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+};
+use asap_logical_optimizer::pass1::replacement::{default_size_params, DEFAULT_DELTA};
+use asap_logical_optimizer::{
+    search_workload_with_targets, ASAPStrategies, Replacement, ReplacementStrategy,
+    ReplacementSubDAG, TargetSubDAG,
+};
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::operator::agg_intent::default_quantile;
 use asap_types::ir::operator::AggIntent;

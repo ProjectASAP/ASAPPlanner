@@ -24,4 +24,4 @@ Additional opportunities:
     - reuse finer-grained aggregation through roll-up
 ```
 
-Implemented as `asap-aware-mapping`'s `explanation` module (`explain_replacements`/`explain_replacements_with`, issue #257)
+Implemented as `asap-logical-optimizer`'s `pass1::explanation` module (`explain_replacements`/`explain_replacements_with`, issue #257)

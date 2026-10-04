@@ -41,12 +41,12 @@
 //!   (still logical, structurally different from the target but semantically
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
-//!   extension-point shape [`CostModel`](crate::cost_model::CostModel) and [`Matcher`] already use in this
+//!   extension-point shape `CostModel` and [`Matcher`] already use in this
 //!   crate: a new replacement source is a new `impl ReplacementStrategy`, not
 //!   a restructuring of this trait or of any existing strategy. `replacements`
 //!   is **exhaustive, not ranked, not filtered** — reporting "every valid
 //!   candidate" is core's job; picking the best one is left to the caller.
-//!   [`crate::explanation`] (issue #257) is this trait's own downstream
+//!   [`crate::pass1::explanation`] (issue #257) is this trait's own downstream
 //!   consumer, not a second extension point: it explains why a replacement
 //!   exists as a pure view over the candidates strategies registered here
 //!   already produced, rather than re-deriving that explanation with a rule
@@ -84,7 +84,7 @@
 //!   fixtures), it reports the two-way candidate CSE's own detection pass
 //!   deliberately declines to pick between on its own: build once and share
 //!   the already-interned sub-DAG, or build it independently at each
-//!   consumer. [`crate::cost_model::CostModel::cse_share_decision`] is where
+//!   consumer. `cost_model::CostModel::cse_share_decision` is where
 //!   that choice actually gets made *today* (a fixed comparison, not a
 //!   search) — this strategy exposes the same two-way choice as an explicit,
 //!   inspectable pair of candidates instead of a cost model's already-decided
@@ -234,7 +234,7 @@
 //! ### Cost-based final selection — reusing `CostModel`, not a second interface
 //!
 //! `candidate_selection::cost_sorted` is the `sorted_by(cost_model)` step, and it
-//! reuses this crate's existing [`CostModel`](crate::cost_model::CostModel) trait rather than inventing a
+//! reuses this crate's existing `CostModel` trait rather than inventing a
 //! second cost interface (`docs/design_docs/cse-cost-model-decision.md`,
 //! issue #237, explicitly reasoned about *why* a narrow, direct cost
 //! comparison was enough for the CSE share/recompute decision alone, and
@@ -244,15 +244,15 @@
 //!
 //! - A group whose candidates are the [`SharedSubDAGStrategy`]
 //!   share-vs-recompute pair is ranked by calling
-//!   [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) via this module's own
+//!   `CostModel::cse_share_decision` via this module's own
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
 //! - A group whose candidates are [`ASAPStrategies`]'s sketch-family
-//!   candidates is ranked via [`CostModel::rank_candidates`](crate::cost_model::CostModel::rank_candidates) (the same hook
+//!   candidates is ranked via `CostModel::rank_candidates` (the same hook
 //!   `realizations_for_intent` itself consults), applied to the
 //!   candidates' own [`SketchAlgorithm`]s.
 //! - Any other shape (a single candidate, or a mix this module doesn't have
 //!   a defined comparison for) keeps discovery order — there is nothing to
-//!   rank, or no [`CostModel`](crate::cost_model::CostModel) hook this module knows how to apply; it never
+//!   rank, or no `CostModel` hook this module knows how to apply; it never
 //!   invents a comparison `CostModel` doesn't already define.
 //!
 //! ## Whole-plan (cross-group) selection — issue #271
@@ -262,7 +262,7 @@
 //! group is costed. That's the right behavior when groups genuinely don't
 //! interact — which both shipped strategies' one-round convergence (see
 //! "Termination" above) makes the common case — but it's the wrong answer
-//! whenever they do. Concretely: [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) costs a
+//! whenever they do. Concretely: `CostModel::cse_share_decision` costs a
 //! [`SharedSubDAGStrategy`] group by comparing a `consumer_count`-scaled
 //! recompute cost against a fixed maintenance cost — but a **nested**
 //! `SharedSubDAGStrategy` group's *true* recompute burden isn't its own
@@ -284,11 +284,11 @@
 //! **effective consumer count** — how many times that site actually runs
 //! once every ancestor's own selected candidate is accounted for — and, for
 //! every [`SharedSubDAGStrategy`]-shaped group, re-decides
-//! [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) against *that* corrected count instead
+//! `CostModel::cse_share_decision` against *that* corrected count instead
 //! of the group's raw structural one. When that group also contains a
 //! non-CSE alternative such as a semantic rewrite, the chosen CSE candidate
 //! and the cheapest non-CSE candidate additionally compete through
-//! [`CostModel::estimate_cost`](crate::cost_model::CostModel::estimate_cost); the CSE pair is no longer allowed to hide an
+//! `CostModel::estimate_cost`; the CSE pair is no longer allowed to hide an
 //! otherwise valid logical alternative. See [`multiplier`]'s doc for the
 //! exact recurrence: a group that chooses `Share` collapses its own
 //! multiplicity to exactly `1` for everything beneath it (one shared
@@ -314,7 +314,7 @@
 //! Two things this deliberately does **not** attempt, both left as
 //! documented follow-up rather than silently overclaimed:
 //!
-//! - [`CostModel::rank_candidates`](crate::cost_model::CostModel::rank_candidates) — the hook
+//! - `CostModel::rank_candidates` — the hook
 //!   [`ASAPStrategies`] groups rank by — takes no `consumer_count`
 //!   parameter at all today, so a `ASAPStrategies` group's selection
 //!   here still falls back to [`rank_group`]'s ordinary (consumer-count-
@@ -327,7 +327,7 @@
 //!   would need, and this module now computes it for every group, sketch
 //!   groups included.
 //! - This is not an exhaustive search over combinations of choices for a
-//!   provably-global optimum in every case. [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision)
+//!   provably-global optimum in every case. `CostModel::cse_share_decision`
 //!   is still a *local*, pairwise comparison at each `SharedSubDAGStrategy`
 //!   site (recompute-total vs. one fixed maintenance cost) — this module
 //!   just now feeds it a *correct* input instead of an *incorrect* one. Two
@@ -374,15 +374,17 @@ use asap_types::types::AccuracyTarget;
 use std::rc::{Rc, Weak};
 use thiserror::Error;
 
-use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
     DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
 };
-use crate::exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
-use crate::grouping::HydraGroupingStrategy;
-use crate::rollup::RollupStrategy;
-use crate::topk_reuse::TopKLimitReuseStrategy;
+use crate::pass1::exact_composition::{
+    ExactComposition, ExactCompositionStrategy, OperationPlacement,
+};
+use crate::pass1::grouping::HydraGroupingStrategy;
+use crate::pass1::rollup::RollupStrategy;
+use crate::pass2::reconciliation::AccuracyReconciliationStrategy;
+use crate::pass2::topk_reuse::TopKLimitReuseStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
 /// ([`realize_child`] and [`retain_exact`]). Moved here from the former
@@ -492,7 +494,7 @@ pub enum Replacement {
     /// reference to the child target — `candidate_selection::global_selection`
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
-    /// `OperatorNode` DAG. See [`crate::exact_composition`].
+    /// `OperatorNode` DAG. See [`crate::pass1::exact_composition`].
     ExactComposition(ExactComposition),
 }
 
@@ -508,7 +510,7 @@ pub fn is_logical_rewrite(node: &OperatorNode) -> bool {
 /// One candidate replacement for a [`TargetSubDAG`], plus a human-readable
 /// `rationale` explaining why it's a valid candidate (meant for a
 /// report/log/debugging a search engine's choices, not machine parsing —
-/// [`crate::explanation::ReplacementExplanation::reason`] literally reuses
+/// [`crate::pass1::explanation::ReplacementExplanation::reason`] literally reuses
 /// this same string rather than inventing new prose of its own.
 #[derive(Debug, Clone)]
 pub struct ReplacementSubDAG {
@@ -543,12 +545,12 @@ pub enum ReplacementProvenance {
     CseShare,
     CseRecompute,
     LogicalRewrite,
-    /// [`crate::accuracy::reconciliation::AccuracyReconciliationStrategy`]'s
+    /// [`crate::pass2::reconciliation::AccuracyReconciliationStrategy`]'s
     /// "read a strictly-tighter sibling instead of building an independent,
     /// looser copy" candidate (issue #273). Kept distinct from
     /// `LogicalRewrite` — even though both are structurally-different,
     /// semantically-equivalent rewrites — because
-    /// [`crate::cost_model::DefaultCostModel::estimate_cost`] needs to price
+    /// `cost_model::DefaultCostModel::estimate_cost` needs to price
     /// it differently: `LogicalRewrite` candidates (`RollupStrategy`,
     /// `TopKLimitReuseStrategy`) still rebuild `target` itself from a
     /// different source, so pricing them like an independent rebuild is
@@ -575,7 +577,7 @@ pub enum ReplacementProvenance {
 /// accuracy-legality grounds (issue #172) — kept alongside the group's
 /// legal candidates in [`TargetSubDAGCandidates::rejected`] so a rejection is as
 /// inspectable (and exportable) as a selection. Never ranked: a
-/// [`CostModel`](crate::cost_model::CostModel) only ever sees [`TargetSubDAGCandidates::candidates`].
+/// `CostModel` only ever sees [`TargetSubDAGCandidates::candidates`].
 #[derive(Debug, Clone)]
 pub struct RejectedCandidate {
     /// Name of the [`ReplacementStrategy`] that considered it.
@@ -602,7 +604,7 @@ pub struct Proposals {
 /// replacement (`replacements`)?
 ///
 /// The extension point this module exists for — the same shape
-/// [`CostModel`](crate::cost_model::CostModel) and [`Matcher`] already use elsewhere in this crate: a new
+/// `CostModel` and [`Matcher`] already use elsewhere in this crate: a new
 /// replacement source is a new `impl ReplacementStrategy`, no restructuring
 /// of this trait or any existing strategy required.
 ///
@@ -627,7 +629,7 @@ pub trait ReplacementStrategy {
 
     /// Every valid replacement for `target` — not ranked, not filtered.
     /// Reporting "every valid candidate" is this method's whole job; picking
-    /// the best one is a [`CostModel`](crate::cost_model::CostModel)'s job, out of scope here.
+    /// the best one is a `CostModel`'s job, out of scope here.
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG>;
 
     /// [`replacements`](Self::replacements) plus the accuracy-illegal
@@ -864,7 +866,7 @@ pub(crate) fn realizations_for_intent(intent: &AggIntent) -> Vec<Realization> {
         | AggIntent::Rate
         | AggIntent::IRate
         | AggIntent::Increase => {
-            let (kind, params) = crate::function_rules::function_rules(intent)
+            let (kind, params) = crate::pass1::function_rules::function_rules(intent)
                 .and_then(|rules| rules.accumulator)
                 .expect("exact accumulator intents have registered realizations");
             vec![exact_accumulator(intent, kind, params)]
@@ -1410,7 +1412,7 @@ impl<'a> ASAPStrategies<'a> {
         // during DAG assembly. Also expose its concrete summary realization
         // for selection.
         if intent_override.is_none() {
-            if let Some(rewritten) = crate::rewrite::composed_aggregate_rewrite(root) {
+            if let Some(rewritten) = crate::pass1::rewrite::composed_aggregate_rewrite(root) {
                 if let Ok(node) = realize_child_with(&rewritten, self.planning_inputs, None) {
                     if node.contains_asap() {
                         proposals.candidates.push(ReplacementSubDAG {
@@ -1714,7 +1716,7 @@ fn describe_realization(intent: &AggIntent, realization: &Realization) -> String
     match realization {
         Realization::Sketch(kind) => format!(
             "{} realizes as a {:?} sketch — one of summary_candidates' \
-             candidates for this intent (asap_aware_mapping::replacement::realizations_for_intent)",
+             candidates for this intent (asap_logical_optimizer::pass1::replacement::realizations_for_intent)",
             describe_intent(intent),
             kind.algorithm()
         ),
@@ -1752,7 +1754,7 @@ fn describe_realization(intent: &AggIntent, realization: &Realization) -> String
 /// this crate's other `AggIntent` matches, e.g. [`realizations_for_intent`]'s)
 /// — this is prose for a rationale string, not a decision, so an unlisted
 /// variant just falls back to its `Debug` tag rather than forcing every
-/// future intent to be named here too. [`crate::explanation`] needs no
+/// future intent to be named here too. [`crate::pass1::explanation`] needs no
 /// counterpart of its own: it reads a candidate's `rationale` — built from
 /// this text — straight off [`ReplacementSubDAG`], rather than re-describing
 /// the same intent a second time.
@@ -1887,7 +1889,7 @@ fn realize_temporal_average(
     planning_inputs: CandidatePlanningInputs<'_>,
     target: Option<&AccuracyTarget>,
 ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
-    let Some(components) = crate::rewrite::temporal_average_components(root) else {
+    let Some(components) = crate::pass1::rewrite::temporal_average_components(root) else {
         return Ok(None);
     };
     let mut node = realize_child_with(&components, planning_inputs, target)?;
@@ -3022,7 +3024,7 @@ fn construct_summary_agg(
         // Explicit snapshot selection prevents historical observations from
         // becoming repeated weights in an instant-vector heap.
         let root = Rc::new(node.clone());
-        let population = crate::maintained_population::MaintainedPopulationStrategy::new(
+        let population = crate::pass1::maintained_population::MaintainedPopulationStrategy::new(
             std::slice::from_ref(&root),
         )
         .candidate(&root)
@@ -3642,7 +3644,7 @@ fn compose_guarantee(
                 // Lipschitz constant — over an approximate child this is a
                 // deterministic transform with no registered rule.
                 _ => {
-                    crate::function_rules::function_rules(intent)
+                    crate::pass1::function_rules::function_rules(intent)
                         .expect("exact accumulator intents have registered accuracy rules")
                         .accuracy
                 }
@@ -3810,7 +3812,7 @@ fn evaluation(intent: &AggIntent, input: &SummaryUpdate) -> PostAsapSketchStatis
 /// "Non-goals" on why that traversal isn't itself part of this strategy).
 /// This strategy only reframes "two or more consumers already share this
 /// `Rc`" as the two-way choice a downstream cost model (today,
-/// [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision)) picks between: build once and share, or
+/// `CostModel::cse_share_decision`) picks between: build once and share, or
 /// build independently at each consumer.
 pub struct SharedSubDAGStrategy;
 
@@ -3897,7 +3899,7 @@ pub struct TargetSubDAGCandidates {
     /// accuracy-legality grounds (issue #172), plus any `candidates` entry
     /// the root-target check ([`search_workload_with_targets`]) moved here.
     /// Never ranked — `candidate_selection::cost_sorted`/`candidate_selection::global_selection`
-    /// read only `candidates`, so a [`CostModel`](crate::cost_model::CostModel) cannot resurrect one.
+    /// read only `candidates`, so a `CostModel` cannot resurrect one.
     pub rejected: Vec<RejectedCandidate>,
 }
 
@@ -4834,11 +4836,11 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
 /// cross-consumer accuracy reconciliation for CSE sharing — see that
 /// module's own docs) are added by [`search_workload`] after CSE and target
 /// discovery, when their sibling context exists.
-/// [`crate::explanation::explain_replacements`] (issue #257) uses
+/// [`crate::pass1::explanation::explain_replacements`] (issue #257) uses
 /// this same set (via [`search_workload`]) rather than keeping a second,
 /// explanation-specific list to stay in sync with.
 ///
-/// [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) is
+/// `AvgToSumOverCountStrategy` is
 /// included here (issue #253) even though it's a
 /// [`Replacement::Rewrite`]-only strategy — it's context-free (`matches`/`replacements` need nothing beyond
 /// the target itself) exactly like [`SharedSubDAGStrategy`], so it belongs
@@ -4853,7 +4855,7 @@ pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
         Box::new(ASAPStrategies::default()),
         Box::new(HydraGroupingStrategy::default()),
         Box::new(SharedSubDAGStrategy),
-        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(crate::pass1::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy),
     ]
 }
@@ -4879,7 +4881,7 @@ pub fn default_strategies_with_evidence<'a>(
             ),
         ),
         Box::new(SharedSubDAGStrategy),
-        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(crate::pass1::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy),
     ]
 }
@@ -4901,7 +4903,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogic
 ///
 /// Runs [`share_common_sub_dags`] once over `roots` first — so every
 /// strategy (and, transitively, every
-/// [`crate::explanation::ReplacementExplanation`] a caller reads off the
+/// [`crate::pass1::explanation::ReplacementExplanation`] a caller reads off the
 /// result) sees the same already-deduplicated DAG — then discovers every
 /// `TargetSubDAG` (see [`discover_targets`]) and runs the
 /// fixpoint loop the module docs describe, capped at
@@ -5662,7 +5664,7 @@ mod tests {
             .expect("maintained average candidate");
         assert!(operator.checked_finite_division);
         assert!(
-            crate::rewrite::SemanticEquivalentRewriteStrategy
+            crate::pass1::rewrite::SemanticEquivalentRewriteStrategy
                 .replacements(&TargetSubDAG::new(&root))
                 .is_empty(),
             "an unconditional pre-ASAP rewrite would bypass the runtime guard"

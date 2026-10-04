@@ -244,11 +244,11 @@ mod tests {
                 delta: 0.001,
             },
         );
-        let inventory = crate::logical_candidates::enumerate_local_logical_candidates(vec![(
-            0,
-            QueryRoot::Operator(root),
-        )])
-        .unwrap();
+        let inventory =
+            asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(
+                vec![(0, QueryRoot::Operator(root))],
+            )
+            .unwrap();
         // A summary (the last alternative) for every target.
         let choice: Vec<_> = inventory
             .targets
@@ -256,14 +256,16 @@ mod tests {
             .map(|t| t.alternatives.len() - 1)
             .collect();
         let roots: Vec<_> =
-            crate::logical_candidates::compose_logical_candidate(&inventory, &choice)
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| match root {
-                    QueryRoot::Operator(node) => node,
-                    QueryRoot::Scalar(_) => panic!("operator root"),
-                })
-                .collect();
+            asap_logical_optimizer::pass1::logical_candidates::compose_logical_candidate(
+                &inventory, &choice,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| match root {
+                QueryRoot::Operator(node) => node,
+                QueryRoot::Scalar(_) => panic!("operator root"),
+            })
+            .collect();
         let candidate = stage2_physical("L1", &roots).unwrap();
         assert!(candidate
             .dag

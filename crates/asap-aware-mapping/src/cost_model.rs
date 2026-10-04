@@ -32,24 +32,24 @@
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic).
 //! [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)
-//! (via [`crate::replacement`]'s own `cse_preference`) and
+//! (via [`asap_logical_optimizer::pass1::replacement`]'s own `cse_preference`) and
 //! [`DefaultCostModel::estimate_cost`] are this crate's own callers.
 
 use std::rc::Rc;
 
-use crate::exact_composition::ExactOperation;
+use asap_logical_optimizer::pass1::exact_composition::ExactOperation;
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams,
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 
-use crate::exact_composition::{ExactComposition, OperationPlacement};
 use crate::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
 };
-use crate::replacement::{
+use asap_logical_optimizer::pass1::exact_composition::{ExactComposition, OperationPlacement};
+use asap_logical_optimizer::pass1::replacement::{
     realize_child, Replacement, ReplacementProvenance, ReplacementSubDAG, TargetSubDAG,
 };
 
@@ -70,7 +70,7 @@ pub struct CostProvenance {
 }
 
 /// Which mixed-execution shapes the downstream runtime can actually
-/// execute (issue #171). [`crate::exact_composition::ExactCompositionStrategy`]
+/// execute (issue #171). [`asap_logical_optimizer::pass1::exact_composition::ExactCompositionStrategy`]
 /// proposes an `ValueOperationAtQueryTime` candidate only when
 /// `query_time` is set, and an `ValueOperationAtIngestionTime` candidate only
 /// when `ingestion_time` is — a runtime that cannot run an exact
@@ -252,7 +252,7 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 /// A CSE-detected, legality-gated shared sub-DAG with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
 /// [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)
-/// (via [`crate::replacement`]'s own `cse_preference`) the first time it
+/// (via [`asap_logical_optimizer::pass1::replacement`]'s own `cse_preference`) the first time it
 /// needs a representative bound node for a sub-DAG that
 /// [`asap_types::ir::cse::share_common_sub_dags`] already collapsed
 /// onto one `Rc` for two or more workload roots. See
@@ -403,7 +403,7 @@ pub trait CostModel {
     }
 
     /// Rank `candidates` (as returned by
-    /// [`summary_candidates`](crate::replacement::summary_candidates)) for
+    /// [`summary_candidates`](asap_logical_optimizer::pass1::replacement::summary_candidates)) for
     /// `intent`, best choice first.
     ///
     /// Implementations MAY reorder freely, but MUST return exactly the input
@@ -413,7 +413,7 @@ pub trait CostModel {
     /// [`ReplacementStrategy`]'s exhaustive, never-prune contract. This
     /// invariant is checked at every production call site.
     ///
-    /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
+    /// [`ReplacementStrategy`]: asap_logical_optimizer::pass1::replacement::ReplacementStrategy
     fn rank_candidates(
         &self,
         intent: &AggIntent,
@@ -622,9 +622,9 @@ pub trait CostModel {
     /// on [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)),
     /// not just order candidates against each other — that ordering job
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
-    /// [`ASAPStrategies`](crate::replacement::ASAPStrategies)
+    /// [`ASAPStrategies`](asap_logical_optimizer::pass1::replacement::ASAPStrategies)
     /// group) and [`cse_share_decision`](Self::cse_share_decision) (for a
-    /// [`SharedSubDAGStrategy`](crate::replacement::SharedSubDAGStrategy)
+    /// [`SharedSubDAGStrategy`](asap_logical_optimizer::pass1::replacement::SharedSubDAGStrategy)
     /// group).
     ///
     /// One method covers both candidate shapes this crate ships:
@@ -663,7 +663,7 @@ pub trait CostModel {
 
     /// Which mixed exact/summary execution shapes the downstream runtime
     /// advertises (issue #171). Gates candidate *generation* in
-    /// [`crate::exact_composition::ExactCompositionStrategy`]: a shape the
+    /// [`asap_logical_optimizer::pass1::exact_composition::ExactCompositionStrategy`]: a shape the
     /// runtime can't execute is never proposed, so it can't be selected
     /// either.
     ///
@@ -790,7 +790,7 @@ pub(crate) fn validated_candidate_ranking(
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
 /// order.
 ///
-/// [`summary_candidates`]: crate::replacement::summary_candidates
+/// [`summary_candidates`]: asap_logical_optimizer::pass1::replacement::summary_candidates
 pub struct DefaultCostModel;
 
 impl CostModel for DefaultCostModel {
@@ -899,7 +899,7 @@ impl CostModel for DefaultCostModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replacement::summary_candidates;
+    use asap_logical_optimizer::pass1::replacement::summary_candidates;
     use asap_types::ir::operator::agg_intent::default_cardinality;
 
     #[test]
@@ -1289,7 +1289,7 @@ mod tests {
             replacement: Replacement::SubDAG(summary_node(FieldDataType::Plain(
                 asap_types::ir::schema::DataType::Float64,
             ))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
+            provenance: asap_logical_optimizer::pass1::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "whatever".into(),
         };
         assert!(RankOnly.estimate_cost(&candidate, &target).is_nan());
@@ -1314,7 +1314,7 @@ mod tests {
                 ExactKind::Sum,
                 ExactParams::Sum,
             ))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
+            provenance: asap_logical_optimizer::pass1::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "exact accumulator".into(),
         };
         let pricey = ReplacementSubDAG {
@@ -1325,7 +1325,7 @@ mod tests {
                     family: "gaussian_mixture".into(),
                 },
             ))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
+            provenance: asap_logical_optimizer::pass1::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "fitted statistical model".into(),
         };
 
@@ -1359,13 +1359,14 @@ mod tests {
         let share = ReplacementSubDAG {
             strategy: "TestStrategy",
             replacement: Replacement::SubDAG(Rc::clone(&target_root)),
-            provenance: crate::replacement::ReplacementProvenance::CseShare,
+            provenance: asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare,
             rationale: "build once and share".into(),
         };
         let recompute = ReplacementSubDAG {
             strategy: "TestStrategy",
             replacement: Replacement::SubDAG(Rc::new((*target_root).clone())),
-            provenance: crate::replacement::ReplacementProvenance::CseRecompute,
+            provenance:
+                asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseRecompute,
             rationale: "build independently".into(),
         };
 

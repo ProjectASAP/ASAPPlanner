@@ -8,11 +8,11 @@ use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::{
+use asap_integration_tests::fixtures::lower_promql;
+use asap_logical_optimizer::{
     search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
     TargetSubDAG,
 };
-use asap_integration_tests::fixtures::lower_promql;
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,

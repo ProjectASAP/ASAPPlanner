@@ -1132,7 +1132,7 @@ mod tests {
 
     // ── multiple roots sharing a sub-DAG, via CandidateLogicalASAPDAGs ──────────────────
 
-    use crate::replacement::search_workload;
+    use asap_logical_optimizer::pass1::replacement::search_workload;
     use asap_types::ir::operator::agg_intent::AggIntent;
     use asap_types::ir::operator::operator_properties::Reduction as QueryReduction;
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
@@ -1303,11 +1303,11 @@ mod tests {
             };
         assert_eq!(
             first_provenance(&frequent_ranked),
-            Some(crate::replacement::ReplacementProvenance::CseShare)
+            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare)
         );
         assert_eq!(
             first_provenance(&infrequent_ranked),
-            Some(crate::replacement::ReplacementProvenance::CseRecompute)
+            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseRecompute)
         );
 
         let frequent_selected =
@@ -1325,14 +1325,14 @@ mod tests {
                 .for_target(&shared.target)
                 .and_then(|group| group.chosen)
                 .map(|candidate| candidate.provenance),
-            Some(crate::replacement::ReplacementProvenance::CseShare)
+            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare)
         );
         assert_eq!(
             infrequent_selected
                 .for_target(&shared.target)
                 .and_then(|group| group.chosen)
                 .map(|candidate| candidate.provenance),
-            Some(crate::replacement::ReplacementProvenance::CseRecompute)
+            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseRecompute)
         );
     }
 

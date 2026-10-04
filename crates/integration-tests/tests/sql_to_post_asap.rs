@@ -20,13 +20,14 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
-use asap_aware_mapping::replacement::{retain_exact, RealizationError};
-use asap_aware_mapping::{
-    search_workload, ASAPStrategies, DefaultCostModel, Replacement, ReplacementStrategy,
-    ReplacementSubDAG, TargetSubDAG,
-};
+use asap_aware_mapping::DefaultCostModel;
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
+use asap_logical_optimizer::pass1::replacement::{retain_exact, RealizationError};
+use asap_logical_optimizer::{
+    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
+    TargetSubDAG,
+};
 use asap_types::ir::export::{
     EdgeRole, NonASAPOpKind, PhysicalASAPNodeId, PhysicalASAPOperatorPayload, WirePredicate,
     WireScalarExpr,
