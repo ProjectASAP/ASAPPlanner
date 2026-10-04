@@ -12,6 +12,9 @@ asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-plan-selection = { path = "../plan-selection" }
 asap-logical-optimizer = { path = "../logical-optimizer" }
+# The reference executor's capabilities, the deployment input stage_pipeline
+# plans with. A devtool, not a stage crate, so the #572 guards allow it.
+asap-executor = { path = "../executor" }
 
 # Used by the show_ir / dag_export / variant_coverage bins (catalog schemas,
 # async SQL path, JSON output) and by the topk_ir / canonical_examples

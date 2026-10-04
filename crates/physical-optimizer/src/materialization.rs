@@ -33,7 +33,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::schema::{FieldDataType, GroupingStrategy};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, RepeatedDemand, RootDemand,
@@ -353,6 +353,10 @@ fn window_of(summary: &Rc<OperatorNode>) -> Window {
 fn family_name(summary: &OperatorNode) -> String {
     match &summary.operator {
         Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => match family {
+            // A Hydra's family is the per-group sketch it emulates.
+            FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
+                format!("{kind:?}")
+            }
             FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
             FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?}"),
             other => format!("{other:?}"),
@@ -480,6 +484,47 @@ mod tests {
     }
 
     const P99_5M: &str = "quantile_over_time(0.99, m[5m])";
+
+    /// A Hydra summary's unit is labeled by its Hydra kind ("HydraCms"),
+    /// not by the per-group Count-Min it emulates.
+    #[test]
+    fn hydra_unit_is_labeled_by_its_hydra_kind() {
+        let demand = [every_at(300_000)];
+        let approximate = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let root = crate::test_support::lower_promql("count by (job) (m)", approximate);
+        let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+        let variants = stage1_logical_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+            &Default::default(),
+            &demand,
+        )
+        .unwrap();
+        let inventory = &variants[0].inventory;
+        let choice: Vec<_> = inventory
+            .targets
+            .iter()
+            .map(|t| {
+                t.groupings
+                    .iter()
+                    .position(|g| *g != GroupingStrategy::default())
+                    .unwrap_or(0)
+            })
+            .collect();
+        let roots: Vec<_> = compose_logical_candidate(inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| match root {
+                QueryRoot::Operator(node) => node,
+                QueryRoot::Scalar(_) => panic!("operator root"),
+            })
+            .collect();
+        let space = MaterializationSpace::new(&roots, &demand, &ingesting());
+        let labels: Vec<_> = space.units.iter().map(|u| u.label.as_str()).collect();
+        assert_eq!(labels, ["HydraCms"]);
+    }
 
     /// Panes of a query repeating every minute over arriving data give a
     /// second candidate that builds all five panes at ingestion time and
