@@ -430,6 +430,8 @@ which is what lets one shared summary beat several cheaper independent ones:
 the cost of a shared summary is estimated once, with the demand of all its
 consumers.
 
+The cost model's scope is in [Stage 3 Cost Model](stage3-cost-model.md).
+
 ### 4. Execution
 
 Execution runs outside ASAPPlanner. The deployment runs the selected plan as
