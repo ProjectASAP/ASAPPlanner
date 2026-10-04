@@ -625,7 +625,7 @@ pub enum SketchStatistic {
     /// `count(cms_metric{item="checkout"})` — `key` is `item`, `value` is
     /// `"checkout"`). `value` is carried here rather than resolved by the
     /// `SummaryExecutor` from a `Filter` predicate because `evaluation`'s
-    /// trait signature has no dag access — see `CostModel::evaluation_extension`.
+    /// signature has no dag access.
     PointCount {
         key: ColumnRef,
         value: Option<String>,

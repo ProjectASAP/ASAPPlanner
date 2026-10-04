@@ -4,7 +4,6 @@ use asap_aware_mapping::{
     accuracy::{
         AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
     },
-    cost_model::DefaultCostModel,
     ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG,
 };
 use asap_physical_operators::dag::{
@@ -72,7 +71,6 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         evidence,
@@ -313,7 +311,6 @@ fn check_direct_rate_topk(dynamic: bool) {
     }
     let root = logical;
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &Evidence,
@@ -632,7 +629,6 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
     let root = Rc::new(with_series_identity(&logical).unwrap());
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &Evidence,
@@ -821,7 +817,6 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
         .unwrap(),
     );
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &Evidence,

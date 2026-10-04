@@ -86,7 +86,6 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
 };
-use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::replacement::{
     accuracy_target, bindable_intent, construct_summary_with, describe_intent,
     realizations_for_intent, summary_candidates, CandidatePlanningInputs, Proposals, Realization,
@@ -112,11 +111,6 @@ pub fn has_subpopulations(reduction: &Reduction) -> bool {
     }
 }
 
-/// A single static instance so [`HydraGroupingStrategy::default_cost_model`]
-/// can hand out a `&'static dyn CostModel` without heap-allocating one — same
-/// pattern [`crate::replacement::ASAPStrategies`] uses.
-static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
-
 /// Wraps the `GroupingStrategy` axis (issue #256) as a
 /// [`ReplacementStrategy`]: for a target [`ASAPStrategies`](crate::replacement::ASAPStrategies)
 /// already has an opinion on, offers an additional
@@ -133,37 +127,24 @@ pub struct HydraGroupingStrategy<'a> {
     planning_inputs: CandidatePlanningInputs<'a>,
 }
 
-impl HydraGroupingStrategy<'static> {
-    /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
-    /// what a deployment gets with no custom cost model plugged in, the same
-    /// default [`crate::replacement::ASAPStrategies::default_cost_model`]
-    /// offers.
-    pub fn default_cost_model() -> Self {
+impl Default for HydraGroupingStrategy<'static> {
+    /// The built-in accuracy models, the same default
+    /// [`crate::replacement::ASAPStrategies`] uses.
+    fn default() -> Self {
         Self {
-            planning_inputs: CandidatePlanningInputs::with_default_accuracy(&DEFAULT_COST_MODEL),
+            planning_inputs: CandidatePlanningInputs::with_default_accuracy(),
         }
     }
 }
 
 impl<'a> HydraGroupingStrategy<'a> {
-    /// A strategy that ranks/binds via `cost_model` instead of the built-in
-    /// static preference order — the same customization point
-    /// [`crate::replacement::ASAPStrategies::new`] already offers.
-    pub fn new(cost_model: &'a dyn CostModel) -> Self {
-        Self {
-            planning_inputs: CandidatePlanningInputs::with_default_accuracy(cost_model),
-        }
-    }
-
     pub fn new_with_planning_inputs_and_evidence(
-        cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
         allocator: &'a dyn AccuracyBudgetAllocator,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs {
-                cost: cost_model,
                 accuracy: accuracy_model,
                 allocator,
                 evidence,
@@ -222,7 +203,7 @@ impl<'a> HydraGroupingStrategy<'a> {
         hydra_kind: HydraKind,
         rejected: &mut Vec<RejectedCandidate>,
     ) -> Option<ReplacementSubDAG> {
-        let realization = realizations_for_intent(intent, self.planning_inputs.cost)
+        let realization = realizations_for_intent(intent)
             .into_iter()
             .find(|candidate| {
                 matches!(candidate, Realization::Sketch(kind) if *kind.algorithm() == sketch_kind)
@@ -326,7 +307,7 @@ impl ReplacementStrategy for HydraGroupingStrategy<'_> {
         let Some(intent) = bindable_intent(target.root) else {
             return false;
         };
-        realizations_for_intent(intent, self.planning_inputs.cost)
+        realizations_for_intent(intent)
             .into_iter()
             .any(|realization| {
                 matches!(realization,
@@ -573,7 +554,7 @@ mod tests {
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        assert!(HydraGroupingStrategy::default_cost_model().matches(&target));
+        assert!(HydraGroupingStrategy::default().matches(&target));
     }
 
     #[test]
@@ -581,7 +562,7 @@ mod tests {
         // Global reduction — no subpopulation concept, no Hydra alternative.
         let q = agg(vec![], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let strategy = HydraGroupingStrategy::default_cost_model();
+        let strategy = HydraGroupingStrategy::default();
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
     }
@@ -590,7 +571,7 @@ mod tests {
     fn does_not_match_a_per_entity_aggregate() {
         let q = agg_per_entity(default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let strategy = HydraGroupingStrategy::default_cost_model();
+        let strategy = HydraGroupingStrategy::default();
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
     }
@@ -599,14 +580,14 @@ mod tests {
     fn does_not_match_a_non_aggregate_node() {
         let scan = metric_scan(&["job"]);
         let target = TargetSubDAG::new(&scan);
-        assert!(!HydraGroupingStrategy::default_cost_model().matches(&target));
+        assert!(!HydraGroupingStrategy::default().matches(&target));
     }
 
     #[test]
     fn quantile_has_no_hydra_candidate_without_a_modeled_error_bound() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
+        let replacements = HydraGroupingStrategy::default().replacements(&target);
         assert!(replacements.is_empty(), "{replacements:?}");
     }
 
@@ -620,7 +601,7 @@ mod tests {
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
+        let replacements = HydraGroupingStrategy::default().replacements(&target);
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
@@ -658,7 +639,6 @@ mod tests {
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &ZeroSharedGridEvidence,
@@ -698,7 +678,6 @@ mod tests {
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &InvalidEvidence,
@@ -747,7 +726,6 @@ mod tests {
             metric_scan(&["job"]),
         );
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
-            &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
             &ExcessiveCollision,
@@ -768,7 +746,7 @@ mod tests {
         // an empty result, same conservatism as every other strategy here).
         let q = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let strategy = HydraGroupingStrategy::default_cost_model();
+        let strategy = HydraGroupingStrategy::default();
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
     }
@@ -784,7 +762,7 @@ mod tests {
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let strategy = HydraGroupingStrategy::default_cost_model();
+        let strategy = HydraGroupingStrategy::default();
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
     }
@@ -795,14 +773,14 @@ mod tests {
         // (summary_candidates only covers approximate-capable intents).
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let strategy = HydraGroupingStrategy::default_cost_model();
+        let strategy = HydraGroupingStrategy::default();
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
     }
 
     #[test]
     fn does_not_match_a_multi_intent_or_having_aggregate() {
-        let strategy = HydraGroupingStrategy::default_cost_model();
+        let strategy = HydraGroupingStrategy::default();
 
         let multi =
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
@@ -817,34 +795,5 @@ mod tests {
         let target = TargetSubDAG::new(&multi);
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
-    }
-
-    /// A custom `CostModel` doesn't change *which* candidate is offered —
-    /// only which sketch candidate `realizations_for_intent` itself would
-    /// have ranked first, and how that candidate's own params are sized —
-    /// same guarantee `ASAPStrategies` makes for its own candidates.
-    struct PreferDDSketch;
-    impl CostModel for PreferDDSketch {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
-                let dd = v.remove(pos);
-                v.insert(0, dd);
-            }
-            v
-        }
-    }
-
-    #[test]
-    fn custom_cost_model_cannot_enable_unproven_hydra_kll() {
-        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let target = TargetSubDAG::new(&q);
-        let custom = PreferDDSketch;
-        let replacements = HydraGroupingStrategy::new(&custom).replacements(&target);
-        assert!(replacements.is_empty(), "{replacements:?}");
     }
 }
