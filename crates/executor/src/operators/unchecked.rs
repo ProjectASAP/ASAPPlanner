@@ -116,6 +116,15 @@ impl TryFrom<UncheckedOperator> for Operator {
                 groups,
                 window,
             } => Operator::window(input(0)?, *intent, coordinate, value, groups, window)?,
+            Kind::SQLWindowSum { column } => {
+                let name = output
+                    .fields
+                    .last()
+                    .ok_or_else(|| invalid("SQL window SUM output missing"))?
+                    .name
+                    .clone();
+                Operator::sql_window_sum(input(0)?, column, name)?
+            }
             Kind::Aggregate { groups, measures } => {
                 if groups.len() + measures.len() != output.fields.len() {
                     return Err(invalid("aggregate width mismatch"));

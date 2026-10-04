@@ -120,6 +120,9 @@ enum Kind {
         groups: Vec<usize>,
         window: Option<(i64, i64)>,
     },
+    SQLWindowSum {
+        column: usize,
+    },
     Aggregate {
         groups: Vec<usize>,
         measures: Vec<Reduction>,
@@ -281,6 +284,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
                 | Kind::SeriesBinary { .. }
                 | Kind::SeriesHistogramQuantile { .. }
                 | Kind::SeriesRelabel { .. }
+                | Kind::SQLWindowSum { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -333,6 +337,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::Filter(_) => "Filter",
             Kind::Limit { .. } => "Limit",
             Kind::Sort { .. } => "Sort",
+            Kind::SQLWindowSum { .. } => "SQLWindowSum",
             Kind::Aggregate { .. } => "Aggregate",
             Kind::Window { .. } => "WindowAggregate",
             Kind::SemiJoin { .. } => "SemiJoin",
@@ -384,7 +389,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),
-            Kind::Window { .. } | Kind::Aggregate { .. } => {
+            Kind::SQLWindowSum { .. } | Kind::Window { .. } | Kind::Aggregate { .. } => {
                 aggregate::execute(self, inputs, context)
             }
             Kind::Join { .. } | Kind::SemiJoin { .. } => joins::execute(self, inputs, context),

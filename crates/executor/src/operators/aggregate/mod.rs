@@ -1,5 +1,20 @@
 use super::*;
 impl Operator {
+    /// A SQL SUM window over the complete, unordered input relation.
+    pub fn sql_window_sum(input: SchemaRef, column: usize, name: String) -> Result<Self, Error> {
+        let (dtype, _) = plain(&input, column)?;
+        if !matches!(dtype, DataType::Int64 | DataType::Float64) {
+            return Err(invalid("SQL window SUM requires a numeric column"));
+        }
+        let mut output = (*input).clone();
+        output.fields.push(result_field(&name, dtype.clone(), true));
+        Ok(Self {
+            kind: Kind::SQLWindowSum { column },
+            inputs: vec![input],
+            output: Arc::new(output),
+        })
+    }
+
     pub fn aggregate(
         input: SchemaRef,
         groups: Vec<usize>,
@@ -171,6 +186,26 @@ pub(super) fn execute<'a>(
     Ok(futures::stream::once(async move {
         let (rows, _memory) = collect_rows(input, &context).await?;
         let result = match &operator.kind {
+            Kind::SQLWindowSum { column } => {
+                let mut work = Cooperative::new(&context);
+                let total = reduce_one(
+                    &rows,
+                    &Reduction::Sum(*column),
+                    &operator.inputs[0],
+                    &mut work,
+                    &context,
+                )
+                .await?;
+                let mut workspace = Workspace::new(&context)?;
+                let mut result = Vec::with_capacity(rows.len());
+                for mut row in rows {
+                    work.checkpoint().await?;
+                    row.push(total.clone());
+                    workspace.grow(row_bytes(&row))?;
+                    result.push(row);
+                }
+                result
+            }
             Kind::Window {
                 intent,
                 coordinate,
