@@ -7,6 +7,10 @@
 // every 10 min on a deployment that does not keep raw data)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
+// cargo run -p asap-devtools --bin stage_pipeline -- \
+//     --table '{"name": "flows", "columns": [{"name": "ts", "type": "timestamp"},
+//               {"name": "src_ip", "type": "utf8", "nullable": false}], "time_index": 0}' \
+//     --sql "SELECT COUNT(DISTINCT src_ip) FROM flows" --epsilon 0.02 --out run.json
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
 // four planner stages (#509 MVP):
@@ -48,13 +52,19 @@
 // displayed candidate; the facade's dynamic program selects the same winner
 // when its assumptions hold.
 //
-// `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
-// query; without them the queries are exact. `--interval-ms` is the source
-// cadence PromQL needs (default 15000).
+// `--promql` and `--sql` may repeat; a run is one language. `--epsilon`/
+// `--delta` apply to every query; without them the queries are exact.
+// `--interval-ms` is the source cadence PromQL needs (default 15000).
+// `--table '<json>'` (repeatable) declares a table SQL queries read:
+// `{"name": ..., "columns": [{"name": ..., "type": "timestamp|utf8|string|
+// float64|double|int64|bigint", "nullable": true}], "time_index": 0}`
+// (`nullable` defaults to true; without `time_index` the table has no time
+// column). There are no default tables.
 
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use asap_frontend_sql::SqlCatalog;
 use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, LocalLogicalCandidates,
 };
@@ -80,8 +90,9 @@ use asap_types::workload::{
 use serde_json::{json, Value};
 
 const USAGE: &str =
-    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b,4a,4b} | --promql <query>... \
-[--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) [--max-candidates <n>] --out <file>";
+    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b,4a,4b} | (--promql <query>... \
+| --table <json>... --sql <query>...) [--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) \
+[--max-candidates <n>] --out <file>";
 
 fn main() {
     if let Err(message) = run(std::env::args().skip(1).collect()) {
@@ -92,7 +103,7 @@ fn main() {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let mut example = None;
-    let mut queries = Vec::new();
+    let (mut promql, mut sql, mut tables) = (Vec::new(), Vec::new(), Vec::new());
     let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
     let mut max_candidates = MAX_ENUMERATED_CANDIDATES;
     let mut out = None;
@@ -102,7 +113,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
         let number = |v: String| v.parse::<f64>().map_err(|e| format!("{v}: {e}"));
         match flag.as_str() {
             "--example" => example = Some(value()?),
-            "--promql" => queries.push(value()?),
+            "--promql" => promql.push(value()?),
+            "--sql" => sql.push(value()?),
+            "--table" => tables.push(value()?),
             "--epsilon" => epsilon = Some(number(value()?)?),
             "--delta" => delta = Some(number(value()?)?),
             "--interval-ms" => interval_ms = value()?.parse().map_err(|e| format!("{e}"))?,
@@ -111,9 +124,22 @@ fn run(args: Vec<String>) -> Result<(), String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
+    let (language, queries) = match (promql.is_empty(), sql.is_empty()) {
+        (false, false) => {
+            return Err("a run is one language: give --promql or --sql, not both".into())
+        }
+        (true, false) => (QueryLanguage::SQL(SqlDialect::DataFusionSQL), sql),
+        _ => (QueryLanguage::PromQL, promql),
+    };
+    if !tables.is_empty() && !matches!(language, QueryLanguage::SQL(_)) {
+        return Err("--table needs --sql".into());
+    }
     let workload = match (example.as_deref(), queries.is_empty()) {
         (Some("planner-layering-1"), true) => planner_layering_example1(),
-        (Some("planner-layering-2"), true) => planner_layering_example2(),
+        (Some("planner-layering-2"), true) => {
+            tables = vec![FLOWS.into()];
+            planner_layering_example2()
+        }
         (Some("planner-layering-3a"), true) => planner_layering_example3a(),
         (Some("planner-layering-3b"), true) => planner_layering_example3b(),
         (Some("planner-layering-4a"), true) => planner_layering_example4a(),
@@ -126,17 +152,18 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 (Some(epsilon), Some(delta)) => AccuracyTarget::EpsilonDelta { epsilon, delta },
                 (None, Some(_)) => return Err("--delta needs --epsilon".into()),
             };
-            promql_batch(&queries, accuracy, interval_ms)
+            query_batch(language, &queries, accuracy, interval_ms)
         }
-        _ => return Err("give exactly one of --example or --promql".into()),
+        _ => return Err("give exactly one of --example, --promql or --sql".into()),
     };
+    let catalog = sql_catalog(&tables)?;
     let out = out.ok_or("--out is required")?;
     let capabilities = DeploymentCapabilities {
         // Example 4b's crossover needs a deployment that does not keep raw data.
         raw_data_retained: example.as_deref() != Some("planner-layering-4b"),
         ..asap_executor::capabilities()
     };
-    let document = stage_pipeline(&workload, &capabilities, max_candidates)?;
+    let document = stage_pipeline(&workload, &catalog, &capabilities, max_candidates)?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))
 }
@@ -147,17 +174,17 @@ const PRICE_LIMIT: usize = 4096;
 
 fn stage_pipeline(
     workload: &PlanningWorkload,
+    catalog: &SqlCatalog,
     capabilities: &DeploymentCapabilities,
     max_candidates: usize,
 ) -> Result<Value, String> {
     let roots = match workload.query_workload.language {
-        // The only SQL workload here is Example 2's, over `flows`.
         QueryLanguage::SQL(_) => tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(|e| e.to_string())?
             .block_on(asap_frontend_sql::lower_sql_batch(
                 &workload.query_workload,
-                &flows_catalog(),
+                catalog,
             ))
             .into_iter()
             .map(|root| {
@@ -502,14 +529,15 @@ fn declared<T>(value: T) -> Evidence<T> {
     }
 }
 
-fn promql_batch(
+fn query_batch(
+    language: QueryLanguage,
     queries: &[String],
     accuracy: AccuracyTarget,
     interval_ms: u64,
 ) -> PlanningWorkload {
     PlanningWorkload {
         query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
+            language,
             query_batch: Some(
                 queries
                     .iter()
@@ -585,15 +613,56 @@ fn planner_layering_example1() -> PlanningWorkload {
     }
 }
 
-/// #509 Example 2's `flows` table.
-fn flows_catalog() -> asap_frontend_sql::SqlCatalog {
-    asap_frontend_sql::SqlCatalog::new().with_table(
-        "flows",
-        Schema::new(vec![
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("src_ip", DataType::Utf8, false),
-        ]),
-    )
+/// #509 Example 2's `flows` table, as a `--table`.
+const FLOWS: &str = r#"{"name": "flows", "columns": [
+    {"name": "ts", "type": "timestamp", "nullable": false},
+    {"name": "src_ip", "type": "utf8", "nullable": false}]}"#;
+
+/// The SQL catalog of the `--table` declarations.
+fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
+    let mut catalog = SqlCatalog::new();
+    let mut names = HashSet::new();
+    for raw in tables {
+        let bad = |what: &str| format!("--table {raw}: {what}");
+        let value: Value = serde_json::from_str(raw).map_err(|e| bad(&e.to_string()))?;
+        let name = value["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| bad("name must be a non-empty string"))?;
+        if !names.insert(name.to_string()) {
+            return Err(bad("the table is declared twice"));
+        }
+        let columns = value["columns"]
+            .as_array()
+            .filter(|columns| !columns.is_empty())
+            .ok_or_else(|| bad("columns must be a non-empty array"))?
+            .iter()
+            .map(|column| {
+                let column_name = column["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| bad("column.name must be a non-empty string"))?;
+                let data_type = match column["type"].as_str().map(str::to_ascii_lowercase) {
+                    Some(t) if t == "timestamp" => DataType::Timestamp,
+                    Some(t) if t == "utf8" || t == "string" => DataType::Utf8,
+                    Some(t) if t == "float64" || t == "double" => DataType::Float64,
+                    Some(t) if t == "int64" || t == "bigint" => DataType::Int64,
+                    _ => return Err(bad(&format!("unsupported column type {}", column["type"]))),
+                };
+                let nullable = column["nullable"].as_bool().unwrap_or(true);
+                Ok(Field::plain(column_name, data_type, nullable))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let schema = match value.get("time_index") {
+            None | Some(Value::Null) => Schema::new(columns),
+            Some(index) => match index.as_u64().map(|i| i as usize) {
+                Some(i) if i < columns.len() => Schema::with_time_index(columns, i, vec![]),
+                _ => return Err(bad("time_index must be a column index")),
+            },
+        };
+        catalog = catalog.with_table(name, schema);
+    }
+    Ok(catalog)
 }
 
 /// #509 Example 2: distinct count, entropy and L2 of `src_ip` over the last

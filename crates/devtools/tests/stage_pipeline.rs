@@ -17,10 +17,9 @@ fn generate(args: &[&str]) -> Value {
     // Tests run in parallel and may generate the same document.
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let out = std::env::temp_dir().join(format!(
-        "stage_pipeline_{}_{}_{}.json",
+        "stage_pipeline_{}_{}.json",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        args.join("_")
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
         .args(args)
@@ -318,4 +317,59 @@ fn document_records_the_deployment_inputs() {
     assert_eq!(calibration["cost_per_retained_byte_second"], 1.25e-7);
     assert_eq!(calibration["version"], "illustrative-v2");
     assert_eq!(deployment["accuracy_model"]["name"], "DefaultAccuracyModel");
+}
+
+const FLOWS: &str = r#"{"name": "flows", "columns": [{"name": "ts", "type": "timestamp", "nullable": false}, {"name": "src_ip", "type": "utf8", "nullable": false}], "time_index": 0}"#;
+
+/// A `--sql` query over a `--table` lowers through the SQL frontend, plans,
+/// and is reported as SQL with its accuracy target.
+#[test]
+fn sql_over_declared_tables_plans() {
+    let document = generate(&[
+        "--table",
+        FLOWS,
+        "--sql",
+        "SELECT COUNT(DISTINCT src_ip) FROM flows",
+        "--epsilon",
+        "0.02",
+    ]);
+    assert_valid_document(&document, 1);
+    let query = &document["workload"]["queries"][0];
+    assert_eq!(query["language"], "sql");
+    assert_eq!(query["requirements"]["accuracy"]["epsilon"], 0.02);
+}
+
+/// The tool's error message for `args`, which must fail.
+fn failure(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(args)
+        .args(["--out", "unused.json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{args:?} should fail");
+    String::from_utf8(output.stderr).unwrap()
+}
+
+/// A run is one language, `--table` needs `--sql`, and a malformed table
+/// or a query over an undeclared table is an error, not a panic.
+#[test]
+fn bad_sql_arguments_are_rejected() {
+    let query = "SELECT COUNT(*) FROM flows";
+    let error = failure(&["--promql", "up", "--table", FLOWS, "--sql", query]);
+    assert!(error.contains("one language"), "{error}");
+    let error = failure(&["--table", FLOWS, "--promql", "up"]);
+    assert!(error.contains("--table needs --sql"), "{error}");
+    for table in [
+        "{not json",
+        r#"{"columns": [{"name": "ts", "type": "timestamp"}]}"#,
+        r#"{"name": "flows", "columns": [{"name": "ts", "type": "decimal"}]}"#,
+        r#"{"name": "flows", "columns": [{"name": "ts", "type": "timestamp"}], "time_index": 1}"#,
+    ] {
+        let error = failure(&["--table", table, "--sql", query]);
+        assert!(error.contains("--table"), "{table}: {error}");
+    }
+    let error = failure(&["--table", FLOWS, "--table", FLOWS, "--sql", query]);
+    assert!(error.contains("declared twice"), "{error}");
+    let error = failure(&["--sql", query]);
+    assert!(error.contains("lowering"), "{error}");
 }
