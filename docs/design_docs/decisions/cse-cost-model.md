@@ -1,6 +1,8 @@
 # Common sub-DAG sharing: rule-based vs. cost-based framework (issue #237)
 
-> Status: accepted decision for the implementation described here.
+> Status: accepted decision for the implementation described here. That
+> implementation (`CostModel::cse_share_decision` in the legacy search) was
+> removed (#635); kept as a decision record.
 
 ## Context
 

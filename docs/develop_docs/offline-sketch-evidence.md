@@ -1,8 +1,13 @@
 # Consuming offline sketch measurements
 
-This document is for developers integrating sketch-bench with the planner. The
-Rust schema is `asap_plan_selection::cost::empirical_cost::EvidenceArtifact`; its JSON
-schema version is `1`. Required artifact-level `benchmark_version` and
+This document is for developers integrating sketch-bench with the planner.
+
+> **Status:** the planner-side consumer (`asap_plan_selection::cost::empirical_cost`:
+> `EvidenceArtifact`, `EmpiricalCostModel`) was removed with the legacy
+> `CostModel`; Stage 3 does not read offline measurements yet. This document
+> records the artifact format for producers and a future Stage 3 consumer.
+
+The artifact's JSON schema version is `1`. Required artifact-level `benchmark_version` and
 `model_version` identify the producer and cost interpretation independently of
 the serialization schema. Producers export offline benchmark measurements using
 this contract; benchmark tooling is delivered separately from the core provider.
@@ -76,7 +81,7 @@ include generator configuration and seed, or trace checksum and sampling rules.
 Validity intervals are supplied by the producer or deployment policy; they are
 an explicit applicability assumption, not a measured property.
 
-`EmpiricalCostModel` implements the planner's existing `CostModel` boundary.
+The removed `EmpiricalCostModel` implemented the legacy `CostModel` boundary.
 It derives the planner's default parameter configurations for the requested
 accuracy, and orders algorithms by mean measured update CPU only when all
 candidates have applicable measurements. Otherwise it preserves discovery order.
