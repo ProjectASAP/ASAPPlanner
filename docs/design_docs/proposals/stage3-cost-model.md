@@ -53,6 +53,18 @@ the longest range plus its offset. Each range then passes only its own
 span. For example, `x[1y] offset 2y` scans 3 years, and a 1-year range over a
 shared 5-year scan passes 1 year of rows.
 
+**Time shifts and ranges (Q66).** A time shift only re-labels time: the
+executor folds the offset into the time bounds of the read below it, so a
+shift is free at either timing. A query-time time range is charged one
+operation per row it keeps, not per row of the scan below it: rows are
+ordered by time, so it seeks to its span. The 1-year range above costs 1
+year of rows, not 5. (At ingestion time a range keeps every arriving row, so
+both counts agree.) Without this, every shifted window over a shared long
+scan paid for the whole scan twice, and Example 3a's shared 1-year segments
+(18 104 per second; scan 12 264, five ranges and five builds of 584 each)
+lost to the shared-input plan (25 112), which reads the same scan with fewer
+shifts and ranges.
+
 **Workload cost** is the sum over the candidate's DAG nodes:
 `cost(P) = Σ_n cost(n)`, in cost per second.
 
@@ -292,8 +304,8 @@ candidate scales by the same factor, so their ranking is unchanged.
 
 **With materialization.** Stage 2 also offers Q2's exact `sum_over_time` in
 six 10-s panes maintained at ingestion time. The cheapest such candidate costs
-47.407 per second: the panes' ingestion work is small (scan 0.387, shift and
-range 0.133, newest-pane build 0.067), but the newest pane retains seven
+47.340 per second: the panes' ingestion work is small (scan 0.387, range
+0.067, the shift free, newest-pane build 0.067), but the newest pane retains seven
 panes of 1 000 000 per-series sums, 336 MB, for 42.0 per second of memory.
 The selection is unchanged. Q2's 100 ms latency bound rejects 40 candidates,
 every Count-Sketch + heap among them.
