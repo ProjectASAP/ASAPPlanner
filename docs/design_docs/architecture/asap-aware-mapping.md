@@ -1,5 +1,11 @@
 # ASAP-Aware Mapping
 
+> **Historical:** this document describes the legacy replacement search
+> (`ReplacementStrategy`, `CandidateLogicalASAPDAGs`, `global_selection`), which
+> was removed (#630, #635). The #509 stage pipeline replaced it; see
+> [planner layering](../proposals/planner-layering.md) and the
+> [library API](../../develop_docs/library-api.md).
+
 ## Overview
 
 ASAP-aware mapping decides **whether and how a query intent can be answered using summaries instead of scanning raw data**.

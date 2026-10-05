@@ -34,6 +34,5 @@ plans, and callers must not execute the first choice as a selection policy.
 Multi-measure aggregates remain intact in the roots until an explicit semantic
 split is supported. Opaque deployment extensions retain exact execution here;
 additional local alternatives require an explicit logical rule rather than a cost
-model making a generation decision. The legacy ranked search remains available
-for the existing pipeline until its later cutover; this module supplies the new
-logical-only entry point without changing production selection prematurely.
+model making a generation decision. This module is the stage pipeline's Stage 1
+entry point; the legacy ranked search it replaced was removed.

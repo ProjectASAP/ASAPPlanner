@@ -42,7 +42,7 @@ o11y-bench, and awesome-prometheus-alerts. They are not duplicated here.
   formats and writes deterministic fixtures; it does not parse or judge
   PromQL.
 - `metrics_observability.rs` is the executable corpus test. It runs the
-  PromQL parser/lowerer and the sketch-only post-ASAP replacement pass, and
+  PromQL parser/lowerer and Stage 1 (Pass 1 and composition) per query, and
   prints the current measurements.
 - `summarize_misses.py` is an optional report formatter. It consumes the
   test's opt-in `POST_ASAP_MISS` lines and groups misses by coarse root shape.
@@ -50,22 +50,16 @@ o11y-bench, and awesome-prometheus-alerts. They are not duplicated here.
 The test prints totals, parse errors, lowering errors, pre-ASAP successes,
 post-ASAP candidates, unchanged queries, and post-ASAP errors. `Pre-ASAP` means
 that parsing and lowering produced an `OperatorNode` DAG. `Post-ASAP candidate`
-means the isolated `ASAPStrategies` produced a candidate that contains
-an ASAP operator (`contains_asap()`). `Unchanged` is a successful pre-ASAP query
-for which that strategy returned only the kept pre-ASAP sub-DAG (`retain_exact`).
+means one of the query's first 64 Stage 1 choices composes to a candidate
+that contains an ASAP operator (`contains_asap()`). `Unchanged` is a successful
+pre-ASAP query for which only the pass-through choice composes to such a
+candidate, and a post-ASAP error is a query Pass 1 rejects or whose
+pass-through choice does not compose (`support::stage1_plan`).
 
-## Strategies
+## Scope
 
-The corpus measurement deliberately uses only
-`ASAPStrategies::default().replacements(...)` on each
-query root. It does not measure workload-wide search or the other default
-strategies.
-
-The default workload search currently registers `ASAPStrategies`,
-`HydraGroupingStrategy`, `SharedSubDAGStrategy`, and
-`AvgToSumOverCountStrategy`. Workload context can additionally contribute
-`RollupStrategy` and `AccuracyReconciliationStrategy`. This baseline is
-therefore a sketch-only comparison point.
+The measurement runs Pass 1 on each query alone. It does not measure Pass 2's
+sharing across queries, or Stage 2 and Stage 3.
 
 ## Alerts
 
@@ -84,10 +78,9 @@ binary expressions, parenthesized/binary expressions, bare selectors, and
 root functions such as `sum`, `histogram_quantile`, `increase`, `absent`,
 `topk`, and `scalar`.
 
-Many misses are expected because the isolated strategy only replaces a
-bindable aggregate at the query root. A nested aggregate can be sketchable
-even when the root expression is a selector, binary expression, or another
-non-bindable function.
+Many misses are expected because Pass 1 only realizes a single-measure
+aggregate with a summary; a query without one (a bare selector, a per-series
+function) keeps its exact plan.
 
 ## Reproducing and refreshing the baseline
 
@@ -99,7 +92,7 @@ python3 tools/metrics_observability/extract_promql.py \
   <benchmark-root>/metrics_observability \
   crates/frontend-promql/tests/observability/data/metrics_observability
 
-# Re-run totals, errors, pre-ASAP, and sketch-only post-ASAP candidates.
+# Re-run totals, errors, pre-ASAP, and Stage 1 post-ASAP candidates.
 cargo test -p asap-frontend-promql --test metrics_observability -- --nocapture
 
 # Recreate the miss-pattern report.

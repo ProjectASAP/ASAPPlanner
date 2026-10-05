@@ -5,8 +5,8 @@ corpus coverage. These commands do not deploy or execute a physical plan.
 
 To develop an application using the Rust library, start with
 [Library API: definitions, options, and examples](../develop_docs/library-api.md).
-That guide explains how to choose strategies and models, rank candidates, and
-assemble selected DAGs.
+That guide explains how to plan a workload with the stage pipeline, inspect
+Stage 1's alternatives, and supply deployment models.
 
 ## Choose a command
 
@@ -19,7 +19,7 @@ tool on first use.
 | `analyze_corpora --corpora --data-ingestion-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
 | `variant_coverage --data-ingestion-interval-ms 1000` | Repository corpora | Reports Pre-ASAP IR variant coverage |
-| `sketch_coverage --data-ingestion-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports sketch/reuse opportunities among successfully lowered queries |
+| `sketch_coverage --data-ingestion-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Lists, per query, the sketch alternatives Stage 1 offers, and each corpus's coverage |
 
 ## Inspect a query from the command line
 
@@ -95,13 +95,13 @@ cargo run -p asap-devtools --bin variant_coverage -- --data-ingestion-interval-m
 
 ### Check sketch-replacement coverage
 
-Parse the same query corpora, lower them with an approximate `AccuracyTarget`, and report what fraction of each corpus's successfully-lowered queries got a genuine sketch alternative (`SketchApproximation`, e.g. KLL vs. DDSketch) and/or a cross-query common-subexpression-reuse candidate (`CommonSubexpressionReuse`):
+Parse the same query corpora, lower them with an approximate `AccuracyTarget`, and list, per query, the sketch alternatives (e.g. KLL and DDSketch) Stage 1's Pass 1 offers, with the fraction of each corpus's successfully-lowered queries that got at least one:
 
 ```sh
 cargo run -p asap-devtools --bin sketch_coverage -- --data-ingestion-interval-ms 1000 --epsilon 0.01
 ```
 
-`--epsilon` is optional (defaults to `0.01`). See the binary's own doc comment for exactly how "coverage" is defined and attributed back to each query.
+`--epsilon` is optional (defaults to `0.01`).
 
 ## Additional examples
 

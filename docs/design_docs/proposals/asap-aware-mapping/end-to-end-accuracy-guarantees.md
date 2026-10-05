@@ -1,7 +1,10 @@
 # Design: End-to-End Accuracy Guarantees
 
-> Status: partially implemented design. Typed guarantees, supported composition
-> rules and accuracy gating are implemented. Empirical-input and combined
+> Status: partially implemented design. Typed guarantees and accuracy gating
+> are implemented: Stage 3 checks each summary estimate's local guarantee. The
+> composition rules and budget allocation were implemented by the legacy search
+> and removed with it (#635); the stage pipeline does not compose guarantees
+> yet (#623). Empirical-input and combined
 > parameter configuration remain extensions as described below. The
 > [implementation companion](../../../develop_docs/end-to-end-accuracy-guarantees.md)
 > describes current contracts and validation.
