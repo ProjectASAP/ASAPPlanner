@@ -57,7 +57,19 @@ impl From<ResolveDAGError> for SqlError {
 }
 
 impl From<datafusion::error::DataFusionError> for SqlError {
-    fn from(e: datafusion::error::DataFusionError) -> Self {
-        Self::DataFusion(e)
+    fn from(mut e: datafusion::error::DataFusionError) -> Self {
+        use datafusion::error::DataFusionError;
+        // Report the first underlying `Plan`/`SQL`/... error. The planner
+        // collects every error it finds and wraps each with a source-span
+        // diagnostic; neither carries anything this front end reports.
+        loop {
+            e = match e {
+                DataFusionError::Diagnostic(_, inner) => *inner,
+                DataFusionError::Collection(errors) if !errors.is_empty() => {
+                    errors.into_iter().next().unwrap()
+                }
+                other => break Self::DataFusion(other),
+            };
+        }
     }
 }

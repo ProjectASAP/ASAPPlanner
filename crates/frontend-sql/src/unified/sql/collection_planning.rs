@@ -5,15 +5,22 @@ use asap_types::ir::scalar::{element_access_type, struct_field_type};
 use asap_types::ir::ScalarExpr;
 use asap_types::pre_asap::scalar_type_rules::MapScalarFunction;
 use asap_types::pre_asap::{Field, Schema};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::common::{DataFusionError, ExprSchema, Result};
+use datafusion::arrow::datatypes::{DataType, Field as ArrowField, FieldRef};
+use datafusion::common::{DataFusionError, Result, ScalarValue as DfScalarValue};
 use datafusion::logical_expr::{
-    ColumnarValue, Expr, ExprSchemable, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature,
-    Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+    TypeSignature, Volatility,
 };
 use datafusion::prelude::SessionContext;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy)]
+/// The name ClickHouse's `map(...)` is planned under. DataFusion's SQL planner
+/// reserves `map` for its own constructor (and rejects `map()`), so
+/// `clickhouse_ast::normalize` renames the call and lowering restores `map`.
+pub(super) const MAP_PLANNING_NAME: &str = "asap_map_construct";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanningFunction {
     Map(MapScalarFunction),
     Element,
@@ -22,7 +29,10 @@ enum PlanningFunction {
 
 pub(super) fn register(context: &SessionContext) {
     for (name, function) in [
-        ("map", PlanningFunction::Map(MapScalarFunction::Construct)),
+        (
+            MAP_PLANNING_NAME,
+            PlanningFunction::Map(MapScalarFunction::Construct),
+        ),
         (
             "mapconcat",
             PlanningFunction::Map(MapScalarFunction::Concat),
@@ -48,18 +58,26 @@ pub(super) fn register(context: &SessionContext) {
         }));
     }
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct CollectionPlanningFunction {
     name: &'static str,
     function: PlanningFunction,
     signature: Signature,
+}
+// `function` is determined by `name` at registration, so hashing the name and
+// signature agrees with the derived `Eq`.
+impl Hash for CollectionPlanningFunction {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.signature.hash(state);
+    }
 }
 impl CollectionPlanningFunction {
     fn output(
         &self,
         args: &[DataType],
         nullable: &[bool],
-        expressions: Option<&[Expr]>,
+        literals: Option<&[Option<&DfScalarValue>]>,
     ) -> Result<(DataType, bool)> {
         let inputs = args
             .iter()
@@ -88,8 +106,7 @@ impl CollectionPlanningFunction {
             );
             let args = (0..schema.fields.len())
                 .map(|index| {
-                    if let Some(Expr::Literal(value)) = expressions.and_then(|args| args.get(index))
-                    {
+                    if let Some(Some(value)) = literals.and_then(|args| args.get(index)) {
                         scalar_value_to_asap(value)
                             .map(ScalarExpr::Literal)
                             .map_err(|error| DataFusionError::Plan(error.to_string()))
@@ -113,9 +130,6 @@ impl CollectionPlanningFunction {
     }
 }
 impl ScalarUDFImpl for CollectionPlanningFunction {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         self.name
     }
@@ -133,37 +147,21 @@ impl ScalarUDFImpl for CollectionPlanningFunction {
         )
         .map(|output| output.0)
     }
-    fn return_type_from_exprs(
-        &self,
-        args: &[Expr],
-        schema: &dyn ExprSchema,
-        types: &[DataType],
-    ) -> Result<DataType> {
-        let nullable = args
-            .iter()
-            .map(|arg| arg.nullable(schema))
-            .collect::<Result<Vec<_>>>()?;
-        self.output(types, &nullable, Some(args))
-            .map(|output| output.0)
-    }
-    fn is_nullable(&self, args: &[Expr], schema: &dyn ExprSchema) -> bool {
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
         let types = args
+            .arg_fields
             .iter()
-            .map(|arg| arg.get_type(schema))
-            .collect::<Result<Vec<_>>>();
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>();
         let nullable = args
+            .arg_fields
             .iter()
-            .map(|arg| arg.nullable(schema))
-            .collect::<Result<Vec<_>>>();
-        match (types, nullable) {
-            (Ok(types), Ok(nullable)) => self
-                .output(&types, &nullable, Some(args))
-                .map(|out| out.1)
-                .unwrap_or(true),
-            _ => true,
-        }
+            .map(|field| field.is_nullable())
+            .collect::<Vec<_>>();
+        let (dtype, nullable) = self.output(&types, &nullable, Some(args.scalar_arguments))?;
+        Ok(Arc::new(ArrowField::new(self.name, dtype, nullable)))
     }
-    fn invoke_batch(&self, _args: &[ColumnarValue], _number_rows: usize) -> Result<ColumnarValue> {
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         Err(DataFusionError::NotImplemented("collection planning adapter cannot execute; use a capable query engine or external exact sub_dag".into()))
     }
 }
@@ -174,12 +172,19 @@ mod tests {
     #[test]
     fn planning_adapter_explicitly_refuses_physical_execution() {
         let adapter = CollectionPlanningFunction {
-            name: "map",
+            name: MAP_PLANNING_NAME,
             function: PlanningFunction::Map(MapScalarFunction::Construct),
             signature: Signature::any(0, Volatility::Immutable),
         };
+        let args = ScalarFunctionArgs {
+            args: vec![],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(ArrowField::new("map", DataType::Null, true)),
+            config_options: Default::default(),
+        };
         assert!(matches!(
-            adapter.invoke_batch(&[], 1),
+            adapter.invoke_with_args(args),
             Err(DataFusionError::NotImplemented(_))
         ));
         let result = adapter.return_type(&[]).unwrap();

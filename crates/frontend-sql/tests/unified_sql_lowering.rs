@@ -206,16 +206,19 @@ fn find_filter(node: &OperatorNode) -> Option<&OperatorNode> {
 }
 
 #[tokio::test]
-async fn select_star_with_where_folds_predicate_onto_scan() {
-    // SELECT * elides the projection; WHERE folds onto the Scan predicates.
+async fn where_folds_predicate_onto_scan() {
+    // WHERE folds onto the Scan predicates, below the SELECT projection.
     let qe = lower("SELECT * FROM metrics WHERE service = 'api'").await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
     let NonASAPOp::Scan {
         source,
         predicates,
         schema,
-    } = op(&qe)
+    } = op(child)
     else {
-        panic!("expected Scan at root, got {qe:?}");
+        panic!("expected Scan under the projection, got {child:?}");
     };
     assert!(matches!(source, Source::Table { table_ref } if table_ref == "metrics"));
     assert_eq!(predicates.len(), 1, "WHERE clause folded onto the scan");
@@ -702,7 +705,9 @@ async fn a_multi_column_in_subquery_is_rejected() {
     )
     .await
     .expect_err("IN must select one column");
-    assert!(format!("{err}").contains("exactly one column"), "got {err}");
+    // DataFusion's planner rejects this before `lower_in_subquery`'s own
+    // arity check; either message names the one-column rule.
+    assert!(format!("{err}").contains("one column"), "got {err}");
 }
 
 #[tokio::test]
@@ -2195,10 +2200,13 @@ async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
 /// PromQL's Float64 Unix-seconds `EvalTimestamp`.
 #[tokio::test]
 async fn now_in_predicate_lowers_to_current_timestamp() {
-    // SELECT * folds WHERE onto Scan.predicates (no explicit Filter node).
+    // WHERE folds onto Scan.predicates (no explicit Filter node).
     let qe = lower("SELECT * FROM metrics WHERE ts < NOW()").await;
-    let NonASAPOp::Scan { predicates, .. } = op(&qe) else {
-        panic!("expected Scan at root, got {qe:?}");
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    let NonASAPOp::Scan { predicates, .. } = op(child) else {
+        panic!("expected Scan under the projection, got {child:?}");
     };
     assert_eq!(predicates.len(), 1);
     assert!(
@@ -2214,8 +2222,11 @@ async fn now_in_predicate_lowers_to_current_timestamp() {
 #[tokio::test]
 async fn clickhouse_now_in_predicate_lowers_to_current_timestamp() {
     let qe = lower_clickhouse("SELECT * FROM metrics WHERE ts < now()").await;
-    let NonASAPOp::Scan { predicates, .. } = op(&qe) else {
-        panic!("expected Scan at root, got {qe:?}");
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    let NonASAPOp::Scan { predicates, .. } = op(child) else {
+        panic!("expected Scan under the projection, got {child:?}");
     };
     assert_eq!(predicates.len(), 1);
     assert!(

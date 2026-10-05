@@ -1,10 +1,12 @@
 //! Structural ClickHouse syntax normalization before DataFusion type inference.
 use datafusion::sql::sqlparser::ast::{
-    visit_expressions, visit_expressions_mut, BinaryOperator, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, MapAccessSyntax, ObjectName,
-    Query, SelectItem, SetExpr, Statement, VisitMut, VisitorMut,
+    visit_expressions, visit_expressions_mut, AccessExpr, BinaryOperator, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName,
+    ObjectNamePart, Query, SelectItem, SetExpr, Statement, Subscript, Value, VisitMut, VisitorMut,
 };
 use std::ops::ControlFlow;
+
+use super::collection_planning::MAP_PLANNING_NAME;
 
 pub(super) fn normalize(statement: &mut Statement) {
     struct PreserveNames;
@@ -23,28 +25,24 @@ pub(super) fn normalize(statement: &mut Statement) {
                                 });
                                 let _: ControlFlow<()> = visit_expressions(expr, |candidate| {
                                     if let Expr::Function(function) = candidate {
-                                        changed |= function.name.0.len() == 1
-                                            && function.name.0[0].quote_style.is_none()
-                                            && matches!(
-                                                function.name.0[0]
-                                                    .value
-                                                    .to_ascii_lowercase()
-                                                    .as_str(),
-                                                "modulo"
-                                                    | "map"
-                                                    | "mapconcat"
-                                                    | "arrayelement"
-                                                    | "tupleelement"
-                                            );
+                                        changed |=
+                                            unquoted_name(&function.name).is_some_and(|name| {
+                                                matches!(
+                                                    name.to_ascii_lowercase().as_str(),
+                                                    "modulo"
+                                                        | "map"
+                                                        | "mapconcat"
+                                                        | "arrayelement"
+                                                        | "tupleelement"
+                                                )
+                                            });
                                     }
                                     ControlFlow::Continue(())
                                 });
                                 if changed {
                                     let alias = Ident::with_quote('"', expr.to_string());
-                                    let value = std::mem::replace(
-                                        expr,
-                                        Expr::Value(datafusion::sql::sqlparser::ast::Value::Null),
-                                    );
+                                    let value =
+                                        std::mem::replace(expr, Expr::Value(Value::Null.into()));
                                     *item = SelectItem::ExprWithAlias { expr: value, alias };
                                 }
                             }
@@ -67,9 +65,11 @@ pub(super) fn normalize(statement: &mut Statement) {
         let Expr::Function(function) = expr else {
             return ControlFlow::Continue(());
         };
-        if function.name.0.len() != 1
-            || function.name.0[0].quote_style.is_some()
-            || !function.name.0[0].value.eq_ignore_ascii_case("modulo")
+        if unquoted_name(&function.name).is_some_and(|name| name.eq_ignore_ascii_case("map")) {
+            function.name = ObjectName::from(vec![Ident::new(MAP_PLANNING_NAME)]);
+            return ControlFlow::Continue(());
+        }
+        if !unquoted_name(&function.name).is_some_and(|name| name.eq_ignore_ascii_case("modulo"))
             || !matches!(function.parameters, FunctionArguments::None)
             || function.filter.is_some()
             || function.over.is_some()
@@ -98,34 +98,47 @@ pub(super) fn normalize(statement: &mut Statement) {
     });
 }
 
+/// The name of a single-part, unquoted function name such as `modulo`.
+fn unquoted_name(name: &ObjectName) -> Option<&str> {
+    match name.0.as_slice() {
+        [ObjectNamePart::Identifier(ident)] if ident.quote_style.is_none() => Some(&ident.value),
+        _ => None,
+    }
+}
+
+/// Rewrites a bracket-only access chain such as `m['k'][1]` into nested
+/// `arrayElement` calls. Chains with a dot access or a slice stay unchanged.
 fn normalize_map_access(expression: &mut Expr) -> bool {
-    let Expr::MapAccess { keys, .. } = expression else {
+    let Expr::CompoundFieldAccess { access_chain, .. } = expression else {
         return false;
     };
-    if keys.is_empty()
-        || keys
+    if access_chain.is_empty()
+        || access_chain
             .iter()
-            .any(|key| key.syntax != MapAccessSyntax::Bracket)
+            .any(|access| !matches!(access, AccessExpr::Subscript(Subscript::Index { .. })))
     {
         return false;
     }
-    let Expr::MapAccess { column, keys } = std::mem::replace(
-        expression,
-        Expr::Value(datafusion::sql::sqlparser::ast::Value::Null),
-    ) else {
+    let Expr::CompoundFieldAccess { root, access_chain } =
+        std::mem::replace(expression, Expr::Value(Value::Null.into()))
+    else {
         unreachable!()
     };
-    let mut input = *column;
-    for key in keys {
+    let mut input = *root;
+    for access in access_chain {
+        let AccessExpr::Subscript(Subscript::Index { index }) = access else {
+            unreachable!()
+        };
         input = Expr::Function(Function {
-            name: ObjectName(vec![Ident::new("arrayElement")]),
+            name: ObjectName::from(vec![Ident::new("arrayElement")]),
+            uses_odbc_syntax: false,
             parameters: FunctionArguments::None,
             args: FunctionArguments::List(FunctionArgumentList {
                 duplicate_treatment: None,
                 clauses: vec![],
                 args: vec![
                     FunctionArg::Unnamed(FunctionArgExpr::Expr(input)),
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(key.key)),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(index)),
                 ],
             }),
             filter: None,
