@@ -28,7 +28,4 @@ pub mod pass2;
 #[cfg(test)]
 mod test_support;
 
-pub use accuracy::{
-    AccuracyEvidenceProvider, NoAccuracyEvidence, PropagationStats, WorkloadAccuracyEvidence,
-};
 pub use pass1::realization::{has_subpopulations, summary_candidates, Realization};

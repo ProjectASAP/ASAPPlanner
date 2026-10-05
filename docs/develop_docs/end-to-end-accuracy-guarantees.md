@@ -232,16 +232,14 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
 It imports `asap_sketchlib` DDSketch mapping bounds for ratio certification;
 see [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md). This dependency
-does not make Planner a query executor. Data- or runtime-dependent evidence enters
-through an `AccuracyEvidenceProvider` as typed `PropagationStats` and is
-recorded in provenance; the stage pipeline does not read it yet. `NoAccuracyEvidence` is the
-default: it supplies no missing facts. Guarantee derivation remains conservative;
-the direct DDSketch ratio exception above retains a candidate without claiming
-its accuracy is proven.
+does not make Planner a query executor. The planner has no input for data- or
+runtime-dependent accuracy evidence: the accuracy-evidence provider was removed
+with the legacy search, which was its only reader. Guarantee derivation remains
+conservative: a guarantee that needs a missing fact keeps it as an unknown leaf.
 
 ### TopK membership
 
-`PropagationStats` supplies:
+Not implemented in the stage pipeline. A certificate would need:
 
 - the lower confidence bound of the kth selected item;
 - the greatest upper confidence bound among excluded items; and

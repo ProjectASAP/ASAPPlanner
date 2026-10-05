@@ -89,12 +89,11 @@ pub fn local_guarantee(family: &FieldDataType, query: &SketchStatistic) -> Optio
             // it with probability e^-shared_rows. N is the whole input's
             // weight, not one group's, so this bounds error relative to it.
             let inner = sketch_guarantee(kind.algorithm(), kind.params(), query)?;
-            let stats = crate::accuracy::PropagationStats {
+            let stats = PropagationStats {
                 hydra_shared_grid_collision_bound: Some(
                     std::f64::consts::E / f64::from(*shared_columns),
                 ),
                 hydra_shared_grid_failure_probability: Some((-f64::from(*shared_rows)).exp()),
-                ..Default::default()
             };
             Some(hydra_guarantee(&inner, &stats))
         }
@@ -177,6 +176,15 @@ pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
     }
     (x.ceil() as u32).clamp(lo, hi)
 }
+/// Hydra's shared-grid statistics; a missing one stays a symbolic leaf.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PropagationStats {
+    /// Hydra shared-grid collision error in the inner guarantee's metric.
+    pub hydra_shared_grid_collision_bound: Option<f64>,
+    /// Failure probability assigned to the Hydra shared-grid term.
+    pub hydra_shared_grid_failure_probability: Option<f64>,
+}
+
 /// Compose the inner per-subpopulation guarantee with Hydra's outer shared
 /// grid. The paper's collision term depends on deployment/data statistics;
 /// keeping those leaves symbolic makes the formula explicit while ensuring
@@ -186,7 +194,6 @@ pub(crate) fn hydra_guarantee(
     stats: &PropagationStats,
 ) -> ResultGuarantee {
     let mut provenance = inner.provenance.clone();
-    provenance.extend(stats.evidence_provenance.clone());
     provenance.push(GuaranteeSource::ChildGuarantee {
         input_index: 0,
         guarantee: Box::new(inner.clone()),
