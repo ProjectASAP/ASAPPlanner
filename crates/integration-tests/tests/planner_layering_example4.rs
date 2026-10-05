@@ -97,13 +97,17 @@ fn eh_options(run: &Run) -> BTreeMap<Materialization, (String, LogicalASAPNodeId
     options_of(run, None, 5)
 }
 
-/// The physical candidates of the shared-segment candidate (Q60), keyed by
-/// the materialization of its segments, with the newest segment's id.
-fn segment_options(run: &Run) -> BTreeMap<Materialization, (String, LogicalASAPNodeId)> {
+/// The physical candidates of the shared-segment candidate (Q60) with
+/// `count` segments (Q67), keyed by the materialization of its segments,
+/// with the newest segment's id.
+fn segment_options(
+    run: &Run,
+    count: usize,
+) -> BTreeMap<Materialization, (String, LogicalASAPNodeId)> {
     let logical = run
         .logical
         .iter()
-        .find(|c| shares_segments(&c.dag, &c.query_roots))
+        .find(|c| shares_segments(&c.dag, &c.query_roots) && sketch_builds(&c.dag).len() == count)
         .expect("a candidate sharing window segments");
     run.physical_of(logical)
         .map(|p| {
@@ -197,23 +201,31 @@ fn stage2_a_at_rest_drops_the_ingestion_time_option() {
     assert_eq!(found, BTreeSet::from([QueryTimeKept, NotMaterialized]));
 }
 
-/// The shared segments (Q60, in place of the spec's EH) are five builds,
-/// each built once, read by all five queries through their merges and
-/// charged once, in every materialization: at query time for the one-off
-/// batch, and also at ingestion time when it repeats monthly (Q61).
+/// The shared segments (Q60, in place of the spec's EH), four split at the
+/// windows' boundaries or five on the 1-year grid (Q67), are each built
+/// once, read by all five queries through their merges and charged once,
+/// in every materialization: at query time for the one-off batch, and, for
+/// the even grid only, also at ingestion time when it repeats monthly
+/// (Q61). Uneven segments are no stream of panes.
 #[test]
 fn stage2_a_segments_are_built_once_for_all_consumers() {
-    for (workload, expected) in [
-        (once(), BTreeSet::from([NotMaterialized])),
-        (monthly(), BTreeSet::from([IngestionTime, NotMaterialized])),
+    for (workload, count, expected) in [
+        (once(), 4, BTreeSet::from([NotMaterialized])),
+        (once(), 5, BTreeSet::from([NotMaterialized])),
+        (monthly(), 4, BTreeSet::from([NotMaterialized])),
+        (
+            monthly(),
+            5,
+            BTreeSet::from([IngestionTime, NotMaterialized]),
+        ),
     ] {
         let run = run_promql(&workload);
-        let options = segment_options(&run);
+        let options = segment_options(&run, count);
         assert_eq!(options.keys().copied().collect::<BTreeSet<_>>(), expected);
         for (id, _) in options.values() {
             let p = run.physical(id);
             let segments = sketch_builds(&p.dag);
-            assert_eq!(segments.len(), 5, "{id}");
+            assert_eq!(segments.len(), count, "{id}");
             let read: BTreeSet<usize> = segments
                 .iter()
                 .flat_map(|(b, ..)| readers(&p.dag, &p.query_roots, *b))

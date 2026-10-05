@@ -28,6 +28,8 @@
 //! **Units.** The panes merged by one `SummaryMerge` are decided together:
 //! a pane chain is maintained as one stream of panes, and a mixed chain is
 //! never cheaper. Panes shared by two merges join both chains into one unit.
+//! A merge of panes of different widths (uneven shared segments, Q67) is no
+//! stream of panes, so its chain stays at query time.
 //!
 //! **Down-closed sets.** Everything upstream of an ingestion-time node also
 //! runs at ingestion time (#509), so a unit is at ingestion time only if
@@ -178,7 +180,12 @@ impl MaterializationSpace {
                 .into_iter()
                 .filter_map(|c| index.get(&Rc::as_ptr(c)).copied())
                 .collect();
-            if members.iter().any(|&m| !eligible[m]) {
+            // Panes of different widths (uneven shared segments, Q67) are
+            // not one stream of panes: no pane is a later one shifted back.
+            let uneven = members
+                .windows(2)
+                .any(|pair| window_of(&summaries[pair[0]]) != window_of(&summaries[pair[1]]));
+            if uneven || members.iter().any(|&m| !eligible[m]) {
                 for &m in &members {
                     usable[m] = false;
                 }

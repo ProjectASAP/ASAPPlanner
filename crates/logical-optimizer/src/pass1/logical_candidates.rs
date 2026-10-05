@@ -711,10 +711,9 @@ fn realize(
             };
             build(child, coverage)?
         }
-        WindowForm::Tumbling { pane_ms }
-        | WindowForm::Segments {
-            segment_ms: pane_ms,
-        } => tumbling_state(&child, pane_ms, build)?,
+        WindowForm::Tumbling { .. } | WindowForm::Segments { .. } => {
+            tumbling_state(&child, window, build)?
+        }
     };
     let evaluation = match query {
         Some(query) => ASAPOp::SummaryEstimate {

@@ -23,7 +23,7 @@
 //! summary per segment of a grid that every window's boundaries lie on, and
 //! each query merges the segments its range covers.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -48,21 +48,51 @@ pub enum WindowForm {
     Whole,
     /// Back-to-back panes of `pane_ms`, merged at each evaluation.
     Tumbling { pane_ms: u64 },
-    /// Segments of `segment_ms` shared by several queries' windows
-    /// ([`share_window_segments`]); built as tumbling panes are.
-    Segments { segment_ms: u64 },
+    /// Segments shared by several queries' windows
+    /// ([`share_window_segments`]); built as tumbling panes are. Counting
+    /// units of `unit_ms` back from the window's newest end, a segment ends
+    /// after unit `j + 1` when bit `j` of `ends` is set; the highest set bit
+    /// is the window's oldest end.
+    Segments { unit_ms: u64, ends: u64 },
 }
 
 impl WindowForm {
-    /// E.g. "tumbling 1m panes"; `None` for the whole window.
+    /// E.g. "tumbling 1m panes", "365d segments" (even) or "365d+730d
+    /// segments";
+    /// `None` for the whole window.
     pub fn label(self) -> Option<String> {
         match self {
             WindowForm::Whole => None,
             WindowForm::Tumbling { pane_ms } => {
                 Some(format!("tumbling {} panes", duration_label(pane_ms)))
             }
-            WindowForm::Segments { segment_ms } => {
-                Some(format!("{} segments", duration_label(segment_ms)))
+            WindowForm::Segments { .. } => {
+                let mut widths = self.widths(0);
+                if widths.iter().all(|w| *w == widths[0]) {
+                    widths.truncate(1);
+                }
+                let widths: Vec<_> = widths.into_iter().map(duration_label).collect();
+                Some(format!("{} segments", widths.join("+")))
+            }
+        }
+    }
+
+    /// The widths of the panes or segments a window of `lookback_ms` is
+    /// split into, newest first. Segments know their own window.
+    pub fn widths(self, lookback_ms: u64) -> Vec<u64> {
+        match self {
+            WindowForm::Whole => vec![lookback_ms],
+            WindowForm::Tumbling { pane_ms } => vec![pane_ms; (lookback_ms / pane_ms) as usize],
+            WindowForm::Segments { unit_ms, ends } => {
+                let mut widths = Vec::new();
+                let mut start = 0;
+                for j in 0..64 {
+                    if ends & (1 << j) != 0 {
+                        widths.push((j + 1 - start) * unit_ms);
+                        start = j + 1;
+                    }
+                }
+                widths
             }
         }
     }
@@ -184,10 +214,26 @@ fn relative(back_from: i64, back_to: i64) -> Option<CoverageTime> {
     ))
 }
 
-/// Pane `i`'s time coverage.
-fn pane_time(window: &Window<'_>, pane_ms: i64, i: i64) -> Option<CoverageTime> {
-    let newest = window.offset_ms.checked_add(i.checked_mul(pane_ms)?)?;
-    relative(newest.checked_add(pane_ms)?, newest)
+/// The panes of `widths` (newest first) over `window`: each one's offset
+/// back from the evaluation, and its width.
+fn panes(window: &Window<'_>, widths: &[u64]) -> Option<Vec<(i64, u64)>> {
+    let mut offset_ms = window.offset_ms;
+    widths
+        .iter()
+        .map(|&width| {
+            let pane = (offset_ms, width);
+            offset_ms = offset_ms.checked_add(i64::try_from(width).ok()?)?;
+            Some(pane)
+        })
+        .collect()
+}
+
+/// A pane's time coverage: `[-(offset + width), -offset)`.
+fn pane_time((offset_ms, width): (i64, u64)) -> Option<CoverageTime> {
+    relative(
+        offset_ms.checked_add(i64::try_from(width).ok()?)?,
+        offset_ms,
+    )
 }
 
 /// The whole window's time coverage: `[-(o + lookback), -o)`.
@@ -213,16 +259,17 @@ fn scan_source(scan: &OperatorNode) -> &Source {
     }
 }
 
-/// The coverage proof (W2): the panes' coverages, each relative to the
-/// evaluation, merge without overlap into exactly the whole window.
-fn panes_cover_window(window: &Window<'_>, pane_ms: u64) -> bool {
-    let Ok(width) = i64::try_from(pane_ms) else {
-        return false;
-    };
+/// The coverage proof (W2): the coverages of panes of `widths`, each
+/// relative to the evaluation, merge without overlap into exactly the whole
+/// window.
+fn panes_cover_window(window: &Window<'_>, widths: &[u64]) -> bool {
     let source = scan_source(window.scan);
-    let panes: Option<Vec<_>> = (0..(window.lookback_ms / pane_ms) as i64)
-        .map(|i| pane_time(window, width, i).map(|time| coverage(source, time)))
-        .collect();
+    let panes: Option<Vec<_>> = panes(window, widths).and_then(|panes| {
+        panes
+            .into_iter()
+            .map(|pane| pane_time(pane).map(|time| coverage(source, time)))
+            .collect()
+    });
     match (panes, whole_time(window)) {
         (Some(panes), Some(whole)) => {
             SummaryCoverage::merge_disjoint(&panes).ok() == Some(coverage(source, whole))
@@ -269,7 +316,8 @@ pub fn add_window_forms<Id>(inventory: &mut LocalLogicalCandidates<Id>, demand: 
         else {
             continue;
         };
-        if !panes_cover_window(&window, pane_ms) {
+        let form = WindowForm::Tumbling { pane_ms };
+        if !panes_cover_window(&window, &form.widths(window.lookback_ms)) {
             continue;
         }
         let tumbling: Vec<(Realization, GroupingStrategy)> = target
@@ -286,7 +334,7 @@ pub fn add_window_forms<Id>(inventory: &mut LocalLogicalCandidates<Id>, demand: 
         for (alternative, grouping) in tumbling {
             target.alternatives.push(alternative);
             target.absorbs.push(None);
-            target.windows.push(WindowForm::Tumbling { pane_ms });
+            target.windows.push(form);
             target.groupings.push(grouping);
         }
     }
@@ -294,25 +342,31 @@ pub fn add_window_forms<Id>(inventory: &mut LocalLogicalCandidates<Id>, demand: 
 
 /// The shared-segment rule (Q60) over a Pass 1 inventory: targets that
 /// estimate the same statistic (up to accuracy) with the same grouping and
-/// no filters, over windows of one scan, share one summary per segment. The
-/// segment width is the gcd of every window's lookback and offset, so each
-/// window `[-(o + lookback), -o)` is a whole number of segments, and each
-/// query merges the segments its range covers. Merging disjoint summaries is
-/// exact (`SummaryCoverage::merge_disjoint` proves the cover), so no
-/// accuracy is split: every segment is sized for the strictest consumer, as
-/// the summary-capability rule sizes a shared summary.
+/// no filters, over windows of one scan, share one summary per segment, and
+/// each query merges the segments its range covers. Merging disjoint
+/// summaries is exact (`SummaryCoverage::merge_disjoint` proves the cover),
+/// so no accuracy is split: every segment is sized for the strictest
+/// consumer, as the summary-capability rule sizes a shared summary.
 ///
-/// Only the all-shared form is offered (Q62): in the returned inventory each
-/// grouped target has the segment form of its first mergeable summary as its
-/// only alternative, so composition builds identical segments, which the
-/// identical-expression rule merges. A group is skipped when its windows are
-/// all the same (nothing to split), the union of its windows has more than
-/// [`MAX_PANES`] segments, or its queries recur at different cadences.
-/// `None` when no group remains.
+/// The planner chooses the segment grid (Q67): two segmentations are
+/// offered, each as its own inventory, and Stage 3's cost decides. One
+/// splits the windows only at their own boundaries (the fewest segments);
+/// the other is the even grid whose width is the gcd of every window's
+/// lookback and offset, offered when it differs. Each window
+/// `[-(o + lookback), -o)` is a whole number of segments in both.
+///
+/// Only the all-shared form is offered (Q62): in each returned inventory
+/// each grouped target has the segment form of its first mergeable summary
+/// as its only alternative, so composition builds identical segments, which
+/// the identical-expression rule merges. A group is skipped when its windows
+/// are all the same (nothing to split), the union of its windows has more
+/// than [`MAX_PANES`] grid units, or its queries recur at different
+/// cadences. Returns each inventory with its number of distinct segments,
+/// boundary split first; empty when no group remains.
 pub fn share_window_segments<Id: Clone>(
     inventory: &LocalLogicalCandidates<Id>,
     demand: &[RootDemand],
-) -> Result<Option<LocalLogicalCandidates<Id>>, LogicalCandidateError> {
+) -> Result<Vec<(usize, LocalLogicalCandidates<Id>)>, LogicalCandidateError> {
     // The cadences of the roots reaching each node.
     let mut cadences: HashMap<*const OperatorNode, Vec<Option<u64>>> = HashMap::new();
     for (index, (_, root)) in inventory.roots.iter().enumerate() {
@@ -358,7 +412,12 @@ pub fn share_window_segments<Id: Clone>(
         })
         .collect();
     let same_scan = |a: &Rc<OperatorNode>, b: &Rc<OperatorNode>| Rc::ptr_eq(a, b) || a == b;
-    let mut out = inventory.clone();
+    // Boundary split, then even grid: the inventory and its distinct
+    // segments, as `[offset, offset + width)`.
+    let mut out = [
+        (inventory.clone(), BTreeSet::new()),
+        (inventory.clone(), BTreeSet::new()),
+    ];
     let mut grouped = vec![false; keyed.len()];
     let mut any = false;
     for leader in 0..keyed.len() {
@@ -404,9 +463,29 @@ pub fn share_window_segments<Id: Clone>(
             .fold(0, |g, w| gcd(gcd(g, w.lookback_ms), w.offset_ms as u64));
         let start = windows.iter().map(|w| bounds(w).0).min().unwrap_or(0);
         let end = windows.iter().map(|w| bounds(w).1).max().unwrap_or(0);
-        if width == 0
-            || (end - start) / width > MAX_PANES
-            || !windows.iter().all(|w| panes_cover_window(w, width))
+        if width == 0 || (end - start) / width > MAX_PANES {
+            continue;
+        }
+        // Each window's segments end at the units where some window's
+        // boundary lies, or at every unit.
+        let boundaries: BTreeSet<u64> = windows
+            .iter()
+            .flat_map(|w| [bounds(w).0, bounds(w).1])
+            .collect();
+        let forms = |w: &Window<'_>| {
+            let units = w.lookback_ms / width;
+            let ends = (1..=units)
+                .filter(|j| boundaries.contains(&(bounds(w).0 + j * width)))
+                .fold(0u64, |ends, j| ends | 1 << (j - 1));
+            let even = u64::MAX.checked_shr(64 - units as u32).unwrap_or(0);
+            [ends, even].map(|ends| WindowForm::Segments {
+                unit_ms: width,
+                ends,
+            })
+        };
+        if !windows
+            .iter()
+            .all(|w| forms(w).iter().all(|f| panes_cover_window(w, &f.widths(0))))
         {
             continue;
         }
@@ -426,15 +505,29 @@ pub fn share_window_segments<Id: Clone>(
         };
         // The members' estimates differ only in accuracy, so the one sized
         // summary serves each of them.
-        for &t in &members {
-            out.targets[t].alternatives = vec![summary.clone()];
-            out.targets[t].absorbs = vec![None];
-            out.targets[t].windows = vec![WindowForm::Segments { segment_ms: width }];
-            out.targets[t].groupings = vec![grouping.clone()];
+        for (&t, w) in members.iter().zip(&windows) {
+            for ((out, segments), form) in out.iter_mut().zip(forms(w)) {
+                out.targets[t].alternatives = vec![summary.clone()];
+                out.targets[t].absorbs = vec![None];
+                out.targets[t].windows = vec![form];
+                out.targets[t].groupings = vec![grouping.clone()];
+                segments.extend(panes(w, &form.widths(0)).expect("covered above"));
+            }
         }
         any = true;
     }
-    Ok(any.then_some(out))
+    if !any {
+        return Ok(Vec::new());
+    }
+    let [split, even] = out;
+    let mut variants = vec![split];
+    if even.1 != variants[0].1 {
+        variants.push(even);
+    }
+    Ok(variants
+        .into_iter()
+        .map(|(inventory, segments)| (segments.len(), inventory))
+        .collect())
 }
 
 fn single_intent<Id>(inventory: &LocalLogicalCandidates<Id>, t: usize) -> &AggIntent {
@@ -454,13 +547,14 @@ fn family(realization: &Realization, grouping: &GroupingStrategy) -> Option<Fiel
     }
 }
 
-/// Realize a tumbling form over `input`, the target's window: pane `i`
-/// reads `TimeRange(w)` over `TimeShift(o + i·w)` over the scan, `pane`
-/// builds its state with its coverage, and a `SummaryMerge` combines them.
-/// Fails when the merged coverage is not the whole window.
+/// Realize a tumbling or segment `form` over `input`, the target's window:
+/// the pane of width `w` at offset `o'` (the query's offset plus the newer
+/// panes' widths) reads `TimeRange(w)` over `TimeShift(o')` over the scan,
+/// `pane` builds its state with its coverage, and a `SummaryMerge` combines
+/// them. Fails when the merged coverage is not the whole window.
 pub(crate) fn tumbling_state(
     input: &Rc<OperatorNode>,
-    pane_ms: u64,
+    form: WindowForm,
     pane: impl Fn(Rc<OperatorNode>, SummaryCoverage) -> Result<Rc<OperatorNode>, LogicalCandidateError>,
 ) -> Result<Rc<OperatorNode>, LogicalCandidateError> {
     let unsupported = || LogicalCandidateError::Unsupported("tumbling panes over this window");
@@ -468,14 +562,11 @@ pub(crate) fn tumbling_state(
     let Some(NonASAPOp::TimeRange { kind, .. }) = input.non_asap() else {
         return Err(unsupported());
     };
-    let width = i64::try_from(pane_ms).map_err(|_| unsupported())?;
     let source = scan_source(window.scan);
     let mut panes = Vec::new();
-    for i in 0..(window.lookback_ms / pane_ms) as i64 {
-        let offset_ms = window
-            .offset_ms
-            .checked_add(i * width)
-            .ok_or_else(unsupported)?;
+    for (offset_ms, width) in
+        self::panes(&window, &form.widths(window.lookback_ms)).ok_or_else(unsupported)?
+    {
         let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
             child: Rc::clone(window.scan),
             shift: TimeShift {
@@ -484,11 +575,11 @@ pub(crate) fn tumbling_state(
             },
         }))?;
         let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-            range: Duration::from_millis(pane_ms),
+            range: Duration::from_millis(width),
             kind: *kind,
             child: shifted,
         }))?;
-        let time = pane_time(&window, width, i).ok_or_else(unsupported)?;
+        let time = pane_time((offset_ms, width)).ok_or_else(unsupported)?;
         panes.push(pane(range, coverage(source, time))?);
     }
     let merged =
@@ -635,22 +726,26 @@ mod tests {
             let Some(NonASAPOp::Aggregate { child, .. }) = target.target.non_asap() else {
                 panic!("aggregate")
             };
-            let merged = tumbling_state(child, 60_000, |input, coverage| {
-                Ok(Rc::new(
-                    OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
-                        child: input,
-                        family: family(&target.alternatives[1], &GroupingStrategy::default())
-                            .unwrap(),
-                        input: asap_types::ir::schema::SummaryUpdate::column(
-                            asap_types::ir::scalar::ColumnRef::SampleValue,
-                        ),
-                        reduction: asap_types::ir::operator::Reduction::PerEntity,
-                        grouping: GroupingStrategy::default(),
-                        filter: None,
-                    }))?
-                    .with_coverage(coverage)?,
-                ))
-            })
+            let merged = tumbling_state(
+                child,
+                WindowForm::Tumbling { pane_ms: 60_000 },
+                |input, coverage| {
+                    Ok(Rc::new(
+                        OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
+                            child: input,
+                            family: family(&target.alternatives[1], &GroupingStrategy::default())
+                                .unwrap(),
+                            input: asap_types::ir::schema::SummaryUpdate::column(
+                                asap_types::ir::scalar::ColumnRef::SampleValue,
+                            ),
+                            reduction: asap_types::ir::operator::Reduction::PerEntity,
+                            grouping: GroupingStrategy::default(),
+                            filter: None,
+                        }))?
+                        .with_coverage(coverage)?,
+                    ))
+                },
+            )
             .unwrap();
             let Operator::ASAP(ASAPOp::SummaryMerge { children }) = &merged.operator else {
                 panic!("merge")
@@ -744,8 +839,9 @@ mod tests {
             offset_ms: 0,
             scan: &scan,
         };
-        assert!(panes_cover_window(&window, 60_000));
-        assert!(!panes_cover_window(&window, 70_000));
+        assert!(panes_cover_window(&window, &[60_000; 5]));
+        assert!(panes_cover_window(&window, &[60_000, 120_000, 120_000]));
+        assert!(!panes_cover_window(&window, &[70_000; 4]));
     }
 
     const YEAR_MS: u64 = 365 * 86_400_000;
@@ -776,51 +872,97 @@ mod tests {
         .collect()
     }
 
-    /// The windows' boundaries lie on a 1-year grid, so the five queries
-    /// share five 1-year KLL segments: the variant offers each query only
-    /// that form, and composition with the identical-expression merge builds
-    /// each segment once, read by the merges of every query covering it.
+    /// The planner chooses the grid (Q67): split at the windows' boundaries
+    /// (0, 1, 2, 3 and 5 years back), the five queries share four KLL
+    /// segments, the oldest two years wide; on the even 1-year grid (the gcd
+    /// of every lookback and offset) they share five. Each is its own
+    /// variant offering each query only that form, and composition with the
+    /// identical-expression merge builds each segment once, read by the
+    /// merges of every query covering it.
     #[test]
-    fn pattern_a_shares_five_one_year_segments() {
+    fn pattern_a_shares_four_boundary_or_five_one_year_segments() {
         use crate::pass1::logical_candidates::compose_logical_candidate;
         use crate::pass2::identical_expressions::{
             share_identical_expressions, stage1_logical_candidates, Sharing,
         };
         let variants = stage1_logical_candidates(pattern_a(), &BTreeMap::new(), &[]).unwrap();
-        let segments = variants
+        let segmented: Vec<_> = variants
             .iter()
-            .find(|v| v.sharing == Sharing::WindowSegments)
-            .expect("a shared-segment variant");
-        let form = WindowForm::Segments {
-            segment_ms: YEAR_MS,
-        };
-        assert_eq!(form.label().as_deref(), Some("365d segments"));
-        for target in &segments.inventory.targets {
-            assert_eq!(target.windows, [form]);
-            assert!(matches!(
-                &target.alternatives[..],
-                [Realization::Sketch(kind)] if *kind.algorithm() == SketchAlgorithm::Kll
-            ));
-        }
-        let composed = compose_logical_candidate(&segments.inventory, &[0; 5]).unwrap();
-        let composed = share_identical_expressions(&composed).unwrap();
-        let roots: Vec<_> = composed
-            .iter()
-            .map(|(_, root)| match root {
-                QueryRoot::Operator(node) => node.clone(),
-                QueryRoot::Scalar(_) => unreachable!(),
-            })
+            .filter(|v| matches!(v.sharing, Sharing::WindowSegments { .. }))
             .collect();
-        let mut builds = std::collections::HashSet::new();
-        let mut merges = std::collections::HashSet::new();
-        for node in roots.iter().flat_map(OperatorNode::reachable) {
-            match &node.operator {
-                Operator::ASAP(ASAPOp::SummaryAgg { .. }) => builds.insert(Rc::as_ptr(&node)),
-                Operator::ASAP(ASAPOp::SummaryMerge { .. }) => merges.insert(Rc::as_ptr(&node)),
-                _ => false,
+        let sharing: Vec<_> = segmented.iter().map(|v| v.sharing).collect();
+        assert_eq!(
+            sharing,
+            [
+                Sharing::WindowSegments { segments: 4 },
+                Sharing::WindowSegments { segments: 5 }
+            ]
+        );
+        // Newest first: [5y] and [3y offset 2y] end at 3 years back.
+        let split = |ends| WindowForm::Segments {
+            unit_ms: YEAR_MS,
+            ends,
+        };
+        let boundary = [split(0b10111), split(1), split(1), split(1), split(0b101)];
+        assert_eq!(
+            boundary[0].label().as_deref(),
+            Some("365d+365d+365d+730d segments")
+        );
+        assert_eq!(
+            boundary[0].widths(0),
+            [YEAR_MS, YEAR_MS, YEAR_MS, 2 * YEAR_MS]
+        );
+        let even = [split(0b11111), split(1), split(1), split(1), split(0b111)];
+        assert_eq!(even[0].label().as_deref(), Some("365d segments"));
+        for (variant, forms) in segmented.iter().zip([boundary, even]) {
+            for (target, form) in variant.inventory.targets.iter().zip(forms) {
+                assert_eq!(target.windows, [form]);
+                assert!(matches!(
+                    &target.alternatives[..],
+                    [Realization::Sketch(kind)] if *kind.algorithm() == SketchAlgorithm::Kll
+                ));
+            }
+            let composed = compose_logical_candidate(&variant.inventory, &[0; 5]).unwrap();
+            let composed = share_identical_expressions(&composed).unwrap();
+            let roots: Vec<_> = composed
+                .iter()
+                .map(|(_, root)| match root {
+                    QueryRoot::Operator(node) => node.clone(),
+                    QueryRoot::Scalar(_) => unreachable!(),
+                })
+                .collect();
+            let mut builds = std::collections::HashSet::new();
+            let mut merges = std::collections::HashSet::new();
+            for node in roots.iter().flat_map(OperatorNode::reachable) {
+                match &node.operator {
+                    Operator::ASAP(ASAPOp::SummaryAgg { .. }) => builds.insert(Rc::as_ptr(&node)),
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. }) => merges.insert(Rc::as_ptr(&node)),
+                    _ => false,
+                };
+            }
+            let Sharing::WindowSegments { segments } = variant.sharing else {
+                unreachable!()
             };
+            assert_eq!((builds.len(), merges.len()), (segments, 5));
         }
-        assert_eq!((builds.len(), merges.len()), (5, 5));
+    }
+
+    /// When the windows' boundaries already lie on the even grid, the two
+    /// segmentations are the same and only one variant is offered.
+    #[test]
+    fn identical_segmentations_are_offered_once() {
+        let roots = pattern_a();
+        let inventory = enumerate_local_logical_candidates(
+            vec![roots[1].clone(), roots[2].clone()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let offered: Vec<_> = share_window_segments(&inventory, &[])
+            .unwrap()
+            .into_iter()
+            .map(|(segments, _)| segments)
+            .collect();
+        assert_eq!(offered, [2]);
     }
 
     /// Queries that recur at different cadences, or read the same window,
@@ -830,16 +972,16 @@ mod tests {
         let roots = pattern_a();
         let inventory =
             enumerate_local_logical_candidates(roots[..2].to_vec(), &BTreeMap::new()).unwrap();
-        assert!(share_window_segments(&inventory, &[]).unwrap().is_some());
+        assert!(!share_window_segments(&inventory, &[]).unwrap().is_empty());
         let demand = [every(60_000), every(120_000)];
         assert!(share_window_segments(&inventory, &demand)
             .unwrap()
-            .is_none());
+            .is_empty());
         let same = enumerate_local_logical_candidates(
             vec![roots[1].clone(), (1, roots[1].1.clone())],
             &BTreeMap::new(),
         )
         .unwrap();
-        assert!(share_window_segments(&same, &[]).unwrap().is_none());
+        assert!(share_window_segments(&same, &[]).unwrap().is_empty());
     }
 }

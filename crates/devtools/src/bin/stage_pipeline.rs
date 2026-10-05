@@ -22,8 +22,9 @@
 //     input"), and, when the summary-capability rule applies, again with
 //     one summary sized for its strictest consumer ("· shared summary"),
 //     and, when queries read windows of one scan on a common grid, again
-//     with one summary per shared segment ("· shared segments"); in
-//     enumeration order, only those with a written physical candidate. A
+//     with one summary per shared segment, once per segmentation, by its
+//     number of segments ("· shared segments ×4"); in enumeration order,
+//     only those with a written physical candidate. A
 //     repeating query's mergeable alternatives also come in tumbling panes
 //     (Pass 2's window-composition rule), e.g. "Q1 Kll · tumbling 1m panes";
 //   - stage2_physical_asap: per logical candidate, its physical candidates
@@ -267,11 +268,11 @@ fn stage_pipeline(
         let inventory = &variant.inventory;
         let index = offset + choice_index(inventory, &candidate.choice) + 1;
         let mut label = label(inventory, &target_owners(inventory), &candidate.choice);
-        label += match candidate.sharing {
-            Sharing::Independent => "",
-            Sharing::IdenticalExpressions => " · shared input",
-            Sharing::SummaryCapability => " · shared summary",
-            Sharing::WindowSegments => " · shared segments",
+        label += &match candidate.sharing {
+            Sharing::Independent => String::new(),
+            Sharing::IdenticalExpressions => " · shared input".into(),
+            Sharing::SummaryCapability => " · shared summary".into(),
+            Sharing::WindowSegments { segments } => format!(" · shared segments ×{segments}"),
         };
         let written = candidate
             .physical
