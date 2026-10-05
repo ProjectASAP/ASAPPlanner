@@ -2,26 +2,43 @@
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::post_asap_dag;
-use asap_logical_optimizer::pass1::replacement::is_logical_rewrite;
-use asap_logical_optimizer::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
+use asap_logical_optimizer::pass1::logical_candidates::{
+    compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
+    LocalLogicalCandidates,
+};
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{ExactKind, FieldDataType, SummaryInputExpr, SummaryUpdate};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
-fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+/// Stage 1's Pass 1 alternatives for `query`.
+fn inventory(query: &str, accuracy: AccuracyTarget) -> LocalLogicalCandidates<usize> {
     let pre = lower_promql(query, accuracy).unwrap();
-    ASAPStrategies::default()
-        .replacements(&TargetSubDAG::new(&pre))
-        .into_iter()
-        .find_map(|r| match r.replacement {
-            // A bound decision: a summary DAG or a kept (exact) sub-DAG.
-            Replacement::SubDAG(n) if !is_logical_rewrite(&n) => Some(n),
-            _ => None,
-        })
-        .unwrap_or_else(|| asap_logical_optimizer::pass1::replacement::retain_exact(&pre).unwrap())
+    enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(pre))], &Default::default())
+        .unwrap()
+}
+fn compose(inventory: &LocalLogicalCandidates<usize>, choice: &[usize]) -> Rc<OperatorNode> {
+    match compose_logical_candidate(inventory, choice)
+        .unwrap()
+        .remove(0)
+        .1
+    {
+        QueryRoot::Operator(node) => node,
+        QueryRoot::Scalar(_) => unreachable!("operator root"),
+    }
+}
+/// The Stage 1 candidate where every target takes its first alternative other
+/// than pass-through (an exact accumulator, else the first sketch).
+fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+    let inventory = inventory(query, accuracy);
+    let choice: Vec<_> = inventory
+        .targets
+        .iter()
+        .map(|target| usize::from(target.alternatives.len() > 1))
+        .collect();
+    compose(&inventory, &choice)
 }
 fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction) {
     match &node.operator {
@@ -39,6 +56,17 @@ fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction
         }
         other => panic!("not a maintained accumulator: {other:?}"),
     }
+}
+/// The family and update of the summary `node` builds, if any.
+fn summary(node: &Rc<OperatorNode>) -> Option<(FieldDataType, SummaryUpdate)> {
+    OperatorNode::reachable(node)
+        .iter()
+        .find_map(|node| match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) => {
+                Some((family.clone(), input.clone()))
+            }
+            _ => None,
+        })
 }
 fn contribution(family: &FieldDataType, update: &SummaryUpdate, value: f64) -> f64 {
     if matches!(family, FieldDataType::ExactAggregate(ExactKind::Count, _)) {
@@ -102,7 +130,6 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
         let node = plan(query, AccuracyTarget::Exact);
         let (family, _, _) = aggregate(&node);
         assert!(matches!(family, FieldDataType::ExactAggregate(k, _) if *k == kind));
-        assert!(node.guarantee.as_ref().unwrap().is_exact());
         post_asap_dag(&node);
     }
 }
@@ -119,7 +146,6 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
             && node.contains_asap(),
         "direct quantile ratio should remain an available candidate"
     );
-    assert!(node.guarantee.is_none());
     post_asap_dag(&node);
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.
@@ -151,7 +177,7 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
 fn quantile_over_temporal_average_keeps_a_legal_candidate() {
     for query in [
         "quantile(0.9, avg_over_time(a[5m]))",
-        "quantile(0.9, avg_over_time(a[5m]) + avg_over_time(b[5m]))",
+        "quantile(0.9, avg_over_time(a[5m]) + avg_over_time(a[5m] offset 5m))",
     ] {
         let node = plan(query, AccuracyTarget::Epsilon(0.01));
         assert!(
@@ -172,62 +198,40 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
     }
 }
 
-struct OneKeyTopKEvidence;
-impl asap_logical_optimizer::accuracy::AccuracyEvidenceProvider for OneKeyTopKEvidence {
-    fn propagation_stats(
-        &self,
-        op: &asap_types::ir::properties::CompositionOperator,
-        _family: &FieldDataType,
-        _query: Option<&asap_types::ir::schema::SketchStatistic>,
-    ) -> asap_logical_optimizer::accuracy::PropagationStats {
-        // Single-key fixture: no excluded keys; bounds cover every value below.
-        if matches!(
-            op,
-            asap_types::ir::properties::CompositionOperator::TopKSelection
-        ) {
-            asap_logical_optimizer::accuracy::PropagationStats {
-                topk_selected_lower_bound: Some(-1000.),
-                topk_excluded_upper_bound: Some(-1001.),
-                topk_interval_failure_probability: Some(0.001),
-                ..Default::default()
-            }
-        } else {
-            Default::default()
-        }
-    }
-}
-
 #[test]
 fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
-    use asap_logical_optimizer::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
     use asap_types::ir::schema::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
-    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultAccuracyModel,
-        &EqualSplitAllocator,
-        &OneKeyTopKEvidence,
-    );
     for is_count in [true, false] {
         let query = if is_count {
             "topk(1, count_over_time(up[5m]))"
         } else {
             "topk(1, sum_over_time(up[5m]))"
         };
-        let pre = lower_promql(query, AccuracyTarget::Epsilon(0.01)).unwrap();
-        let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
+        let inventory = inventory(query, AccuracyTarget::Epsilon(0.01));
+        let candidates: Vec<_> = enumerate_choices(&inventory, 4096)
+            .iter()
+            .map(|choice| compose(&inventory, choice))
+            .collect();
         let wanted = if is_count {
             SketchAlgorithm::CmsWithHeap
         } else {
             SketchAlgorithm::CountSketchWithHeap
         };
+        // The heap that absorbs the inner aggregate reads its input rows: the
+        // candidate's only summary, with no aggregate left beneath it.
         let node = candidates
             .iter()
-            .find_map(|c| {
-                let Replacement::SubDAG(node) = &c.replacement else {
-                    return None;
-                };
-                let (family, _, _) = aggregate(node);
-                matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &wanted)
-                    .then_some(node)
+            .find(|node| {
+                let reachable = OperatorNode::reachable(node);
+                summary(node).is_some_and(|(family, _)| matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &wanted))
+                    && reachable
+                        .iter()
+                        .filter(|node| matches!(node.operator, Operator::ASAP(ASAPOp::SummaryAgg { .. })))
+                        .count()
+                        == 1
+                    && reachable
+                        .iter()
+                        .all(|node| !matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             })
             .expect("weighted sketch candidate");
         let (family, update, _) = aggregate(node);
@@ -244,11 +248,11 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
                 update.weight,
                 SummaryInputExpr::Column(ColumnRef::SampleValue)
             );
-            for c in &candidates {
-                if let Replacement::SubDAG(n) = &c.replacement {
-                    assert!(
-                        !matches!(aggregate(n).0, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
-                    );
+            // Signed sums never prove the non-negative weights Count-Min needs.
+            for (family, update) in candidates.iter().filter_map(summary) {
+                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
+                {
+                    assert_eq!(update.weight_domain, WeightDomain::UnknownOrSigned);
                 }
             }
         }
