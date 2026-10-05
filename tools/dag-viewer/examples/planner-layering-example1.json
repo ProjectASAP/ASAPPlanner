@@ -493324,7 +493324,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -493340,7 +493340,7 @@
           },
           "5": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
             "cost": 0.8,
@@ -493367,7 +493367,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -493383,7 +493383,7 @@
           },
           "5": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
             "cost": 3.2,
@@ -493406,7 +493406,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -493426,7 +493426,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.8,
@@ -493453,7 +493453,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0001,
@@ -493477,7 +493477,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.4,
@@ -493504,47 +493504,47 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "11": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "14": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "17": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -493555,12 +493555,12 @@
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "23": {
             "cost": 0.06666670000000001,
@@ -493595,24 +493595,24 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 12.840100400000006,
+        "total": 8.440100599999997,
         "unit": "cost_per_second"
       },
       "P14-m1": {
@@ -493623,7 +493623,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -493714,8 +493714,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -493731,7 +493731,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.10676960000001,
+        "total": 48.040102600000004,
         "unit": "cost_per_second"
       },
       "P15": {
@@ -493742,7 +493742,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -493762,7 +493762,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.8,
@@ -493789,7 +493789,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0001,
@@ -493813,7 +493813,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.4,
@@ -493840,47 +493840,47 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "11": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "14": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "17": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -493891,12 +493891,12 @@
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "23": {
             "cost": 0.06666670000000001,
@@ -493931,24 +493931,24 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 12.240100400000006,
+        "total": 7.840100599999998,
         "unit": "cost_per_second"
       },
       "P17-m1": {
@@ -493959,7 +493959,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -494050,8 +494050,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -494067,7 +494067,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.506769600000005,
+        "total": 47.4401026,
         "unit": "cost_per_second"
       },
       "P2": {
@@ -494078,7 +494078,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -494094,7 +494094,7 @@
           },
           "5": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
             "cost": 0.4,
@@ -494125,7 +494125,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -494145,7 +494145,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 3.2,
@@ -494168,7 +494168,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -494188,7 +494188,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.8,
@@ -494215,7 +494215,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0001,
@@ -494239,7 +494239,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.4,
@@ -494266,47 +494266,47 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "11": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "14": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "17": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -494317,12 +494317,12 @@
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "23": {
             "cost": 0.06666670000000001,
@@ -494357,24 +494357,24 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 13.040110400000005,
+        "total": 8.640110599999996,
         "unit": "cost_per_second"
       },
       "P25-m1": {
@@ -494385,7 +494385,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -494476,8 +494476,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -494493,7 +494493,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.306779600000006,
+        "total": 48.24011260000001,
         "unit": "cost_per_second"
       },
       "P26": {
@@ -494504,7 +494504,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -494524,7 +494524,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.8,
@@ -494551,7 +494551,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0001,
@@ -494575,7 +494575,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.4,
@@ -494602,47 +494602,47 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "11": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "14": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "17": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -494653,12 +494653,12 @@
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "23": {
             "cost": 0.06666670000000001,
@@ -494693,24 +494693,24 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 12.440110400000005,
+        "total": 8.040110599999997,
         "unit": "cost_per_second"
       },
       "P28-m1": {
@@ -494721,7 +494721,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -494812,8 +494812,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -494829,7 +494829,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.706779600000004,
+        "total": 47.64011260000001,
         "unit": "cost_per_second"
       },
       "P3": {
@@ -494840,43 +494840,43 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "13": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "16": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "19": {
             "cost": 0.06666670000000001,
@@ -494887,12 +494887,12 @@
             "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "22": {
             "cost": 0.06666670000000001,
@@ -494923,28 +494923,28 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 13.140100400000005,
+        "total": 8.740100599999996,
         "unit": "cost_per_second"
       },
       "P3-m1": {
@@ -494955,7 +494955,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -495038,8 +495038,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "5": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "6": {
             "cost": 0.06666699999999999,
@@ -495059,7 +495059,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.406769600000004,
+        "total": 48.34010260000001,
         "unit": "cost_per_second"
       },
       "P32": {
@@ -495070,7 +495070,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -495090,7 +495090,7 @@
           },
           "6": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 3.2,
@@ -495113,7 +495113,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0001,
@@ -495141,7 +495141,7 @@
           },
           "7": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.8,
@@ -495164,7 +495164,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 1.4000000000000001,
@@ -495196,7 +495196,7 @@
           },
           "7": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.4,
@@ -495219,67 +495219,67 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "12": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "15": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "18": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
             "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "21": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "23": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "24": {
             "cost": 0.06666670000000001,
@@ -495318,12 +495318,12 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "9": {
             "cost": 0.06666670000000001,
@@ -495331,7 +495331,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 12.740110400000006,
+        "total": 8.340110599999997,
         "unit": "cost_per_second"
       },
       "P36-m1": {
@@ -495342,7 +495342,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -495441,8 +495441,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "7": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "8": {
             "cost": 0.06666699999999999,
@@ -495454,7 +495454,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.00677960000001,
+        "total": 47.940112600000006,
         "unit": "cost_per_second"
       },
       "P37": {
@@ -495465,7 +495465,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0001,
@@ -495493,7 +495493,7 @@
           },
           "7": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.8,
@@ -495516,7 +495516,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.8,
@@ -495548,7 +495548,7 @@
           },
           "7": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.4,
@@ -495571,67 +495571,67 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "12": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "15": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "18": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
             "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "21": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "23": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "24": {
             "cost": 0.06666670000000001,
@@ -495670,12 +495670,12 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "9": {
             "cost": 0.06666670000000001,
@@ -495683,7 +495683,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 12.140110400000006,
+        "total": 7.740110599999998,
         "unit": "cost_per_second"
       },
       "P39-m1": {
@@ -495694,7 +495694,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -495793,8 +495793,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "7": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "8": {
             "cost": 0.06666699999999999,
@@ -495806,7 +495806,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.40677960000001,
+        "total": 47.340112600000005,
         "unit": "cost_per_second"
       },
       "P4": {
@@ -495817,7 +495817,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -495833,7 +495833,7 @@
           },
           "5": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
             "cost": 0.8,
@@ -495860,7 +495860,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -495884,7 +495884,7 @@
           },
           "7": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 3.2,
@@ -495907,7 +495907,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -495942,7 +495942,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -495981,55 +495981,55 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "12": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "15": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "18": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
             "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "21": {
             "cost": 0.06666670000000001,
@@ -496056,24 +496056,24 @@
             "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "9": {
             "cost": 0.06666670000000001,
@@ -496081,7 +496081,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 10.820100400000003,
+        "total": 6.420100599999998,
         "unit": "cost_per_second"
       },
       "P47-m1": {
@@ -496092,7 +496092,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -496175,8 +496175,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "5": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "6": {
             "cost": 0.06666699999999999,
@@ -496196,7 +496196,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.406769600000004,
+        "total": 48.34010260000001,
         "unit": "cost_per_second"
       },
       "P48": {
@@ -496207,7 +496207,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -496242,7 +496242,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -496281,7 +496281,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -496297,7 +496297,7 @@
           },
           "5": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
             "cost": 0.4,
@@ -496328,55 +496328,55 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "12": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "15": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "18": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
             "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "21": {
             "cost": 0.06666670000000001,
@@ -496403,24 +496403,24 @@
             "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "9": {
             "cost": 0.06666670000000001,
@@ -496428,7 +496428,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 10.220100400000003,
+        "total": 5.820100599999997,
         "unit": "cost_per_second"
       },
       "P50-m1": {
@@ -496439,7 +496439,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -496522,8 +496522,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "5": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "6": {
             "cost": 0.06666699999999999,
@@ -496543,7 +496543,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.8067696,
+        "total": 47.74010260000001,
         "unit": "cost_per_second"
       },
       "P54": {
@@ -496554,7 +496554,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -496585,7 +496585,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -496624,7 +496624,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -496667,43 +496667,43 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "13": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "16": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "19": {
             "cost": 0.06666670000000001,
@@ -496714,12 +496714,12 @@
             "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "22": {
             "cost": 0.06666670000000001,
@@ -496750,28 +496750,28 @@
             "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 10.520100400000002,
+        "total": 6.120100599999998,
         "unit": "cost_per_second"
       },
       "P58-m1": {
@@ -496782,7 +496782,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -496873,8 +496873,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -496890,7 +496890,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.10676960000001,
+        "total": 48.040102600000004,
         "unit": "cost_per_second"
       },
       "P59": {
@@ -496901,7 +496901,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -496940,43 +496940,43 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "13": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "16": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "19": {
             "cost": 0.06666670000000001,
@@ -496987,12 +496987,12 @@
             "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "22": {
             "cost": 0.06666670000000001,
@@ -497023,28 +497023,28 @@
             "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 12.540100400000005,
+        "total": 8.140100599999997,
         "unit": "cost_per_second"
       },
       "P6-m1": {
@@ -497055,7 +497055,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -497138,8 +497138,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "5": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "6": {
             "cost": 0.06666699999999999,
@@ -497159,7 +497159,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.8067696,
+        "total": 47.74010260000001,
         "unit": "cost_per_second"
       },
       "P60": {
@@ -497170,7 +497170,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -497213,43 +497213,43 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "13": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "16": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "19": {
             "cost": 0.06666670000000001,
@@ -497260,12 +497260,12 @@
             "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "22": {
             "cost": 0.06666670000000001,
@@ -497296,28 +497296,28 @@
             "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 9.920100400000003,
+        "total": 5.5201005999999975,
         "unit": "cost_per_second"
       },
       "P61-m1": {
@@ -497328,7 +497328,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -497419,8 +497419,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -497436,7 +497436,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.506769600000005,
+        "total": 47.4401026,
         "unit": "cost_per_second"
       },
       "P65": {
@@ -497447,7 +497447,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -497482,7 +497482,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -497521,7 +497521,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -497564,43 +497564,43 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "13": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "16": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "19": {
             "cost": 0.06666670000000001,
@@ -497611,12 +497611,12 @@
             "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "22": {
             "cost": 0.06666670000000001,
@@ -497647,28 +497647,28 @@
             "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 10.720110400000003,
+        "total": 6.320110599999998,
         "unit": "cost_per_second"
       },
       "P69-m1": {
@@ -497679,7 +497679,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -497770,8 +497770,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -497787,7 +497787,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.306779600000006,
+        "total": 48.24011260000001,
         "unit": "cost_per_second"
       },
       "P70": {
@@ -497798,7 +497798,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -497837,7 +497837,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -497880,43 +497880,43 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "13": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "14": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "16": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "17": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "19": {
             "cost": 0.06666670000000001,
@@ -497927,12 +497927,12 @@
             "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "20": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "22": {
             "cost": 0.06666670000000001,
@@ -497963,28 +497963,28 @@
             "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 10.120110400000003,
+        "total": 5.720110599999997,
         "unit": "cost_per_second"
       },
       "P72-m1": {
@@ -497995,7 +497995,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -498086,8 +498086,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "6": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "7": {
             "cost": 0.06666699999999999,
@@ -498103,7 +498103,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.706779600000004,
+        "total": 47.64011260000001,
         "unit": "cost_per_second"
       },
       "P76": {
@@ -498114,7 +498114,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.8,
@@ -498149,7 +498149,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -498192,7 +498192,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -498239,47 +498239,47 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "11": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "14": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "17": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -498290,12 +498290,12 @@
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "23": {
             "cost": 0.06666670000000001,
@@ -498330,24 +498330,24 @@
             "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 10.420110400000002,
+        "total": 6.020110599999998,
         "unit": "cost_per_second"
       },
       "P80-m1": {
@@ -498358,7 +498358,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -498457,8 +498457,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "7": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "8": {
             "cost": 0.06666699999999999,
@@ -498470,7 +498470,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 48.00677960000001,
+        "total": 47.940112600000006,
         "unit": "cost_per_second"
       },
       "P81": {
@@ -498481,7 +498481,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -498524,7 +498524,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -498571,47 +498571,47 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "11": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "12": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 20000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "13": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "14": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "15": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 30000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "16": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "17": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "18": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 40000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "19": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -498622,12 +498622,12 @@
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "21": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 50000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "22": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "23": {
             "cost": 0.06666670000000001,
@@ -498662,24 +498662,24 @@
             "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.4,
-            "detail": "time range 10s: pass 666667 rows; x 0.1000 evaluations/s"
+            "cost": 0.06666670000000001,
+            "detail": "time range 10s: keep 666667 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
             "cost": 0.06666670000000001,
             "detail": "build exact Sum accumulator into 666667 states: 666667 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.4,
-            "detail": "operator: pass 4000000 rows; x 0.1000 evaluations/s"
+            "cost": 0.0,
+            "detail": "time shift 10000 ms: re-label 4000000 rows, free; x 0.1000 evaluations/s"
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 9.820110400000003,
+        "total": 5.4201105999999974,
         "unit": "cost_per_second"
       },
       "P83-m1": {
@@ -498690,7 +498690,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
             "cost": 0.0,
@@ -498789,8 +498789,8 @@
             "detail": "scan 66667 samples; ingestion time"
           },
           "7": {
-            "cost": 0.06666699999999999,
-            "detail": "operator: pass 66667 rows; ingestion time"
+            "cost": 0.0,
+            "detail": "time shift 0 ms: re-label 66667 rows, free; ingestion time"
           },
           "8": {
             "cost": 0.06666699999999999,
@@ -498802,7 +498802,7 @@
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
-        "total": 47.40677960000001,
+        "total": 47.340112600000005,
         "unit": "cost_per_second"
       },
       "P87": {
@@ -498813,7 +498813,7 @@
           },
           "1": {
             "cost": 0.4,
-            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+            "detail": "time range 60s: keep 4000000 of 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
             "cost": 0.4,
@@ -498868,7 +498868,7 @@
       },
       {
         "id": "P9",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -498908,7 +498908,7 @@
       },
       {
         "id": "P20",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -498948,7 +498948,7 @@
       },
       {
         "id": "P31",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -498988,7 +498988,7 @@
       },
       {
         "id": "P42",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -499028,7 +499028,7 @@
       },
       {
         "id": "P53",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -499068,7 +499068,7 @@
       },
       {
         "id": "P64",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -499108,7 +499108,7 @@
       },
       {
         "id": "P75",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -499148,7 +499148,7 @@
       },
       {
         "id": "P86",
-        "reason": "q2: query-time work takes 206.2 ms per evaluation, over the 100 ms latency bound",
+        "reason": "q2: query-time work takes 162.2 ms per evaluation, over the 100 ms latency bound",
         "valid": false
       },
       {
@@ -499178,12 +499178,12 @@
       },
       {
         "id": "P3",
-        "reason": "costlier: 13.140 vs 4.620 cost_per_second",
+        "reason": "costlier: 8.740 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P3-m1",
-        "reason": "costlier: 48.407 vs 4.620 cost_per_second",
+        "reason": "costlier: 48.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499198,12 +499198,12 @@
       },
       {
         "id": "P6",
-        "reason": "costlier: 12.540 vs 4.620 cost_per_second",
+        "reason": "costlier: 8.140 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P6-m1",
-        "reason": "costlier: 47.807 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.740 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499223,12 +499223,12 @@
       },
       {
         "id": "P14",
-        "reason": "costlier: 12.840 vs 4.620 cost_per_second",
+        "reason": "costlier: 8.440 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P14-m1",
-        "reason": "costlier: 48.107 vs 4.620 cost_per_second",
+        "reason": "costlier: 48.040 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499243,12 +499243,12 @@
       },
       {
         "id": "P17",
-        "reason": "costlier: 12.240 vs 4.620 cost_per_second",
+        "reason": "costlier: 7.840 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P17-m1",
-        "reason": "costlier: 47.507 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.440 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499268,12 +499268,12 @@
       },
       {
         "id": "P25",
-        "reason": "costlier: 13.040 vs 4.620 cost_per_second",
+        "reason": "costlier: 8.640 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P25-m1",
-        "reason": "costlier: 48.307 vs 4.620 cost_per_second",
+        "reason": "costlier: 48.240 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499288,12 +499288,12 @@
       },
       {
         "id": "P28",
-        "reason": "costlier: 12.440 vs 4.620 cost_per_second",
+        "reason": "costlier: 8.040 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P28-m1",
-        "reason": "costlier: 47.707 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.640 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499313,12 +499313,12 @@
       },
       {
         "id": "P36",
-        "reason": "costlier: 12.740 vs 4.620 cost_per_second",
+        "reason": "costlier: 8.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P36-m1",
-        "reason": "costlier: 48.007 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.940 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499333,12 +499333,12 @@
       },
       {
         "id": "P39",
-        "reason": "costlier: 12.140 vs 4.620 cost_per_second",
+        "reason": "costlier: 7.740 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P39-m1",
-        "reason": "costlier: 47.407 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499358,12 +499358,12 @@
       },
       {
         "id": "P47",
-        "reason": "costlier: 10.820 vs 4.620 cost_per_second",
+        "reason": "costlier: 6.420 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P47-m1",
-        "reason": "costlier: 48.407 vs 4.620 cost_per_second",
+        "reason": "costlier: 48.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499378,12 +499378,12 @@
       },
       {
         "id": "P50",
-        "reason": "costlier: 10.220 vs 4.620 cost_per_second",
+        "reason": "costlier: 5.820 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P50-m1",
-        "reason": "costlier: 47.807 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.740 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499403,12 +499403,12 @@
       },
       {
         "id": "P58",
-        "reason": "costlier: 10.520 vs 4.620 cost_per_second",
+        "reason": "costlier: 6.120 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P58-m1",
-        "reason": "costlier: 48.107 vs 4.620 cost_per_second",
+        "reason": "costlier: 48.040 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499423,12 +499423,12 @@
       },
       {
         "id": "P61",
-        "reason": "costlier: 9.920 vs 4.620 cost_per_second",
+        "reason": "costlier: 5.520 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P61-m1",
-        "reason": "costlier: 47.507 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.440 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499448,12 +499448,12 @@
       },
       {
         "id": "P69",
-        "reason": "costlier: 10.720 vs 4.620 cost_per_second",
+        "reason": "costlier: 6.320 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P69-m1",
-        "reason": "costlier: 48.307 vs 4.620 cost_per_second",
+        "reason": "costlier: 48.240 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499468,12 +499468,12 @@
       },
       {
         "id": "P72",
-        "reason": "costlier: 10.120 vs 4.620 cost_per_second",
+        "reason": "costlier: 5.720 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P72-m1",
-        "reason": "costlier: 47.707 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.640 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499493,12 +499493,12 @@
       },
       {
         "id": "P80",
-        "reason": "costlier: 10.420 vs 4.620 cost_per_second",
+        "reason": "costlier: 6.020 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P80-m1",
-        "reason": "costlier: 48.007 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.940 vs 4.620 cost_per_second",
         "valid": true
       },
       {
@@ -499508,12 +499508,12 @@
       },
       {
         "id": "P83",
-        "reason": "costlier: 9.820 vs 4.620 cost_per_second",
+        "reason": "costlier: 5.420 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P83-m1",
-        "reason": "costlier: 47.407 vs 4.620 cost_per_second",
+        "reason": "costlier: 47.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {

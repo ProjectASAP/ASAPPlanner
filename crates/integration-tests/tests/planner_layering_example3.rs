@@ -482,10 +482,12 @@ fn stage3_b_selects_cheapest_valid() {
 
 /// Merged KLL and DDSketch panes keep the family's guarantee, so Stage 3
 /// finds no tumbling candidate inaccurate. Rebuilding all five panes at
-/// every evaluation takes 310 ms of query-time work, over the 200 ms latency
-/// bound (S6); with the panes maintained at ingestion time, only the merge
-/// and the estimate remain and the candidate is valid and priced. Panes
-/// kept at query time (B3) need a capability the executor lacks.
+/// every evaluation takes 130 ms of query-time work, within the 200 ms
+/// latency bound (S6), now that the panes' time shifts are free and each
+/// 1-min range pays only for its own rows (Q66); with the panes maintained at
+/// ingestion time, only the merge and the estimate remain. Both are valid
+/// and priced. Panes kept at query time (B3) need a capability the executor
+/// lacks.
 #[test]
 fn stage3_b_tumbling_candidates_are_valid() {
     let run = run_b();
@@ -506,14 +508,6 @@ fn stage3_b_tumbling_candidates_are_valid() {
                 invalid
                     .get(p.id.as_str())
                     .is_some_and(|r| r.contains("cannot keep query-time state")),
-                "{}: {:?}",
-                p.id,
-                invalid.get(p.id.as_str())
-            ),
-            "" => assert!(
-                invalid
-                    .get(p.id.as_str())
-                    .is_some_and(|r| r.contains("310.0 ms") && r.contains("200 ms latency")),
                 "{}: {:?}",
                 p.id,
                 invalid.get(p.id.as_str())

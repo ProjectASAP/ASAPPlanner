@@ -404,16 +404,18 @@ fn b1_b2(run: &Run, every_min: u64) -> (f64, f64) {
     )
 }
 
-/// At Pattern B's 1M series, rebuilding the five panes at query time breaks
-/// the 200 ms latency bound, so B2 is invalid and B1 is priced.
+/// At Pattern B's 1M series, rebuilding the five panes at query time takes
+/// 130 ms, within the 200 ms latency bound: the panes' time shifts are free
+/// and each 1-min range pays only for its own rows (Q66). So B2 and B1 are
+/// both valid and priced, and B2, which keeps nothing, is cheaper.
 #[test]
-fn stage3_b_rebuilding_a_million_series_breaks_the_latency_bound() {
+fn stage3_b_rebuilding_a_million_series_meets_the_latency_bound() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);
     let b2 = &options[&NotMaterialized].0;
-    let reason = run.invalid()[b2.as_str()];
-    assert!(reason.contains("latency bound"), "{b2}: {reason}");
-    assert!(run.cost(&options[&IngestionTime].0).is_some());
+    assert!(!run.invalid().contains_key(b2.as_str()), "{b2}");
+    let (b1, b2) = b1_b2(&run, 1);
+    assert!(b2 < b1, "B2 {b2} vs B1 {b1}");
 }
 
 /// When the deployment keeps raw data, B2 pays only to read it, while B1
