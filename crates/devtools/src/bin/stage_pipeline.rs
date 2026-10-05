@@ -1,5 +1,5 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
-//     --example planner-layering-1 --max-candidates 128 --out planner-layering-example1.json
+//     --example planner-layering-1 --max-candidates 160 --out planner-layering-example1.json
 // (also planner-layering-2: #509 Example 2, three SQL statistics over
 // `flows`; planner-layering-3a and planner-layering-3b: Example 3, Patterns A
 // and B; planner-layering-4a: Example 4, Pattern A repeated monthly;

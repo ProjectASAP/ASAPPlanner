@@ -19,7 +19,8 @@
 //! Cost is per second of wall time (`docs/design_docs/proposals/stage3-cost-model.md`):
 //! an ingestion-time node over the ingestion rate, a query-time node per
 //! evaluation times the evaluation rate of the roots reaching it ([`RootDemand`]),
-//! plus memory for ingestion-time state that query time reads. Prices come
+//! plus memory for ingestion-time state that query time reads and for
+//! tumbling panes kept across evaluations at query time. Prices come
 //! from [`crate::cost::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count, weighted by [`Stage3Calibration`]; summary build and estimation are
@@ -62,10 +63,8 @@ use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use asap_types::ir::physical_export::{ PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
 use asap_types::ir::operator::Reduction;
-use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
-};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
@@ -1155,8 +1154,9 @@ pub fn plan_stages<Id: Clone>(
 }
 
 /// The first capability `candidate` needs that the deployment lacks, as a
-/// reason: maintaining state at ingestion time, building a summary, or
-/// reading a statistic out of one.
+/// reason: maintaining state at ingestion time, keeping query-time state
+/// across evaluations, building a summary, or reading a statistic out of
+/// one.
 fn capability_violation(
     candidate: &PhysicalCandidate,
     capabilities: &DeploymentCapabilities,
@@ -1169,6 +1169,11 @@ fn capability_violation(
             .any(|n| !n.output_state.timing.is_query_time())
     {
         return Some("deployment cannot maintain state at ingestion time".into());
+    }
+    if !capabilities.query_time_retention && candidate.dag.nodes.iter().any(|n| n.kept) {
+        return Some(
+            "deployment cannot keep query-time state across evaluations (query time, kept)".into(),
+        );
     }
     // Summaries first: a readout of a summary that cannot be built is moot.
     let reasons = |node: &Rc<OperatorNode>, readouts: bool| match &node.operator {
@@ -1398,30 +1403,44 @@ fn reaching_roots(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<usiz
 
 /// How far back the time ranges reading `id` reach, in milliseconds: each
 /// range plus the offsets between it and `id`. `None` when no range reads it.
-fn scan_extent_ms(dag: &PhysicalASAPDAG, id: PhysicalASAPNodeId, offset_ms: i64) -> Option<u64> {
+/// A range feeding only kept panes (`roles`) is not read again.
+fn scan_extent_ms(
+    dag: &PhysicalASAPDAG,
+    roles: &HashMap<PhysicalASAPNodeId, PaneRole>,
+    id: PhysicalASAPNodeId,
+    offset_ms: i64,
+) -> Option<u64> {
     dag.edges
         .iter()
         .filter(|e| e.producer == id)
+        .filter(|e| {
+            !matches!(
+                roles.get(&e.consumer),
+                Some(PaneRole::Retained | PaneRole::FeedsRetained)
+            )
+        })
         .filter_map(|e| {
             let consumer = dag.nodes.iter().find(|n| n.id == e.consumer)?;
             match &consumer.payload {
-                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
-                    scan_extent_ms(dag, consumer.id, offset_ms.saturating_add(shift.offset_ms))
-                }
-                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                    Some((range.as_millis() as u64).saturating_add(offset_ms.max(0) as u64))
-                }
+                Payload::NonASAP(NonASAPOp::TimeShift { shift }) => scan_extent_ms(
+                    dag,
+                    roles,
+                    consumer.id,
+                    offset_ms.saturating_add(shift.offset_ms),
+                ),
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => Some((range.as_millis() as u64).saturating_add(offset_ms.max(0) as u64)),
                 _ => None,
             }
         })
         .max()
 }
 
-/// The role of an ingestion-time node in a chain of tumbling panes.
+/// The role of an ingestion-time or kept node in a chain of tumbling panes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaneRole {
-    /// The pane being built: every arriving row lands in it. It retains
-    /// `panes` completed panes plus itself.
+    /// The pane being built: at ingestion time every arriving row lands in
+    /// it, and it retains `panes` completed panes plus itself; kept, each
+    /// evaluation builds it and keeps it with `panes − 1` older ones.
     Newest { panes: u64 },
     /// An older pane: the newest pane of an earlier evaluation, kept. It is
     /// not built again.
@@ -1430,10 +1449,10 @@ enum PaneRole {
     FeedsRetained,
 }
 
-/// Ingestion-time panes merged by a `SummaryMerge`: pane `i` is pane 0
-/// shifted back by `i` widths, so at ingestion time the chain is one pane
-/// built as rows arrive and kept for the later evaluations. The newest pane
-/// is the one with the smallest shift.
+/// Ingestion-time or kept panes merged by a `SummaryMerge`: pane `i` is
+/// pane 0 shifted back by `i` widths, so the chain is one pane built (as
+/// rows arrive, or when an evaluation reads it) and kept for the later
+/// evaluations. The newest pane is the one with the smallest shift.
 fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
     let producers = |id| {
@@ -1442,13 +1461,14 @@ fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
             .filter(move |e| e.consumer == id)
             .map(|e| e.producer)
     };
-    let ingestion = |id: PhysicalASAPNodeId| !nodes[&id].output_state.timing.is_query_time();
+    let materialized =
+        |id: PhysicalASAPNodeId| !nodes[&id].output_state.timing.is_query_time() || nodes[&id].kept;
     // The shift of a pane over `TimeRange` over `TimeShift`, else 0.
     let shift = |pane| {
         producers(pane)
             .flat_map(producers)
             .find_map(|id| match &nodes[&id].payload {
-                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => Some(shift.offset_ms),
+                Payload::NonASAP(NonASAPOp::TimeShift { shift }) => Some(shift.offset_ms),
                 _ => None,
             })
             .unwrap_or(0)
@@ -1457,12 +1477,11 @@ fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
     for merge in dag
         .nodes
         .iter()
-        .filter(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })))
+        .filter(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryMerge {})))
     {
         let panes: Vec<_> = producers(merge.id)
             .filter(|&id| {
-                ingestion(id)
-                    && matches!(nodes[&id].payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
+                materialized(id) && matches!(nodes[&id].payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
             })
             .collect();
         let Some(&newest) = panes.iter().min_by_key(|&&id| shift(id)) else {
@@ -1487,10 +1506,10 @@ fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
             roles.insert(pane, merged);
         }
     }
-    // Consumers first: an ingestion-time node whose consumers all are
-    // retained panes, or feed only those, does no work of its own.
+    // Consumers first: a node whose consumers all are retained panes, or
+    // feed only those, does no work of its own.
     for node in dag.nodes.iter().rev() {
-        if roles.contains_key(&node.id) || !ingestion(node.id) {
+        if roles.contains_key(&node.id) {
             continue;
         }
         let mut consumers = dag
@@ -1516,8 +1535,9 @@ fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
 /// exported children first, so each node's input statistics are known when
 /// it is reached. An ingestion-time node is priced over one second of
 /// ingested rows; a query-time node per evaluation, times its evaluation
-/// rate. State an ingestion-time node keeps for query-time readers is also
-/// charged per retained byte per second.
+/// rate. State an ingestion-time node keeps for query-time readers, and the
+/// older panes a kept chain keeps, are also charged per retained byte per
+/// second; a kept chain builds only its newest pane at each evaluation.
 #[cfg(test)]
 fn price(
     dag: &PhysicalASAPDAG,
@@ -1534,7 +1554,8 @@ struct Priced {
     /// The cost of one evaluation of each query-time node.
     per_evaluation: HashMap<PhysicalASAPNodeId, f64>,
     /// Bytes retained across evaluations: ingestion-time state that query
-    /// time reads, and raw data retained for query-time scans.
+    /// time reads, kept query-time panes, and raw data retained for
+    /// query-time scans.
     retained_bytes: u64,
 }
 
@@ -1548,7 +1569,11 @@ fn price_nodes(
     calibration: &Stage3Calibration,
     raw_bytes_per_sample: Option<u64>,
 ) -> Result<Priced, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let first = dag.roots.first().copied().unwrap_or(0);
+    let first = dag
+        .roots
+        .first()
+        .copied()
+        .unwrap_or(0);
     calibration.validate().map_err(|error| (first, error))?;
     let series = data
         .input_cardinality
@@ -1570,7 +1595,7 @@ fn price_nodes(
     let reached = reaching_roots(dag);
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
     let roles = pane_roles(dag);
-    let raw_retention = raw_retention(dag, rows_per_ms, raw_bytes_per_sample);
+    let raw_retention = raw_retention(dag, &roles, rows_per_ms, raw_bytes_per_sample);
     let mut retained_bytes = 0u64;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
@@ -1613,210 +1638,210 @@ fn price_nodes(
             }
         };
         let groups = |reduction: &Reduction| bounded_groups(reduction, input.rows);
-        let (out, estimate, detail) =
-            match &node.payload {
-                Payload::NonASAP(operator) => match operator {
-                    NonASAPOp::Scan { .. } => {
-                        // At ingestion time, one second of arriving rows; at
-                        // query time, as far back as the ranges reading it reach.
-                        let span_ms = match ingestion {
-                            true => 1_000,
-                            false => scan_extent_ms(dag, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS),
-                        };
-                        let out = edge(scan_rows(rows_per_ms, span_ms));
-                        let estimate = estimate_operator(
-                            PhysicalOperator::Scan,
-                            OperatorStatistics::Scan {
-                                edges: UnaryEdgeStatistics {
-                                    input: out,
-                                    output: out,
-                                    promql: None,
-                                },
-                                source_read_bytes: out.bytes,
-                            },
-                        );
-                        (out, estimate, format!("scan {} samples", out.rows))
-                    }
-                    NonASAPOp::Aggregate {
-                        reduction,
-                        measures,
-                        ..
-                    } => {
-                        let group_count = groups(reduction);
-                        let keys = match reduction {
-                            Reduction::Reduce(keys) => keys.keys().len() as u64,
-                            _ => 1,
-                        };
-                        let out = edge(group_count);
-                        let estimate = estimate_operator(
-                            PhysicalOperator::HashAggregate {
-                                grouping_key_count: keys,
-                                accumulator_count: measures.len().max(1) as u64,
-                            },
-                            OperatorStatistics::HashAggregate {
-                                edges: unary(out),
-                                group_count,
-                                key_bytes: 16 * keys,
-                                accumulator_bytes_per_group: 8,
-                            },
-                        );
-                        (
-                            out,
-                            estimate,
-                            format!(
-                                "hash aggregate {} rows into {group_count} groups",
-                                input.rows
-                            ),
-                        )
-                    }
-                    NonASAPOp::Sort {
-                        keys, partition_by, ..
-                    } => {
-                        let partitions = if partition_by.keys().is_empty() {
-                            1
-                        } else {
-                            DEFAULT_GROUP_COUNT.min(input.rows.max(1))
-                        };
-                        let estimate = estimate_operator(
-                            PhysicalOperator::InMemoryComparisonSort {
-                                ordering_key_count: keys.len() as u64,
-                                partitioned: partitions > 1,
-                            },
-                            OperatorStatistics::InMemoryComparisonSort {
-                                edges: unary(input),
-                                input_partitioning: split(input, partitions),
-                            },
-                        );
-                        (
-                            input,
-                            estimate,
-                            format!("sort {} rows in {partitions} partitions", input.rows),
-                        )
-                    }
-                    NonASAPOp::Limit {
-                        n,
-                        offset,
-                        partition_by,
-                        ..
-                    } => {
-                        let partitions = partition_count(!partition_by.keys().is_empty());
-                        let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
-                        let offset = (*offset as u64).saturating_mul(partitions);
-                        let out = edge(selected_rows(input.rows.saturating_sub(offset), limit));
-                        let estimate = estimate_operator(
-                            PhysicalOperator::Limit { limit, offset },
-                            OperatorStatistics::Limit { edges: unary(out) },
-                        );
-                        (out, estimate, format!("limit to {} rows", out.rows))
-                    }
-                    // At query time a range keeps only its own span of a longer
-                    // scan: a filter on the timestamp.
-                    NonASAPOp::TimeRange { range, .. } if !ingestion => {
-                        let rows = (rows_per_ms * range.as_millis() as f64).round() as u64;
-                        let out = edge(input.rows.min(rows.max(1)));
-                        let estimate = estimate_operator(
-                            PhysicalOperator::Filter {
-                                predicate_operations_per_row: 1,
-                            },
-                            OperatorStatistics::Filter { edges: unary(out) },
-                        );
-                        (
-                            out,
-                            estimate,
-                            format!("time range {range:?}: pass {} rows", out.rows),
-                        )
-                    }
-                    other => {
-                        let estimate = estimate_operator(
-                            PhysicalOperator::PassThrough,
-                            OperatorStatistics::PassThrough {
-                                edges: unary(input),
-                            },
-                        );
-                        let name = match other {
-                            NonASAPOp::TimeRange { range, .. } => format!("time range {range:?}"),
-                            _ => "operator".into(),
-                        };
-                        (input, estimate, format!("{name}: pass {} rows", input.rows))
-                    }
-                },
-                Payload::ASAP(ASAPOp::SummaryAgg {
-                    family, reduction, ..
-                }) => {
-                    let group_count = groups(reduction);
-                    let (depth, state_bytes) = summary_shape(family);
-                    let out = EdgeStatistics {
-                        rows: group_count,
-                        bytes: group_count * state_bytes,
+        let (out, estimate, detail) = match &node.payload {
+            Payload::NonASAP(operator) => match operator {
+                NonASAPOp::Scan { .. } => {
+                    // At ingestion time, one second of arriving rows; at
+                    // query time, as far back as the ranges reading it reach.
+                    let span_ms = match ingestion {
+                        true => 1_000,
+                        false => {
+                            scan_extent_ms(dag, &roles, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS)
+                        }
                     };
-                    let ops = input.rows as f64 * depth as f64;
+                    let out = edge(scan_rows(rows_per_ms, span_ms));
+                    let estimate = estimate_operator(
+                        PhysicalOperator::Scan,
+                        OperatorStatistics::Scan {
+                            edges: UnaryEdgeStatistics {
+                                input: out,
+                                output: out,
+                                promql: None,
+                            },
+                            source_read_bytes: out.bytes,
+                        },
+                    );
+                    (out, estimate, format!("scan {} samples", out.rows))
+                }
+                NonASAPOp::Aggregate {
+                    reduction,
+                    measures,
+                    ..
+                } => {
+                    let group_count = groups(reduction);
+                    let keys = match reduction {
+                        Reduction::Reduce(keys) => keys.keys().len() as u64,
+                        _ => 1,
+                    };
+                    let out = edge(group_count);
+                    let estimate = estimate_operator(
+                        PhysicalOperator::HashAggregate {
+                            grouping_key_count: keys,
+                            accumulator_count: measures.len().max(1) as u64,
+                        },
+                        OperatorStatistics::HashAggregate {
+                            edges: unary(out),
+                            group_count,
+                            key_bytes: 16 * keys,
+                            accumulator_bytes_per_group: 8,
+                        },
+                    );
                     (
                         out,
-                        Ok(ResourceEstimate::new(ops, out.bytes, 0)),
+                        estimate,
                         format!(
-                            "build {} into {group_count} states: {} rows x depth {depth}",
-                            family_name(family),
+                            "hash aggregate {} rows into {group_count} groups",
                             input.rows
                         ),
                     )
                 }
-                Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
-                    let rows = match query {
-                        // The logical result, as an exact Sort → Limit sizes it.
-                        // Items are at most the series: a whole-expression
-                        // sketch reads several samples per ranked item.
-                        SketchStatistic::TopK { k } => {
-                            let (summarized, grouped) = summarized_rows(dag, &output, node.id);
-                            selected_rows(
-                                summarized.min(shape.series),
-                                (*k as u64).saturating_mul(partition_count(grouped)),
-                            )
-                        }
-                        _ => input.rows,
+                NonASAPOp::Sort { keys, partition_by } => {
+                    let partitions = if partition_by.keys().is_empty() {
+                        1
+                    } else {
+                        DEFAULT_GROUP_COUNT.min(input.rows.max(1))
                     };
-                    let out = edge(rows);
-                    (
-                        out,
-                        Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
-                        format!("estimate {} rows from {} states", out.rows, input.rows),
-                    )
-                }
-                // One merge per input state. The output holds the union of the
-                // inputs' groups, bounded as one build over all their rows is,
-                // so readers see what they would see over the whole window.
-                Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
-                    let merged: u64 = inputs.iter().map(|edge| edge.rows).sum();
-                    let reduction = dag.edges.iter().filter(|e| e.consumer == node.id).find_map(
-                        |e| match &nodes[&e.producer].payload {
-                            Payload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => Some(reduction),
-                            _ => None,
+                    let estimate = estimate_operator(
+                        PhysicalOperator::InMemoryComparisonSort {
+                            ordering_key_count: keys.len() as u64,
+                            partitioned: partitions > 1,
+                        },
+                        OperatorStatistics::InMemoryComparisonSort {
+                            edges: unary(input),
+                            input_partitioning: split(input, partitions),
                         },
                     );
-                    let rows = reduction.map_or(merged, |r| bounded_groups(r, merged));
-                    let out = EdgeStatistics {
-                        rows,
-                        bytes: rows * (input.bytes / input.rows.max(1)),
-                    };
                     (
-                        out,
-                        Ok(ResourceEstimate::new(merged as f64, 0, 0)),
-                        format!(
-                            "merge {merged} states from {} inputs into {rows}",
-                            inputs.len()
-                        ),
+                        input,
+                        estimate,
+                        format!("sort {} rows in {partitions} partitions", input.rows),
                     )
                 }
-                Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
-                    edge(input.rows),
-                    Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
-                    format!("finalize {} accumulators", input.rows),
-                ),
-                _ => (
-                    edge(input.rows),
-                    Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
-                    format!("{} rows", input.rows),
-                ),
-            };
+                NonASAPOp::Limit {
+                    n,
+                    offset,
+                    partition_by,
+                } => {
+                    let partitions = partition_count(!partition_by.keys().is_empty());
+                    let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
+                    let offset = (*offset as u64).saturating_mul(partitions);
+                    let out = edge(selected_rows(input.rows.saturating_sub(offset), limit));
+                    let estimate = estimate_operator(
+                        PhysicalOperator::Limit { limit, offset },
+                        OperatorStatistics::Limit { edges: unary(out) },
+                    );
+                    (out, estimate, format!("limit to {} rows", out.rows))
+                }
+                // At query time a range keeps only its own span of a longer
+                // scan: a filter on the timestamp.
+                NonASAPOp::TimeRange { range, .. } if !ingestion => {
+                    let rows = (rows_per_ms * range.as_millis() as f64).round() as u64;
+                    let out = edge(input.rows.min(rows.max(1)));
+                    let estimate = estimate_operator(
+                        PhysicalOperator::Filter {
+                            predicate_operations_per_row: 1,
+                        },
+                        OperatorStatistics::Filter { edges: unary(out) },
+                    );
+                    (
+                        out,
+                        estimate,
+                        format!("time range {range:?}: pass {} rows", out.rows),
+                    )
+                }
+                other => {
+                    let estimate = estimate_operator(
+                        PhysicalOperator::PassThrough,
+                        OperatorStatistics::PassThrough {
+                            edges: unary(input),
+                        },
+                    );
+                    let name = match other {
+                        NonASAPOp::TimeRange { range, .. } => format!("time range {range:?}"),
+                        _ => "operator".into(),
+                    };
+                    (input, estimate, format!("{name}: pass {} rows", input.rows))
+                }
+            },
+            Payload::ASAP(ASAPOp::SummaryAgg {
+                family, reduction, ..
+            }) => {
+                let group_count = groups(reduction);
+                let (depth, state_bytes) = summary_shape(family);
+                let out = EdgeStatistics {
+                    rows: group_count,
+                    bytes: group_count * state_bytes,
+                };
+                let ops = input.rows as f64 * depth as f64;
+                (
+                    out,
+                    Ok(ResourceEstimate::new(ops, out.bytes, 0)),
+                    format!(
+                        "build {} into {group_count} states: {} rows x depth {depth}",
+                        family_name(family),
+                        input.rows
+                    ),
+                )
+            }
+            Payload::ASAP(ASAPOp::SummaryEstimate { query }) => {
+                let rows = match query {
+                    // The logical result, as an exact Sort → Limit sizes it.
+                    // Items are at most the series: a whole-expression
+                    // sketch reads several samples per ranked item.
+                    SketchStatistic::TopK { k } => {
+                        let (summarized, grouped) = summarized_rows(dag, &output, node.id);
+                        selected_rows(
+                            summarized.min(shape.series),
+                            (*k as u64).saturating_mul(partition_count(grouped)),
+                        )
+                    }
+                    _ => input.rows,
+                };
+                let out = edge(rows);
+                (
+                    out,
+                    Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
+                    format!("estimate {} rows from {} states", out.rows, input.rows),
+                )
+            }
+            // One merge per input state. The output holds the union of the
+            // inputs' groups, bounded as one build over all their rows is,
+            // so readers see what they would see over the whole window.
+            Payload::ASAP(ASAPOp::SummaryMerge {}) => {
+                let merged: u64 = inputs.iter().map(|edge| edge.rows).sum();
+                let reduction = dag
+                    .edges
+                    .iter()
+                    .filter(|e| e.consumer == node.id)
+                    .find_map(|e| match &nodes[&e.producer].payload {
+                        Payload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => Some(reduction),
+                        _ => None,
+                    });
+                let rows = reduction.map_or(merged, |r| bounded_groups(r, merged));
+                let out = EdgeStatistics {
+                    rows,
+                    bytes: rows * (input.bytes / input.rows.max(1)),
+                };
+                (
+                    out,
+                    Ok(ResourceEstimate::new(merged as f64, 0, 0)),
+                    format!(
+                        "merge {merged} states from {} inputs into {rows}",
+                        inputs.len()
+                    ),
+                )
+            }
+            Payload::ASAP(ASAPOp::FinalizeExactAccumulator {}) => (
+                edge(input.rows),
+                Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
+                format!("finalize {} accumulators", input.rows),
+            ),
+            _ => (
+                edge(input.rows),
+                Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
+                format!("{} rows", input.rows),
+            ),
+        };
         let cost = estimate
             .and_then(|estimate| estimate.calibrated_cost(&resources))
             .map_err(|error| (node.id, error))?;
@@ -1858,17 +1883,46 @@ fn price_nodes(
             let roots = reached.get(&node.id).into_iter().flatten();
             let rate = evaluation_rate(roots.filter_map(|&r| demand.get(r)), calibration.horizon_s)
                 .map_err(|error| (node.id, error))?;
-            per_evaluation.insert(node.id, cost);
-            let detail = format!("{detail}; x {rate:.4} evaluations/s");
-            match raw_retention.get(&node.id) {
-                Some(&bytes) => {
-                    retained_bytes = retained_bytes.saturating_add(bytes);
+            match roles.get(&node.id) {
+                Some(PaneRole::Retained) => (
+                    0.0,
+                    "pane kept from an earlier evaluation; built and kept as the newest pane"
+                        .to_string(),
+                ),
+                Some(PaneRole::FeedsRetained) => (
+                    0.0,
+                    "feeds only kept panes; done for the newest pane".to_string(),
+                ),
+                // Built from its width of raw data at each evaluation, then
+                // kept with the `panes − 1` older panes the next one reads.
+                Some(PaneRole::Newest { panes }) => {
+                    per_evaluation.insert(node.id, cost);
+                    let retained = (panes - 1) * out.rows * state_bytes(node);
+                    retained_bytes = retained_bytes.saturating_add(retained);
                     (
-                        cost * rate + calibration.cost_per_retained_byte_second * bytes as f64,
-                        format!("{detail}; retains {bytes} bytes of raw data"),
+                        cost * rate + calibration.cost_per_retained_byte_second * retained as f64,
+                        format!(
+                            "{detail}; x {rate:.4} evaluations/s; query time, newest of {panes} \
+                             panes, keeps {} older, retains {retained} bytes",
+                            panes - 1
+                        ),
                     )
                 }
-                None => (cost * rate, detail),
+                None => {
+                    per_evaluation.insert(node.id, cost);
+                    let detail = format!("{detail}; x {rate:.4} evaluations/s");
+                    match raw_retention.get(&node.id) {
+                        Some(&bytes) => {
+                            retained_bytes = retained_bytes.saturating_add(bytes);
+                            (
+                                cost * rate
+                                    + calibration.cost_per_retained_byte_second * bytes as f64,
+                                format!("{detail}; retains {bytes} bytes of raw data"),
+                            )
+                        }
+                        None => (cost * rate, detail),
+                    }
+                }
             }
         };
         output.insert(node.id, out);
@@ -1909,6 +1963,7 @@ fn scan_rows(rows_per_ms: f64, span_ms: u64) -> u64 {
 /// queries is one node.
 fn raw_retention(
     dag: &PhysicalASAPDAG,
+    roles: &HashMap<PhysicalASAPNodeId, PaneRole>,
     rows_per_ms: f64,
     raw_bytes_per_sample: Option<u64>,
 ) -> HashMap<PhysicalASAPNodeId, u64> {
@@ -1919,10 +1974,13 @@ fn raw_retention(
         .iter()
         .filter(|n| {
             n.output_state.timing.is_query_time()
-                && matches!(n.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+                && matches!(
+                    n.payload,
+                    Payload::NonASAP(NonASAPOp::Scan { .. })
+                )
         })
         .map(|n| {
-            let span_ms = scan_extent_ms(dag, n.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS);
+            let span_ms = scan_extent_ms(dag, roles, n.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS);
             let rows = scan_rows(rows_per_ms, span_ms);
             (n.id, rows.saturating_mul(bytes_per_sample))
         })
@@ -2686,7 +2744,10 @@ mod tests {
     }
 
     fn is_scan(payload: &Payload) -> bool {
-        matches!(payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+        matches!(
+            payload,
+            Payload::NonASAP(NonASAPOp::Scan { .. })
+        )
     }
 
     fn is_build(payload: &Payload) -> bool {
@@ -2781,6 +2842,68 @@ mod tests {
             .collect();
         // The scan, one shift, one range and the newest pane.
         assert_eq!(ingestion.len(), 4, "{ingestion:#?}");
+    }
+
+    /// Kept at query time (B3, Q59), each evaluation builds the newest pane
+    /// from one pane width of raw data and keeps it with the 4 older panes
+    /// the next evaluation reads: the newest pane pays the build per
+    /// evaluation and the memory of 4 panes; the older panes and their
+    /// inputs cost nothing, and the scan reads one pane width. Without
+    /// `query_time_retention` the candidate is rejected.
+    #[test]
+    fn kept_panes_build_the_newest_and_retain_the_others() {
+        let (run, demand, data) = pattern_b(data(), None);
+        let enumeration = run.enumeration.as_ref().unwrap();
+        let p = enumeration
+            .candidates
+            .iter()
+            .flat_map(|c| &c.physical)
+            .find(|p| p.materialization == "query time, kept: Kll ×5 panes")
+            .expect("kept KLL panes");
+        let cost = &enumeration.selection.costs[&p.id];
+        let builds: Vec<_> = p.dag.nodes.iter().filter(|n| n.kept).collect();
+        assert_eq!(builds.len(), 5);
+        assert!(builds.iter().all(|n| is_build(&n.payload)));
+        let charged: Vec<_> = builds
+            .iter()
+            .filter(|n| cost.per_node[&n.id].cost > 0.0)
+            .collect();
+        let [newest] = charged[..] else {
+            panic!("one charged pane: {}", charged.len())
+        };
+        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &newest.payload else {
+            unreachable!()
+        };
+        // data(): λ = 10 000 rows/s into 10 000 series; a 1-min pane is
+        // 600 000 rows, built once a minute.
+        let node = &cost.per_node[&newest.id];
+        let retained = 4 * 10_000 * summary_shape(family).1;
+        let build = 600_000.0 * 1e-6 / 60.0;
+        assert!(
+            (node.cost - build - 1.25e-7 * retained as f64).abs() < 1e-9,
+            "{}: {}",
+            node.cost,
+            node.detail
+        );
+        let scan = node_of(&p.dag, is_scan);
+        assert_eq!(cost.per_node[&scan.id].rows, 600_000);
+        let without = DeploymentCapabilities {
+            query_time_retention: false,
+            ..DeploymentCapabilities::UNRESTRICTED
+        };
+        let selection = stage3_select(
+            std::slice::from_ref(p),
+            &demand,
+            &data,
+            PlanningModels::builtin().with_capabilities(&without),
+        );
+        let Err(SelectionError::NoValidCandidate(rejected)) = selection else {
+            panic!("rejected")
+        };
+        assert_eq!(
+            rejected[0].reason,
+            "deployment cannot keep query-time state across evaluations (query time, kept)"
+        );
     }
 
     /// The latency check (S6) rejects a candidate whose query-time work in
@@ -3173,7 +3296,7 @@ mod tests {
         .unwrap();
         let invalid = reasons(&selection);
         for p in &all {
-            let maintained = !p.materialization.is_empty();
+            let maintained = p.materialization.starts_with("ingestion time");
             assert_eq!(invalid.contains_key(p.id.as_str()), maintained, "{}", p.id);
             if maintained {
                 assert_eq!(
@@ -3192,8 +3315,7 @@ mod tests {
         let (p, _) = maintained_panes(&run);
         let p = p.clone();
         // data(): 10 000 series; the newest pane keeps itself and 5 others.
-        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &node_of(&p.dag, is_build).payload
-        else {
+        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &node_of(&p.dag, is_build).payload else {
             unreachable!()
         };
         let retained = 6 * 10_000 * summary_shape(family).1;

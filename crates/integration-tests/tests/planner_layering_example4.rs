@@ -104,13 +104,6 @@ fn tumbling() -> Option<WindowForm> {
     })
 }
 
-fn sliding() -> Option<WindowForm> {
-    Some(WindowForm::Sliding {
-        length_ms: PATTERN_B_WINDOW_MS,
-        slide_ms: PATTERN_B_INTERVAL_MS,
-    })
-}
-
 fn cost(run: &Run, id: &str) -> f64 {
     run.cost(id).unwrap_or_else(|| panic!("{id} is not priced"))
 }
@@ -261,7 +254,6 @@ fn stage3_a_monthly_amortizes_ingestion_time_maintenance() {
 
 /// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, kept).
 #[test]
-#[ignore = "needs Stage 2 query time, kept (B3); B1 and B2 alone pass in stage2_b_tumbling_kll_has_b1_and_b2"]
 fn stage2_b_tumbling_kll_has_three_materialization_options() {
     let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), tumbling(), 1)
         .into_keys()
@@ -270,17 +262,6 @@ fn stage2_b_tumbling_kll_has_three_materialization_options() {
         found,
         BTreeSet::from([IngestionTime, QueryTimeKept, NotMaterialized])
     );
-}
-
-/// B1 (ingestion time) and B2 (not materialized) are generated for the
-/// tumbling KLL; B3 is not yet (added by the implementer, not part of the
-/// spec).
-#[test]
-fn stage2_b_tumbling_kll_has_b1_and_b2() {
-    let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), tumbling(), 1)
-        .into_keys()
-        .collect();
-    assert_eq!(found, BTreeSet::from([IngestionTime, NotMaterialized]));
 }
 
 /// B1 builds the tumbling KLLs at ingestion time and merges and estimates at query time.
@@ -310,7 +291,6 @@ fn stage2_b_b1_builds_at_ingestion_and_merges_at_query_time() {
 
 /// B3 runs nothing at ingestion time; it keeps the tumbling KLLs it builds at query time.
 #[test]
-#[ignore = "needs Stage 2 query time, kept (B3)"]
 fn stage2_b_b3_keeps_query_time_windows() {
     let run = run_promql(&pattern_b());
     let (id, _) = options_of(&run, tumbling(), 1)[&QueryTimeKept].clone();
@@ -319,16 +299,29 @@ fn stage2_b_b3_keeps_query_time_windows() {
         p.dag.nodes.iter().all(|n| !runs_at_ingestion(p, n.id)),
         "{id}"
     );
+    let kept: Vec<_> = p.dag.nodes.iter().filter(|n| n.kept).collect();
+    assert_eq!(kept.len(), 5, "{id}: the five panes are kept");
+    for n in kept {
+        assert_eq!(
+            window_form(&p.dag, n.id),
+            WindowForm::Tumbling {
+                length_ms: PATTERN_B_INTERVAL_MS
+            }
+        );
+    }
 }
 
-/// The sliding-window KLL is kept from ingestion time or from query time; not materializing it is the no-window plan.
+/// The executor cannot keep query-time state (Q56), so Stage 3 rejects B3
+/// on its capabilities, with the reason.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): sliding windows"]
-fn stage2_b_sliding_kll_has_two_materialization_options() {
-    let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), sliding(), 1)
-        .into_keys()
-        .collect();
-    assert_eq!(found, BTreeSet::from([IngestionTime, QueryTimeKept]));
+fn stage3_b_executor_rejects_b3() {
+    let run = run_promql(&pattern_b());
+    let (id, _) = options_of(&run, tumbling(), 1)[&QueryTimeKept].clone();
+    let reason = run.invalid()[id.as_str()];
+    assert!(
+        reason.contains("cannot keep query-time state across evaluations"),
+        "{id}: {reason}"
+    );
 }
 
 // Which of B1 and B2 is cheaper depends on the workload and the deployment,
@@ -433,4 +426,43 @@ fn stage3_b_panes_smaller_than_their_raw_data_win() {
         1,
     );
     assert_eq!(run.selection.selected, options[&IngestionTime].0);
+}
+
+// B3 (query time, kept) builds only the newest pane at each evaluation, from
+// one pane width of raw data, and keeps the N − 1 older panes. Per
+// evaluation it does what B1 does at ingestion time, so the choice is about
+// retention (Q59): B3 keeps N − 1 panes and one pane of raw data, B1 keeps
+// N + 1 panes, B2 keeps all N panes' raw data. Sampled every 7.5 s, a 10-min
+// pane covers 80 samples per series (1280 bytes), a little more than its KLL
+// (1024 bytes): B3 keeps less than either.
+
+/// Plans `workload` on the executor without raw data retention, but able to
+/// keep query-time state across evaluations.
+fn run_keeping_query_time_state(workload: &PlanningWorkload) -> Run {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        query_time_retention: true,
+        ..asap_executor::capabilities()
+    };
+    let models = PlanningModels::builtin().with_capabilities(&capabilities);
+    run_stages_with(workload, lower_promql(workload), models)
+}
+
+/// On a deployment that can keep query-time state, B3 is priced, and where
+/// a pane's raw data is a little larger than its KLL it keeps the least, so
+/// the planner selects it.
+#[test]
+fn stage3_b_kept_panes_win_when_the_deployment_can_keep_them() {
+    let run = run_keeping_query_time_state(&pattern_b_variant(1_000, 7_500, 60, 10));
+    let options = options_of(
+        &run,
+        Some(WindowForm::Tumbling {
+            length_ms: 10 * MINUTE_MS,
+        }),
+        1,
+    );
+    let b3 = cost(&run, &options[&QueryTimeKept].0);
+    let (b1, b2) = b1_b2(&run, 10);
+    assert!(b3 < b1 && b3 < b2, "B3 {b3} vs B1 {b1}, B2 {b2}");
+    assert_eq!(run.selection.selected, options[&QueryTimeKept].0);
 }
