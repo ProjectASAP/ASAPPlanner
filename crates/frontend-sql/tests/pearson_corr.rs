@@ -148,8 +148,29 @@ async fn corr_filter_is_a_measure_filter() {
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
-    let plan = asap_logical_optimizer::pass1::replacement::retain_exact(&query).unwrap();
-    assert!(plan.guarantee.as_ref().unwrap().is_exact());
+    use asap_logical_optimizer::pass1::logical_candidates::{
+        compose_logical_candidate, enumerate_local_logical_candidates,
+    };
+    use asap_logical_optimizer::Realization;
+    use asap_types::ir::QueryRoot;
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(Rc::clone(&query)))],
+        &Default::default(),
+    )
+    .unwrap();
+    // corr has no summary realization: Stage 1 offers only pass-through.
+    assert!(inventory
+        .targets
+        .iter()
+        .all(|target| target.alternatives == [Realization::PassThrough]));
+    let choice = vec![0; inventory.targets.len()];
+    let QueryRoot::Operator(plan) = compose_logical_candidate(&inventory, &choice)
+        .unwrap()
+        .remove(0)
+        .1
+    else {
+        panic!("operator root")
+    };
     // The exact fallback is the query's own operator DAG, no ASAP node added.
     assert!(!plan.contains_asap(), "expected exact fallback");
     assert_eq!(aggregate(&plan).0, aggregate(&query).0);

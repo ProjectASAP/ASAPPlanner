@@ -1,67 +1,29 @@
 use std::rc::Rc;
 
-use asap_logical_optimizer::accuracy::{
-    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-};
-use asap_logical_optimizer::pass1::replacement::{
-    default_strategies, search_workload_with_targets,
-};
-use asap_logical_optimizer::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
+use asap_logical_optimizer::accuracy::{AccuracyModel, DefaultAccuracyModel};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
-use asap_types::ir::properties::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
-};
+use asap_types::ir::properties::ErrorMetric;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::types::AccuracyTarget;
-use support::{lower_promql, post_asap_dag, selected_dag};
+use support::{lower_promql, post_asap_dag, selected_dag, stage1_candidates};
 
-// Synthetic evidence exercises structural sharing, never runtime accuracy.
-struct TestEvidence;
-impl AccuracyModel for TestEvidence {
-    fn local_guarantee(
-        &self,
-        family: &FieldDataType,
-        query: &SketchStatistic,
-    ) -> Option<ResultGuarantee> {
-        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
-            && !matches!(query, SketchStatistic::PointCount { .. })
-        {
-            let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
-            guarantee.metric = ErrorMetric::RelativeValue;
-            guarantee.bound = BoundExpr::Constant { value: 0.01 };
-            guarantee.failure_probability = ProbabilityExpr::Constant { value: 0.01 };
-            Some(guarantee)
-        } else {
-            DefaultAccuracyModel.local_guarantee(family, query)
-        }
-    }
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError> {
-        DefaultAccuracyModel.propagate(op, inputs, local, stats)
-    }
-    fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
-        DefaultAccuracyModel.satisfies(guarantee, target)
-    }
+fn reads_univmon(node: &OperatorNode) -> bool {
+    let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else {
+        return false;
+    };
+    matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+        if kind.algorithm() == &SketchAlgorithm::UnivMon)
 }
 
+/// Stage 1's candidate for `query` whose root reads a UnivMon summary.
 fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy).unwrap();
-    ASAPStrategies::new_with_planning_inputs(&TestEvidence, &EqualSplitAllocator)
-        .replacements(&TargetSubDAG::new(&root))
+    stage1_candidates(&root)
         .into_iter()
-        .find_map(|candidate| {
-            let Replacement::SubDAG(node) = candidate.replacement else { return None };
-            let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else { return None };
-            matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::UnivMon).then_some(node)
-        }).expect("UnivMon candidate")
+        .find(|node| reads_univmon(node))
+        .expect("UnivMon candidate")
 }
 
 #[test]
@@ -70,14 +32,14 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
     // independently of evaluation: UnivMon is sized for L2 whatever it reads.
     let accuracy = AccuracyTarget::Epsilon(0.02);
     let roots: Vec<_> = [
-        ("distinct_over_time(m[5m])", accuracy.clone()),
-        ("count_over_time(m[5m])", accuracy.clone()),
-        ("l2_over_time(m[5m])", accuracy.clone()),
-        ("entropy_over_time(m[5m])", accuracy),
+        "distinct_over_time(m[5m])",
+        "count_over_time(m[5m])",
+        "l2_over_time(m[5m])",
+        "entropy_over_time(m[5m])",
     ]
     .into_iter()
     .enumerate()
-    .map(|(id, (query, accuracy))| (id, candidate(query, accuracy)))
+    .map(|(id, query)| (id, candidate(query, accuracy.clone())))
     .collect();
     let roots = share_common_sub_dags(roots);
     let mut first_state = None;
@@ -97,7 +59,8 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
         } else {
             first_state = Some(Rc::clone(summary_input));
         }
-        let Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) = &summary_input.operator else {
+        let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &summary_input.operator
+        else {
             panic!()
         };
         assert!(matches!(input.item, Some(SummaryInputExpr::Column(_))));
@@ -107,12 +70,7 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
                 query,
                 SketchStatistic::PointCount { value: None, .. }
             ));
-            assert!(root.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         } else {
-            assert!(!root.guarantee.as_ref().unwrap().is_exact());
-            let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
-                panic!()
-            };
             // Production certifies L2 from layer 0's F₂, but has no
             // calibrated bound for distinct count or entropy.
             assert_eq!(
@@ -131,7 +89,7 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
 fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // An unmeasured heuristic remains inspectable but is never certified or
     // automatically selected for a caller-visible bounded-error result.
-    for query in ["entropy_over_time(m[5m])"] {
+    for query in ["entropy_over_time(m[5m])", "l2_over_time(m[5m])"] {
         for target in [
             AccuracyTarget::Exact,
             AccuracyTarget::Epsilon(0.02),
@@ -141,34 +99,13 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             },
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
-            let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
-            let unknown = candidates
+            let offered = stage1_candidates(&root)
                 .iter()
-                .filter(|candidate| {
-                    matches!(
-                        &candidate.replacement,
-                        Replacement::SubDAG(node)
-                            if matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. }))
-                                && node.guarantee.is_none()
-                                && candidate.has_missing_accuracy_evidence()
-                    )
-                })
-                .count();
+                .any(|node| reads_univmon(node));
             if target == AccuracyTarget::Exact {
-                assert_eq!(unknown, 0);
+                assert!(!offered);
             } else {
-                assert!(unknown > 0);
-                let space = search_workload_with_targets(
-                    vec![("q", Rc::clone(&root), Some(target.clone()))],
-                    &default_strategies(),
-                    &DefaultAccuracyModel,
-                );
-                assert!(space
-                    .candidates_for_target(&space.roots[0].1)
-                    .unwrap()
-                    .candidates
-                    .iter()
-                    .any(|candidate| candidate.has_missing_accuracy_evidence()));
+                assert!(offered);
                 // Stage 3 never selects the uncalibrated UnivMon estimate.
                 let selected = selected_dag(root, target);
                 assert!(!OperatorNode::reachable(&selected)

@@ -11,8 +11,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use asap_logical_optimizer::search_workload;
-use common::{compile_physical_asap_dag, selected_dag};
+use common::{compile_physical_asap_dag, selected_dag, stage1_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::schema::DataType;
@@ -50,10 +49,6 @@ fn grouped_rate_root() -> std::rc::Rc<planner_types::ir::OperatorNode> {
         .unwrap()
         .remove(0);
     asap_executor::physical_planner::promql_rows::with_series_identity(&root).unwrap()
-}
-
-fn grouped_rate_space() -> asap_logical_optimizer::CandidateLogicalASAPDAGs<&'static str> {
-    search_workload(vec![("grouped-rate", grouped_rate_root())])
 }
 
 fn grouped_rate() -> PhysicalASAPDAG {
@@ -410,11 +405,9 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
 
 #[test]
 fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
-    let inventory = grouped_rate_space().enumerate_candidate_dags(4096).unwrap();
     let mut executed = 0;
-    for forest in inventory.candidates {
-        let root = &forest[0].1;
-        let dag = compile_physical_asap_dag(root).unwrap();
+    for root in stage1_candidates(&grouped_rate_root()) {
+        let dag = compile_physical_asap_dag(&root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
                 node.payload,

@@ -3,8 +3,7 @@
 mod executor_models;
 mod physical_common;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
-use asap_types::ir::ASAPOp;
-use asap_types::ir::OperatorNode;
+use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use physical_common::compile_maintained_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
@@ -18,14 +17,14 @@ use asap_executor::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_integration_tests::fixtures::lower_promql;
-use asap_logical_optimizer::{
-    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+use asap_logical_optimizer::pass1::logical_candidates::{
+    compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
 };
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
-    SummaryUpdate,
+    SummaryUpdate, WeightDomain,
 };
 use asap_types::types::AccuracyTarget;
 use futures::{executor::block_on, StreamExt};
@@ -54,18 +53,36 @@ fn canonical(labels: &Series) -> Series {
 }
 
 /// Every Planner candidate for `query`: the stage pipeline's selection plus
-/// each summary replacement of the root.
+/// each candidate Stage 1 composes that Stage 3 could admit (Count-Min only
+/// over weights proven non-negative).
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
     let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
-    let mut result = ASAPStrategies::default()
-        .replacements(&TargetSubDAG::new(&root))
-        .into_iter()
-        .filter_map(|candidate| match candidate {
-            ReplacementSubDAG {
-                replacement: Replacement::SubDAG(node),
-                ..
-            } => Some(node),
-            _ => None,
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(Rc::clone(&root)))],
+        &Default::default(),
+    )
+    .unwrap();
+    let mut result = enumerate_choices(&inventory, 4096)
+        .iter()
+        .filter_map(|choice| {
+            match compose_logical_candidate(&inventory, choice)
+                .ok()?
+                .remove(0)
+                .1
+            {
+                QueryRoot::Operator(node) => Some(node),
+                QueryRoot::Scalar(_) => None,
+            }
+        })
+        .filter(|node| {
+            OperatorNode::reachable(node).iter().all(|node| {
+                !matches!(&node.operator, asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    input,
+                    ..
+                }) if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap)
+                    && !matches!(input.weight_domain, WeightDomain::NonNegative { .. }))
+            })
         })
         .collect::<Vec<_>>();
     result.push(executor_models::selected_dag(root, accuracy));
@@ -76,12 +93,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
 fn raw_summaries(dag: &PhysicalASAPDAG) -> Vec<(u64, u64)> {
     dag.nodes
         .iter()
-        .filter(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
-            )
-        })
+        .filter(|node| matches!(node.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })))
         .filter_map(|node| {
             let inputs = dag
                 .edges
@@ -302,7 +314,11 @@ fn check(
     root: u64,
     rows: &[(Series, i64, f64)],
 ) -> Result<String, String> {
-    let node = dag.nodes.iter().find(|n| n.id as u64 == root).unwrap();
+    let node = dag
+        .nodes
+        .iter()
+        .find(|n| n.id as u64 == root)
+        .unwrap();
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family,
         input,
@@ -313,7 +329,11 @@ fn check(
     else {
         unreachable!()
     };
-    let source_node = dag.nodes.iter().find(|n| n.id as u64 == source).unwrap();
+    let source_node = dag
+        .nodes
+        .iter()
+        .find(|n| n.id as u64 == source)
+        .unwrap();
     let keys = match reduction {
         Reduction::Reduce(keys) => keys
             .keys()
@@ -486,7 +506,11 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     .unwrap();
     let mut dag = compile_maintained_physical_asap_dag(&candidate).unwrap();
     let (source, root) = raw_summaries(&dag)[0];
-    let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
+    let node = dag
+        .nodes
+        .iter_mut()
+        .find(|n| n.id as u64 == root)
+        .unwrap();
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family: old,
         input: update,
@@ -503,7 +527,11 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     *old = family;
     *update = input;
     let schema = node.output_schema.clone();
-    for edge in dag.edges.iter_mut().filter(|e| e.producer as u64 == root) {
+    for edge in dag
+        .edges
+        .iter_mut()
+        .filter(|e| u64::from(e.producer.0) == root)
+    {
         edge.intermediate_schema = schema.clone();
     }
     (dag, source, root)
@@ -610,9 +638,12 @@ fn raw_sample_without_grouping_drops_labels_and_name() {
         .iter()
         .position(|f| f.name == "service")
         .unwrap();
-    let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
-    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) = &mut node.payload
-    else {
+    let node = dag
+        .nodes
+        .iter_mut()
+        .find(|n| n.id as u64 == root)
+        .unwrap();
+    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) = &mut node.payload else {
         unreachable!()
     };
     *reduction = Reduction::Reduce(GroupKeys::without(vec![service]));

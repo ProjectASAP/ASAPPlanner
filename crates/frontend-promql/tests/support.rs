@@ -138,3 +138,67 @@ pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<Oper
     };
     root.clone()
 }
+
+/// Every whole-query candidate Stage 1's Pass 1 lists for `root` (up to
+/// 4096), composed; choices that do not compose are skipped.
+#[allow(dead_code)]
+pub fn stage1_candidates(root: &Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+    use asap_logical_optimizer::pass1::logical_candidates::{
+        compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
+    };
+    use asap_types::ir::QueryRoot;
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(Rc::clone(root)))],
+        &Default::default(),
+    )
+    .unwrap();
+    enumerate_choices(&inventory, 4096)
+        .iter()
+        .filter_map(|choice| {
+            match compose_logical_candidate(&inventory, choice)
+                .ok()?
+                .remove(0)
+                .1
+            {
+                QueryRoot::Operator(node) => Some(node),
+                QueryRoot::Scalar(_) => None,
+            }
+        })
+        .collect()
+}
+
+/// A candidate Stage 1 composes for `root`: the first of its (up to 64)
+/// whole-query choices that composes and builds a summary, else the
+/// pass-through choice. `Err` when Pass 1 rejects the query or the
+/// pass-through choice does not compose. A choice may legitimately not
+/// compose (an alternative its input cannot feed); selection skips it.
+#[allow(dead_code)]
+pub fn stage1_plan(
+    root: &Rc<OperatorNode>,
+) -> Result<
+    Rc<OperatorNode>,
+    asap_logical_optimizer::pass1::logical_candidates::LogicalCandidateError,
+> {
+    use asap_logical_optimizer::pass1::logical_candidates::{
+        compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
+    };
+    use asap_types::ir::QueryRoot;
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(Rc::clone(root)))],
+        &Default::default(),
+    )?;
+    let compose = |choice: &[usize]| {
+        compose_logical_candidate(&inventory, choice).map(|mut roots| match roots.remove(0).1 {
+            QueryRoot::Operator(node) => node,
+            QueryRoot::Scalar(_) => unreachable!("an operator root composes to an operator root"),
+        })
+    };
+    let summarized = enumerate_choices(&inventory, 64)
+        .iter()
+        .filter_map(|choice| compose(choice).ok())
+        .find(|node| node.contains_asap());
+    match summarized {
+        Some(node) => Ok(node),
+        None => compose(&vec![0; inventory.targets.len()]),
+    }
+}
