@@ -180,50 +180,101 @@ fn stage1_a_identical_expression_rule_shares_only_raw_input() {
     }
 }
 
-/// The windows' boundaries lie on a 1-year grid, so one set of five 1-year
-/// KLL segments over [T − 5y, T] serves all five queries (Q60, in place of
-/// the spec's Exponential Histogram): each query merges the segments its
-/// range covers and estimates p99 from its merge.
+/// The planner chooses the segment grid (Q67): one candidate splits the
+/// windows at their boundaries into four KLL segments over [T − 5y, T], the
+/// oldest two years wide; another uses the even grid of five 1-year
+/// segments. Either serves all five queries (Q60, in place of the spec's
+/// Exponential Histogram): each query merges the segments its range covers
+/// and estimates p99 from its merge.
 #[test]
 fn stage1_a_shared_segments_serve_all_five() {
     let run = run_a();
-    let c = run
+    let candidates: Vec<_> = run
         .logical
         .iter()
-        .find(|c| shares_segments(&c.dag, &c.query_roots))
-        .expect("a candidate sharing window segments");
-    let segments = windowed_builds(c);
-    assert_eq!(segments.len(), 5, "{}", c.id);
-    for (_, algorithm, form, _) in &segments {
-        assert_eq!(*algorithm, SketchAlgorithm::Kll);
-        assert_eq!(*form, WindowForm::Tumbling { length_ms: YEAR_MS });
-    }
-    let read: BTreeSet<usize> = segments.iter().flat_map(|(.., r)| r.clone()).collect();
-    assert_eq!(read, (0..5).collect());
-    // Each query merges as many segments as its range has years.
-    for (q, (_, lookback, _)) in PATTERN_A.iter().enumerate() {
-        let covering = segments.iter().filter(|(.., r)| r.contains(&q)).count() as u64;
-        assert_eq!(covering, lookback / YEAR_MS, "q{}", q + 1);
-    }
-    let estimates: std::collections::BTreeMap<_, _> = segments
-        .iter()
-        .flat_map(|(build, ..)| estimates_of(&c.dag, *build))
+        .filter(|c| shares_segments(&c.dag, &c.query_roots))
         .collect();
-    assert_eq!(estimates.len(), 5, "one estimate per query");
-    for (estimate, statistic) in estimates {
-        assert_eq!(statistic, SketchStatistic::Quantile { q: 0.99 });
-        let merged = c.dag.producers(estimate).into_iter().any(|p| {
-            matches!(
-                c.dag.payload(p),
-                Operator::ASAP(ASAPOp::SummaryMerge { .. })
-            )
-        });
-        assert!(
-            merged,
-            "{}: estimate {estimate:?} does not read a merge",
-            c.id
-        );
+    let mut widths: Vec<Vec<u64>> = candidates
+        .iter()
+        .map(|c| {
+            let mut widths: Vec<u64> = windowed_builds(c)
+                .iter()
+                .map(|(_, _, form, _)| match form {
+                    WindowForm::Tumbling { length_ms } => length_ms / YEAR_MS,
+                    other => panic!("{}: {other:?}", c.id),
+                })
+                .collect();
+            widths.sort();
+            widths
+        })
+        .collect();
+    widths.sort();
+    assert_eq!(widths, [vec![1, 1, 1, 1, 1], vec![1, 1, 1, 2]]);
+    for c in candidates {
+        let segments = windowed_builds(c);
+        for (_, algorithm, ..) in &segments {
+            assert_eq!(*algorithm, SketchAlgorithm::Kll);
+        }
+        let read: BTreeSet<usize> = segments.iter().flat_map(|(.., r)| r.clone()).collect();
+        assert_eq!(read, (0..5).collect());
+        // The segments each query merges add up to its range.
+        for (q, (_, lookback, _)) in PATTERN_A.iter().enumerate() {
+            let covered: u64 = segments
+                .iter()
+                .filter(|(.., r)| r.contains(&q))
+                .map(|(_, _, form, _)| match form {
+                    WindowForm::Tumbling { length_ms } => *length_ms,
+                    _ => unreachable!(),
+                })
+                .sum();
+            assert_eq!(covered, *lookback, "{} q{}", c.id, q + 1);
+        }
+        let estimates: std::collections::BTreeMap<_, _> = segments
+            .iter()
+            .flat_map(|(build, ..)| estimates_of(&c.dag, *build))
+            .collect();
+        assert_eq!(estimates.len(), 5, "one estimate per query");
+        for (estimate, statistic) in estimates {
+            assert_eq!(statistic, SketchStatistic::Quantile { q: 0.99 });
+            let merged = c
+                .dag
+                .producers(estimate)
+                .into_iter()
+                .any(|p| matches!(c.dag.payload(p), Operator::ASAP(ASAPOp::SummaryMerge { .. })));
+            assert!(
+                merged,
+                "{}: estimate {estimate:?} does not read a merge",
+                c.id
+            );
+        }
     }
+}
+
+/// Stage 3 decides the grid: the four boundary segments cost as much to
+/// build as the five 1-year ones (each row lands in one segment) but merge
+/// fewer states, so they are cheaper, and cheapest overall.
+#[test]
+fn stage3_a_selects_the_cheaper_segment_grid() {
+    let run = run_a();
+    let mut costs: Vec<(usize, f64, &str)> = run
+        .logical
+        .iter()
+        .filter(|c| shares_segments(&c.dag, &c.query_roots))
+        .map(|c| {
+            let p = run.physical_of(c).next().unwrap();
+            (
+                windowed_builds(c).len(),
+                run.cost(&p.id).unwrap(),
+                p.id.as_str(),
+            )
+        })
+        .collect();
+    costs.sort_by_key(|(segments, ..)| *segments);
+    let [(4, four, selected), (5, five, _)] = costs[..] else {
+        panic!("{costs:?}");
+    };
+    assert!(four < five, "×4 {four} vs ×5 {five}");
+    assert_eq!(run.selection.selected, selected);
 }
 
 /// The shared-segment candidate is added next to the independent KLL candidates, not instead of them.
