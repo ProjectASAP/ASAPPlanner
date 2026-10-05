@@ -98,7 +98,7 @@ fn key(node: &OperatorNode) -> Option<Key<'_>> {
 }
 
 /// `intent` with its accuracy requirement replaced.
-fn with_accuracy(intent: &AggIntent, target: AccuracyTarget) -> AggIntent {
+pub(crate) fn with_accuracy(intent: &AggIntent, target: AccuracyTarget) -> AggIntent {
     let mut intent = intent.clone();
     match &mut intent {
         AggIntent::Quantile { accuracy, .. }
@@ -114,7 +114,9 @@ fn with_accuracy(intent: &AggIntent, target: AccuracyTarget) -> AggIntent {
 
 /// The requirement that dominates every one in `targets`: the smallest ε
 /// and the smallest δ.
-fn strictest<'a>(targets: impl IntoIterator<Item = &'a AccuracyTarget>) -> AccuracyTarget {
+pub(crate) fn strictest<'a>(
+    targets: impl IntoIterator<Item = &'a AccuracyTarget>,
+) -> AccuracyTarget {
     let (epsilon, delta) = targets
         .into_iter()
         .map(accuracy_budget)

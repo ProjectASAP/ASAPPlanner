@@ -697,7 +697,10 @@ fn realize(
     };
     let state = match window {
         WindowForm::Whole => build(child)?,
-        WindowForm::Tumbling { pane_ms } => tumbling_state(&child, pane_ms, build)?,
+        WindowForm::Tumbling { pane_ms }
+        | WindowForm::Segments {
+            segment_ms: pane_ms,
+        } => tumbling_state(&child, pane_ms, build)?,
     };
     let evaluation = match query {
         Some(query) => ASAPOp::SummaryEstimate {
