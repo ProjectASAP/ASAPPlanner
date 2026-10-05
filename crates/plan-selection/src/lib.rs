@@ -2072,9 +2072,20 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
             ),
             // An insert reaches about two layers; each updates `d` rows'
             // counters and sign-checks, then its heap.
-            params @ SketchParams::UnivMon { sketch_rows, .. } => (
+            // Each layer holds `rows x cols` eight-byte counters plus a
+            // conservative 64 bytes per heap entry.
+            SketchParams::UnivMon {
+                heap_size,
+                sketch_rows,
+                sketch_cols,
+                layers,
+            } => (
                 2 * (2 * u64::from(*sketch_rows) + 4),
-                asap_logical_optimizer::pass1::replacement::sketch_state_bytes(params)
+                u64::from(*sketch_rows)
+                    .checked_mul(u64::from(*sketch_cols))
+                    .and_then(|counters| counters.checked_mul(8))
+                    .and_then(|bytes| bytes.checked_add(u64::from(*heap_size).checked_mul(64)?))
+                    .and_then(|bytes| bytes.checked_mul(u64::from(*layers)))
                     .unwrap_or(u64::MAX),
             ),
             _ => (1, 1_024),
