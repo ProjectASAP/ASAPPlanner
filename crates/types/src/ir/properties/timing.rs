@@ -35,7 +35,7 @@
 //! | `MaintainPopulation.child` | Ingestion-time rows matching the population's input |
 //! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing; ingestion work never reads a query-time value |
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ir::operator::asap::ASAPOp;
@@ -56,6 +56,9 @@ use crate::ir::schema::{DataType, FieldDataType, Schema};
 pub struct MaterializationAssignment {
     summary_timings: HashMap<*const OperatorNode, ExecutionTiming>,
     default_timing: ExecutionTiming,
+    /// Query-time states kept across evaluations (#509 Example 4, B3). The
+    /// timing stays query time; the export marks them kept.
+    kept: HashSet<*const OperatorNode>,
 }
 
 impl MaterializationAssignment {
@@ -69,11 +72,21 @@ impl MaterializationAssignment {
         Self {
             summary_timings: HashMap::new(),
             default_timing: ExecutionTiming::IngestionTime,
+            kept: HashSet::new(),
         }
     }
 
     pub fn set(&mut self, summary: &Rc<OperatorNode>, timing: ExecutionTiming) {
         self.summary_timings.insert(Rc::as_ptr(summary), timing);
+    }
+
+    /// Keep `summary`'s query-time state across evaluations.
+    pub fn set_kept(&mut self, summary: &Rc<OperatorNode>) {
+        self.kept.insert(Rc::as_ptr(summary));
+    }
+
+    pub fn is_kept(&self, summary: &Rc<OperatorNode>) -> bool {
+        self.kept.contains(&Rc::as_ptr(summary))
     }
 
     pub fn summary_timing(&self, summary: &Rc<OperatorNode>) -> ExecutionTiming {
@@ -667,6 +680,9 @@ pub fn split_shared_by_phase(
             state
                 .rekeyed
                 .set(&out, state.assignment.summary_timing(node));
+            if state.assignment.is_kept(node) {
+                state.rekeyed.set_kept(&out);
+            }
         }
         state.copies.insert(key, Rc::clone(&out));
         out

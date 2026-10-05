@@ -500,6 +500,7 @@ fn bind_post_asap_before_execution() {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
+        kept: false,
         output_schema: (*schema).clone(),
         guarantee: None,
     };
@@ -646,6 +647,7 @@ fn source_batches_must_match_the_bound_schema() {
                 schema: (*expected).clone(),
             }),
             output_state: ExecutionDataState::QUERY_ROWS,
+            kept: false,
             output_schema: (*expected).clone(),
             guarantee: None,
         }],
@@ -725,6 +727,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
+        kept: false,
         guarantee: None,
     };
     let edge =
@@ -1187,6 +1190,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         id,
         payload: PhysicalASAPOperatorPayload::NonASAP(operation),
         output_state: ExecutionDataState::QUERY_ROWS,
+        kept: false,
         output_schema: (*input).clone(),
         guarantee: None,
     };
@@ -1274,6 +1278,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             id: 2,
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
+            kept: false,
             guarantee: None,
             payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
                 kind: JoinKind::Semi,
@@ -1389,6 +1394,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         id: 2,
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
+        kept: false,
         guarantee: None,
         payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
             operator: BinaryOperator {
