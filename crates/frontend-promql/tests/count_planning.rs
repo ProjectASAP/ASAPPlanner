@@ -1,9 +1,4 @@
 //! Query text through summary selection: counts use observations, never value weights.
-use asap_logical_optimizer::accuracy::DefaultAccuracyModel;
-use asap_logical_optimizer::{
-    default_strategies, search_workload_with_targets, ASAPStrategies, Replacement,
-    ReplacementStrategy, TargetSubDAG,
-};
 mod support;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::schema::{
@@ -13,43 +8,36 @@ use asap_types::ir::schema::{
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
-use support::{lower_promql, post_asap_dag, selected_dag};
+use support::{lower_promql, post_asap_dag, selected_dag, stage1_candidates};
 
 #[test]
-fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
+fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
     let target = AccuracyTarget::EpsilonDelta {
         epsilon: 0.01,
         delta: 0.01,
     };
-    let root = lower_promql("count by(job)(up)", target.clone()).unwrap();
-    let space = search_workload_with_targets(
-        vec![("count", Rc::clone(&root), Some(target.clone()))],
-        &default_strategies(),
-        &DefaultAccuracyModel,
-    );
-    let planned = &space.roots[0].1;
-    let hydra: Vec<_> = space
-        .candidates_for_target(planned)
-        .unwrap()
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.strategy == "HydraGroupingStrategy")
-        .collect();
-    assert_eq!(hydra.len(), 2);
-    assert!(hydra
-        .iter()
-        .all(|candidate| candidate.has_missing_accuracy_evidence()));
-    // Stage 3 never selects a summary without accuracy evidence.
-    let selected = selected_dag(root, target);
-    assert!(!OperatorNode::reachable(&selected)
-        .iter()
-        .any(|node| matches!(
-            &node.operator,
-            Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. }),
-                ..
-            })
-        )));
+    // Hydra hashes a non-null item per row: the series identity (PromQL
+    // labels are nullable).
+    let root = asap_types::ir::schema_support::with_promql_series_identity(
+        &lower_promql("count by(job)(up)", target.clone()).unwrap(),
+    )
+    .unwrap();
+    let hydra = |node: &Rc<OperatorNode>| {
+        OperatorNode::reachable(node).iter().any(|node| {
+            matches!(
+                &node.operator,
+                Operator::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(
+                        _,
+                        GroupingStrategy::SharedMultiSubpopulation { .. }
+                    ),
+                    ..
+                })
+            )
+        })
+    };
+    assert!(stage1_candidates(&root).iter().any(hydra));
+    assert!(!hydra(&selected_dag(root, target)));
 }
 
 // Exact series and temporal counts must select a count accumulator, not distinct or sum.
@@ -57,12 +45,18 @@ fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
 fn exact_counts_select_count_accumulators() {
     for query in ["count(up)", "count by(job)(up)", "count_over_time(up[5m])"] {
         let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
-        let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
+        let candidates = stage1_candidates(&root);
         assert!(
             candidates.iter().any(|candidate| {
-                matches!(&candidate.replacement, Replacement::SubDAG(node)
-                if matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryAgg {
-                    family: FieldDataType::ExactAggregate(ExactKind::Count, _), .. })))
+                OperatorNode::reachable(candidate).iter().any(|node| {
+                    matches!(
+                        &node.operator,
+                        Operator::ASAP(ASAPOp::SummaryAgg {
+                            family: FieldDataType::ExactAggregate(ExactKind::Count, _),
+                            ..
+                        })
+                    )
+                })
             }),
             "{query}: {candidates:?}"
         );
@@ -74,13 +68,18 @@ fn exact_counts_select_count_accumulators() {
 fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
         let root = lower_promql(query, AccuracyTarget::Epsilon(0.02)).unwrap();
-        let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
+        let candidates = stage1_candidates(&root);
         let mut algorithms = Vec::new();
-        for candidate in &candidates {
-            let Replacement::SubDAG(node) = &candidate.replacement else {
-                continue;
-            };
-            let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator
+        for node in &candidates {
+            let Some(summary_input) =
+                OperatorNode::reachable(node)
+                    .into_iter()
+                    .find_map(|node| match &node.operator {
+                        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
+                            Some(summary_input.clone())
+                        }
+                        _ => None,
+                    })
             else {
                 continue;
             };
@@ -231,13 +230,9 @@ fn count_over_time_counts_scrapes_not_sample_values() {
 fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     use asap_types::ir::scalar::ColumnRef;
     let root = lower_promql("count_over_time(up[5m])", AccuracyTarget::Epsilon(0.02)).unwrap();
-    let candidates = ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
-    let dag = candidates
+    let dag = stage1_candidates(&root)
         .iter()
-        .find_map(|candidate| {
-            let Replacement::SubDAG(node) = &candidate.replacement else {
-                return None;
-            };
+        .find_map(|node| {
             let dag = post_asap_dag(node);
             dag.nodes
                 .iter()

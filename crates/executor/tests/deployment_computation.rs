@@ -1,18 +1,17 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
 //! the deployment supplies only raw rows at the ingestion frontier.
 mod common;
+use planner_types::ir::ASAPOp;
 use asap_executor::{
     operators::Operator,
     physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::{compile_physical_asap_dag, selected_dag};
+use common::{compile_physical_asap_dag, selected_dag, stage1_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
-use planner_types::ir::schema::*;
-use planner_types::ir::ASAPOp;
-use planner_types::{types::AccuracyTarget, workload::*};
+use planner_types::{ir::schema::*, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
 fn lower(query: &str) -> Rc<planner_types::ir::OperatorNode> {
@@ -72,18 +71,14 @@ fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(u64, Arc<Schema>, String)> {
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange {
-                ..
-            }) => {
+            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange { .. }) => {
                 let mut id = node.id;
                 loop {
                     let n = dag.nodes.iter().find(|n| n.id == id)?;
-                    if let PhysicalASAPOperatorPayload::NonASAP(
-                        planner_types::ir::NonASAPOp::Scan {
-                            source: planner_types::ir::operator::Source::TimeSeries { metric },
-                            ..
-                        },
-                    ) = &n.payload
+                    if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Scan {
+                                source: planner_types::ir::operator::Source::TimeSeries { metric },
+                                ..
+                            }) = &n.payload
                     {
                         return Some((
                             node.id as u64,
@@ -332,10 +327,9 @@ fn with_kind(
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
         if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
-            operator,
-            return_bool,
-            ..
-        }) = &mut node.payload
+                    operator,
+                    return_bool,
+                }) = &mut node.payload
         {
             operator.kind = kind.clone();
             *return_bool = bool_result;
@@ -532,9 +526,9 @@ fn with_vector_match(
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
         if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
-            operator,
-            ..
-        }) = &mut node.payload
+                    operator,
+                    return_bool: _,
+                }) = &mut node.payload
         {
             operator.vector_match = Some(planner_types::ir::operator::VectorMatch {
                 kind: kind.clone(),
@@ -611,42 +605,31 @@ fn population_sums_and_averages_are_compensated() {
 #[test]
 fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_executor::summary_kernels::CountMinSketchAccumulator;
-    use asap_logical_optimizer::{Replacement, ReplacementStrategy, TargetSubDAG};
     let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
-    let dag = asap_logical_optimizer::ASAPStrategies::default()
-        .replacements(&TargetSubDAG::new(&root))
+    let dag = stage1_candidates(&root)
         .into_iter()
-        .find_map(|candidate| match candidate.replacement {
-            Replacement::SubDAG(node) => {
-                let dag = compile_physical_asap_dag(&node).ok()?;
-                let bare_count = dag.nodes.iter().any(|n| {
-                    matches!(
-                        &n.payload,
-                        PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryEstimate {
-                            query: SketchStatistic::PointCount { value: None, .. },
-                            ..
-                        })
-                    )
-                });
-                let count_min = dag.nodes.iter().any(|n| {
-                    matches!(&n.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+        .find_map(|node| {
+            let dag = compile_physical_asap_dag(&node).ok()?;
+            let bare_count = dag.nodes.iter().any(|n| {
+                matches!(
+                    &n.payload,
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryEstimate {
+                        query: SketchStatistic::PointCount { value: None, .. }
+                    })
+                )
+            });
+            let count_min = dag.nodes.iter().any(|n| {
+                matches!(&n.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                         family: FieldDataType::Sketch(kind, _), ..
                     }) if kind.algorithm() == &SketchAlgorithm::Cms)
-                });
-                (bare_count && count_min).then_some(dag)
-            }
-            _ => None,
+            });
+            (bare_count && count_min).then_some(dag)
         })
         .expect("Planner lists a Count-Min candidate for count(up)");
     let state = dag
         .nodes
         .iter()
-        .find(|n| {
-            matches!(
-                n.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
-            )
-        })
+        .find(|n| matches!(n.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })))
         .unwrap();
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family: FieldDataType::Sketch(kind, _),
@@ -661,7 +644,10 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let schema = Arc::new(state.output_schema.clone());
     let program = compile(
         &dag,
-        BTreeMap::from([(state.id as u64, InputContract::bounded(schema.clone()))]),
+        BTreeMap::from([(
+            state.id as u64,
+            InputContract::bounded(schema.clone()),
+        )]),
         &[dag.roots[0] as u64],
     )
     .unwrap();
