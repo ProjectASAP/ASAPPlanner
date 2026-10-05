@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-chrono = { version = "=0.4.39", default-features = false, features = ["std"] }
+chrono = { version = "0.4.39", default-features = false, features = ["std"] }
 futures = "0.3"
 planner-types = { package = "asap-types", path = "../types" }
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "5f03ccbd798ed5fec62bdd839bcb331123cab369" }
