@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use asap_frontend_sql::SqlCatalog;
 use asap_logical_optimizer::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
-use asap_logical_optimizer::pass1::replacement::{default_size_params, DEFAULT_DELTA};
+use asap_logical_optimizer::pass1::realization::{default_size_params, DEFAULT_DELTA};
 use asap_logical_optimizer::{Replacement, ReplacementSubDAG, TargetSubDAG};
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{CostModel, DefaultCostModel};

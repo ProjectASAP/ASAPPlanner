@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_frequency_sizing() {
-        use crate::pass1::replacement::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = asap_types::ir::operator::agg_intent::default_cardinality();
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
@@ -69,7 +69,7 @@ mod tests {
     /// for ε/2 and δ/2 (Pass 1's split) it meets it.
     #[test]
     fn hydra_guarantee_adds_the_shared_grid_term() {
-        use crate::pass1::replacement::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::schema::{
             default_hydra_params, GroupingStrategy, HydraKind, SketchKind,
         };

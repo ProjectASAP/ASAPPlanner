@@ -34,7 +34,7 @@
 //! 1. Both are the same bindable shape [`crate::pass1::replacement::ASAPStrategies`]
 //!    itself targets — a single measure, no `HAVING` (`bindable_intent`'s own
 //!    scope) — **and** that one measure is one of the four accuracy-bearing
-//!    [`AggIntent`] variants ([`crate::pass1::replacement::accuracy_target`]'s own
+//!    [`AggIntent`] variants ([`crate::pass1::realization::accuracy_target`]'s own
 //!    scope: `Count` / `Quantile` / `Cardinality` / `TopK`). Every other
 //!    intent has no `AccuracyTarget` to reconcile in the first place.
 //! 2. Same `reduction` (grouping), same `output_names`, and the same shared
@@ -61,7 +61,7 @@
 //!
 //! ## Safety of tightening: why reading the tighter build is always sound
 //!
-//! [`crate::pass1::replacement::accuracy_budget`] resolves *every* `AccuracyTarget`
+//! [`crate::pass1::realization::accuracy_budget`] resolves *every* `AccuracyTarget`
 //! (`Epsilon`/`EpsilonDelta`) to the literal `(eps, delta)` pair
 //! `realizations_for_intent`'s `sketch_realizations` feeds into the
 //! analytical sizing — the same numbers `default_size_params`'
@@ -156,9 +156,9 @@ use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::types::AccuracyTarget;
 
+use crate::pass1::realization::{accuracy_budget, accuracy_target, dominates};
 use crate::pass1::replacement::{
-    accuracy_budget, accuracy_target, Replacement, ReplacementProvenance, ReplacementStrategy,
-    ReplacementSubDAG, TargetSubDAG,
+    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 
 /// `bindable_accuracy_aggregate`'s return shape: `(reduction, intent,
@@ -177,7 +177,7 @@ type BindableAccuracyAggregate<'a> = (
 /// [`crate::pass1::replacement::ASAPStrategies`] targets (see that
 /// module's private `bindable_intent`), further narrowed to a measure whose
 /// intent actually carries an [`AccuracyTarget`]
-/// ([`crate::pass1::replacement::accuracy_target`]'s own scope: `Count` /
+/// ([`crate::pass1::realization::accuracy_target`]'s own scope: `Count` /
 /// `Quantile` / `Cardinality` / `TopK`). `None` for anything else, including
 /// a multi-measure or `HAVING` aggregate, a non-`Aggregate` node, or an
 /// accuracy-free intent (`Sum`, `Avg`, …).
@@ -222,30 +222,6 @@ fn same_intent_except_accuracy(a: &AggIntent, b: &AggIntent) -> bool {
         }
         _ => false,
     }
-}
-
-/// Would a build sized to `tighter`'s accuracy requirement also satisfy
-/// `looser`'s? See the module docs' "Safety of tightening" section for the
-/// full argument; this is the Pareto check that argument reduces to: both
-/// sides resolve through [`accuracy_budget`] to concrete `(eps, delta)`
-/// numbers, and `tighter` dominates `looser` iff neither of its two numbers
-/// is larger.
-///
-/// `AccuracyTarget::Exact` on either side always returns `false` — never a
-/// dominator, never dominated. Numerically, `accuracy_budget(Exact)`
-/// resolves to a budget that would Pareto-dominate everything (zero error),
-/// but `realizations_for_intent` realizes `Exact` through a wholly
-/// different code path (`exact_realization`, never `sketch_realizations`)
-/// — a different `Realization` family, not a point on the same sizing
-/// curve — so the numeric comparison alone does not mean what it means for
-/// two approximate targets. See the module docs for the full reasoning.
-pub(crate) fn dominates(tighter: &AccuracyTarget, looser: &AccuracyTarget) -> bool {
-    if matches!(tighter, AccuracyTarget::Exact) || matches!(looser, AccuracyTarget::Exact) {
-        return false;
-    }
-    let (tighter_eps, tighter_delta) = accuracy_budget(tighter);
-    let (looser_eps, looser_delta) = accuracy_budget(looser);
-    tighter_eps <= looser_eps && tighter_delta <= looser_delta
 }
 
 /// `dominates(a, b)` and the two resolved budgets aren't equal — the
@@ -530,7 +506,7 @@ mod tests {
         let epsilon_only = AccuracyTarget::Epsilon(0.01);
         let equivalent_epsilon_delta = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
-            delta: crate::pass1::replacement::DEFAULT_DELTA,
+            delta: crate::pass1::realization::DEFAULT_DELTA,
         };
         assert!(dominates(&epsilon_only, &equivalent_epsilon_delta));
         assert!(dominates(&equivalent_epsilon_delta, &epsilon_only));

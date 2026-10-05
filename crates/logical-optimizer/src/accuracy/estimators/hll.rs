@@ -230,7 +230,7 @@ mod tests {
     }
     #[test]
     fn generic_rse_sizing_does_not_certify_confidence() {
-        use crate::pass1::replacement::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = default_cardinality();

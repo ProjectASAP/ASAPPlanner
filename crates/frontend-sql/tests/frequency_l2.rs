@@ -91,7 +91,7 @@ async fn frequency_l2_preserves_accuracy_target() {
 #[tokio::test]
 async fn stage1_offers_exact_and_summary_l2_alternatives() {
     use asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates;
-    use asap_logical_optimizer::pass1::replacement::Realization;
+    use asap_logical_optimizer::pass1::realization::Realization;
     use asap_types::ir::QueryRoot;
     let target = AccuracyTarget::EpsilonDelta {
         epsilon: 0.01,

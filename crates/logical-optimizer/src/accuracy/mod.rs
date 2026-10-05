@@ -45,7 +45,7 @@ pub trait AccuracyModel {
     /// The guarantee of reading `query` out of a summary of family `family`
     /// built over an **exact** input — derived from the family's committed
     /// parameters by inverting the same sizing formulas
-    /// [`crate::pass1::replacement::default_size_params`] uses. `None` when this
+    /// [`crate::pass1::realization::default_size_params`] uses. `None` when this
     /// model has no error model for the family (the default has none for
     /// `Sample`/`Wavelet`/`StatModel`).
     fn local_guarantee(

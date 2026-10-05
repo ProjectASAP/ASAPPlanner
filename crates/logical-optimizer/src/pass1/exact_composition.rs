@@ -77,9 +77,10 @@ use asap_types::physical::execution_data_state::lift_plain;
 use asap_types::physical::ExactOperationSchemaError;
 use asap_types::types::AccuracyTarget;
 
+use crate::pass1::realization::Realization;
 use crate::pass1::replacement::{
-    bindable_intent, describe_intent, realizations_for_intent, Realization, RealizationError,
-    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+    bindable_intent, describe_intent, realizations_for_intent, RealizationError, Replacement,
+    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use crate::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
 

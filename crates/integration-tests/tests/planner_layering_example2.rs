@@ -4,7 +4,7 @@ mod executor_models;
 mod physical_common;
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_optimizer::pass1::replacement::Realization;
+use asap_logical_optimizer::pass1::realization::Realization;
 use asap_plan_selection::plan_stages;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, Schema, SketchAlgorithm};

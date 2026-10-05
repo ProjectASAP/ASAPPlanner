@@ -20,8 +20,10 @@ use asap_types::types::AccuracyTarget;
 use asap_types::workload::MetricType;
 use thiserror::Error;
 
-use crate::pass1::replacement::{
-    accuracy_budget, accuracy_target, default_size_params, summary_candidates, Realization,
+use crate::pass1::realization::{
+    accuracy_budget, accuracy_target, column_ref, default_size_params, has_subpopulations,
+    realize_keyed_additive_summary_input, summarised_input, summary_candidates,
+    PhysicalSummaryInputRuleResult, Realization,
 };
 use crate::pass2::window_composition::{tumbling_state, WindowForm};
 
@@ -244,7 +246,7 @@ pub fn add_hydra_alternatives(
         return Ok(());
     };
     if *accuracy == AccuracyTarget::Exact
-        || !crate::pass1::grouping::has_subpopulations(reduction)
+        || !has_subpopulations(reduction)
         || reduction.group_keys().is_some_and(|keys| keys.is_without())
         || hydra_update(reduction, &child.schema).is_none()
     {
@@ -275,9 +277,9 @@ pub fn add_hydra_alternatives(
 /// a [`count_item`].
 fn hydra_update(reduction: &Reduction, child: &Schema) -> Option<SummaryUpdate> {
     Some(SummaryUpdate {
-        item: Some(SummaryInputExpr::Column(
-            crate::pass1::replacement::column_ref(count_item(reduction, child)?),
-        )),
+        item: Some(SummaryInputExpr::Column(column_ref(count_item(
+            reduction, child,
+        )?))),
         weight: SummaryInputExpr::Constant(1.0),
         weight_domain: WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::UnitCount,
@@ -314,9 +316,6 @@ fn count_item<'a>(
 /// apply. Rows that carry the full series identity rank it as a column, as
 /// [`summary_update`] does.
 fn whole_expression_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, SummaryUpdate)> {
-    use crate::pass1::replacement::{
-        realize_keyed_additive_summary_input, PhysicalSummaryInputRuleResult,
-    };
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -778,7 +777,7 @@ fn summary_update(
             return sql_row_count_update(algorithm.is_some(), reduction, child);
         }
     }
-    let weight = crate::pass1::replacement::summarised_input(intent, child)
+    let weight = summarised_input(intent, child)
         .map_err(|_| LogicalCandidateError::Unsupported("input column outside child schema"))?;
     Ok(match (intent, algorithm) {
         (AggIntent::TopK { .. }, Some(_)) => {
@@ -799,7 +798,7 @@ fn summary_update(
                 .into_iter()
                 .flat_map(|keys| keys.iter())
                 .filter_map(|&index| child.fields.get(index))
-                .map(crate::pass1::replacement::column_ref)
+                .map(column_ref)
                 .collect();
             // Rows that carry the full series identity rank it as a column,
             // the item form the runtime builds keyed summaries from.
@@ -846,9 +845,7 @@ fn sql_row_count_update(
         let column = count_item(reduction, child).ok_or(LogicalCandidateError::Unsupported(
             "a COUNT(*) sketch needs a non-null item column",
         ))?;
-        Some(SummaryInputExpr::Column(
-            crate::pass1::replacement::column_ref(column),
-        ))
+        Some(SummaryInputExpr::Column(column_ref(column)))
     } else {
         None
     };

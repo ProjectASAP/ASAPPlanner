@@ -66,14 +66,14 @@ pub use pass1::exact_composition::{
 pub use pass1::explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
-pub use pass1::grouping::{has_subpopulations, HydraGroupingStrategy};
+pub use pass1::grouping::HydraGroupingStrategy;
+pub use pass1::realization::{has_subpopulations, summary_candidates, Realization};
 pub use pass1::replacement::{
     default_strategies, is_logical_rewrite, search_workload, search_workload_with,
-    search_workload_with_targets, summary_candidates, ASAPStrategies, CandidateLogicalASAPDAGs,
-    GlobalSelection, Matcher, Proposals, Realization, RealizationError, RejectedCandidate,
-    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
-    SharedSubDAGStrategy, TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection,
-    MAX_SEARCH_ITERATIONS,
+    search_workload_with_targets, ASAPStrategies, CandidateLogicalASAPDAGs, GlobalSelection,
+    Matcher, Proposals, RealizationError, RejectedCandidate, Replacement, ReplacementProvenance,
+    ReplacementStrategy, ReplacementSubDAG, SharedSubDAGStrategy, TargetSubDAG,
+    TargetSubDAGCandidates, TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
 };
 pub use pass1::rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use pass2::reconciliation::AccuracyReconciliationStrategy;
