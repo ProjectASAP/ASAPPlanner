@@ -24,29 +24,6 @@ pub struct QuantileInputDomain {
     pub contract: String,
 }
 
-impl QuantileInputDomain {
-    pub(crate) fn supports_ddsketch(&self, alpha: f64) -> bool {
-        if !alpha.is_finite()
-            || alpha <= 0.0
-            || alpha >= 1.0
-            || !self.lower.is_finite()
-            || !self.upper.is_finite()
-            || self.lower > self.upper
-            || self.max_samples == 0
-            || self.max_samples > (1u64 << 53)
-            || self.contract.trim().is_empty()
-        {
-            return false;
-        }
-        let (min, max) = asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(alpha);
-        // Same-sign interpolation preserves relative error. Zero alone is
-        // exact; an interval touching zero also admits tiny zero-mapped values.
-        (self.lower >= min && self.upper <= max)
-            || (self.upper <= -min && self.lower >= -max)
-            || (self.lower == 0.0 && self.upper == 0.0)
-    }
-}
-
 /// Statistics a propagation rule may consult. Every field is optional and
 /// defaults to "unknown": a rule that needs a missing statistic emits a
 /// [`BoundExpr::Unknown`] leaf (or rejects) rather than guessing.

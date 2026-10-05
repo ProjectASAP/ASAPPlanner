@@ -5,21 +5,16 @@ use asap_types::ir::{ASAPOp, OperatorNode};
 use std::rc::Rc;
 
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_optimizer::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
+use asap_logical_optimizer::accuracy::{AccuracyModel, DefaultAccuracyModel};
 use asap_logical_optimizer::pass1::realization::{default_size_params, DEFAULT_DELTA};
-use asap_logical_optimizer::{Replacement, ReplacementSubDAG, TargetSubDAG};
 use asap_plan_selection::PlanningModels;
-use asap_plan_selection::{CostModel, DefaultCostModel};
 use asap_planner::pass::{PlanOutput, QueryPlan};
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::operator::agg_intent::default_quantile;
-use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
-};
+use asap_types::ir::properties::{BoundExpr, ErrorMetric, ProbabilityExpr, ResultGuarantee};
 use asap_types::ir::schema::SketchStatistic;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchKind, SketchParams};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataWorkload, DurationMs, Evidence, LatencyRequirement,
@@ -28,53 +23,6 @@ use asap_types::workload::{
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
-
-/// Stand-in for the workload-level amortization Stage 2 materialization will
-/// price: a sketch candidate costs `preference(kind)` per sketch state, any
-/// other candidate more than every sketch. Ranking is otherwise built-in.
-struct PreferSketch(fn(&SketchKind) -> f64);
-
-impl CostModel for PreferSketch {
-    // Selection takes the cheapest candidate by `estimate_cost`.
-    fn candidate_cost_covers_complete_plan(&self) -> bool {
-        true
-    }
-
-    fn rank_candidates(
-        &self,
-        intent: &AggIntent,
-        candidates: &[SketchAlgorithm],
-    ) -> Vec<SketchAlgorithm> {
-        DefaultCostModel.rank_candidates(intent, candidates)
-    }
-
-    fn estimate_cost(&self, candidate: &ReplacementSubDAG, _: &TargetSubDAG<'_>) -> f64 {
-        let Replacement::SubDAG(root) = &candidate.replacement else {
-            return 1e9;
-        };
-        let kinds: Vec<_> = OperatorNode::reachable(root)
-            .into_iter()
-            .filter_map(|node| match &node.operator {
-                asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(kind, _),
-                    ..
-                }) => Some(kind.clone()),
-                _ => None,
-            })
-            .collect();
-        if kinds.is_empty() {
-            1e9
-        } else {
-            kinds.iter().map(self.0).sum()
-        }
-    }
-}
-
-/// Prefers the largest KLL, i.e. one sized for the strictest consumer.
-const PREFER_LARGE_KLL: PreferSketch = PreferSketch(|kind| match kind.params() {
-    SketchParams::Kll { k } => 1.0 / f64::from(*k),
-    _ => 1.0,
-});
 
 fn requirements(epsilon: f64) -> QueryRequirements {
     QueryRequirements {
@@ -122,10 +70,6 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
 }
 
 async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
-    plan_promql_with(queries, &DefaultCostModel).await
-}
-
-async fn plan_promql_with(queries: &[(&str, f64)], cost: &dyn CostModel) -> PlanOutput {
     let workload = promql_workload(queries);
     let input = UserInput::new(
         &workload,
@@ -133,7 +77,7 @@ async fn plan_promql_with(queries: &[(&str, f64)], cost: &dyn CostModel) -> Plan
             now_ms: NOW_MS,
             histograms: None,
         },
-        PlanningModels::builtin().with_cost(cost),
+        PlanningModels::builtin(),
     );
     e2e_plan(input).await.expect("workload plans")
 }
@@ -293,35 +237,6 @@ fn kll_k_for(epsilon: f64) -> u32 {
     k
 }
 
-/// p50 at ε=0.01 and p99 at ε=0.001 over the same input share one KLL sized
-/// for the strictest consumer when the cost model prefers that candidate; each
-/// reader's guarantee meets its own target.
-#[tokio::test]
-#[ignore = "the stage pipeline shares the KLL sized for the strictest consumer, but attaches no \
-            guarantee to plan roots, and Stage 3 ignores PlanningModels.cost, so the looser query \
-            alone selects the raw plan: #580"]
-async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
-    let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
-    let p99 = ("quantile_over_time(0.99, lat[5m])", 0.001);
-    assert!(kll_k_for(0.001) > kll_k_for(0.01));
-
-    let output = plan_promql_with(&[p50, p99], &PREFER_LARGE_KLL).await;
-    assert!(same_states(&states(&output)));
-    assert_eq!(unique_deployments(&output), 1);
-    for (plan, (_, epsilon)) in output.plans.iter().zip([p50, p99]) {
-        assert_eq!(kll_k(plan), kll_k_for(0.001));
-        let guarantee = plan.root.guarantee.as_ref().expect("certified");
-        assert!(
-            guarantee.bound.evaluate().unwrap() <= epsilon,
-            "{guarantee:?}"
-        );
-    }
-
-    // Alone, the looser query keeps its own, smaller KLL.
-    let alone = plan_promql_with(&[p50], &PREFER_LARGE_KLL).await;
-    assert_eq!(kll_k(&alone.plans[0]), kll_k_for(0.01));
-}
-
 /// The stage pipeline's summary-capability rule: p50 at ε=0.01 and p99 at
 /// ε=0.001 over one input read one KLL sized for ε=0.001, and Stage 3 accepts
 /// each query against its own target.
@@ -467,16 +382,6 @@ impl AccuracyModel for UnivMonEvidence {
         } else {
             DefaultAccuracyModel.local_guarantee(family, query)
         }
-    }
-
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError> {
-        DefaultAccuracyModel.propagate(op, inputs, local, stats)
     }
 
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
