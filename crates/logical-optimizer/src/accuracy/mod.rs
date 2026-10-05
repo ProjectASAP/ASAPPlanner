@@ -68,6 +68,34 @@ pub trait AccuracyModel {
     /// Compare the dimensions requested by `target`. Unknown required
     /// dimensions fail; selection separately excludes missing accuracy evidence.
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool;
+
+    /// Whether `guarantee` bounds the error a target on `statistic` is
+    /// stated in, so that [`Self::satisfies`] compares like with like. An
+    /// exact guarantee answers every statistic; otherwise the metric must be
+    /// one the statistic's ε is measured in. A deployment with a registered
+    /// cross-metric conversion overrides this.
+    fn answers(&self, statistic: &SketchStatistic, guarantee: &ResultGuarantee) -> bool {
+        use ErrorMetric::*;
+        guarantee.is_exact()
+            || match statistic {
+                SketchStatistic::Quantile { .. } => {
+                    matches!(guarantee.metric, Rank | RelativeValue)
+                }
+                SketchStatistic::Cardinality => {
+                    matches!(guarantee.metric, Cardinality | RelativeValue)
+                }
+                SketchStatistic::FrequencyL2 | SketchStatistic::FrequencyEntropy => {
+                    guarantee.metric == RelativeValue
+                }
+                SketchStatistic::PointCount { .. } => {
+                    matches!(guarantee.metric, Frequency | L2Frequency)
+                }
+                // A top-k target bounds the item scores, as Pass 1 checks.
+                SketchStatistic::TopK { .. } => {
+                    matches!(guarantee.metric, Frequency | L2Frequency | TopKMembership)
+                }
+            }
+    }
 }
 
 /// The built-in estimator and composition models, with conservative target checks.
@@ -151,5 +179,25 @@ mod tests {
         assert!(
             DefaultAccuracyModel.satisfies(&ResultGuarantee::exact("x"), &AccuracyTarget::Exact)
         );
+    }
+
+    /// A bound in another statistic's metric does not answer a target:
+    /// Count-Min's L1 frequency bound says nothing about a distinct count.
+    #[test]
+    fn answers_requires_the_statistics_metric() {
+        let frequency = ResultGuarantee {
+            metric: ErrorMetric::Frequency,
+            ..abs(0.01, 0.01)
+        };
+        let count = SketchStatistic::PointCount {
+            key: asap_types::ir::scalar::ColumnRef::SampleValue,
+            value: None,
+        };
+        assert!(DefaultAccuracyModel.answers(&count, &frequency));
+        assert!(!DefaultAccuracyModel.answers(&SketchStatistic::Cardinality, &frequency));
+        assert!(!DefaultAccuracyModel.answers(&SketchStatistic::Quantile { q: 0.5 }, &frequency));
+        assert!(!DefaultAccuracyModel.answers(&SketchStatistic::FrequencyL2, &abs(0.01, 0.01)));
+        assert!(DefaultAccuracyModel
+            .answers(&SketchStatistic::Cardinality, &ResultGuarantee::exact("x")));
     }
 }
