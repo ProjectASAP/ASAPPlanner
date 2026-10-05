@@ -158,7 +158,7 @@ mod tests {
     }
 
     fn l2(params: SketchParams) -> Option<ResultGuarantee> {
-        DefaultAccuracyModel.local_guarantee(&family(params), &SketchStatistic::FrequencyL2)
+        local_guarantee(&family(params), &SketchStatistic::FrequencyL2)
     }
 
     fn shape(params: &SketchParams) -> (u32, u32) {
@@ -191,12 +191,10 @@ mod tests {
             key: ColumnRef::SampleValue,
             value: None,
         };
-        assert!(DefaultAccuracyModel
-            .local_guarantee(&family(params.clone()), &total)
-            .is_some_and(|g| g.is_exact()));
+        assert!(local_guarantee(&family(params.clone()), &total).is_some_and(|g| g.is_exact()));
         let guarantee = l2(params.clone()).expect("L2 is certified");
         assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
-        assert!(DefaultAccuracyModel.satisfies(
+        assert!(crate::accuracy::satisfies(
             &guarantee,
             &AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -208,9 +206,7 @@ mod tests {
             SketchStatistic::FrequencyEntropy,
         ] {
             assert!(
-                DefaultAccuracyModel
-                    .local_guarantee(&family(params.clone()), &query)
-                    .is_none(),
+                local_guarantee(&family(params.clone()), &query).is_none(),
                 "{query:?}"
             );
         }
