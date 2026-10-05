@@ -69,7 +69,6 @@ use crate::cost::analytical_cost::{
 use crate::cost::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
-use asap_logical_optimizer::accuracy::{AccuracyEvidenceProvider, NoAccuracyEvidence};
 use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
     read_targets, LocalLogicalCandidates, LogicalCandidateError,
@@ -103,7 +102,6 @@ const DEFAULT_LOOKBACK_MS: u64 = 60_000;
 pub const MAX_ENUMERATED_CANDIDATES: usize = 64;
 
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
-static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 static UNRESTRICTED: DeploymentCapabilities = DeploymentCapabilities::UNRESTRICTED;
 
 /// Stage 3's price coefficients and amortization horizon. Values are
@@ -168,7 +166,6 @@ impl Stage3Calibration {
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
     pub accuracy: &'a dyn AccuracyModel,
-    pub evidence: &'a dyn AccuracyEvidenceProvider,
     pub calibration: Stage3Calibration,
     /// What the deployment can build, read out and keep; unrestricted by
     /// default.
@@ -176,13 +173,9 @@ pub struct PlanningModels<'a> {
 }
 
 impl<'a> PlanningModels<'a> {
-    pub fn new(
-        accuracy: &'a dyn AccuracyModel,
-        evidence: &'a dyn AccuracyEvidenceProvider,
-    ) -> Self {
+    pub fn new(accuracy: &'a dyn AccuracyModel) -> Self {
         Self {
             accuracy,
-            evidence,
             calibration: Stage3Calibration::ILLUSTRATIVE,
             capabilities: &UNRESTRICTED,
         }
@@ -193,7 +186,6 @@ impl<'a> PlanningModels<'a> {
     pub fn builtin() -> PlanningModels<'static> {
         PlanningModels {
             accuracy: &DEFAULT_ACCURACY_MODEL,
-            evidence: &NO_ACCURACY_EVIDENCE,
             calibration: Stage3Calibration::ILLUSTRATIVE,
             capabilities: &UNRESTRICTED,
         }
@@ -201,11 +193,6 @@ impl<'a> PlanningModels<'a> {
 
     pub fn with_accuracy(mut self, accuracy: &'a dyn AccuracyModel) -> Self {
         self.accuracy = accuracy;
-        self
-    }
-
-    pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidenceProvider) -> Self {
-        self.evidence = evidence;
         self
     }
 

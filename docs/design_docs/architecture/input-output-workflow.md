@@ -290,7 +290,7 @@ latter cannot be fabricated by one.
 |---|---|---|
 | Accuracy model | `PlanningModels.accuracy`; `DefaultAccuracyModel` by default. Stage 3 checks each summary estimate with it. | Derives each estimate's guarantee and checks it against the requested accuracy. The model does not itself provide missing data-domain facts. |
 | Cost calibration | `PlanningModels.calibration`; `Stage3Calibration::ILLUSTRATIVE` by default. | Stage 3 prices candidates analytically; the built-in calibration is not a measured deployment cost. |
-| Accuracy/domain evidence | `AccuracyEvidenceProvider`; default strategies use `NoAccuracyEvidence` when no provider is supplied. | Input ranges, nonempty populations, Top-K intervals, and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
+| Accuracy/domain evidence | No planner input yet; the accuracy-evidence provider was removed with the legacy search. | Input ranges, nonempty populations, Top-K intervals, and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
 | Measured cost evidence | Supplied through a deployment-specific cost model or physical-evidence provider when cost-based physical comparison is needed. | CPU, memory, and I/O estimates must be comparable before claiming a summary beats raw recomputation. |
 | Runtime capabilities | Checked by deployment-specific providers. | Prevents choosing a maintenance/window operation the intended executor cannot implement. |
 
