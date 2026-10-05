@@ -20,7 +20,9 @@
 //     the queries as written and, when Pass 2's identical-expression rule
 //     merges something, again with identical sub-DAGs shared ("· shared
 //     input"), and, when the summary-capability rule applies, again with
-//     one summary sized for its strictest consumer ("· shared summary"); in
+//     one summary sized for its strictest consumer ("· shared summary"),
+//     and, when queries read windows of one scan on a common grid, again
+//     with one summary per shared segment ("· shared segments"); in
 //     enumeration order, only those with a written physical candidate. A
 //     repeating query's mergeable alternatives also come in tumbling panes
 //     (Pass 2's window-composition rule), e.g. "Q1 Kll · tumbling 1m panes";
@@ -269,6 +271,7 @@ fn stage_pipeline(
             Sharing::Independent => "",
             Sharing::IdenticalExpressions => " · shared input",
             Sharing::SummaryCapability => " · shared summary",
+            Sharing::WindowSegments => " · shared segments",
         };
         let written = candidate
             .physical

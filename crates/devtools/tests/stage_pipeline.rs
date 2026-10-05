@@ -170,13 +170,15 @@ fn example3b_lists_tumbling_candidates() {
     }
 }
 
-/// Example 4, Pattern A repeated monthly: the same 486 candidates as the ad
-/// hoc batch (3a), and none maintained at ingestion time. The windows (1–5 y)
-/// are longer than the month between runs and no pane width fits, so
-/// nothing is maintainable. The selected plan is 3a's, now amortized over
-/// monthly runs instead of one run per hour of horizon.
+/// Example 4, Pattern A repeated monthly: the same 487 logical candidates
+/// as the ad hoc batch (3a), 486 independent or sharing input plus the one
+/// sharing 1-year segments (Q60). The windows (1–5 y) are longer than the
+/// month between runs and no pane width fits, so only the shared segments
+/// can be maintained at ingestion time (Q61): 488 plans. The selected plan
+/// is 3a's, now amortized over monthly runs instead of one run per hour of
+/// horizon.
 #[test]
-fn example4a_repeats_monthly_with_nothing_maintainable() {
+fn example4a_repeats_monthly_with_only_segments_maintainable() {
     let once = generate(&[
         "--example",
         "planner-layering-3a",
@@ -192,10 +194,14 @@ fn example4a_repeats_monthly_with_nothing_maintainable() {
     let physical = monthly["stage2_physical_asap"]["candidates"]
         .as_array()
         .unwrap();
-    assert_eq!(physical.len(), 486);
-    assert!(physical
+    assert_eq!(physical.len(), 488);
+    let maintained: Vec<_> = physical
         .iter()
-        .all(|p| !p["label"].as_str().unwrap().contains("ingestion time")));
+        .map(|p| p["label"].as_str().unwrap())
+        .filter(|label| label.contains("ingestion time"))
+        .collect();
+    assert_eq!(maintained.len(), 1, "{maintained:?}");
+    assert!(maintained[0].ends_with("shared segments · ingestion time: Kll ×5 panes"));
     let selected = |d: &Value| {
         d["stage3_selection"]["selected"]
             .as_str()

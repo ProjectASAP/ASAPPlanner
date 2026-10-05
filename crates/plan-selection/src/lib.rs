@@ -1130,7 +1130,8 @@ pub struct StagePipelineRun<Id> {
 
 /// The #509 stage pipeline over `roots`: Stage 1 (Pass 1 and Pass 2's
 /// identical-expression and summary-capability rules and the
-/// window-composition rule's tumbling panes, from each root's `demand`),
+/// window-composition rule's tumbling panes and shared segments, from each
+/// root's `demand`),
 /// Stage 2 and Stage 3. The facade and the
 /// `stage_pipeline` devtool both run this. `display` builds and prices up to
 /// that many candidates for display as well (0: none).

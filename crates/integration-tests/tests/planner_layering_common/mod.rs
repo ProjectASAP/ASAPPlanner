@@ -550,6 +550,17 @@ pub fn query_option(
     }
 }
 
+/// Whether `dag` shares a summary build across queries: Pass 2's
+/// shared-segment rule (Q60), whose segments several queries merge.
+pub fn shares_segments(dag: &impl ExportedDag, query_roots: &[LogicalASAPNodeId]) -> bool {
+    cross_query_nodes(dag, query_roots).into_iter().any(|id| {
+        matches!(
+            dag.payload(id),
+            LogicalASAPOperatorPayload::SummaryAgg { .. }
+        )
+    })
+}
+
 /// Nodes reachable from more than one query root.
 pub fn cross_query_nodes(
     dag: &impl ExportedDag,
