@@ -47,6 +47,12 @@ pub struct PhysicalASAPDAGNode {
     pub payload: PhysicalASAPOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
+    /// A query-time output kept across evaluations (#509 Example 4, B3):
+    /// a tumbling pane built once, when it is the newest, and read by the
+    /// later evaluations whose window still covers it. Set by Stage 2
+    /// materialization; `false` (omitted) for every other node.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
     pub output_schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     #[serde(default)]
@@ -423,6 +429,7 @@ impl Exporter {
             id,
             payload,
             output_state,
+            kept: false,
             output_schema: node.schema.clone(),
             guarantee: node.guarantee.clone(),
             coverage: node.coverage.clone(),

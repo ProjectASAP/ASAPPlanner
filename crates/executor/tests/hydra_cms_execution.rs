@@ -73,6 +73,7 @@ fn node(id: u32, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         id: LogicalASAPNodeId(id),
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
+        kept: false,
         output_schema: output,
         guarantee: None,
         coverage: None,

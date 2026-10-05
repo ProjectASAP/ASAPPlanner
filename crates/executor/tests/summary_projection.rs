@@ -62,6 +62,7 @@ fn post_asap_summary_projection_survives_recovery() {
                 payload: PhysicalASAPOperatorPayload::SummaryMerge,
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
+                kept: false,
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
@@ -81,6 +82,7 @@ fn post_asap_summary_projection_survives_recovery() {
                 },
                 output_schema: output.clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
+                kept: false,
                 guarantee: None,
             },
         ],

@@ -1,7 +1,7 @@
 //! #509 Stage 2: physical operator implementation of one logical candidate,
 //! and its materialization choices ([`crate::materialization`]). Each
-//! logical candidate yields one physical candidate per down-closed set of
-//! ingestion-time summaries, all query time first.
+//! logical candidate yields one physical candidate per choice of
+//! ingestion-time (down-closed) and kept summaries, all query time first.
 //!
 //! The runtime has one implementation per logical operator except exact
 //! top-k, which it cannot run as `Aggregate{[TopK]}`. Stage 2 records that
@@ -9,7 +9,7 @@
 //! per-group limit, the shape the PromQL frontend uses for generic `topk`.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::export::{
@@ -26,7 +26,7 @@ use asap_types::ir::{
 use asap_types::workload::{DataWorkload, RootDemand};
 use thiserror::Error;
 
-use crate::materialization::{MaterializationSpace, MAX_PHYSICAL_PER_LOGICAL};
+use crate::materialization::{Choice, Choices, MaterializationSpace, MAX_PHYSICAL_PER_LOGICAL};
 
 /// One Stage 2 candidate, derived from exactly one Stage 1 candidate.
 /// `roots` are the timed operator roots (one per query, in workload order)
@@ -36,8 +36,9 @@ pub struct PhysicalCandidate {
     pub id: String,
     pub from_logical: String,
     pub label: String,
-    /// Which summaries run at ingestion time, e.g. "ingestion time: Kll ×5
-    /// panes"; empty when everything runs at query time.
+    /// Which summaries run at ingestion time or are kept, e.g. "ingestion
+    /// time: Kll ×5 panes" or "query time, kept: Kll ×5 panes"; empty when
+    /// everything runs at query time, recomputed at each evaluation.
     pub materialization: String,
     pub roots: Vec<Rc<OperatorNode>>,
     pub dag: PhysicalASAPDAG,
@@ -68,8 +69,8 @@ pub enum Stage2Error {
 }
 
 /// Implement every operator of one logical candidate and enumerate its
-/// materialization choices: one candidate per down-closed set of
-/// ingestion-time summaries, all query time first. `id` and `label` are left
+/// materialization choices: one candidate per choice of ingestion-time
+/// (down-closed) and kept summaries, all query time first. `id` and `label` are left
 /// empty for the caller to name. Sharing between `roots` is preserved: one
 /// memo serves the whole workload, and a node shared by an ingestion-time and
 /// a query-time consumer is copied per phase.
@@ -77,8 +78,8 @@ pub enum Stage2Error {
 /// `demand[i]` is the demand of `roots[i]`. Above
 /// [`MAX_PHYSICAL_PER_LOGICAL`] choices, the choices are searched greedily
 /// by `score` (lower is better; `None`: not admissible): starting from all
-/// query time, move the unit whose move improves the score most, until none
-/// does. The candidates on that path are returned and flagged not
+/// query time, move the unit (to ingestion time or kept) whose move improves
+/// the score most, until none does. The candidates on that path are returned and flagged not
 /// exhaustive.
 pub fn stage2_physical(
     from_logical: &str,
@@ -94,10 +95,10 @@ pub fn stage2_physical(
         .collect::<Result<Vec<_>, _>>()?;
     reject_maintained_populations(&implemented)?;
     let space = MaterializationSpace::new(&implemented, demand, data);
-    let build = |set: &BTreeSet<usize>| materialize(from_logical, &implemented, &space, set);
+    let build = |set: &Choices| materialize(from_logical, &implemented, &space, set);
     // All query time must build; an ingestion-time choice that the timing
     // rules reject is not a candidate.
-    let base = build(&BTreeSet::new())?;
+    let base = build(&Choices::new())?;
     if let Some(sets) = space.down_closed_sets(MAX_PHYSICAL_PER_LOGICAL) {
         let mut candidates = vec![base];
         candidates.extend(sets.iter().skip(1).filter_map(|set| build(set).ok()));
@@ -106,15 +107,16 @@ pub fn stage2_physical(
             exhaustive: true,
         });
     }
-    let mut set = BTreeSet::new();
+    let mut set = Choices::new();
     let mut best = score(&base);
     let mut candidates = vec![base];
     loop {
         let step = (0..space.units.len())
-            .filter(|&u| space.can_add(&set, u))
-            .filter_map(|u| {
+            .flat_map(|u| [(u, Choice::IngestionTime), (u, Choice::Kept)])
+            .filter(|&(u, choice)| space.can_choose(&set, u, choice))
+            .filter_map(|(u, choice)| {
                 let mut next = set.clone();
-                next.insert(u);
+                next.insert(u, choice);
                 let candidate = build(&next).ok()?;
                 let value = score(&candidate)?;
                 Some((value, next, candidate))
@@ -134,12 +136,13 @@ pub fn stage2_physical(
     })
 }
 
-/// Time the implemented roots with the summaries of `set` at ingestion time.
+/// Time the implemented roots with the summaries of `set` at ingestion time
+/// or kept, and mark the kept ones in the exported DAG.
 fn materialize(
     from_logical: &str,
     implemented: &[Rc<OperatorNode>],
     space: &MaterializationSpace,
-    set: &BTreeSet<usize>,
+    set: &Choices,
 ) -> Result<PhysicalCandidate, Stage2Error> {
     let (roots, assignment): (Vec<_>, MaterializationAssignment) =
         split_shared_by_phase(implemented, &space.assignment(set));
@@ -148,10 +151,24 @@ fn materialize(
         .iter()
         .map(|root| apply_materialization_timings(root, &assignment, &mut timing))
         .collect::<Result<Vec<_>, _>>()?;
-    let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
+    let compiled = compile_physical_asap_workload_with_node_ids(&timed)?;
+    let kept: HashSet<_> = roots
+        .iter()
+        .flat_map(OperatorNode::reachable)
+        .filter(|node| assignment.is_kept(node))
+        .filter_map(|node| compiled.node_ids.node_id(timing.timed(&node)?))
+        .collect();
+    let mut dag = compiled.dag;
+    for node in &mut dag.nodes {
+        node.kept = kept.contains(&node.id);
+    }
     // A summary over query-time work stays at query time whatever the
     // assignment says; such a set is not a distinct candidate.
-    let assigned: usize = set.iter().map(|&u| space.units[u].summaries.len()).sum();
+    let assigned: usize = set
+        .iter()
+        .filter(|(_, choice)| **choice == Choice::IngestionTime)
+        .map(|(&u, _)| space.units[u].summaries.len())
+        .sum();
     let maintained = dag
         .nodes
         .iter()

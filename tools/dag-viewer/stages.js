@@ -257,10 +257,11 @@ function wirePartition(keys, schema) {
   return `${keys.without ? 'per group without' : 'per'} ${keys.keys.map((key) => wireColumn(key, schema)).join(', ')}`;
 }
 
-function formatTiming(timing) {
+// `kept`: a query-time output kept across evaluations (Stage 2's B3 panes).
+function formatTiming(timing, kept) {
   const normalized = String(timing || '').replace(/_/g, '').toLowerCase();
   if (normalized === 'ingestiontime') return 'ingestion time';
-  if (normalized === 'querytime') return 'query time';
+  if (normalized === 'querytime') return kept ? 'query time, kept' : 'query time';
   return String(timing || 'unknown');
 }
 
@@ -352,7 +353,7 @@ function stageLaneElements(laneId, laneLabel, dag, options) {
     const lines = stageNodeLines(node, input && input.output_schema);
     const timing = physical && node.output_state ? node.output_state.timing : undefined;
     const cost = costPerNode ? costPerNode[String(node.id)] : undefined;
-    if (timing !== undefined) lines.push(`⏱ ${formatTiming(timing)}`);
+    if (timing !== undefined) lines.push(`⏱ ${formatTiming(timing, node.kept)}`);
     if (cost && typeof cost.cost === 'number') lines.push(`cost ${Number(cost.cost.toFixed(3))}`);
     if (rootFor.has(node.id)) lines.push(`root of ${rootFor.get(node.id).join(', ')}`);
     elements.push({

@@ -10,8 +10,9 @@ use serde_json::Value;
 
 const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
 
-/// Every Example 1 logical candidate (88) is displayed; the default cap is 64.
-const EXAMPLE1: [&str; 4] = ["--example", "planner-layering-1", "--max-candidates", "128"];
+/// Every Example 1 plan (136, from 88 logical candidates) is displayed; the
+/// default cap is 64.
+const EXAMPLE1: [&str; 4] = ["--example", "planner-layering-1", "--max-candidates", "160"];
 
 fn generate(args: &[&str]) -> Value {
     // Tests run in parallel and may generate the same document.
@@ -75,9 +76,10 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         .iter()
         .map(|p| p["from_logical"].as_str().unwrap())
         .collect();
-    // One all-query-time candidate per logical one, plus one with Q2's sum
-    // panes at ingestion time for each of the 24 with panes.
-    assert_eq!(physical.len(), candidates.len() + 24);
+    // One all-query-time candidate per logical one, plus, for each of the
+    // 24 with panes, one with Q2's sum panes at ingestion time and one with
+    // them kept at query time.
+    assert_eq!(physical.len(), candidates.len() + 48);
     assert_eq!(sources, ids);
     for candidate in physical {
         assert!(candidate.get("cost").is_none(), "Stage 2 has no cost");

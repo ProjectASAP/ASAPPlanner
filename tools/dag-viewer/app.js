@@ -65,7 +65,7 @@
       items.push(['instances', summaryInstancesText(n.payload.grouping, n.payload.reduction)]);
     }
     if (d.rootFor && d.rootFor.length) items.push(['query root of', d.rootFor.join(', ')]);
-    if (d.timing) items.push(['runs at', formatTiming(d.timing)]);
+    if (d.timing) items.push(['runs at', formatTiming(d.timing, n.kept)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
     if (d.nodeCost) items.push(['Stage 3 cost', `${Number(d.nodeCost.cost.toFixed(4))} · ${d.nodeCost.detail || ''}`]);
     items.push(['coverage', n.coverage ? compactWire(n.coverage) : 'none (not a summary state)']);

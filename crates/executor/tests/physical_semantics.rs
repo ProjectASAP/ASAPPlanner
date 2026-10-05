@@ -387,6 +387,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
                 },
             },
             output_state: ExecutionDataState::QUERY_ROWS,
+            kept: false,
             output_schema: (*output).clone(),
             guarantee: None,
         };
@@ -771,6 +772,7 @@ fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
                     },
                 },
                 output_state: ExecutionDataState::QUERY_ROWS,
+                kept: false,
                 output_schema: (*schema(&[(name, DataType::Float64, false)])).clone(),
                 guarantee: None,
             };
@@ -858,6 +860,7 @@ fn exact_cardinality_binds_and_executes_typed_tuples() {
                 },
             },
             output_state: ExecutionDataState::QUERY_ROWS,
+            kept: false,
             output_schema: (*schema(&[("distinct", DataType::Int64, false)])).clone(),
             guarantee: None,
         };

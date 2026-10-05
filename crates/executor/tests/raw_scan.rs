@@ -74,6 +74,7 @@ fn plan(
         id: planner_types::ir::export::LogicalASAPNodeId(id),
         payload,
         output_state: state,
+        kept: false,
         output_schema: (**schema).clone(),
         guarantee: None,
     };

@@ -823,22 +823,25 @@ fn stage1_candidates_are_valid_and_uniquely_named() {
 /// No candidate is discarded before Stage 3: each of the 88 logical
 /// candidates keeps its all-query-time physical candidate, and the 24 whose
 /// Q2 sum comes in 10-s panes also get one with the panes at ingestion time
-/// (the panels repeat predictably over arriving data): 112.
+/// (the panels repeat predictably over arriving data) and one with the panes
+/// kept at query time (B3): 136.
 #[test]
 fn stage2_keeps_every_logical_candidate() {
     let (_, logical, physical) = pipeline();
-    assert_eq!(physical.len(), 112);
-    let maintained: Vec<_> = physical
-        .iter()
-        .filter(|p| !p.stage2.materialization.is_empty())
-        .collect();
-    assert_eq!(maintained.len(), 24);
-    for p in maintained {
-        assert_eq!(
-            p.stage2.materialization,
-            "ingestion time: exact Sum ×6 panes"
-        );
-    }
+    assert_eq!(physical.len(), 136);
+    let materialized: BTreeMap<_, usize> =
+        physical.iter().fold(BTreeMap::new(), |mut counts, p| {
+            *counts.entry(p.stage2.materialization.as_str()).or_default() += 1;
+            counts
+        });
+    assert_eq!(
+        materialized,
+        BTreeMap::from([
+            ("", 88),
+            ("ingestion time: exact Sum ×6 panes", 24),
+            ("query time, kept: exact Sum ×6 panes", 24),
+        ])
+    );
     let sources: BTreeSet<_> = physical.iter().map(|p| p.from_logical.as_str()).collect();
     let logical_ids: BTreeSet<_> = logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(sources, logical_ids);
@@ -855,7 +858,7 @@ fn stage2_preserves_logical_choices() {
     for p in &physical {
         let source = logical.iter().find(|c| c.id == p.from_logical).unwrap();
         let (option, shared) = classify(&source.dag, &source.query_roots);
-        let maintained = !p.stage2.materialization.is_empty();
+        let maintained = p.stage2.materialization.starts_with("ingestion time");
         assert_eq!(
             classify(&p.dag, &p.query_roots),
             (option, shared && !maintained),
@@ -874,8 +877,8 @@ fn stage2_exact_topk_is_sort_then_limit() {
         .iter()
         .filter(|p| classify(&p.dag, &p.query_roots).0 == Q2Option::Exact)
         .collect();
-    // 24 logical, 8 of which also maintain Q2's sum panes.
-    assert_eq!(exact.len(), 32);
+    // 24 logical, 8 of which also maintain Q2's sum panes and 8 keep them.
+    assert_eq!(exact.len(), 40);
     for p in exact {
         let sort_then_limit = p.dag.edges.iter().any(|e| {
             relational(payload(&p.dag, e.producer)).as_deref() == Some("sort")
@@ -936,7 +939,7 @@ fn stage2_summary_topk_is_build_then_estimate() {
 fn stage2_only_maintained_panes_run_at_ingestion_time() {
     let (_, _, physical) = pipeline();
     for p in &physical {
-        let maintained = !p.stage2.materialization.is_empty();
+        let maintained = p.stage2.materialization.starts_with("ingestion time");
         let mut panes = 0;
         for n in &p.dag.nodes {
             if !runs_at_ingestion(p, n.id) {
@@ -1013,18 +1016,26 @@ fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
 /// The physical planner compiles every candidate Stage 3 finds valid, and
 /// rejects the invalid ones (Count-Min over weights not proven non-negative)
 /// for the same reason Stage 3 gives. A candidate over Q2's 100 ms latency
-/// bound compiles; the bound is Stage 3's alone. Returns the number of
-/// candidates invalid for their weights.
+/// bound compiles; the bound is Stage 3's alone. One keeping panes at query
+/// time is rejected first for the executor's capability (Q56) and not
+/// compared. Returns the number of candidates invalid for their weights.
 fn assert_runtime_agrees_with_stage3(workload: PlanningWorkload) -> usize {
     let (workload, _, physical) = pipeline_for(workload);
     let selection = stage3_select(&workload, &physical, executor_models());
     let invalid: BTreeMap<_, _> = selection
         .rejected
         .iter()
-        .filter(|r| !r.valid && !r.reason.contains("latency bound"))
+        .filter(|r| {
+            !r.valid
+                && !r.reason.contains("latency bound")
+                && !r.reason.contains("query time, kept")
+        })
         .map(|r| (r.id.as_str(), r.reason.as_str()))
         .collect();
-    for p in &physical {
+    for p in physical
+        .iter()
+        .filter(|p| p.dag.nodes.iter().all(|n| !n.kept))
+    {
         let compiled = compile_in_runtime(p);
         match invalid.get(p.id.as_str()) {
             None => compiled.unwrap(),
@@ -1103,9 +1114,10 @@ fn stage3_selected_plan_compiles_in_the_physical_planner() {
 
 /// Deployment inputs (C2, added by the implementer): the reference
 /// executor's exported capabilities reject no candidate its physical planner
-/// compiles, and planning with them selects what the unrestricted default
-/// does, at the same costs (Example 1 needs nothing the executor lacks, and
-/// both keep raw data, so no raw retention is priced).
+/// compiles but those keeping panes at query time (B3), which it compiles as
+/// recomputed at each evaluation but cannot keep (Q56). Planning with them
+/// selects what the unrestricted default does, at the same costs for every
+/// other candidate (both keep raw data, so no raw retention is priced).
 #[test]
 fn executor_capabilities_accept_every_compiled_candidate_and_keep_the_selection() {
     let (workload, _, physical) = pipeline();
@@ -1116,7 +1128,14 @@ fn executor_capabilities_accept_every_compiled_candidate_and_keep_the_selection(
         if compile_in_runtime(p).is_ok() {
             compiled += 1;
             if let Some(r) = executor.rejected.iter().find(|r| r.id == p.id) {
-                assert!(!r.reason.contains("deployment"), "{}: {}", p.id, r.reason);
+                let kept = p.dag.nodes.iter().any(|n| n.kept);
+                assert_eq!(
+                    r.reason.contains("deployment"),
+                    kept,
+                    "{}: {}",
+                    p.id,
+                    r.reason
+                );
             }
         }
     }
@@ -1128,7 +1147,9 @@ fn executor_capabilities_accept_every_compiled_candidate_and_keep_the_selection(
             .map(|(id, c)| (id.clone(), c.total))
             .collect()
     };
-    assert_eq!(totals(&executor), totals(&default));
+    let mut default_totals = totals(&default);
+    default_totals.retain(|id, _| executor.costs.contains_key(id));
+    assert_eq!(totals(&executor), default_totals);
 }
 
 // ── Stage 3 ──────────────────────────────────────────────────────────────
@@ -1195,7 +1216,8 @@ fn stage3_rejects_candidates_over_the_latency_bound() {
                 family: FieldDataType::Sketch(kind, _), ..
             } if *kind.algorithm() == SketchAlgorithm::CountSketchWithHeap)
         });
-        if count_sketch {
+        // A kept candidate is rejected first for the executor's capability.
+        if count_sketch && !p.dag.nodes.iter().any(|n| n.kept) {
             assert!(over.contains(p.id.as_str()), "{}", p.id);
         }
     }
