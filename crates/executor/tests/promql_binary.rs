@@ -78,6 +78,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhys
             rhs: 1,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
+        kept: false,
         output_schema: (*schema).clone(),
         guarantee: None,
     };

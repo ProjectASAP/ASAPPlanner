@@ -89,8 +89,9 @@ priced like 1/8 of a vCPU, the memory-to-core ratio of memory-optimized cloud
 instances (8 GB per vCPU): 125 CPU-ms per second for 10⁹ bytes, or 1.25e-7
 per byte per second.
 
-**What counts as retained.** Only ingestion-time state that a query-time node
-reads: it lives between evaluations. Retained bytes are
+**What counts as retained.** Ingestion-time state that a query-time node
+reads, and panes kept at query time (below): both live between evaluations.
+Retained bytes of ingestion-time state are
 
 ```text
 retained_bytes(n) = 2 · groups(n) · state_bytes(n)
@@ -118,6 +119,26 @@ When panes are shared by windows of different lengths, the longest sets `N`.
 The merge and the estimate run at query time, per evaluation. Retention is
 in memory only (S3).
 
+**Tumbling panes kept at query time (Example 4 B3, Q59).** Stage 2 may
+instead build a repeating query's panes at query time and keep them across
+evaluations (the physical node's `kept` flag). Each evaluation builds the
+newest pane from `w` of raw data, merges it with the `N − 1` panes kept from
+earlier evaluations, then keeps it and drops the oldest. So the newest pane
+pays its build per evaluation, times the evaluation rate, and the memory of
+the panes the next evaluation reads:
+
+```text
+retained_bytes(newest) = (N − 1) · groups · state_bytes
+```
+
+The older panes, and the shifts and ranges that feed only them, cost
+nothing; the scan reads, and when raw data is not kept anyway retains
+(below), only `w`, not the whole lookback. Per-evaluation work, also for the
+latency check, is the newest pane, the merge and the estimate. Retained
+bytes count against the memory budget. Cold start, the first `N − 1`
+evaluations before every pane is kept, is not priced. A deployment without
+`query_time_retention` rejects the candidate (below).
+
 ## Latency check
 
 A query's `response_latency` bound (S6) is checked against the query-time
@@ -142,7 +163,7 @@ deployment exports its own set; the reference executor's is
 |---|---|---|
 | `summaries` | `None`: every summary | Summary families (exact kind or sketch algorithm) × instance layout (per group, or a Hydra kind), each with the readouts it supports (quantile, total count, item count, cardinality, top-k, L2, entropy) |
 | `ingestion_time` | `true` | Can maintain state at ingestion time |
-| `query_time_retention` | `true` | Can keep query-time results across evaluations (Example 4, B3; no candidate needs it yet) |
+| `query_time_retention` | `true` | Can keep query-time results across evaluations (Example 4, B3; the reference executor cannot yet) |
 | `memory_budget_bytes` | `None` | Most bytes a plan may retain across evaluations |
 | `raw_data_retained` | `true` | The deployment keeps the sources' raw data anyway |
 | `raw_bytes_per_sample` | 16 | An 8-byte timestamp and an 8-byte value, uncompressed |
@@ -156,6 +177,8 @@ deployment lacks, before checking accuracy, with the first missing one:
   `SummaryEstimate` whose statistic the summary it reads does not list.
 * `deployment cannot maintain state at ingestion time`: any node at
   ingestion time when `ingestion_time` is false.
+* `deployment cannot keep query-time state across evaluations (query time,
+  kept)`: any kept node when `query_time_retention` is false.
 * `retains N bytes across evaluations, over the deployment's memory budget
   of M bytes`: the retained bytes below exceed `memory_budget_bytes`.
 
@@ -174,8 +197,8 @@ charge is on the scan node, so cost stays a sum over nodes; a scan shared
 by several queries is one node and pays once. A scan at ingestion time
 reads samples as they arrive and retains none: a plan whose raw input is
 maintained at ingestion time does not pay it. Retained bytes for the
-memory budget are the ingestion-time state of the memory term plus, when
-charged, this raw retention.
+memory budget are the ingestion-time state and kept panes of the memory term
+plus, when charged, this raw retention.
 
 ## Calibration
 
@@ -280,9 +303,6 @@ every Count-Sketch + heap among them.
 * **Not materialized for several consumers (Q44, Example 4 A3).** Stage 2
   would duplicate the sub-DAG per consuming query; it does not generate that
   option yet.
-* **Query time, kept (Example 4 B3).** A pane built at query time and kept
-  for later evaluations is not offered; panes are rebuilt at query time or
-  maintained at ingestion time.
 * **Storage tier and retention (S3).** Retained state is priced as memory.
   Choosing disk versus memory and how long to keep state comes with panes.
 * **Calibration from measurements.** The coefficients and default statistics

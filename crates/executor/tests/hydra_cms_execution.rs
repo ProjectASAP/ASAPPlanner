@@ -74,6 +74,7 @@ fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
+        kept: false,
         output_schema: output,
         guarantee: None,
     }
