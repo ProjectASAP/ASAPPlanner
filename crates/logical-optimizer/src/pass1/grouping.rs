@@ -72,44 +72,25 @@
 use std::rc::Rc;
 
 use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::operator_properties::Reduction;
-use asap_types::ir::properties::{
-    AccuracyError, BoundExpr, CompositionOperator, GuaranteeSource, ProbabilityExpr,
-    ResultGuarantee,
-};
+use asap_types::ir::properties::{AccuracyError, CompositionOperator};
 use asap_types::ir::schema::{
     default_hydra_params, hydra_kind_for, FieldDataType, GroupingStrategy, HydraKind,
     SketchAlgorithm, SketchParams,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
+use crate::accuracy::estimators::hydra_guarantee;
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
 };
-use crate::pass1::replacement::{
-    accuracy_target, bindable_intent, construct_summary_with, describe_intent,
-    realizations_for_intent, summary_candidates, CandidatePlanningInputs, Proposals, Realization,
-    RejectedCandidate, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+use crate::pass1::realization::{
+    accuracy_target, has_subpopulations, summary_candidates, Realization,
 };
-
-/// Whether `reduction` has a genuine subpopulation concept for
-/// `GroupingStrategy::SharedMultiSubpopulation` to multiplex across — the
-/// non-empty-`by` legality condition issue #256 requires.
-///
-/// - [`Reduction::PerEntity`]: no grouping concept at all (never merges
-///   across entities) — `false`.
-/// - [`Reduction::Reduce`] with an empty, non-`without` `by`: a genuine full
-///   reduction, one output row, no subpopulations — `false`.
-/// - [`Reduction::Reduce`] with a non-empty `by`, or any `without(...)`
-///   exclusion grouping (which groups by whatever labels remain, even
-///   `without([])` — "group by every label"): a real subpopulation concept
-///   — `true`.
-pub fn has_subpopulations(reduction: &Reduction) -> bool {
-    match reduction.group_keys() {
-        None => false,
-        Some(keys) => keys.is_without() || !keys.is_empty(),
-    }
-}
+use crate::pass1::replacement::{
+    bindable_intent, construct_summary_with, describe_intent, realizations_for_intent,
+    CandidatePlanningInputs, Proposals, RejectedCandidate, Replacement, ReplacementStrategy,
+    ReplacementSubDAG, TargetSubDAG,
+};
 
 /// Wraps the `GroupingStrategy` axis (issue #256) as a
 /// [`ReplacementStrategy`]: for a target `ASAPStrategies`
@@ -426,126 +407,14 @@ fn with_grouping(
     }
 }
 
-/// Compose the inner per-subpopulation guarantee with Hydra's outer shared
-/// grid. The paper's collision term depends on deployment/data statistics;
-/// keeping those leaves symbolic makes the formula explicit while ensuring
-/// target satisfaction fails closed until a caller supplies them.
-pub(crate) fn hydra_guarantee(
-    inner: &ResultGuarantee,
-    stats: &PropagationStats,
-) -> ResultGuarantee {
-    let mut provenance = inner.provenance.clone();
-    provenance.extend(stats.evidence_provenance.clone());
-    provenance.push(GuaranteeSource::ChildGuarantee {
-        input_index: 0,
-        guarantee: Box::new(inner.clone()),
-    });
-    if stats.hydra_shared_grid_collision_bound.is_none() {
-        provenance.push(GuaranteeSource::UnavailableStatistic {
-            statistic: "hydra_shared_grid_collision_bound".into(),
-        });
-    }
-    if stats.hydra_shared_grid_failure_probability.is_none() {
-        provenance.push(GuaranteeSource::UnavailableStatistic {
-            statistic: "hydra_shared_grid_failure_probability".into(),
-        });
-    }
-    provenance.push(GuaranteeSource::CompositionStep {
-        operator: CompositionOperator::ApproximateAggregate,
-        rule: "hydra_shared_grid_union_bound".into(),
-    });
-    ResultGuarantee {
-        metric: inner.metric,
-        bound: BoundExpr::Sum {
-            terms: vec![
-                inner.bound.clone(),
-                stats.hydra_shared_grid_collision_bound.map_or_else(
-                    || BoundExpr::Unknown {
-                        statistic: "hydra_shared_grid_collision_bound".into(),
-                    },
-                    |value| BoundExpr::Constant { value },
-                ),
-            ],
-        },
-        failure_probability: ProbabilityExpr::UnionBound {
-            terms: vec![
-                inner.failure_probability.clone(),
-                stats.hydra_shared_grid_failure_probability.map_or_else(
-                    || ProbabilityExpr::Unknown {
-                        statistic: "hydra_shared_grid_failure_probability".into(),
-                    },
-                    |value| ProbabilityExpr::Constant { value },
-                ),
-            ],
-        },
-        provenance,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
     use crate::test_support::{agg, agg_per_entity, metric_scan};
     use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile};
-    use asap_types::ir::properties::ErrorMetric;
+    use asap_types::ir::operator::operator_properties::Reduction;
     use asap_types::types::AccuracyTarget;
-
-    // ── has_subpopulations ────────────────────────────────────────────────
-
-    #[test]
-    fn per_entity_has_no_subpopulation_concept() {
-        assert!(!has_subpopulations(&Reduction::PerEntity));
-    }
-
-    #[test]
-    fn empty_by_reduction_has_no_subpopulation_concept() {
-        assert!(!has_subpopulations(&Reduction::by(vec![])));
-    }
-
-    #[test]
-    fn non_empty_by_reduction_has_a_subpopulation_concept() {
-        assert!(has_subpopulations(&Reduction::by(vec![2])));
-    }
-
-    #[test]
-    fn without_grouping_has_a_subpopulation_concept_even_when_empty() {
-        use asap_types::ir::operator::operator_properties::GroupKeys;
-        // `without([])` groups by every remaining label — a real
-        // subpopulation concept, unlike `by([])`'s genuine full reduction.
-        assert!(has_subpopulations(&Reduction::Reduce(GroupKeys::without(
-            vec![]
-        ))));
-    }
-
-    #[test]
-    fn hydra_composes_inner_and_shared_grid_error_symbolically() {
-        let inner = ResultGuarantee {
-            metric: ErrorMetric::Frequency,
-            bound: BoundExpr::Constant { value: 0.01 },
-            failure_probability: ProbabilityExpr::Constant { value: 0.02 },
-            provenance: vec![],
-        };
-        let composed = hydra_guarantee(&inner, &PropagationStats::default());
-
-        assert_eq!(composed.metric, ErrorMetric::Frequency);
-        assert!(matches!(
-            composed.bound,
-            BoundExpr::Sum { ref terms }
-                if matches!(terms.as_slice(), [
-                    BoundExpr::Constant { value },
-                    BoundExpr::Unknown { statistic },
-                ] if *value == 0.01 && statistic == "hydra_shared_grid_collision_bound")
-        ));
-        assert!(matches!(
-            composed.failure_probability,
-            ProbabilityExpr::UnionBound { ref terms }
-                if matches!(terms.as_slice(), [
-                    ProbabilityExpr::Constant { value },
-                    ProbabilityExpr::Unknown { statistic },
-                ] if *value == 0.02 && statistic == "hydra_shared_grid_failure_probability")
-        ));
-    }
 
     // ── HydraGroupingStrategy ─────────────────────────────────────────────
 

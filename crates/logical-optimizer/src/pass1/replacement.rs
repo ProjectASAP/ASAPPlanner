@@ -360,9 +360,8 @@ use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef};
 use asap_types::ir::schema::{
     ColumnId, EntityIdentity, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy,
-    NonNegativeWeightProof, SamplingKind, SamplingParams, Schema, SketchAlgorithm, SketchKind,
-    SketchParams, SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams,
-    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
+    NonNegativeWeightProof, Schema, SketchAlgorithm, SketchKind, SketchParams,
+    SketchStatistic as PostAsapSketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
@@ -382,6 +381,12 @@ use crate::pass1::exact_composition::{
     ExactComposition, ExactCompositionStrategy, OperationPlacement,
 };
 use crate::pass1::grouping::HydraGroupingStrategy;
+use crate::pass1::realization::{
+    accuracy_budget, accuracy_target, column_ref, default_size_params,
+    realize_keyed_additive_summary_input, schema_column_ref, summarised_column, summarised_input,
+    summary_candidates, PhysicalSummaryInput, PhysicalSummaryInputRuleResult, Realization,
+    DEFAULT_DELTA,
+};
 use crate::pass1::rollup::RollupStrategy;
 use crate::pass2::reconciliation::AccuracyReconciliationStrategy;
 use crate::pass2::topk_reuse::TopKLimitReuseStrategy;
@@ -656,64 +661,6 @@ pub trait ReplacementStrategy {
     }
 }
 
-// ── Realization: how one AggIntent may be realised ───────────────────────
-
-/// How an [`AggIntent`] may be realised at post-ASAP binding time (issue
-/// #98): by an approximate summary (sketch, sample, wavelet, statistical
-/// model, …), by an exact mergeable accumulator, or by an ordinary exact
-/// operator (pass-through). This is a post-ASAP concern — the pre-ASAP IR
-/// carries only the intent + accuracy target, never the realization — and
-/// it's a per-node decision, made once per `AggIntent`, not a plan-wide one.
-///
-/// [`realizations_for_intent`] is where every valid realization gets
-/// enumerated, exhaustive and ranked (most-preferred first) — this crate has
-/// no separate function that computes just "the one" `Realization`
-/// independently of that list. [`ASAPStrategies`] is the sole
-/// consumer: it wraps every entry of this list into its own bound
-/// [`OperatorNode`] and returns all of them, ranked — a caller wanting a
-/// single answer keeps the first one itself (see the module docs above).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Realization {
-    /// An exact **mergeable** accumulator (partial state ≡ the value
-    /// itself: `Sum` / `Count` / `Min` / `Max` / `Rate` / `Increase`). The
-    /// built state *is* the answer already — no `SummaryEstimate` evaluation
-    /// step.
-    ExactAggregate {
-        kind: ExactKind,
-        params: ExactParams,
-    },
-    /// An approximate sketch sized to the intent's [`AccuracyTarget`].
-    /// Needs a `SummaryEstimate` evaluation to recover a value. Already
-    /// classified into its [`SketchKind`] category (`SketchKind::new`
-    /// having been called) — construction always goes through that
-    /// classifier, never this variant directly.
-    Sketch(SketchKind),
-    /// A sampling-based summary (a retained row subset). Needs a
-    /// `SummaryEstimate` evaluation. Not chosen by any core `AggIntent`
-    /// dispatch today — see the module docs.
-    Sample {
-        kind: SamplingKind,
-        params: SamplingParams,
-    },
-    /// A wavelet-transform summary. Needs a `SummaryEstimate` evaluation. Not
-    /// chosen by any core `AggIntent` dispatch today — see the module docs.
-    Wavelet {
-        kind: WaveletKind,
-        params: WaveletParams,
-    },
-    /// A fitted statistical/parametric-model summary. Needs a
-    /// `SummaryEstimate` evaluation. Not chosen by any core `AggIntent`
-    /// dispatch today — see the module docs.
-    StatModel {
-        kind: StatModelKind,
-        params: StatModelParams,
-    },
-    /// No summary form — the node stays a logical pre-ASAP operator and is
-    /// executed exactly (per-series transforms, non-mergeable reducers, exact
-    /// quantile/top-k/cardinality, classic-bucket `HistogramQuantile`, …).
-    PassThrough,
-}
-
 /// Does an already-**available** [`Realization`] — e.g. a summary
 /// instance a downstream deployment already materialized somewhere, found
 /// via whatever inventory/index that deployment keeps — satisfy a
@@ -751,70 +698,6 @@ pub enum Realization {
 /// because this crate has no inventory concept to carry it in).
 pub trait Matcher {
     fn is_satisfied_by(&self, required: &Realization, available: &Realization) -> bool;
-}
-
-/// Confidence δ assumed when the target carries only an ε
-/// (`AccuracyTarget::Epsilon`): the (ε, δ)-parameterised sketches (CMS) need
-/// one. `ln(1/0.01) → depth 5`, matching the conventional CMS sizing.
-pub const DEFAULT_DELTA: f64 = 0.01;
-
-/// The sketch kinds that can serve an intent, most-preferred first.
-/// This is the `AggIntent → SketchAlgorithm` map of issue #98;
-/// [`realizations_for_intent`] sizes and ranks every entry via `cost_model`.
-/// Listed here so the candidate set has one home.
-pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
-    match intent {
-        AggIntent::Quantile { .. } => &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
-        // A distinct-tuple count hashes the whole tuple as one item
-        // (`SummaryInputExpr::Tuple`), which the distinct-count sketches take
-        // unchanged. UnivMon is dropped there: it estimates frequency moments
-        // over a single value stream, and `realize_value_frequency_summary_input`
-        // would feed it one column of the tuple.
-        AggIntent::Cardinality { cols, .. } if cols.len() > 1 => &[
-            SketchAlgorithm::Hll,
-            SketchAlgorithm::Theta,
-            SketchAlgorithm::Kmv,
-        ],
-        AggIntent::Cardinality { .. } => &[
-            SketchAlgorithm::Hll,
-            SketchAlgorithm::Theta,
-            SketchAlgorithm::Kmv,
-            SketchAlgorithm::UnivMon,
-        ],
-        AggIntent::FrequencyL2 { .. } | AggIntent::FrequencyEntropy { .. } => {
-            &[SketchAlgorithm::UnivMon]
-        }
-        // Count-Sketch-with-heap is CMS-with-heap's balanced/zero-mean-error
-        // alternative for the same heavy-hitter shape.
-        AggIntent::TopK { .. } => &[
-            SketchAlgorithm::CmsWithHeap,
-            SketchAlgorithm::CountSketchWithHeap,
-        ],
-        AggIntent::Count { .. } => &[
-            SketchAlgorithm::Cms,
-            SketchAlgorithm::CountSketch,
-            SketchAlgorithm::UnivMon,
-        ],
-        _ => &[],
-    }
-}
-
-/// The [`AccuracyTarget`] threaded onto an approximate-capable intent
-/// (`Quantile`/`Cardinality`/`Count`/`TopK`), or `None` for every other
-/// intent (no sketch candidate applies — [`realizations_for_intent`]'s own
-/// match routes those elsewhere). Exposed so callers resolve the exact same
-/// accuracy target [`realizations_for_intent`] does, without re-deriving it
-/// from scratch.
-pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
-    match intent {
-        AggIntent::Quantile { accuracy, .. }
-        | AggIntent::Cardinality { accuracy, .. }
-        | AggIntent::FrequencyL2 { accuracy, .. }
-        | AggIntent::FrequencyEntropy { accuracy, .. }
-        | AggIntent::Count { accuracy }
-        | AggIntent::TopK { accuracy, .. } => Some(accuracy),
-        _ => None,
-    }
 }
 
 /// Every valid [`Realization`] for `intent`, exhaustive, in
@@ -949,22 +832,6 @@ fn exact_accumulator(intent: &AggIntent, kind: ExactKind, params: ExactParams) -
     Realization::ExactAggregate { kind, params }
 }
 
-/// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget sketch
-/// sizing needs. Shared by [`sketch_realizations`] and
-/// this crate's own sizing — one place this resolution happens, so nothing
-/// can drift apart on it.
-///
-/// `Exact` is unreachable via [`realizations_for_intent`] (which routes
-/// `Exact` to [`exact_realization`] instead); degrades to the tightest
-/// parameters for a caller that resolves it directly anyway.
-pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
-    match accuracy {
-        AccuracyTarget::Exact => (f64::MIN_POSITIVE, DEFAULT_DELTA),
-        AccuracyTarget::Epsilon(e) => (*e, DEFAULT_DELTA),
-        AccuracyTarget::EpsilonDelta { epsilon, delta } => (*epsilon, *delta),
-    }
-}
-
 /// Every candidate sketch [`Realization`] for an approximate-capable
 /// intent, sized analytically to `accuracy`, in [`summary_candidates`]'
 /// order — [`realizations_for_intent`]'s Sketch branch.
@@ -1024,22 +891,6 @@ pub fn sketch_state_bytes(params: &SketchParams) -> Option<u64> {
         .checked_mul(u64::from(depth))?
         .checked_mul(8)?
         .checked_add(u64::from(heap_size).checked_mul(64)?)
-}
-
-/// `asap-plan`'s built-in `SketchParams` sizing, keyed off the resolved
-/// `(eps, delta)` accuracy budget.
-///
-/// Each formula inverts the sketch family's standard error bound to the
-/// smallest parameter satisfying the target, clamped to the family's sane
-/// range. A non-positive ε saturates to the clamp maximum (tightest
-/// allowed).
-pub fn default_size_params(
-    kind: SketchAlgorithm,
-    intent: &AggIntent,
-    eps: f64,
-    delta: f64,
-) -> SketchParams {
-    crate::accuracy::estimators::size_params(kind, intent, eps, delta)
 }
 
 /// A deployment's explicit bet about how "typical" (non-adversarial) its
@@ -2701,21 +2552,6 @@ fn summary_family(realization: Realization) -> Option<(FieldDataType, bool)> {
     })
 }
 
-/// The physical input consumed by one summary realization. Most summaries
-/// consume the logical aggregate's immediate child and summarize its declared
-/// input value. Composite realizations can instead consume a larger
-/// logical sub-DAG and bind a different key or value.
-pub(crate) struct PhysicalSummaryInput {
-    pub(crate) child: Rc<OperatorNode>,
-    pub(crate) input: SummaryUpdate,
-}
-
-pub(crate) enum PhysicalSummaryInputRuleResult {
-    NotApplicable,
-    Realized(PhysicalSummaryInput),
-    Unsupported(&'static str),
-}
-
 type PhysicalSummaryInputRule =
     fn(&AggIntent, &FieldDataType, &Reduction, &Rc<OperatorNode>) -> PhysicalSummaryInputRuleResult;
 
@@ -2792,7 +2628,8 @@ fn realize_physical_summary_input(
         child: Rc::clone(child),
         input: SummaryUpdate {
             item: None,
-            weight: summarised_input(intent, child_schema)?,
+            weight: summarised_input(intent, child_schema)
+                .map_err(RealizationError::PhysicalRealization)?,
             weight_domain: WeightDomain::UnknownOrSigned,
         },
     })
@@ -3476,142 +3313,6 @@ fn realize_current_series_summary_input(
     })
 }
 
-/// Realize the composite heavy-hitter realization for
-/// `TopK(Count GROUP BY key)`. The heap sketch consumes the raw keyed stream;
-/// it does not consume an independently materialized Count result.
-pub(crate) fn realize_keyed_additive_summary_input(
-    intent: &AggIntent,
-    family: &FieldDataType,
-    output_reduction: &Reduction,
-    child: &Rc<OperatorNode>,
-) -> PhysicalSummaryInputRuleResult {
-    if !matches!(intent, AggIntent::TopK { .. }) {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
-    }
-    let FieldDataType::Sketch(kind, _) = family else {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
-    };
-    let heap_algorithm = kind.algorithm();
-    if !matches!(
-        heap_algorithm,
-        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
-    ) {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
-    }
-    let Some(NonASAPOp::Aggregate {
-        reduction,
-        measures,
-        having: None,
-        child: raw_child,
-        ..
-    }) = child.non_asap()
-    else {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
-    };
-    let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-        && matches!(raw_child.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
-            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
-    let weight = match measures.as_slice() {
-        [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
-        [AggIntent::Sum { .. }] if counter_input => {
-            SummaryInputExpr::Column(ColumnRef::SampleValue)
-        }
-        [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
-            None => ColumnRef::SampleValue,
-            Some(index) => match schema_column_ref(raw_child, *index) {
-                Some(column) => column,
-                None => {
-                    return PhysicalSummaryInputRuleResult::Unsupported(
-                        "sum-ranked Top-K value column is outside the raw input schema",
-                    )
-                }
-            },
-        }),
-        _ => return PhysicalSummaryInputRuleResult::NotApplicable,
-    };
-    let weight_domain = match measures.as_slice() {
-        [AggIntent::Count { .. }] => WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::UnitCount,
-        },
-        [AggIntent::Sum { .. }] if counter_input => WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
-        },
-        _ => WeightDomain::UnknownOrSigned,
-    };
-    if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
-        && !matches!(weight_domain, WeightDomain::NonNegative { .. })
-    {
-        return PhysicalSummaryInputRuleResult::Unsupported(
-            "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
-        );
-    }
-    let subpopulation_columns = match output_reduction {
-        Reduction::PerEntity => vec![],
-        Reduction::Reduce(keys) => keys
-            .iter()
-            .filter_map(|index| schema_column_ref(child, *index))
-            .collect(),
-    };
-    let item = match reduction {
-        Reduction::PerEntity => SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet {
-            excluding: subpopulation_columns,
-        }),
-        Reduction::Reduce(keys) if !keys.is_without() && !keys.is_empty() => {
-            let Some(columns) = keys
-                .iter()
-                .map(|index| schema_column_ref(raw_child, *index))
-                .collect::<Option<Vec<_>>>()
-            else {
-                return PhysicalSummaryInputRuleResult::Unsupported(
-                    "ranked item column is outside the raw input schema",
-                );
-            };
-            let item_columns: Vec<_> = columns
-                .into_iter()
-                .filter(|column| !subpopulation_columns.contains(column))
-                .collect();
-            match item_columns.as_slice() {
-                [] => {
-                    return PhysicalSummaryInputRuleResult::Unsupported(
-                        "subpopulation columns consume the complete ranked item identity",
-                    )
-                }
-                [column] => SummaryInputExpr::Column(column.clone()),
-                _ => SummaryInputExpr::Tuple(
-                    item_columns
-                        .into_iter()
-                        .map(SummaryInputExpr::Column)
-                        .collect(),
-                ),
-            }
-        }
-        Reduction::Reduce(_) => {
-            return PhysicalSummaryInputRuleResult::Unsupported(
-                "an empty or without grouping does not identify ranked items",
-            )
-        }
-    };
-    PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
-        child: Rc::clone(raw_child),
-        input: SummaryUpdate {
-            item: Some(item),
-            weight,
-            weight_domain,
-        },
-    })
-}
-
-fn schema_column_ref(child: &OperatorNode, index: usize) -> Option<ColumnRef> {
-    let column = child.schema.fields.get(index)?;
-    Some(match &column.table {
-        Some(table) => ColumnRef::Qualified {
-            table: table.clone(),
-            name: column.name.clone(),
-        },
-        None => ColumnRef::Named(column.name.clone()),
-    })
-}
-
 /// The guarantee of the value a `family` node produces over `child` —
 /// [`AccuracyModel::propagate`] under the [`CompositionOperator`] this family
 /// applies to its child's values — checked against `intent`'s own
@@ -3716,62 +3417,6 @@ fn summary_col_index(out_schema: &Schema, reduction: &Reduction, measures: usize
         }
         Reduction::Reduce(keys) => keys.len(),
     }
-}
-
-/// The column fed into a *single-column* summary: the intent's leading
-/// positional input resolved to a name against the child schema, or the PromQL
-/// sample value when it reads none. Callers are responsible for only reaching
-/// here with a one-column intent — [`summarised_input`] is the general form.
-fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
-    match intent
-        .input_cols()
-        .first()
-        .and_then(|id| child_schema.fields.get(*id))
-    {
-        Some(c) => column_ref(c),
-        None => ColumnRef::SampleValue,
-    }
-}
-
-pub(crate) fn column_ref(column: &Field) -> ColumnRef {
-    match &column.table {
-        Some(t) => ColumnRef::Qualified {
-            table: t.clone(),
-            name: column.name.clone(),
-        },
-        None => ColumnRef::Named(column.name.clone()),
-    }
-}
-
-/// What the summary consumes per input row. An intent that reads one column (or
-/// none) feeds that column; `COUNT(DISTINCT a, b)` feeds the whole tuple as one
-/// item, so the distinct-count sketch hashes `(a, b)` rather than `a` — the
-/// difference between tuple cardinality and single-column cardinality.
-///
-/// A tuple leg outside the child schema is an error rather than
-/// [`summarised_column`]'s sample-value fallback: a leg has no sample-value
-/// reading, and silently dropping one would under-count.
-pub(crate) fn summarised_input(
-    intent: &AggIntent,
-    child_schema: &Schema,
-) -> Result<SummaryInputExpr, RealizationError> {
-    let cols = intent.input_cols();
-    if cols.len() < 2 {
-        return Ok(SummaryInputExpr::Column(summarised_column(
-            intent,
-            child_schema,
-        )));
-    }
-    let legs = cols
-        .iter()
-        .map(|id| child_schema.fields.get(*id).map(column_ref))
-        .collect::<Option<Vec<_>>>()
-        .ok_or(RealizationError::PhysicalRealization(
-            "a tuple column is outside the input schema",
-        ))?;
-    Ok(SummaryInputExpr::Tuple(
-        legs.into_iter().map(SummaryInputExpr::Column).collect(),
-    ))
 }
 
 /// The `SummaryEstimate` evaluation for a summary-bound intent.
