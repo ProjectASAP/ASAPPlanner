@@ -60,20 +60,19 @@ mod tests {
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let intent = default_cardinality();
         let count_sketch = default_size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
-        let guarantee = DefaultAccuracyModel
-            .local_guarantee(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::CountSketch, count_sketch),
-                    GroupingStrategy::default(),
-                ),
-                &SketchStatistic::PointCount {
-                    key: asap_types::ir::scalar::ColumnRef::SampleValue,
-                    value: None,
-                },
-            )
-            .expect("CountSketch has a parameter-derived L2 guarantee");
+        let guarantee = local_guarantee(
+            &FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::CountSketch, count_sketch),
+                GroupingStrategy::default(),
+            ),
+            &SketchStatistic::PointCount {
+                key: asap_types::ir::scalar::ColumnRef::SampleValue,
+                value: None,
+            },
+        )
+        .expect("CountSketch has a parameter-derived L2 guarantee");
         assert_eq!(guarantee.metric, ErrorMetric::L2Frequency);
-        assert!(DefaultAccuracyModel.satisfies(
+        assert!(satisfies(
             &guarantee,
             &AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,

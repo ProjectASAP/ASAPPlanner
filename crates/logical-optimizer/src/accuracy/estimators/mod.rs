@@ -11,7 +11,10 @@ pub mod hll;
 pub mod kll;
 pub mod univmon;
 
-pub(super) fn sketch_guarantee(
+/// The guarantee of reading `query` out of a sketch with these committed
+/// parameters, built over an exact input; `None` when no error model covers
+/// the pair.
+pub fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
@@ -55,10 +58,12 @@ fn bounded_guarantee(
     }
 }
 
-pub(super) fn local_guarantee(
-    family: &FieldDataType,
-    query: &SketchStatistic,
-) -> Option<ResultGuarantee> {
+/// The guarantee of reading `query` out of a summary of family `family` built
+/// over an **exact** input — derived from the family's committed parameters by
+/// inverting the same sizing formulas
+/// [`crate::pass1::realization::default_size_params`] uses. `None` when no
+/// error model covers the family (none does for `Sample`/`Wavelet`/`StatModel`).
+pub fn local_guarantee(family: &FieldDataType, query: &SketchStatistic) -> Option<ResultGuarantee> {
     match family {
         FieldDataType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
         FieldDataType::ExactAggregate(kind, _) => {

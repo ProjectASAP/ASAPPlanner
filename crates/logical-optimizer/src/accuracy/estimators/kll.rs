@@ -47,19 +47,18 @@ mod tests {
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let q = default_quantile(0.99);
         let params = default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
-        let g = DefaultAccuracyModel
-            .local_guarantee(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::Kll, params),
-                    GroupingStrategy::default(),
-                ),
-                &SketchStatistic::Quantile { q: 0.99 },
-            )
-            .unwrap();
+        let g = local_guarantee(
+            &FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::Kll, params),
+                GroupingStrategy::default(),
+            ),
+            &SketchStatistic::Quantile { q: 0.99 },
+        )
+        .unwrap();
         assert_eq!(g.metric, ErrorMetric::Rank);
-        assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
+        assert!(satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
         assert_eq!(g.failure_probability.evaluate(), Some(0.01));
-        assert!(DefaultAccuracyModel.satisfies(
+        assert!(satisfies(
             &g,
             &AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
