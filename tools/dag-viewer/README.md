@@ -30,7 +30,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   valid but costlier, or invalid with the reason. Clicking one shows it in
   the lanes. When a document carries only the cheapest plans, the list says
   how many of how many.
-- **Three lanes**: Stage 0, the chosen Stage 1 candidate, and the chosen
+- **Three lanes**, stacked top to bottom so each is as wide as the page:
+  Stage 0, the chosen Stage 1 candidate below it, and the chosen
   Stage 2 candidate with each node's timing and Stage 3 cost. Nodes are data
   sources, relational operators, or summary operators; summary builds print
   their configuration (for example `CmsWithHeap · depth 7 · heap 100 · width
