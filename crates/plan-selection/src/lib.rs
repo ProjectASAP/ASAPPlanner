@@ -1276,6 +1276,12 @@ fn build_violation(
     let Some(guarantee) = models.accuracy.local_guarantee(family, statistic) else {
         return Some(format!("no accuracy model for {name}; target {target:?}"));
     };
+    if !models.accuracy.answers(statistic, &guarantee) {
+        return Some(format!(
+            "{name} guarantees a {:?} bound, which does not bound {statistic:?}; target {target:?}",
+            guarantee.metric
+        ));
+    }
     if !models.accuracy.satisfies(&guarantee, target) {
         return Some(format!(
             "{name} guarantees bound {:?}, failure probability {:?}, which misses target \
@@ -2513,6 +2519,33 @@ mod tests {
                 assert!(reason.contains("no accuracy model for UnivMon"), "{reason}");
             }
         }
+    }
+
+    /// A guarantee in another statistic's metric does not satisfy a target:
+    /// CountSketch's L2 frequency bound answers the top-k scores it was
+    /// built for, but not a distinct count, however loose the target.
+    #[test]
+    fn a_bound_in_another_metric_misses_the_target() {
+        let candidates = candidates();
+        let build = OperatorNode::reachable(&candidates[2].roots[0])
+            .into_iter()
+            .find(|node| {
+                matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+                    if *kind.algorithm() == SketchAlgorithm::CountSketchWithHeap)
+            })
+            .expect("a CountSketch build");
+        let loose = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.5,
+            delta: 0.5,
+        };
+        let models = PlanningModels::builtin();
+        assert_eq!(
+            build_violation(&build, &SketchStatistic::TopK { k: 10 }, &loose, &models),
+            None
+        );
+        let reason = build_violation(&build, &SketchStatistic::Cardinality, &loose, &models)
+            .expect("an L2 frequency bound does not bound a distinct count");
+        assert!(reason.contains("does not bound Cardinality"), "{reason}");
     }
 
     /// A candidate that cannot be checked is rejected with its reason; the

@@ -253,4 +253,7 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
         self.base.satisfies(guarantee, target)
     }
+    fn answers(&self, statistic: &SketchStatistic, guarantee: &ResultGuarantee) -> bool {
+        self.base.answers(statistic, guarantee)
+    }
 }
