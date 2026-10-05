@@ -330,11 +330,11 @@ pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
 /// each group below says why. Do not add an entry just to make the test
 /// pass; add a `NativeFunction` instead if the name should actually lower.
 ///
-/// Two known, narrow gaps rather than a deliberate non-goal: `var_sample` and
-/// `var_population` are DataFusion's own alias spellings of `var_samp` /
-/// `var_pop` (see `variance.rs`'s `aliases()` in `datafusion-functions-
-/// aggregate`) that [`NATIVE_FUNCTIONS`] doesn't also list under those
-/// spellings. Surfaced here rather than silently added to
+/// Three known, narrow gaps rather than a deliberate non-goal: `var_sample`,
+/// `var_population` and `quantile_cont` are DataFusion's own alias spellings
+/// of `var_samp`, `var_pop` and `percentile_cont` (see the `aliases()` in
+/// `datafusion-functions-aggregate`'s `variance.rs` and `percentile_cont.rs`)
+/// that [`NATIVE_FUNCTIONS`] doesn't also list under those spellings. Surfaced here rather than silently added to
 /// [`NATIVE_FUNCTIONS`], since accepting a new spelling is a maintainer's
 /// call, not something this catalog should do on its own.
 pub const KNOWN_UNMAPPED_NATIVE_FUNCTIONS: &[&str] = &[
@@ -379,9 +379,11 @@ pub const KNOWN_UNMAPPED_NATIVE_FUNCTIONS: &[&str] = &[
     "array_agg",
     "grouping",
     // Known narrow gaps (see doc comment above) -- alias spellings of
-    // `var_samp` / `var_pop` this catalog doesn't accept yet.
+    // `var_samp` / `var_pop` / `percentile_cont` this catalog doesn't accept
+    // yet.
     "var_sample",
     "var_population",
+    "quantile_cont",
 ];
 
 /// Look up a native function name's canonical semantic (case-sensitive --

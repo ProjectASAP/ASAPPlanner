@@ -180,3 +180,21 @@ async fn sql_topk_limits_share_maximum_k() {
         assert!(Rc::ptr_eq(population(&plans[0].1).0, population(plan).0));
     }
 }
+
+// A SELECT list that keeps the table's column order is the same top-k as `*`.
+#[tokio::test]
+async fn sql_topk_over_an_identity_select_list_is_recognized() {
+    let root = aggregate("SELECT latency, job FROM samples ORDER BY latency DESC LIMIT 5").await;
+    let rule = MaintainedPopulationStrategy::new(std::slice::from_ref(&root));
+    let plan = rule.candidate(&root).expect("SQL topk");
+    compile_post_asap_dag(&plan).unwrap();
+    assert_eq!(population(&plan).1.max_k, 5);
+}
+
+// A reordering projection moves the Sort key's column, so it is not skipped.
+#[tokio::test]
+async fn sql_topk_over_a_reordering_select_list_is_not_recognized() {
+    let root = aggregate("SELECT job, latency FROM samples ORDER BY latency DESC LIMIT 5").await;
+    let rule = MaintainedPopulationStrategy::new(std::slice::from_ref(&root));
+    assert!(rule.candidate(&root).is_none());
+}

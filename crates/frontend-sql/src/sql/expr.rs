@@ -43,6 +43,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
         Expr::Literal(
             sv @ (datafusion::common::ScalarValue::Date32(_)
             | datafusion::common::ScalarValue::Date64(_)),
+            _,
         ) => {
             let text = sv.cast_to(&datafusion::arrow::datatypes::DataType::Utf8)?;
             // Arrow formats Date64 with a time suffix; the canonical Date has
@@ -59,7 +60,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
                 try_cast: false,
             })
         }
-        Expr::Literal(sv) => scalar_value_to_asap(sv).map(Unresolved::Literal),
+        Expr::Literal(sv, _) => scalar_value_to_asap(sv).map(Unresolved::Literal),
 
         Expr::Alias(a) => df_expr_to_unresolved(&a.expr),
 
@@ -163,7 +164,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
 
         Expr::Cast(c) => {
             let inner = df_expr_to_unresolved(&c.expr)?;
-            let to = arrow_to_dtype(&c.data_type)?;
+            let to = arrow_to_dtype(c.field.data_type())?;
             Ok(Unresolved::Cast {
                 expr: Rc::new(inner),
                 to,
@@ -174,7 +175,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
         // TRY_CAST returns NULL on conversion failure; preserve that semantic.
         Expr::TryCast(c) => {
             let inner = df_expr_to_unresolved(&c.expr)?;
-            let to = arrow_to_dtype(&c.data_type)?;
+            let to = arrow_to_dtype(c.field.data_type())?;
             Ok(Unresolved::Cast {
                 expr: Rc::new(inner),
                 to,
@@ -227,6 +228,8 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
                     "asap_element_access".into()
                 } else if sf.func.name().eq_ignore_ascii_case("tupleelement") {
                     "asap_struct_field".into()
+                } else if sf.func.name() == super::collection_planning::MAP_PLANNING_NAME {
+                    "map".into()
                 } else {
                     sf.func.name().to_string()
                 },
@@ -311,7 +314,7 @@ mod tests {
             (DfScalarValue::Date32(None), ScalarValue::Null),
             (DfScalarValue::Date64(None), ScalarValue::Null),
         ] {
-            let actual = df_expr_to_unresolved(&Expr::Literal(value)).unwrap();
+            let actual = df_expr_to_unresolved(&Expr::Literal(value, None)).unwrap();
             assert_eq!(
                 actual,
                 Unresolved::Cast {
