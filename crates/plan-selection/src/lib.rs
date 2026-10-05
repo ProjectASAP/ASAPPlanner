@@ -4,8 +4,6 @@
 //!
 //! - [`cost`] — the [`CostModel`] trait, analytical and evidence-based
 //!   pricing, recurrence, and the physical lowering and storage I/O they price.
-//! - [`candidate_selection`] — the legacy cost-ranked selection over a Stage 1
-//!   search (deleted under #580).
 //!
 //! Each Stage 2 candidate is checked against every query's accuracy target
 //! with the accuracy model, and Count-Min is admitted only over weights proven
@@ -39,15 +37,11 @@
 //! there). [`select_exhaustive`] builds and prices every combination, for
 //! display and for checking the program. [`plan_stages`] runs the whole
 //! pipeline from the frontends' roots.
-pub mod candidate_selection;
 pub mod cost;
 #[cfg(test)]
 mod test_support;
 
 pub use asap_types::deployment::DeploymentCapabilities;
-pub use candidate_selection::{
-    CompositionDecision, CostedGlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap,
-};
 pub use cost::cost_model::{
     maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
     CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,

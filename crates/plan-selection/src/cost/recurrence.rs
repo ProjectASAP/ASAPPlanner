@@ -75,7 +75,7 @@
 //!
 //! - [`EvaluationRate`]: derived from [`asap_types::workload::RepeatingEntry::demand`]
 //!   values of every repeating consumer reaching a target (via
-//!   [`evaluation_rate_of`], or [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles)
+//!   [`evaluation_rate_of`], or `recurrence_profiles`
 //!   for a whole workload). A one-shot ([`asap_types::workload::BatchEntry`])
 //!   consumer contributes to [`RecurrenceProfile::one_shot_consumers`]
 //!   instead, never to this rate.
@@ -216,7 +216,7 @@ pub enum RecurrenceError {
          CostRate with a one-shot Cost without distorting the comparison"
     )]
     InvalidHorizon(Horizon),
-    /// [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles) was called
+    /// `recurrence_profiles` was called
     /// with a `root_recurrence` slice whose length doesn't match the
     /// `CandidateLogicalASAPDAGs`'s own root count — a caller error, but recoverable
     /// (this method's whole signature promises a `Result`, so this is
@@ -239,7 +239,7 @@ pub enum RecurrenceError {
 /// applied at every point an `UpdateRate` enters a [`RecurrenceProfile`]
 /// ([`RecurrenceProfile::with_update_rate`],
 /// [`update_rate_from_data_workload`],
-/// [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles)'s own parameter)
+/// `recurrence_profiles`'s own parameter)
 /// *and*, as a backstop that can't be bypassed by constructing a
 /// `RecurrenceProfile` via its public fields directly, inside [`decide`]
 /// itself before any comparison uses it.
@@ -373,7 +373,7 @@ impl RecurrenceProfile {
 }
 
 /// How one workload root recurs — the opaque per-root tag
-/// [`recurrence_profiles`](crate::candidate_selection::recurrence_profiles) threads down to
+/// `recurrence_profiles` threads down to
 /// every target reachable from that root. Mirrors
 /// [`asap_types::workload::QueryWorkload`]'s own `query_batch` (one-shot)
 /// vs. `repeating_queries` (an interval each) split, but at the
@@ -632,17 +632,10 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::candidate_selection::cost_sorted_with_recurrence;
-    use crate::candidate_selection::global_selection_with_recurrence;
-    use crate::candidate_selection::recurrence_profiles;
     use crate::cost::cost_model::DefaultCostModel;
 
     fn interval(ms: u32) -> RepetitionInterval {
         RepetitionInterval(ms)
-    }
-
-    fn repeating(ms: u32) -> RootRecurrence {
-        RootRecurrence::Repeating(evaluation_rate_of([interval(ms)]).unwrap().unwrap())
     }
 
     // ── evaluation_rate_of ──────────────────────────────────────────────
@@ -789,9 +782,7 @@ mod tests {
     use asap_types::ir::schema::{
         ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, Schema,
     };
-    use asap_types::ir::{
-        ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr,
-    };
+    use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
     use std::rc::Rc;
 
@@ -1129,387 +1120,6 @@ mod tests {
             );
         }
     }
-
-    // ── multiple roots sharing a sub-DAG, via CandidateLogicalASAPDAGs ──────────────────
-
-    use asap_logical_optimizer::pass1::replacement::search_workload;
-    use asap_types::ir::operator::agg_intent::AggIntent;
-    use asap_types::ir::operator::operator_properties::Reduction as QueryReduction;
-    use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
-
-    /// Like `scan()`, plus a "job" label column to group by — CSE's
-    /// sharing legality gate requires a provable unique key
-    /// (`Schema::has_unique_key`), and an *ungrouped* aggregate's empty
-    /// `by` reports none (see `asap_types::ir::cse`'s own "Legality"
-    /// module docs); grouping by a label column gives `sum_agg()` below a
-    /// real one, matching the pattern
-    /// `replacement.rs`'s own CSE fixtures already use (`metric_scan`/`agg`
-    /// grouped by a label column).
-    fn labeled_scan() -> Rc<OperatorNode> {
-        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: Schema::with_time_index(
-                vec![
-                    Field::plain("ts", DataType::Timestamp, false),
-                    Field::plain("value", DataType::Float64, false),
-                    Field::plain("job", DataType::Utf8, true),
-                ],
-                0,
-                vec![],
-            ),
-        }))
-        .unwrap()
-    }
-
-    fn sum_agg() -> Rc<OperatorNode> {
-        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
-            reduction: QueryReduction::by(vec![2]),
-            measures: vec![AggIntent::Sum { col: Some(1) }],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: labeled_scan(),
-        }))
-        .unwrap()
-    }
-
-    /// A root wrapping a fresh, independently-built (but structurally
-    /// identical to every other call's) `sum_agg()` in a `Filter` whose
-    /// literal predicate is unique per root — keeps the three roots
-    /// themselves structurally distinct (so they don't collapse into one
-    /// root the way whole-root-identical fixtures do — see
-    /// `shared_aggregate_across_two_roots_gets_both_strategies_candidates`'s
-    /// own doc) while letting `share_common_sub_dags` unify their
-    /// identical `sum_agg()` children onto one shared `Rc`.
-    fn filtered_root(distinguishing_literal: i64) -> Rc<OperatorNode> {
-        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
-            pred: Predicate(ScalarExpr::Compare {
-                left: Box::new(ScalarExpr::Column(1)),
-                op: CompareOpKind::Gt,
-                right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(
-                    distinguishing_literal,
-                ))),
-                semantics: ExprSemantics::Sql,
-            }),
-            child: sum_agg(),
-        }))
-        .unwrap()
-    }
-
-    /// Three workload roots share one underlying `sum_agg()` sub-DAG: two
-    /// repeating consumers with different intervals, one one-shot batch
-    /// consumer. `candidate_selection::recurrence_profiles` must aggregate all three
-    /// onto the shared sub-DAG's own profile: `evaluation_rate = 1/t1 +
-    /// 1/t2`, `one_shot_consumers = 1` — issue #287's "support a shared
-    /// sub-DAG consumed by queries with different intervals" and "multiple
-    /// roots sharing a sub-DAG" acceptance criteria.
-    #[test]
-    fn recurrence_profiles_aggregates_mixed_intervals_across_roots_sharing_a_subdag() {
-        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![
-            ("root_a", filtered_root(1)),
-            ("root_b", filtered_root(2)),
-            ("root_c", filtered_root(3)),
-        ];
-        let space = search_workload(roots);
-
-        // Fixture sanity: the three roots stayed distinct (different
-        // literal predicates), but their `sum_agg()` children merged onto
-        // one shared `Rc` (consumer_count 3) — this is the "shared sub-DAG"
-        // under test. Its own child Scan collapses along with it (all 3
-        // Filters' aggregates now point at the *same* Aggregate Rc, so
-        // there is only ever one Scan Rc underneath, directly referenced
-        // from exactly one place — the shared Aggregate's own `child`).
-        assert_eq!(
-            space.len(),
-            5,
-            "3 distinct Filters + 1 shared Aggregate + 1 Scan underneath it"
-        );
-        let shared_group = space
-            .target_subdag_candidates()
-            .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
-            .expect("the shared sum_agg() is a discovered target");
-        assert_eq!(shared_group.consumer_count, 3, "shared by all 3 roots");
-
-        let root_recurrence = vec![
-            repeating(1_000),  // 1 Hz
-            repeating(10_000), // 0.1 Hz
-            RootRecurrence::OneShotCount(1),
-        ];
-        let profiles =
-            recurrence_profiles(&space, &root_recurrence, Some(UpdateRate(5.0))).unwrap();
-
-        let profile = profiles.for_target(&shared_group.target);
-        let expected_rate = 1.0 / 1.0 + 1.0 / 10.0; // Hz
-        assert!(
-            (profile.evaluation_rate.unwrap().0 - expected_rate).abs() < 1e-9,
-            "evaluation_rate={:?}",
-            profile.evaluation_rate
-        );
-        assert_eq!(profile.one_shot_consumers, 1);
-        assert_eq!(profile.update_rate, Some(UpdateRate(5.0)));
-
-        // Each root's own unshared Filter node sees only its own
-        // contribution — no cross-contamination between sibling roots: the
-        // 1Hz root's own Filter carries only that 1Hz, not the combined
-        // rate the shared Aggregate beneath all three carries.
-        let root_a_profile = profiles.for_target(&space.roots[0].1);
-        assert!(
-            (root_a_profile.evaluation_rate.unwrap().0 - 1.0).abs() < 1e-9,
-            "root_a's own Filter should see only its own 1Hz, not the combined rate: {:?}",
-            root_a_profile.evaluation_rate
-        );
-        assert_eq!(root_a_profile.one_shot_consumers, 0);
-
-        // The one-shot root's own Filter sees only its one-shot
-        // contribution, no evaluation rate at all.
-        let root_c_profile = profiles.for_target(&space.roots[2].1);
-        assert_eq!(root_c_profile.evaluation_rate, None);
-        assert_eq!(root_c_profile.one_shot_consumers, 1);
-    }
-
-    #[test]
-    fn plan_selection_uses_recurrence_profiles_for_cse_choices() {
-        let roots = vec![("a", filtered_root(1)), ("b", filtered_root(2))];
-        let space = search_workload(roots);
-        let shared = space
-            .target_subdag_candidates()
-            .find(|group| matches!(group.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
-            .expect("the aggregate is shared by both roots");
-        let update_rate = Some(UpdateRate(10.0));
-
-        let frequent =
-            recurrence_profiles(&space, &[repeating(10), repeating(10)], update_rate).unwrap();
-        let infrequent = recurrence_profiles(
-            &space,
-            &[repeating(100_000), repeating(100_000)],
-            update_rate,
-        )
-        .unwrap();
-
-        let frequent_ranked =
-            cost_sorted_with_recurrence(&space, &DeterministicUnitCostModel, &frequent, None)
-                .unwrap();
-        let infrequent_ranked =
-            cost_sorted_with_recurrence(&space, &DeterministicUnitCostModel, &infrequent, None)
-                .unwrap();
-        let first_provenance =
-            |ranked: &[crate::candidate_selection::RankedTargetSubDAGCandidates<'_>]| {
-                ranked
-                    .iter()
-                    .find(|group| Rc::ptr_eq(group.target, &shared.target))
-                    .and_then(|group| group.candidates.first())
-                    .map(|candidate| candidate.provenance)
-            };
-        assert_eq!(
-            first_provenance(&frequent_ranked),
-            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare)
-        );
-        assert_eq!(
-            first_provenance(&infrequent_ranked),
-            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseRecompute)
-        );
-
-        let frequent_selected =
-            global_selection_with_recurrence(&space, &DeterministicUnitCostModel, &frequent, None)
-                .unwrap();
-        let infrequent_selected = global_selection_with_recurrence(
-            &space,
-            &DeterministicUnitCostModel,
-            &infrequent,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            frequent_selected
-                .for_target(&shared.target)
-                .and_then(|group| group.chosen)
-                .map(|candidate| candidate.provenance),
-            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare)
-        );
-        assert_eq!(
-            infrequent_selected
-                .for_target(&shared.target)
-                .and_then(|group| group.chosen)
-                .map(|candidate| candidate.provenance),
-            Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseRecompute)
-        );
-    }
-
-    #[test]
-    fn recurrence_profiles_rejects_an_invalid_evaluation_rate() {
-        let root = scan();
-        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
-        let space = search_workload(roots);
-        let err = recurrence_profiles(
-            &space,
-            &[RootRecurrence::Repeating(EvaluationRate(f64::NAN))],
-            None,
-        )
-        .unwrap_err();
-        assert!(matches!(err, RecurrenceError::InvalidEvaluationRate(_)));
-    }
-
-    /// Issue #287 review bug 6: a length mismatch is a recoverable
-    /// `RecurrenceError`, not a panic — `recurrence_profiles`'s whole
-    /// signature promises a `Result`.
-    #[test]
-    fn recurrence_profiles_reports_a_root_count_mismatch_as_an_error_not_a_panic() {
-        let root = scan();
-        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
-        let space = search_workload(roots);
-        let err = recurrence_profiles(&space, &[], None).unwrap_err();
-        assert_eq!(
-            err,
-            RecurrenceError::RootCountMismatch {
-                expected: 1,
-                got: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn recurrence_profiles_rejects_an_invalid_update_rate() {
-        let root = scan();
-        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
-        let space = search_workload(roots);
-        let err = recurrence_profiles(
-            &space,
-            &[RootRecurrence::OneShotCount(1)],
-            Some(UpdateRate(f64::NAN)),
-        )
-        .unwrap_err();
-        assert!(matches!(err, RecurrenceError::InvalidUpdateRate(_)));
-    }
-
-    /// Issue #287 review bug 2: a site no root's own structural DAG
-    /// actually reaches must not have the caller-supplied `update_rate`
-    /// stamped onto it. `AvgToSumOverCountStrategy` (part of
-    /// `default_strategies`, so included by `search_workload`) is a real,
-    /// already-shipped source of exactly this shape: it rewrites a bare
-    /// `avg` `Aggregate` into a *brand new* `Project(sum, count)` sub-DAG —
-    /// `sum`/`count` are genuinely new `Rc`s, discovered via
-    /// `discover_new_descendant_targets` from the *candidate's* own
-    /// children, never reachable by walking the original `avg` root's own
-    /// structural children (which is just the raw scan). Before the fix,
-    /// this `count` site would get `{evaluation_rate: None,
-    /// one_shot_consumers: 0, update_rate: Some(rate)}` — `maintained_cost_rate
-    /// > 0` against a `recompute_cost_rate` of exactly `0` — unconditionally
-    /// `RecomputeIndependently`, regardless of the site's own real
-    /// `consumer_count`.
-    #[test]
-    fn recurrence_profiles_does_not_stamp_update_rate_on_a_site_unreachable_from_any_root() {
-        let avg_root =
-            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
-                reduction: QueryReduction::by(vec![]),
-                measures: vec![AggIntent::Avg { col: None }],
-                output_names: vec![],
-                filters: vec![],
-                having: None,
-                child: scan(),
-            }))
-            .unwrap();
-        let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("q", avg_root)];
-        let space = search_workload(roots);
-
-        let count_group = space
-            .target_subdag_candidates()
-            .find(|g| {
-                matches!(
-                    g.target.non_asap(),
-                    Some(NonASAPOp::Aggregate { measures, .. })
-                        if measures.iter().any(|m| matches!(m, AggIntent::Count { .. }))
-                )
-            })
-            .expect(
-                "AvgToSumOverCountStrategy should have introduced a new Count aggregate \
-                 target, unreachable from the original avg root's own structural children",
-            );
-
-        let root_recurrence = vec![repeating(1_000)];
-        let profiles =
-            recurrence_profiles(&space, &root_recurrence, Some(UpdateRate(5.0))).unwrap();
-
-        let count_profile = profiles.for_target(&count_group.target);
-        assert_eq!(
-            count_profile,
-            RecurrenceProfile::EMPTY,
-            "a site unreachable from any root's own structural DAG must fall back to \
-             RecurrenceProfile::EMPTY (no update_rate, no evaluation_rate, no one-shot \
-             consumers), not just an evaluation-rate-free profile that still carries the \
-             caller's update_rate"
-        );
-
-        // The root itself (and the raw scan directly beneath it, which the
-        // walk *does* reach) still get the real update_rate.
-        let root_profile = profiles.for_target(&space.roots[0].1);
-        assert_eq!(root_profile.update_rate, Some(UpdateRate(5.0)));
-    }
-
-    /// Issue #287 review (lower-priority item): a parent referencing the
-    /// same shared child twice (`BinaryOp{lhs: X, rhs: X}`, the same shape
-    /// `ir::cse`'s own within-one-query sharing collapses onto one
-    /// `Rc`) must credit that child with 2 contributions per repeating
-    /// root, matching how `TargetSubDAGCandidates::consumer_count` already counts that
-    /// exact structural occurrence twice — not 1, which a plain
-    /// reachability-set walk would (wrongly) collapse it to.
-    #[test]
-    fn recurrence_profiles_credits_a_direct_repeated_reference_by_its_multiplicity() {
-        let root =
-            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::BinaryOp {
-                operator: BinaryOperator {
-                    checked_relative_division: false,
-                    checked_finite_division: false,
-                    kind: asap_types::ir::operator::operator_properties::BinaryOpKind::Compare(
-                        CompareOpKind::Eq,
-                    ),
-                    vector_match: None,
-                },
-                return_bool: false,
-                lhs: sum_agg(),
-                rhs: sum_agg(),
-            }))
-            .unwrap();
-        let space = search_workload(vec![("q", root)]);
-
-        let shared_group = space
-            .target_subdag_candidates()
-            .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
-            .expect("sum_agg() should merge onto one shared Rc, referenced twice from BinaryOp");
-        assert_eq!(
-            shared_group.consumer_count, 2,
-            "fixture sanity: referenced twice from the same BinaryOp parent"
-        );
-
-        let root_recurrence = vec![repeating(1_000)]; // 1 Hz
-        let profiles = recurrence_profiles(&space, &root_recurrence, None).unwrap();
-        let profile = profiles.for_target(&shared_group.target);
-
-        // Referenced twice from the one root: evaluation_rate should be
-        // 2 * 1Hz = 2Hz, matching consumer_count's own multiplicity — not
-        // 1Hz, which would undercount by treating "reachable at all" as
-        // the whole story.
-        assert!(
-            (profile.evaluation_rate.unwrap().0 - 2.0).abs() < 1e-9,
-            "evaluation_rate={:?}",
-            profile.evaluation_rate
-        );
-
-        let scan_group = space
-            .target_subdag_candidates()
-            .find(|group| matches!(group.target.non_asap(), Some(NonASAPOp::Scan { .. })))
-            .expect("the shared aggregate has a scan descendant");
-        assert_eq!(
-            profiles
-                .for_target(&scan_group.target)
-                .evaluation_rate
-                .unwrap(),
-            EvaluationRate(2.0),
-            "ancestor multiplicity must propagate transitively to descendants"
-        );
-    }
-
-    // ── Horizon validation ────────────────────────────────────────────────
 
     #[test]
     fn decide_rejects_a_zero_or_negative_horizon() {
