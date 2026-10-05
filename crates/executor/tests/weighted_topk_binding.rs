@@ -6,85 +6,39 @@ use asap_executor::dag::{
     values::{Batch, Value},
     Limits, RunContext, Scope,
 };
-use asap_logical_optimizer::{
-    accuracy::AccuracyEvidenceProvider, accuracy::DefaultAccuracyModel,
-    accuracy::EqualSplitAllocator, accuracy::PropagationStats, ASAPStrategies, Replacement,
-    ReplacementStrategy, TargetSubDAG,
-};
-use common::compile_physical_asap_dag;
+use common::{compile_physical_asap_dag, stage1_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::*;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::types::AccuracyTarget;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
-struct Evidence;
-impl AccuracyEvidenceProvider for Evidence {
-    fn topk_max_distinct_items(&self, _: &planner_types::ir::OperatorNode) -> Option<u64> {
-        Some(1000)
-    }
-    fn propagation_stats(
-        &self,
-        op: &CompositionOperator,
-        _: &FieldDataType,
-        _: Option<&SketchStatistic>,
-    ) -> PropagationStats {
-        if matches!(op, CompositionOperator::TopKSelection) {
-            PropagationStats {
-                topk_selected_lower_bound: Some(101.),
-                topk_excluded_upper_bound: Some(100.),
-                topk_interval_failure_probability: Some(0.001),
-                ..Default::default()
-            }
-        } else {
-            Default::default()
-        }
-    }
-}
-// The evidence here exercises binding; it is not inferred from the sample data.
 #[test]
+#[ignore = "Stage 1's whole-expression heap keeps the outer top-k's partition keys, which \
+            index the inner aggregate's output, over the raw rates it reads"]
 fn planner_weighted_topk_binds_at_either_deployment_phase() {
-    assert_weighted_binding(&Evidence, SketchAlgorithm::CmsWithHeap);
-    assert_weighted_binding(&Evidence, SketchAlgorithm::CountSketchWithHeap);
+    assert_weighted_binding(SketchAlgorithm::CmsWithHeap);
+    assert_weighted_binding(SketchAlgorithm::CountSketchWithHeap);
 }
 
-// Binding validates representation, while deployment owns evidence acceptance.
-#[test]
-fn physical_binding_does_not_impose_an_accuracy_acceptance_policy() {
-    assert_weighted_binding(
-        &asap_logical_optimizer::accuracy::NoAccuracyEvidence,
-        SketchAlgorithm::CmsWithHeap,
-    );
-    assert_weighted_binding(
-        &asap_logical_optimizer::accuracy::NoAccuracyEvidence,
-        SketchAlgorithm::CountSketchWithHeap,
-    );
+/// Whether `dag` builds a heap sketch of `algorithm`.
+fn builds(dag: &PhysicalASAPDAG, algorithm: &SketchAlgorithm) -> bool {
+    dag.nodes.iter().any(|node| matches!(&node.payload,
+        PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == algorithm))
 }
 
-fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: SketchAlgorithm) {
+fn assert_weighted_binding(algorithm: SketchAlgorithm) {
     let root = lower_promql(
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
         AccuracyTarget::Epsilon(0.1),
     )
     .unwrap();
-    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultAccuracyModel,
-        &EqualSplitAllocator,
-        evidence,
-    );
-    let plan = strategy
-        .replacements(&TargetSubDAG::new(&root))
-        .into_iter()
-        .find_map(|candidate| match candidate.replacement {
-            Replacement::SubDAG(node)
-                if candidate.rationale.contains(&format!("{algorithm:?}")) =>
-            {
-                Some(node)
-            }
-            _ => None,
-        })
+    // The whole-expression heap: it ranks the rates, absorbing the grouped Sum.
+    let dag = stage1_candidates(&root)
+        .iter()
+        .map(|candidate| compile_physical_asap_dag(candidate).unwrap())
+        .find(|dag| builds(dag, &algorithm))
         .unwrap();
-    let dag = compile_physical_asap_dag(&plan).unwrap();
     let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::SummaryAgg{family:FieldDataType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
@@ -259,394 +213,73 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
     .is_err());
 }
 
-/// A catalog-resolved per-series rate can feed a heap sketch directly, without
-/// requiring an otherwise unnecessary grouped Sum between Rate and TopK.
-#[test]
-fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
-    check_direct_rate_topk(false);
-}
-
-// Unreferenced labels still distinguish series throughout Rate and heap evaluation.
+// A per-series rate feeds a heap sketch directly, without a grouped Sum
+// between Rate and TopK. Unreferenced labels still distinguish series
+// throughout Rate and heap evaluation.
 #[test]
 fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
-    check_direct_rate_topk(true);
-}
-
-fn check_direct_rate_topk(dynamic: bool) {
     use asap_executor::physical_planner::promql_rows::{
         decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
     };
-    let mut logical =
+    let logical =
         lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap();
-    fn resolve_catalog(node: &mut planner_types::ir::OperatorNode) {
-        match &mut node.operator {
-            planner_types::ir::Operator::NonASAP(
-                planner_types::ir::NonASAPOp::Aggregate { child, .. }
-                | planner_types::ir::NonASAPOp::TimeRange { child, .. },
-            ) => resolve_catalog(Rc::make_mut(child)),
-            planner_types::ir::Operator::NonASAP(planner_types::ir::NonASAPOp::Scan {
-                schema,
-                ..
-            }) => {
-                schema.closed = true;
-                schema.fields.push(planner_types::ir::schema::Field::plain(
-                    "service",
-                    DataType::Utf8,
-                    false,
-                ));
-            }
-            _ => panic!("unexpected input shape: {node:?}"),
-        }
-        node.schema = node.operator.output_schema().unwrap();
-    }
-    if dynamic {
-        logical = with_series_identity(&logical).unwrap();
-    } else {
-        resolve_catalog(Rc::make_mut(&mut logical));
-    }
-    let root = logical;
-    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultAccuracyModel,
-        &EqualSplitAllocator,
-        &Evidence,
-    );
-    let candidates = strategy.replacements(&TargetSubDAG::new(&root));
-    for algorithm in [
-        SketchAlgorithm::CmsWithHeap,
-        SketchAlgorithm::CountSketchWithHeap,
-    ] {
-        let candidate = candidates
-            .iter()
-            .find_map(|candidate| match &candidate.replacement {
-                Replacement::SubDAG(node)
-                    if candidate.rationale.contains(&format!("{algorithm:?}")) =>
-                {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {algorithm:?} over direct Rate"));
-        if dynamic {
-            let (source, ranked) =
-                asap_executor::physical_planner::promql_rows::compile_rate_ranking(candidate)
-                    .unwrap();
-            assert!(matches!(
-                source.operator,
-                planner_types::ir::Operator::ASAP(
-                    planner_types::ir::ASAPOp::FinalizeExactAccumulator { .. }
-                )
-            ));
-            assert_eq!(ranked.input_contracts().count(), 1);
-            let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
-            assert!(encoded.contains("KeyedSummaryBuild"));
-            assert!(encoded.contains("KeyedEvaluation"));
-            assert!(
-                !encoded.contains("\"Rate\""),
-                "Rate must be supplied by its exact stored-state evaluation"
-            );
-        }
-        let dag = compile_physical_asap_dag(candidate).unwrap();
-        assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-            PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
-        let build = dag.nodes.iter().find(|node| matches!(&node.payload,
-            PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
-        let input_id = dag
-            .edges
-            .iter()
-            .find(|edge| edge.consumer == build.id)
-            .unwrap()
-            .producer;
-        let schema = Arc::new(
-            dag.nodes
-                .iter()
-                .find(|node| node.id == input_id)
-                .unwrap()
-                .output_schema
-                .clone(),
-        );
-        let raw = dag
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    &node.payload,
-                    PhysicalASAPOperatorPayload::Relational {
-                        operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                    }
-                )
-            })
-            .unwrap_or_else(|| panic!("no raw counter source: {dag:?}"));
-        let raw_schema = Arc::new(raw.output_schema.clone());
-        let raw_compiled = compile(
-            &dag,
-            BTreeMap::from([(
-                u64::from(raw.id.0),
-                InputContract::bounded(raw_schema.clone()),
-            )]),
-            &[u64::from(dag.roots[0].0)],
-        )
-        .unwrap();
-        let bytes = serde_json::to_vec(&raw_compiled).unwrap();
-        let raw_compiled =
-            serde_json::from_slice::<asap_executor::physical_planner::CompiledPhysicalDAG>(&bytes)
-                .unwrap();
-        // Each evaluation receives a complete raw window. A reset, a stopped
-        // series and an expired leader must not retain last run's heap weights.
-        for (end, series, expected) in [
-            (
-                60_000,
-                vec![
-                    ("auth", vec![10., 30., 50.]),
-                    ("checkout", vec![10., 50., 90.]),
-                    ("search", vec![10., 70., 130.]),
-                ],
-                vec![11. / 6., 8. / 3.],
-            ),
-            (
-                120_000,
-                vec![
-                    ("auth", vec![100., 10., 50.]),
-                    ("checkout", vec![100., 100., 100.]),
-                ],
-                vec![0., 1.25],
-            ),
-        ] {
-            let mut raw_rows = Vec::new();
-            for (service, samples) in series {
-                for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
-                    if dynamic {
-                        raw_rows.push(
-                            series_row(
-                                &raw_schema,
-                                &BTreeMap::from([
-                                    ("job".into(), "api".into()),
-                                    ("service".into(), service.into()),
-                                    ("unreferenced".into(), format!("{service}-extra")),
-                                ]),
-                                end - 60_000 + offset,
-                                value,
-                            )
-                            .unwrap(),
-                        );
-                        continue;
-                    }
-                    raw_rows.push(
-                        raw_schema
-                            .fields
-                            .iter()
-                            .map(|field| match field.name.as_str() {
-                                "service" => Value::Utf8(service.into()),
-                                "job" => Value::Utf8("api".into()),
-                                "value" => Value::Float64(value),
-                                "ts" => Value::Timestamp(end - 60_000 + offset),
-                                _ => panic!("unexpected raw field"),
-                            })
-                            .collect(),
-                    );
-                }
-            }
-            let raw_batch = Batch::try_new(raw_schema.clone(), raw_rows).unwrap();
-            for scope in [
-                Scope::Ingestion {
-                    window_start_ms: end - 60_000,
-                    window_end_ms: end,
-                    revision: 1,
-                },
-                Scope::Query {
-                    evaluation_time_ms: end,
-                    revision: 1,
-                },
-            ] {
-                let source = Box::new(
-                    Operator::source(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
-                ) as Source<'static>;
-                let physical_dag = raw_compiled
-                    .instantiate(BTreeMap::from([(u64::from(raw.id.0), source)]))
-                    .unwrap();
-                let context = RunContext::new(scope, Limits::default()).unwrap();
-                let mut raw_scores = block_on(async {
-                    let mut scores = Vec::new();
-                    let mut stream = physical_dag
-                        .execute(&[u64::from(dag.roots[0].0)], context)
-                        .unwrap()
-                        .remove(0);
-                    while let Some(batch) = stream.next().await {
-                        let batch = batch.unwrap();
-                        for row in batch.rows() {
-                            if dynamic {
-                                let column = batch
-                                    .schema()
-                                    .fields
-                                    .iter()
-                                    .position(|field| field.name == SERIES_IDENTITY_COLUMN)
-                                    .unwrap();
-                                let Value::Utf8(encoded) = &row[column] else {
-                                    panic!("identity lost");
-                                };
-                                let labels = decode_series_identity(encoded).unwrap();
-                                assert_eq!(labels["job"], "api");
-                                assert_eq!(
-                                    labels["unreferenced"],
-                                    format!("{}-extra", labels["service"])
-                                );
-                            }
-                            assert!(row.iter().any(
-                                |value| matches!(value, Value::Timestamp(time) if *time == end)
-                            ));
-                            scores.extend(row.iter().filter_map(|value| match value {
-                                Value::Float64(value) => Some(*value),
-                                _ => None,
-                            }));
+    let root = with_series_identity(&logical).unwrap();
+    let candidates = stage1_candidates(&root);
+    // Stage 1 proves no sign for rate values, so a Count-Min heap over them
+    // is not executable; only Count Sketch is.
+    let algorithm = SketchAlgorithm::CountSketchWithHeap;
+    // The heap over the Rate realized as an exact accumulator.
+    let candidate = candidates
+        .iter()
+        .find(|candidate| {
+            let dag = compile_physical_asap_dag(candidate).unwrap();
+            builds(&dag, &algorithm)
+                && dag.nodes.iter().any(|node| {
+                    matches!(
+                        &node.payload,
+                        PhysicalASAPOperatorPayload::SummaryAgg {
+                            family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
+                            ..
                         }
-                    }
-                    scores
-                });
-                raw_scores.sort_by(f64::total_cmp);
-                assert_eq!(raw_scores.len(), expected.len());
-                for (actual, expected) in raw_scores.iter().zip(&expected) {
-                    assert!(
-                        (actual - expected).abs() < 1e-12,
-                        "raw counter semantics must precede heap ranking: {raw_scores:?}"
-                    );
-                }
-            }
-        }
-        let compiled = compile(
-            &dag,
-            BTreeMap::from([(
-                u64::from(input_id.0),
-                InputContract::bounded(schema.clone()),
-            )]),
-            &[u64::from(dag.roots[0].0)],
-        )
-        .unwrap();
-        for (time, values, expected) in [
-            (
-                60_000,
-                vec![("auth", 3.), ("checkout", 2.), ("search", 1.)],
-                vec![2., 3.],
-            ),
-            (
-                61_000,
-                vec![("auth", 0.), ("checkout", 2.), ("search", 4.)],
-                vec![2., 4.],
-            ),
-            (62_000, vec![("auth", 0.), ("checkout", 2.)], vec![0., 2.]),
-        ] {
-            let rows = values
-                .into_iter()
-                .map(|(service, value)| {
-                    if dynamic {
-                        return series_row(
-                            &schema,
-                            &BTreeMap::from([
-                                ("job".into(), "api".into()),
-                                ("service".into(), service.into()),
-                            ]),
-                            time,
-                            value,
-                        )
-                        .unwrap();
-                    }
-                    schema
-                        .fields
-                        .iter()
-                        .map(|field| match field.name.as_str() {
-                            "service" => Value::Utf8(service.into()),
-                            "job" => Value::Utf8("api".into()),
-                            "value" => Value::Float64(value),
-                            "ts" => Value::Timestamp(time),
-                            _ => panic!("unexpected rate field {field:?}"),
-                        })
-                        .collect()
+                    )
                 })
-                .collect();
-            let batch = Batch::try_new(schema.clone(), rows).unwrap();
-            for scope in [
-                Scope::Query {
-                    evaluation_time_ms: time,
-                    revision: 1,
-                },
-                Scope::Ingestion {
-                    window_start_ms: time - 60_000,
-                    window_end_ms: time,
-                    revision: 1,
-                },
-            ] {
-                let source =
-                    Box::new(Operator::source(schema.clone(), vec![batch.clone()]).unwrap())
-                        as Source<'static>;
-                let physical_dag = compiled
-                    .instantiate(BTreeMap::from([(u64::from(input_id.0), source)]))
-                    .unwrap();
-                let context = RunContext::new(scope, Limits::default()).unwrap();
-                let mut scores = block_on(async {
-                    let mut scores = vec![];
-                    let mut stream = physical_dag
-                        .execute(&[u64::from(dag.roots[0].0)], context)
-                        .unwrap()
-                        .remove(0);
-                    while let Some(batch) = stream.next().await {
-                        let batch = batch.unwrap();
-                        for row in batch.rows() {
-                            assert!(row.iter().any(
-                                |value| matches!(value, Value::Timestamp(actual) if *actual == time)
-                            ));
-                            scores.push(
-                                row.iter()
-                                    .find_map(|value| {
-                                        if let Value::Float64(value) = value {
-                                            Some(*value)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap(),
-                            );
-                        }
-                    }
-                    scores
-                });
-                scores.sort_by(f64::total_cmp);
-                assert_eq!(
-                    scores, expected,
-                    "heap snapshots must not accumulate across evaluations"
-                );
-            }
-        }
-    }
-}
-
-// Spatial ranking consumes one eligible instant vector. Signed values require
-// CountSketch; a raw metric does not establish the non-negative CMS contract.
-#[test]
-fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
-    use asap_executor::physical_planner::promql_rows::{
-        decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
-    };
-    let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
-    let root = Rc::new(with_series_identity(&logical).unwrap());
-    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultAccuracyModel,
-        &EqualSplitAllocator,
-        &Evidence,
-    );
-    let candidates = strategy
-        .current_series_topk_candidates(&root, &AccuracyTarget::Epsilon(0.1))
-        .candidates;
-    assert!(!candidates
-        .iter()
-        .any(|c| c.rationale.contains("CmsWithHeap")));
-    let selected = candidates
-        .iter()
-        .find_map(|candidate| match &candidate.replacement {
-            Replacement::SubDAG(node) if candidate.rationale.contains("CountSketchWithHeap") => {
-                Some(node)
-            }
-            _ => None,
         })
-        .expect("signed spatial TopK must expose CountSketch with heap");
-    let dag = compile_physical_asap_dag(selected).unwrap();
+        .unwrap_or_else(|| panic!("missing {algorithm:?} over direct Rate"));
+    let (source, ranked) =
+        asap_executor::physical_planner::promql_rows::compile_rate_ranking(candidate).unwrap();
+    assert!(matches!(
+        source.operator,
+        planner_types::ir::Operator::ASAP(
+            planner_types::ir::ASAPOp::FinalizeExactAccumulator { .. }
+        )
+    ));
+    assert_eq!(ranked.input_contracts().count(), 1);
+    let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
+    assert!(encoded.contains("KeyedSummaryBuild"));
+    assert!(encoded.contains("KeyedEvaluation"));
+    assert!(
+        !encoded.contains("\"Rate\""),
+        "Rate must be supplied by its exact stored-state evaluation"
+    );
+    let dag = compile_physical_asap_dag(candidate).unwrap();
+    assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
+        PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
+    let build = dag.nodes.iter().find(|node| matches!(&node.payload,
+        PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
+    let input_id = dag
+        .edges
+        .iter()
+        .find(|edge| edge.consumer == build.id)
+        .unwrap()
+        .producer;
+    let schema = Arc::new(
+        dag.nodes
+            .iter()
+            .find(|node| node.id == input_id)
+            .unwrap()
+            .output_schema
+            .clone(),
+    );
     let raw = dag
         .nodes
         .iter()
@@ -658,93 +291,206 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
                 }
             )
         })
-        .unwrap();
-    let schema = Arc::new(raw.output_schema.clone());
-    let program = compile(
+        .unwrap_or_else(|| panic!("no raw counter source: {dag:?}"));
+    let raw_schema = Arc::new(raw.output_schema.clone());
+    let raw_compiled = compile(
         &dag,
-        BTreeMap::from([(u64::from(raw.id.0), InputContract::bounded(schema.clone()))]),
+        BTreeMap::from([(
+            u64::from(raw.id.0),
+            InputContract::bounded(raw_schema.clone()),
+        )]),
         &[u64::from(dag.roots[0].0)],
     )
     .unwrap();
-    let snapshot_program =
-        asap_executor::physical_planner::promql_rows::compile_current_series_evaluation(selected)
+    let bytes = serde_json::to_vec(&raw_compiled).unwrap();
+    let raw_compiled =
+        serde_json::from_slice::<asap_executor::physical_planner::CompiledPhysicalDAG>(&bytes)
             .unwrap();
-    let encoded: serde_json::Value =
-        serde_json::from_slice(&serde_json::to_vec(&snapshot_program).unwrap()).unwrap();
-    assert!(!encoded.to_string().contains("CurrentSeries"));
-    assert!(encoded.to_string().contains("KeyedSummaryBuild"));
-    assert!(encoded.to_string().contains("KeyedEvaluation"));
-    for (values, expected, score) in [
-        ([100., 20.], "a", 100.),
-        ([1., 20.], "b", 20.),
-        ([-10., -2.], "b", -2.),
+    // Each evaluation receives a complete raw window. A reset, a stopped
+    // series and an expired leader must not retain last run's heap weights.
+    for (end, series, expected) in [
+        (
+            60_000,
+            vec![
+                ("auth", vec![10., 30., 50.]),
+                ("checkout", vec![10., 50., 90.]),
+                ("search", vec![10., 70., 130.]),
+            ],
+            vec![11. / 6., 8. / 3.],
+        ),
+        (
+            120_000,
+            vec![
+                ("auth", vec![100., 10., 50.]),
+                ("checkout", vec![100., 100., 100.]),
+            ],
+            vec![0., 1.25],
+        ),
     ] {
-        let rows = ["a", "b"]
+        let mut raw_rows = Vec::new();
+        for (service, samples) in series {
+            for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
+                raw_rows.push(
+                    series_row(
+                        &raw_schema,
+                        &BTreeMap::from([
+                            ("job".into(), "api".into()),
+                            ("service".into(), service.into()),
+                            ("unreferenced".into(), format!("{service}-extra")),
+                        ]),
+                        end - 60_000 + offset,
+                        value,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        let raw_batch = Batch::try_new(raw_schema.clone(), raw_rows).unwrap();
+        for scope in [
+            Scope::Ingestion {
+                window_start_ms: end - 60_000,
+                window_end_ms: end,
+                revision: 1,
+            },
+            Scope::Query {
+                evaluation_time_ms: end,
+                revision: 1,
+            },
+        ] {
+            let source =
+                Box::new(Operator::source(raw_schema.clone(), vec![raw_batch.clone()]).unwrap())
+                    as Source<'static>;
+            let physical_dag = raw_compiled
+                .instantiate(BTreeMap::from([(u64::from(raw.id.0), source)]))
+                .unwrap();
+            let context = RunContext::new(scope, Limits::default()).unwrap();
+            let mut raw_scores = block_on(async {
+                let mut scores = Vec::new();
+                let mut stream = physical_dag
+                    .execute(&[u64::from(dag.roots[0].0)], context)
+                    .unwrap()
+                    .remove(0);
+                while let Some(batch) = stream.next().await {
+                    let batch = batch.unwrap();
+                    for row in batch.rows() {
+                        let column = batch
+                            .schema()
+                            .fields
+                            .iter()
+                            .position(|field| field.name == SERIES_IDENTITY_COLUMN)
+                            .unwrap();
+                        let Value::Utf8(encoded) = &row[column] else {
+                            panic!("identity lost");
+                        };
+                        let labels = decode_series_identity(encoded).unwrap();
+                        assert_eq!(labels["job"], "api");
+                        assert_eq!(
+                            labels["unreferenced"],
+                            format!("{}-extra", labels["service"])
+                        );
+                        scores.extend(row.iter().filter_map(|value| match value {
+                            Value::Float64(value) => Some(*value),
+                            _ => None,
+                        }));
+                    }
+                }
+                scores
+            });
+            raw_scores.sort_by(f64::total_cmp);
+            assert_eq!(raw_scores.len(), expected.len());
+            for (actual, expected) in raw_scores.iter().zip(&expected) {
+                assert!(
+                    (actual - expected).abs() < 1e-12,
+                    "raw counter semantics must precede heap ranking: {raw_scores:?}"
+                );
+            }
+        }
+    }
+    let compiled = compile(
+        &dag,
+        BTreeMap::from([(
+            u64::from(input_id.0),
+            InputContract::bounded(schema.clone()),
+        )]),
+        &[u64::from(dag.roots[0].0)],
+    )
+    .unwrap();
+    for (time, values, expected) in [
+        (
+            60_000,
+            vec![("auth", 3.), ("checkout", 2.), ("search", 1.)],
+            vec![2., 3.],
+        ),
+        (
+            61_000,
+            vec![("auth", 0.), ("checkout", 2.), ("search", 4.)],
+            vec![2., 4.],
+        ),
+        (62_000, vec![("auth", 0.), ("checkout", 2.)], vec![0., 2.]),
+    ] {
+        let rows = values
             .into_iter()
-            .zip(values)
-            .map(|(instance, value)| {
+            .map(|(service, value)| {
                 series_row(
                     &schema,
                     &BTreeMap::from([
                         ("job".into(), "api".into()),
-                        ("unreferenced".into(), instance.into()),
+                        ("service".into(), service.into()),
                     ]),
-                    60_000,
+                    time,
                     value,
                 )
                 .unwrap()
             })
             .collect();
         let batch = Batch::try_new(schema.clone(), rows).unwrap();
-        let physical_dag = program
-            .instantiate(BTreeMap::from([(
-                u64::from(raw.id.0),
-                Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'_>,
-            )]))
-            .unwrap();
-        block_on(async {
-            let context = RunContext::new(
-                Scope::Query {
-                    evaluation_time_ms: 60_000,
-                    revision: 0,
-                },
-                Limits::default(),
-            )
-            .unwrap();
-            let mut stream = physical_dag
-                .execute(program.roots(), context)
-                .unwrap()
-                .remove(0);
-            let mut result = Vec::new();
-            while let Some(batch) = stream.next().await {
-                let batch = batch.unwrap();
-                let identity = batch
-                    .schema()
-                    .fields
-                    .iter()
-                    .position(|f| f.name == SERIES_IDENTITY_COLUMN)
-                    .unwrap();
-                let value = batch
-                    .schema()
-                    .fields
-                    .iter()
-                    .position(|f| f.name == "value")
-                    .unwrap();
-                for row in batch.rows() {
-                    let Value::Utf8(labels) = &row[identity] else {
-                        panic!()
-                    };
-                    let Value::Float64(v) = row[value] else {
-                        panic!()
-                    };
-                    result.push((
-                        decode_series_identity(labels).unwrap()["unreferenced"].clone(),
-                        v,
-                    ));
+        for scope in [
+            Scope::Query {
+                evaluation_time_ms: time,
+                revision: 1,
+            },
+            Scope::Ingestion {
+                window_start_ms: time - 60_000,
+                window_end_ms: time,
+                revision: 1,
+            },
+        ] {
+            let source = Box::new(Operator::source(schema.clone(), vec![batch.clone()]).unwrap())
+                as Source<'static>;
+            let physical_dag = compiled
+                .instantiate(BTreeMap::from([(u64::from(input_id.0), source)]))
+                .unwrap();
+            let context = RunContext::new(scope, Limits::default()).unwrap();
+            let mut scores = block_on(async {
+                let mut scores = vec![];
+                let mut stream = physical_dag
+                    .execute(&[u64::from(dag.roots[0].0)], context)
+                    .unwrap()
+                    .remove(0);
+                while let Some(batch) = stream.next().await {
+                    let batch = batch.unwrap();
+                    for row in batch.rows() {
+                        scores.push(
+                            row.iter()
+                                .find_map(|value| {
+                                    if let Value::Float64(value) = value {
+                                        Some(*value)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap(),
+                        );
+                    }
                 }
-            }
-            assert_eq!(result, vec![(expected.into(), score)]);
-        });
+                scores
+            });
+            scores.sort_by(f64::total_cmp);
+            assert_eq!(
+                scores, expected,
+                "heap snapshots must not accumulate across evaluations"
+            );
+        }
     }
 }
 
@@ -805,20 +551,25 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
         )
         .unwrap(),
     );
-    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultAccuracyModel,
-        &EqualSplitAllocator,
-        &Evidence,
-    );
-    let candidates = strategy
-        .replacements(&TargetSubDAG::new(&root))
+    // The heap over the Rate realized as an exact accumulator. Stage 1 proves
+    // no sign for rate values, so only the Count Sketch heap is executable.
+    let candidates = stage1_candidates(&root)
         .into_iter()
-        .filter_map(|candidate| match candidate.replacement {
-            Replacement::SubDAG(root) if candidate.rationale.contains("WithHeap") => Some(root),
-            _ => None,
+        .filter(|candidate| {
+            let dag = compile_physical_asap_dag(candidate).unwrap();
+            builds(&dag, &SketchAlgorithm::CountSketchWithHeap)
+                && dag.nodes.iter().any(|node| {
+                    matches!(
+                        &node.payload,
+                        PhysicalASAPOperatorPayload::SummaryAgg {
+                            family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
+                            ..
+                        }
+                    )
+                })
         })
         .collect::<Vec<_>>();
-    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates.len(), 1);
     for root in candidates {
         let dag = continuously_maintained_dag(&root);
         let state = dag

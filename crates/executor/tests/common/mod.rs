@@ -61,3 +61,30 @@ pub fn selected_dag(
     };
     root.clone()
 }
+
+/// Every whole-query candidate Stage 1's Pass 1 lists for `root` (up to
+/// 4096), composed; choices that do not compose are skipped.
+pub fn stage1_candidates(root: &Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+    use asap_logical_optimizer::pass1::logical_candidates::{
+        compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
+    };
+    use planner_types::ir::QueryRoot;
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(Rc::clone(root)))],
+        &Default::default(),
+    )
+    .unwrap();
+    enumerate_choices(&inventory, 4096)
+        .iter()
+        .filter_map(|choice| {
+            match compose_logical_candidate(&inventory, choice)
+                .ok()?
+                .remove(0)
+                .1
+            {
+                QueryRoot::Operator(node) => Some(node),
+                QueryRoot::Scalar(_) => None,
+            }
+        })
+        .collect()
+}

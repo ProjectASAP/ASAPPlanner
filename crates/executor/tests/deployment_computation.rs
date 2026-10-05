@@ -7,7 +7,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::{compile_physical_asap_dag, selected_dag};
+use common::{compile_physical_asap_dag, selected_dag, stage1_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::{ir::schema::*, types::AccuracyTarget, workload::*};
@@ -615,30 +615,25 @@ fn population_sums_and_averages_are_compensated() {
 #[test]
 fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_executor::summary_kernels::CountMinSketchAccumulator;
-    use asap_logical_optimizer::{Replacement, ReplacementStrategy, TargetSubDAG};
     let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
-    let dag = asap_logical_optimizer::ASAPStrategies::default()
-        .replacements(&TargetSubDAG::new(&root))
+    let dag = stage1_candidates(&root)
         .into_iter()
-        .find_map(|candidate| match candidate.replacement {
-            Replacement::SubDAG(node) => {
-                let dag = compile_physical_asap_dag(&node).ok()?;
-                let bare_count = dag.nodes.iter().any(|n| {
-                    matches!(
-                        &n.payload,
-                        PhysicalASAPOperatorPayload::SummaryEstimate {
-                            query: SketchStatistic::PointCount { value: None, .. }
-                        }
-                    )
-                });
-                let count_min = dag.nodes.iter().any(|n| {
-                    matches!(&n.payload, PhysicalASAPOperatorPayload::SummaryAgg {
+        .find_map(|node| {
+            let dag = compile_physical_asap_dag(&node).ok()?;
+            let bare_count = dag.nodes.iter().any(|n| {
+                matches!(
+                    &n.payload,
+                    PhysicalASAPOperatorPayload::SummaryEstimate {
+                        query: SketchStatistic::PointCount { value: None, .. }
+                    }
+                )
+            });
+            let count_min = dag.nodes.iter().any(|n| {
+                matches!(&n.payload, PhysicalASAPOperatorPayload::SummaryAgg {
                         family: FieldDataType::Sketch(kind, _), ..
                     } if kind.algorithm() == &SketchAlgorithm::Cms)
-                });
-                (bare_count && count_min).then_some(dag)
-            }
-            _ => None,
+            });
+            (bare_count && count_min).then_some(dag)
         })
         .expect("Planner lists a Count-Min candidate for count(up)");
     let state = dag
