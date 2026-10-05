@@ -411,8 +411,8 @@ async fn alternatives(sql: &str, target: AccuracyTarget) -> Vec<(String, Rc<Oper
 /// Pass 1 offers a filtered single-measure aggregate the same alternatives
 /// as the unfiltered one, each with `SummaryAgg.filter` set. All compose;
 /// an alternative binds in the executor exactly when its unfiltered
-/// counterpart does. The exact `Count` accumulator and HydraCms execute to
-/// the exact plan's counts, `b` included.
+/// counterpart does. Every alternative executes to the exact plan's
+/// counts, `b` included.
 #[tokio::test]
 async fn pass1_offers_filtered_count_alternatives() {
     // ε = 0.1 keeps the Hydra grid inside the default memory limit.
@@ -446,17 +446,7 @@ async fn pass1_offers_filtered_count_alternatives() {
         })
         .collect();
     let labels: Vec<_> = filtered.iter().map(|(label, _)| label.as_str()).collect();
-    assert_eq!(
-        labels,
-        [
-            "",
-            "ExactAggregate(Count, Count)",
-            "Cms",
-            "CountSketch",
-            "UnivMon",
-            "HydraCms"
-        ]
-    );
+    assert_eq!(labels, ["", "ExactAggregate(Count, Count)", "HydraCms"]);
     let expected = printed([
         vec![s("a"), Value::Int64(2)],
         vec![s("b"), Value::Int64(0)],
@@ -464,13 +454,8 @@ async fn pass1_offers_filtered_count_alternatives() {
     ]);
     for ((label, root), plain) in filtered.iter().zip(&plain) {
         assert_eq!(binds(root).is_ok(), binds(plain).is_ok(), "{label}");
-        if matches!(
-            label.as_str(),
-            "" | "ExactAggregate(Count, Count)" | "HydraCms"
-        ) {
-            // Few groups in a wide grid: Hydra's estimate is exact here.
-            assert_eq!(sorted(root), expected, "{label}");
-        }
+        // Few groups in a wide grid: Hydra's estimate is exact here.
+        assert_eq!(sorted(root), expected, "{label}");
     }
 }
 
