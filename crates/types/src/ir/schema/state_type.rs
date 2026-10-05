@@ -13,7 +13,8 @@
 //! [`GroupingStrategy`] is a second, orthogonal axis: how many physical
 //! instances of a summary exist across a grouped aggregate's `by`
 //! subpopulations (per-subpopulation vs. one shared Hydra instance — see
-//! `asap_logical_optimizer::pass1::grouping`). It rides on `ASAPOp::SummaryAgg` and on
+//! `asap_logical_optimizer::pass1::logical_candidates::add_hydra_alternatives`).
+//! It rides on `ASAPOp::SummaryAgg` and on
 //! sketch-valued edge types.
 
 use serde::{Deserialize, Serialize};
@@ -322,9 +323,8 @@ pub enum StatModelParams {
 // family/kind answers an intent — any family could in principle grow its own
 // per-subpopulation vs. shared-multi-subpopulation variant, so it is a
 // second, independent axis, not a member of any one family's own kind
-// vocabulary. See `asap_logical_optimizer::pass1::grouping`'s module docs for where this
-// axis actually plugs into the post-ASAP IR and the legality rules gating
-// when `SharedMultiSubpopulation` is offered as a candidate at all.
+// vocabulary. See `asap_logical_optimizer::pass1::logical_candidates::add_hydra_alternatives`
+// for when Stage 1 offers `SharedMultiSubpopulation` as a candidate.
 
 /// A shared-multi-subpopulation summary family — one physical structure
 /// serving every subpopulation of a grouped aggregate instead of one
@@ -410,8 +410,7 @@ pub enum HydraParams {
         /// Sizing knob for the one physical structure shared across every
         /// subpopulation. Correctly sizing this against an estimated
         /// subpopulation cardinality is a cost-model concern — out of scope
-        /// for the legality axis this type lives on (see
-        /// `asap_logical_optimizer::pass1::grouping`'s module docs) — so this is
+        /// for the legality axis this type lives on — so this is
         /// deliberately not derived from any cardinality estimate here.
         shared_buckets: u32,
     },
@@ -467,9 +466,8 @@ pub fn hydra_kind_for(algorithm: &SketchAlgorithm) -> Option<HydraKind> {
 /// `HydraParams` fields. `None` when `per_subpopulation_params` doesn't
 /// belong to the [`SketchAlgorithm`] `kind` wraps: a caller bug, since
 /// [`hydra_kind_for`] and the algorithm a `SketchParams` came from must
-/// agree; callers that got both from the same already-ranked
-/// `Realization` (as `asap_logical_optimizer::pass1::grouping` does) cannot hit
-/// this.
+/// agree; callers that got both from the same `Realization` (as Stage 1's
+/// `add_hydra_alternatives` does) cannot hit this.
 ///
 /// This function is generic over which inner sketch type `kind` wraps
 /// precisely because [`SketchParams`] already is: it destructures whichever

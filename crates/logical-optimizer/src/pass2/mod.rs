@@ -6,7 +6,5 @@
 //! ([`window_composition`]).
 
 pub mod identical_expressions;
-pub mod reconciliation;
 pub mod summary_capability;
-pub mod topk_reuse;
 pub mod window_composition;
