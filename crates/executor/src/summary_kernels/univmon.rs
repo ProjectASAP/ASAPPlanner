@@ -280,7 +280,7 @@ mod tests {
     /// sizing it is within 1% of a Zipf stream's true L2 norm.
     #[test]
     fn l2_is_layer0_f2_within_the_certified_bound() {
-        use asap_logical_optimizer::pass1::replacement::default_size_params;
+        use asap_logical_optimizer::pass1::realization::default_size_params;
         use planner_types::ir::operator::agg_intent::default_cardinality;
         use planner_types::ir::schema::{SketchAlgorithm, SketchParams};
         let SketchParams::UnivMon {
