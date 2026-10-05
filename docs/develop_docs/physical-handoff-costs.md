@@ -11,9 +11,10 @@ calibration, and ranking remain in the mapping crate. handoff traffic/write work
 is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
 collapsed into the generic CPU/byte resource container.
 
-The physical-plan adapter accepts an optional `PhysicalHandoffProfile` in the
-immutable `PhysicalEvidenceSnapshot`. With no profile, these
-dimensions remain unestimated and the existing resource objective is preserved.
+`asap_plan_selection::cost::physical_handoff_cost::estimate_physical_handoffs` prices a
+deployment-supplied `PhysicalHandoffProfile`. Stage 3 does not read it: the
+physical-plan adapter that did (`PhysicalPlanCostModel`) was removed with the
+legacy cost model. With no profile, these dimensions remain unestimated.
 
 The profile's `plans` list binds handoffs to complete physical alternatives.
 Each plan supplies its `root` and a `nodes` map containing every physical node,
