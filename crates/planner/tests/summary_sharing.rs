@@ -5,9 +5,9 @@ use asap_types::ir::{ASAPOp, OperatorNode};
 use std::rc::Rc;
 
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_optimizer::accuracy::{AccuracyModel, DefaultAccuracyModel};
 use asap_logical_optimizer::pass1::realization::{default_size_params, DEFAULT_DELTA};
 use asap_plan_selection::PlanningModels;
+use asap_plan_selection::{AccuracyModel, DefaultAccuracyModel};
 use asap_planner::pass::{PlanOutput, QueryPlan};
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::operator::agg_intent::default_quantile;

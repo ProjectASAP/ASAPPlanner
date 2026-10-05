@@ -10,8 +10,9 @@
 //! - [`pass1`] — local alternatives per target sub-DAG
 //!   ([`pass1::logical_candidates`], the stage pipeline's Stage 1 entry point).
 //! - [`pass2`] — ASAP-aware sharing across targets.
-//! - [`accuracy`] — the analytical accuracy model: per-family error bounds and
-//!   sizing ([`accuracy::estimators`]).
+//! - [`accuracy`] — the analytical accuracy of each summary family: error
+//!   bounds and sizing ([`accuracy::estimators`]), which Stage 3's accuracy
+//!   model delegates to.
 //!
 //! **Common sub-expression elimination (CSE) of identical sub-DAGs is not
 //! implemented here.** It runs over the pre-ASAP IR itself
@@ -28,7 +29,6 @@ pub mod pass2;
 mod test_support;
 
 pub use accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
-    PropagationStats, WorkloadAccuracyEvidence,
+    AccuracyEvidenceProvider, NoAccuracyEvidence, PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use pass1::realization::{has_subpopulations, summary_candidates, Realization};
