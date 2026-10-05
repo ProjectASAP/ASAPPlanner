@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use asap_logical_optimizer::accuracy::{AccuracyModel, DefaultAccuracyModel};
+use asap_plan_selection::{AccuracyModel, DefaultAccuracyModel};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::properties::ErrorMetric;

@@ -2,6 +2,7 @@
 //! that computes cost. Cargo enforces the stage order: this crate depends on
 //! `asap-types`, Stage 1 and Stage 2, never on the facade or the executor.
 //!
+//! - [`accuracy`] — the accuracy model each estimate is checked with.
 //! - [`cost`] — analytical pricing, evaluation rates from recurrence, and the
 //!   physical lowering and storage I/O profiles a deployment can price.
 //!
@@ -37,9 +38,12 @@
 //! there). [`select_exhaustive`] builds and prices every combination, for
 //! display and for checking the program. [`plan_stages`] runs the whole
 //! pipeline from the frontends' roots.
+pub mod accuracy;
 pub mod cost;
 #[cfg(test)]
 mod test_support;
+
+pub use accuracy::{AccuracyModel, DefaultAccuracyModel};
 
 pub use asap_types::deployment::DeploymentCapabilities;
 pub use cost::recurrence::{evaluation_rate_of, EvaluationRate, RecurrenceError};
@@ -65,9 +69,7 @@ use crate::cost::analytical_cost::{
 use crate::cost::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
-use asap_logical_optimizer::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
-};
+use asap_logical_optimizer::accuracy::{AccuracyEvidenceProvider, NoAccuracyEvidence};
 use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
     read_targets, LocalLogicalCandidates, LogicalCandidateError,
