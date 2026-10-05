@@ -181,7 +181,9 @@ impl AggregateCore for UnivMonAccumulator {
                 value: None,
             } => self.inner.calc_l1(),
             SketchStatistic::Cardinality => self.inner.calc_card(),
-            SketchStatistic::FrequencyL2 => self.inner.calc_l2(),
+            // Layer 0 sees the whole stream; its row-median F₂ is the readout
+            // the planner certifies (`calc_l2` is the heavy-hitter G-sum).
+            SketchStatistic::FrequencyL2 => self.inner.l2_sketch_layers[0].get_l2(),
             SketchStatistic::FrequencyEntropy => self.inner.calc_entropy(),
             other => return Err(format!("UnivMon does not answer {other:?}").into()),
         })
@@ -272,6 +274,47 @@ mod tests {
         ] {
             assert!((restored.estimate(&statistic).unwrap() - expected).abs() < 0.01);
         }
+    }
+
+    /// L2 reads layer 0's F₂ estimate, and at the planner's (0.01, 0.01)
+    /// sizing it is within 1% of a Zipf stream's true L2 norm.
+    #[test]
+    fn l2_is_layer0_f2_within_the_certified_bound() {
+        use asap_logical_optimizer::pass1::replacement::default_size_params;
+        use planner_types::ir::operator::agg_intent::default_cardinality;
+        use planner_types::ir::schema::{SketchAlgorithm, SketchParams};
+        let SketchParams::UnivMon {
+            heap_size,
+            sketch_rows,
+            sketch_cols,
+            layers,
+        } = default_size_params(SketchAlgorithm::UnivMon, &default_cardinality(), 0.01, 0.01)
+        else {
+            unreachable!()
+        };
+        let mut state = UnivMonAccumulator::new(
+            heap_size as usize,
+            sketch_rows as usize,
+            sketch_cols as usize,
+            usize::from(layers),
+        )
+        .unwrap();
+        // Zipf(1) frequencies over 5,000 keys: key i occurs ⌊10,000 / i⌋ times.
+        let mut f2 = 0.0;
+        for key in 1..=5_000u32 {
+            let count = 10_000 / key;
+            f2 += f64::from(count) * f64::from(count);
+            for _ in 0..count {
+                state.insert_sample(f64::from(key)).unwrap();
+            }
+        }
+        let l2 = state.estimate(&SketchStatistic::FrequencyL2).unwrap();
+        assert_eq!(l2, state.sketch().l2_sketch_layers[0].get_l2());
+        assert!(
+            (l2 - f2.sqrt()).abs() <= 0.01 * f2.sqrt(),
+            "{l2} vs {}",
+            f2.sqrt()
+        );
     }
 
     /// Retained variable-length identities contribute to the runtime memory reservation.

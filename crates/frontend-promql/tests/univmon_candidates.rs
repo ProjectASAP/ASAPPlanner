@@ -68,11 +68,12 @@ fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 
 #[test]
 fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees() {
-    // Equal data, grouping and window produce one state independently of evaluation.
+    // Equal data, grouping, window and requirement produce one state
+    // independently of evaluation: UnivMon is sized for L2 whatever it reads.
     let accuracy = AccuracyTarget::Epsilon(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
-        ("count_over_time(m[5m])", AccuracyTarget::Exact),
+        ("count_over_time(m[5m])", accuracy.clone()),
         ("l2_over_time(m[5m])", accuracy.clone()),
         ("entropy_over_time(m[5m])", accuracy),
     ]
@@ -114,11 +115,14 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
             let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
                 panic!()
             };
-            assert!(
+            // Production certifies L2 from layer 0's F₂, but has no
+            // calibrated bound for distinct count or entropy.
+            assert_eq!(
                 DefaultAccuracyModel
                     .local_guarantee(family, query)
-                    .is_none(),
-                "production has no calibrated error bound"
+                    .map(|g| g.metric),
+                (*index == 2).then_some(ErrorMetric::RelativeValue),
+                "{query:?}"
             );
         }
         post_asap_dag(root);
@@ -129,7 +133,7 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
 fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // An unmeasured heuristic remains inspectable but is never certified or
     // automatically selected for a caller-visible bounded-error result.
-    for query in ["entropy_over_time(m[5m])", "l2_over_time(m[5m])"] {
+    for query in ["entropy_over_time(m[5m])"] {
         for target in [
             AccuracyTarget::Exact,
             AccuracyTarget::Epsilon(0.02),

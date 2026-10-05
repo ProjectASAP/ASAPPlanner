@@ -121,7 +121,7 @@ The built-in models currently include:
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
 | KMV / Theta | Parameter-derived cardinality bounds using the registered variance/Chebyshev model at 99% confidence |
-| UnivMon | Exact unit-update total for the supported evaluation; no universal guarantee for all its statistics |
+| UnivMon | Exact unit-update total; relative L2 bound from layer 0's row-median F2 (Chebyshev per row, binomial median tail), requiring odd depth, power-of-two width and disjoint hash slices (`d·log2(w) + d ≤ 128`) under an idealized hash; no guarantee for distinct count or entropy |
 | Other families/evaluations | No default certificate where no accuracy model is registered |
 
 This table describes Planner's registered contracts, not independent

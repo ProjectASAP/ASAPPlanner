@@ -25,12 +25,21 @@ readout. External differential tests must establish the engine's semantics.
 
 The existing `asap_sketchlib::UnivMon` implementation supplies `calc_card`,
 `calc_l1`, `calc_l2`, and `calc_entropy`. Its entropy uses log base 2. Its L1
-counter is exact for nonnegative updates; the other estimators are heuristic.
+counter is exact for nonnegative updates; `calc_card`, `calc_l2` and
+`calc_entropy` are heavy-hitter heuristics. The executor therefore reads L2
+from layer 0's CountSketch instead (`get_l2`, the square root of the row
+median of `Σ C²`), which sees the whole stream and is the textbook F2
+estimator. With `w` columns each row's F2 is within `√(20/w)` relative error
+except with probability 0.1 (Chebyshev), and the median of `d` odd rows fails
+with the binomial tail; the L2 bound is `1 − √(1 − √(20/w))`. This needs a
+power-of-two `w` and `d·log2(w) + d ≤ 128`, so the rows' slices of
+sketchlib's one 128-bit hash are disjoint, and assumes an idealized hash.
 The parameter contract records heap size, sketch rows, sketch columns and
-number of layers. Default dimensions define a candidate configuration, not
-an epsilon guarantee. A deployment accuracy model must supply calibrated
-evidence before an approximate readout can satisfy an accuracy target. Without
-that evidence, the Planner keeps the exact sub-DAG. HLL/Theta/KMV remain
+number of layers; rows and columns are sized from the requirement by
+inverting that bound for every readout, so consumers that share one state
+read identical states. A deployment accuracy model must supply calibrated
+evidence before a distinct-count or entropy readout can satisfy an accuracy
+target. Without that evidence, the Planner keeps the exact sub-DAG. HLL/Theta/KMV remain
 cardinality alternatives, and exact count remains the cheaper first count
 candidate.
 

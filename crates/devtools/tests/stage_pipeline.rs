@@ -266,8 +266,9 @@ fn selected_label(document: &Value) -> String {
 }
 
 /// Example 2: the three SQL statistics over `flows` lower through the SQL
-/// frontend, are reported as SQL, and plan. The built-in models have no
-/// UnivMon accuracy model, so the selected plan is the exact one with the
+/// frontend, are reported as SQL, and plan. The built-in models certify
+/// UnivMon only for the L2 norm (Q3), and a UnivMon sized for ε = 0.01 costs
+/// more than exact counting, so the selected plan is the exact one with the
 /// shared input (recorded, not required by the design).
 #[test]
 fn example2_plans_the_sql_workload() {
