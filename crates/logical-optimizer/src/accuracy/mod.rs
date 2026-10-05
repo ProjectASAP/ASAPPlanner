@@ -2,24 +2,16 @@
 //!
 //! Estimator models derive local guarantees ([`local_guarantee`]) and the
 //! conservative target check ([`satisfies`]); Stage 3's accuracy model
-//! (`asap_plan_selection::DefaultAccuracyModel`) delegates to them. Evidence
-//! supplies scoped contracts. Unknown evidence may retain a candidate but does
-//! not authorize selection. See `docs/design_docs/concepts/accuracy-models.md`
+//! (`asap_plan_selection::DefaultAccuracyModel`) delegates to them. An unknown
+//! bound may retain a candidate but does not authorize selection. See `docs/design_docs/concepts/accuracy-models.md`
 //! for the design.
 
 pub mod estimators;
-pub mod evidence;
-
-pub use evidence::{
-    AccuracyEvidenceProvider, EstimatorContract, NoAccuracyEvidence, PropagationStats,
-    QuantileInputDomain, WorkloadAccuracyEvidence,
-};
 
 use asap_types::ir::properties::{
     BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
-use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
 pub use estimators::{local_guarantee, sketch_guarantee};
