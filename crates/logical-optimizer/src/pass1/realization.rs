@@ -156,19 +156,12 @@ pub fn default_size_params(
     crate::accuracy::estimators::size_params(kind, intent, eps, delta)
 }
 
-/// The physical input consumed by one summary realization. Most summaries
-/// consume the logical aggregate's immediate child and summarize its declared
-/// input value. Composite realizations can instead consume a larger
-/// logical sub-DAG and bind a different key or value.
+/// The physical input consumed by one summary realization: a larger logical
+/// sub-DAG than the aggregate's immediate child, bound with its own key or
+/// value.
 pub(crate) struct PhysicalSummaryInput {
     pub(crate) child: Rc<OperatorNode>,
     pub(crate) input: SummaryUpdate,
-}
-
-pub(crate) enum PhysicalSummaryInputRuleResult {
-    NotApplicable,
-    Realized(PhysicalSummaryInput),
-    Unsupported(&'static str),
 }
 
 /// Realize the composite heavy-hitter realization for
@@ -179,19 +172,19 @@ pub(crate) fn realize_keyed_additive_summary_input(
     family: &FieldDataType,
     output_reduction: &Reduction,
     child: &Rc<OperatorNode>,
-) -> PhysicalSummaryInputRuleResult {
+) -> Option<PhysicalSummaryInput> {
     if !matches!(intent, AggIntent::TopK { .. }) {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
+        return None;
     }
     let FieldDataType::Sketch(kind, _) = family else {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
+        return None;
     };
     let heap_algorithm = kind.algorithm();
     if !matches!(
         heap_algorithm,
         SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
     ) {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
+        return None;
     }
     let Some(NonASAPOp::Aggregate {
         reduction,
@@ -201,7 +194,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         ..
     }) = child.non_asap()
     else {
-        return PhysicalSummaryInputRuleResult::NotApplicable;
+        return None;
     };
     let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
         && matches!(raw_child.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
@@ -216,13 +209,12 @@ pub(crate) fn realize_keyed_additive_summary_input(
             Some(index) => match schema_column_ref(raw_child, *index) {
                 Some(column) => column,
                 None => {
-                    return PhysicalSummaryInputRuleResult::Unsupported(
-                        "sum-ranked Top-K value column is outside the raw input schema",
-                    )
+                    // Sum-ranked Top-K value column is outside the raw input schema.
+                    return None;
                 }
             },
         }),
-        _ => return PhysicalSummaryInputRuleResult::NotApplicable,
+        _ => return None,
     };
     let weight_domain = match measures.as_slice() {
         [AggIntent::Count { .. }] => WeightDomain::NonNegative {
@@ -236,9 +228,8 @@ pub(crate) fn realize_keyed_additive_summary_input(
     if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
         && !matches!(weight_domain, WeightDomain::NonNegative { .. })
     {
-        return PhysicalSummaryInputRuleResult::Unsupported(
-            "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
-        );
+        // Value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values.
+        return None;
     }
     let subpopulation_columns = match output_reduction {
         Reduction::PerEntity => vec![],
@@ -257,9 +248,8 @@ pub(crate) fn realize_keyed_additive_summary_input(
                 .map(|index| schema_column_ref(raw_child, *index))
                 .collect::<Option<Vec<_>>>()
             else {
-                return PhysicalSummaryInputRuleResult::Unsupported(
-                    "ranked item column is outside the raw input schema",
-                );
+                // Ranked item column is outside the raw input schema.
+                return None;
             };
             let item_columns: Vec<_> = columns
                 .into_iter()
@@ -267,9 +257,8 @@ pub(crate) fn realize_keyed_additive_summary_input(
                 .collect();
             match item_columns.as_slice() {
                 [] => {
-                    return PhysicalSummaryInputRuleResult::Unsupported(
-                        "subpopulation columns consume the complete ranked item identity",
-                    )
+                    // Subpopulation columns consume the complete ranked item identity.
+                    return None;
                 }
                 [column] => SummaryInputExpr::Column(column.clone()),
                 _ => SummaryInputExpr::Tuple(
@@ -281,12 +270,11 @@ pub(crate) fn realize_keyed_additive_summary_input(
             }
         }
         Reduction::Reduce(_) => {
-            return PhysicalSummaryInputRuleResult::Unsupported(
-                "an empty or without grouping does not identify ranked items",
-            )
+            // An empty or without grouping does not identify ranked items.
+            return None;
         }
     };
-    PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
+    Some(PhysicalSummaryInput {
         child: Rc::clone(raw_child),
         input: SummaryUpdate {
             item: Some(item),
