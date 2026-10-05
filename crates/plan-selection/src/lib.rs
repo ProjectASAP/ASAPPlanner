@@ -2029,6 +2029,13 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
                 u64::from(*depth) + 1,
                 8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
             ),
+            // An insert reaches about two layers; each updates `d` rows'
+            // counters and sign-checks, then its heap.
+            params @ SketchParams::UnivMon { sketch_rows, .. } => (
+                2 * (2 * u64::from(*sketch_rows) + 4),
+                asap_logical_optimizer::pass1::replacement::sketch_state_bytes(params)
+                    .unwrap_or(u64::MAX),
+            ),
             _ => (1, 1_024),
         },
         _ => (1, 8),
@@ -2464,6 +2471,53 @@ mod tests {
             .map(|n| std::rc::Rc::as_ptr(&n))
             .collect();
         assert_eq!(states.len(), 1);
+    }
+
+    /// #509 Example 2's requirements on one UnivMon each: the built-in model
+    /// certifies the L2 norm (Q3) from layer 0's F₂, but neither the
+    /// distinct count (Q1) nor the entropy (Q2).
+    #[test]
+    fn univmon_certifies_l2_but_not_distinct_count_or_entropy() {
+        for (query, epsilon, certified) in [
+            ("distinct_over_time(src[1m])", 0.02, false),
+            ("entropy_over_time(src[1m])", 0.05, false),
+            ("l2_over_time(src[1m])", 0.01, true),
+        ] {
+            let target = AccuracyTarget::EpsilonDelta {
+                epsilon,
+                delta: 0.01,
+            };
+            let root = lower_promql(query, target.clone());
+            let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+            let inventory =
+                asap_logical_optimizer::pass1::logical_candidates::enumerate_local_logical_candidates(
+                    vec![(0, QueryRoot::Operator(root))],
+                    &Default::default(),
+                )
+                .unwrap();
+            let choice: Vec<_> = inventory
+                .targets
+                .iter()
+                .map(|t| {
+                    t.alternatives
+                        .iter()
+                        .position(|a| matches!(a, asap_logical_optimizer::Realization::Sketch(kind) if *kind.algorithm() == SketchAlgorithm::UnivMon))
+                        .expect("a UnivMon alternative")
+                })
+                .collect();
+            let (_, candidate) = realize_choice(&inventory, &choice).unwrap();
+            let violation = accuracy_violation(
+                &candidate,
+                &[every_10s(Some(target))],
+                &PlanningModels::builtin(),
+            );
+            if certified {
+                assert_eq!(violation, None, "{query}");
+            } else {
+                let reason = violation.expect(query);
+                assert!(reason.contains("no accuracy model for UnivMon"), "{reason}");
+            }
+        }
     }
 
     /// A candidate that cannot be checked is rejected with its reason; the

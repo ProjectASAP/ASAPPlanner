@@ -160,7 +160,13 @@ fn execute(
             window_end_ms: 6000,
             revision: 1,
         },
-        Limits::default(),
+        // A UnivMon sized for L2 at ε = 0.02 holds 16 layers of 5 × 2^14
+        // counters (≈ 10 MiB) per population, past the default 64 MiB for
+        // this test's five series.
+        Limits {
+            max_bytes: 1 << 30,
+            ..Limits::default()
+        },
     )
     .unwrap();
     block_on(async {

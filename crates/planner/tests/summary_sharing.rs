@@ -559,9 +559,10 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
 /// #509 Example 2 through the stage pipeline: distinct count, entropy and L2
 /// of one input over one window, with requirements ε = 0.02, 0.05 and 0.01.
 /// The summary-capability variant gives the three targets one UnivMon.
-/// Certified by the synthetic model, that one state serves all three
-/// queries. The built-in model has no sound bound for these readouts, so
-/// Stage 3 rejects every UnivMon plan.
+/// Certified by the synthetic model, the plan whose three estimates read one
+/// UnivMon build is valid; building it (≈ 28 updates per row) still costs
+/// more than exact counting, so it is not selected. The built-in model
+/// certifies only the L2 readout, and no UnivMon is selected either.
 #[tokio::test]
 async fn frequency_moments_share_one_univmon_in_the_stage_pipeline() {
     let queries = [
@@ -600,10 +601,19 @@ async fn frequency_moments_share_one_univmon_in_the_stage_pipeline() {
     };
 
     let certified = plan(PlanningModels::builtin().with_accuracy(&UnivMonEvidence)).await;
-    let states = univmon_states(&certified);
-    assert_eq!(states.len(), 3, "{:?}", certified.selection);
-    assert!(states.iter().all(|state| Rc::ptr_eq(state, &states[0])));
-    assert_eq!(unique_deployments(&certified), 1);
+    let selection = certified.selection.as_ref().expect("a selection");
+    assert!(
+        selection.costs.values().any(|cost| {
+            let count = |prefix: &str| {
+                cost.per_node
+                    .values()
+                    .filter(|node| node.detail.starts_with(prefix))
+                    .count()
+            };
+            count("build UnivMon") == 1 && count("estimate") == 3
+        }),
+        "{selection:?}"
+    );
 
     let builtin = plan(PlanningModels::builtin()).await;
     assert!(univmon_states(&builtin).is_empty());
