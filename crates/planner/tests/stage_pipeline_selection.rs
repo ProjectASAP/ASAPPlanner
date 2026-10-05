@@ -430,8 +430,8 @@ async fn sql_hydra_count_dp_equals_exhaustive() {
         .targets
         .iter()
         .any(|t| t.groupings.iter().any(|g| *g != Default::default())));
-    // (pass-through, Count acc, CMS, CountSketch, UnivMon, HydraCms) × (pass-through, KLL, DDSketch).
-    assert_dp_matches_exhaustive(&inventory, &workload, 18);
+    // (pass-through, Count acc, HydraCms) × (pass-through, KLL, DDSketch).
+    assert_dp_matches_exhaustive(&inventory, &workload, 9);
 }
 
 /// Filtered single-measure aggregates (`FILTER (WHERE …)`) get the same
@@ -470,8 +470,8 @@ async fn sql_filtered_aggregates_dp_equals_exhaustive() {
         roots.push((index, QueryRoot::Operator(root)));
     }
     let inventory = stage1_logical_candidates(roots, &Default::default(), &[]).expect("Stage 1");
-    // (pass-through, Count acc, CMS, CountSketch, UnivMon, HydraCms) × (pass-through, KLL, DDSketch).
-    assert_dp_matches_exhaustive(&inventory, &workload, 18);
+    // (pass-through, Count acc, HydraCms) × (pass-through, KLL, DDSketch).
+    assert_dp_matches_exhaustive(&inventory, &workload, 9);
     // Every filtered alternative builds through Stages 1 and 2.
     let exhaustive = select_exhaustive(
         &inventory,
