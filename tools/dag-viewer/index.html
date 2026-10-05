@@ -47,7 +47,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
-.wrap { padding-inline: 16px; padding-block: 18px 32px; max-width: 1680px; margin-inline: auto; display: grid; gap: 16px; }
+.wrap { padding-inline: 16px; padding-block: 18px 32px; max-width: 1920px; margin-inline: auto; display: grid; gap: 16px; }
 header { display: grid; gap: 10px; }
 h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter-spacing: 0.01em; margin: 0; text-wrap: balance; }
 .lede { margin: 0; color: var(--muted); max-width: 78ch; }
@@ -63,7 +63,8 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .eyebrow { font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; font-size: 12px; color: var(--muted); }
 .panel-head h2 { font-family: var(--font-display); font-weight: 600; font-size: 16px; margin: 0; }
-.rank { list-style: none; margin: 0; padding: 6px; max-height: 760px; overflow-y: auto; display: grid; gap: 4px; }
+.rank-panel { position: sticky; top: 12px; }
+.rank { list-style: none; margin: 0; padding: 6px; max-height: calc(100vh - 120px); overflow-y: auto; display: grid; gap: 4px; }
 .rank button { width: 100%; text-align: left; font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; cursor: pointer; display: grid; grid-template-columns: 34px minmax(0,1fr) auto; gap: 2px 8px; align-items: baseline; }
 .rank button:hover { background: var(--panel-2); }
 .rank button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
@@ -76,12 +77,13 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 .chip.selected { color: var(--ok); background: var(--ok-soft); }
 .chip.invalid { color: var(--bad); background: var(--bad-soft); }
 .chip.costlier { color: var(--warn); background: var(--warn-soft); }
-.lanes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; min-width: 0; }
-.lane .panel-head { min-height: 64px; }
+/* Stage 0, 1 and 2 stack top to bottom, each as wide as the page allows. */
+.lanes { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+.lane .panel-head { align-items: center; }
 .lane select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; min-width: 0; }
 .lane-meta { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); min-height: 30px; overflow-wrap: anywhere; }
 .lane-meta b { color: var(--fg); font-family: var(--font-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
-.cy { height: 640px; width: 100%; }
+.cy { height: 560px; width: 100%; }
 .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); padding: 2px 2px; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; border: 1.5px solid; }
 .details { padding: 12px; display: grid; gap: 10px; }
@@ -108,8 +110,7 @@ pre { font-family: var(--font-mono); font-size: 12px; background: var(--panel-2)
 .status { color: var(--muted); }
 .error { color: var(--bad); }
 footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
-@media (max-width: 1280px) { .lanes { grid-template-columns: minmax(0, 1fr); } .cy { height: 520px; } }
-@media (max-width: 820px) { .main { grid-template-columns: minmax(0, 1fr); } .rank { max-height: 340px; } .cy { height: 460px; } }
+@media (max-width: 820px) { .main { grid-template-columns: minmax(0, 1fr); } .rank-panel { position: static; } .rank { max-height: 340px; } .cy { height: 460px; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .btn { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
@@ -167,7 +168,7 @@ topk by (job) (10, sum_over_time(http_requests_total[1m]))</textarea>
   </header>
 
   <div class="main">
-    <section class="panel" aria-labelledby="rank-title">
+    <section class="panel rank-panel" aria-labelledby="rank-title">
       <div class="panel-head"><h2 id="rank-title">Stage 3 · plans by cost</h2><span class="eyebrow" id="cost-unit"></span></div>
       <div class="lane-meta" id="shown-of" hidden></div>
       <ol class="rank" id="rank"></ol>
