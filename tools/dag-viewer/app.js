@@ -1,5 +1,6 @@
 // ASAPPlanner Stage Viewer: an asap-stage-pipeline/v1 document as a ranked
-// Stage 3 list beside three DAG lanes (Stage 0 → 1 → 2), details below.
+// Stage 3 list beside three DAG lanes stacked top to bottom (Stage 0, then 1,
+// then 2), details below.
 // Document parsing, ranking and labels live in stages.js (tested);
 // node-style.js groups operator kinds. The same files run in the published
 // artifact.
