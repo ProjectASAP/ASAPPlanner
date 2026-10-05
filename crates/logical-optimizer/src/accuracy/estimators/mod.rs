@@ -91,7 +91,7 @@ pub(super) fn local_guarantee(
                 hydra_shared_grid_failure_probability: Some((-f64::from(*shared_rows)).exp()),
                 ..Default::default()
             };
-            Some(crate::pass1::grouping::hydra_guarantee(&inner, &stats))
+            Some(hydra_guarantee(&inner, &stats))
         }
         // No accuracy model for the other shared groupings.
         FieldDataType::Sketch(..) => None,
@@ -186,7 +186,7 @@ impl<'a> EstimatorAccuracy<'a> {
         target: Option<&AccuracyTarget>,
     ) -> Self {
         let (epsilon, delta) = target
-            .map(crate::pass1::replacement::accuracy_budget)
+            .map(crate::pass1::realization::accuracy_budget)
             .unwrap_or((0.0, 0.0));
         Self {
             base,
@@ -255,5 +255,95 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
     }
     fn answers(&self, statistic: &SketchStatistic, guarantee: &ResultGuarantee) -> bool {
         self.base.answers(statistic, guarantee)
+    }
+}
+
+/// Compose the inner per-subpopulation guarantee with Hydra's outer shared
+/// grid. The paper's collision term depends on deployment/data statistics;
+/// keeping those leaves symbolic makes the formula explicit while ensuring
+/// target satisfaction fails closed until a caller supplies them.
+pub(crate) fn hydra_guarantee(
+    inner: &ResultGuarantee,
+    stats: &PropagationStats,
+) -> ResultGuarantee {
+    let mut provenance = inner.provenance.clone();
+    provenance.extend(stats.evidence_provenance.clone());
+    provenance.push(GuaranteeSource::ChildGuarantee {
+        input_index: 0,
+        guarantee: Box::new(inner.clone()),
+    });
+    if stats.hydra_shared_grid_collision_bound.is_none() {
+        provenance.push(GuaranteeSource::UnavailableStatistic {
+            statistic: "hydra_shared_grid_collision_bound".into(),
+        });
+    }
+    if stats.hydra_shared_grid_failure_probability.is_none() {
+        provenance.push(GuaranteeSource::UnavailableStatistic {
+            statistic: "hydra_shared_grid_failure_probability".into(),
+        });
+    }
+    provenance.push(GuaranteeSource::CompositionStep {
+        operator: CompositionOperator::ApproximateAggregate,
+        rule: "hydra_shared_grid_union_bound".into(),
+    });
+    ResultGuarantee {
+        metric: inner.metric,
+        bound: BoundExpr::Sum {
+            terms: vec![
+                inner.bound.clone(),
+                stats.hydra_shared_grid_collision_bound.map_or_else(
+                    || BoundExpr::Unknown {
+                        statistic: "hydra_shared_grid_collision_bound".into(),
+                    },
+                    |value| BoundExpr::Constant { value },
+                ),
+            ],
+        },
+        failure_probability: ProbabilityExpr::UnionBound {
+            terms: vec![
+                inner.failure_probability.clone(),
+                stats.hydra_shared_grid_failure_probability.map_or_else(
+                    || ProbabilityExpr::Unknown {
+                        statistic: "hydra_shared_grid_failure_probability".into(),
+                    },
+                    |value| ProbabilityExpr::Constant { value },
+                ),
+            ],
+        },
+        provenance,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hydra_composes_inner_and_shared_grid_error_symbolically() {
+        let inner = ResultGuarantee {
+            metric: ErrorMetric::Frequency,
+            bound: BoundExpr::Constant { value: 0.01 },
+            failure_probability: ProbabilityExpr::Constant { value: 0.02 },
+            provenance: vec![],
+        };
+        let composed = hydra_guarantee(&inner, &PropagationStats::default());
+
+        assert_eq!(composed.metric, ErrorMetric::Frequency);
+        assert!(matches!(
+            composed.bound,
+            BoundExpr::Sum { ref terms }
+                if matches!(terms.as_slice(), [
+                    BoundExpr::Constant { value },
+                    BoundExpr::Unknown { statistic },
+                ] if *value == 0.01 && statistic == "hydra_shared_grid_collision_bound")
+        ));
+        assert!(matches!(
+            composed.failure_probability,
+            ProbabilityExpr::UnionBound { ref terms }
+                if matches!(terms.as_slice(), [
+                    ProbabilityExpr::Constant { value },
+                    ProbabilityExpr::Unknown { statistic },
+                ] if *value == 0.02 && statistic == "hydra_shared_grid_failure_probability")
+        ));
     }
 }

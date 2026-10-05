@@ -403,7 +403,7 @@ pub trait CostModel {
     }
 
     /// Rank `candidates` (as returned by
-    /// [`summary_candidates`](asap_logical_optimizer::pass1::replacement::summary_candidates)) for
+    /// [`summary_candidates`](asap_logical_optimizer::pass1::realization::summary_candidates)) for
     /// `intent`, best choice first.
     ///
     /// Implementations MAY reorder freely, but MUST return exactly the input
@@ -771,7 +771,7 @@ fn hydra_grid_cells(params: &HydraParams) -> f64 {
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
 /// order.
 ///
-/// [`summary_candidates`]: asap_logical_optimizer::pass1::replacement::summary_candidates
+/// [`summary_candidates`]: asap_logical_optimizer::pass1::realization::summary_candidates
 pub struct DefaultCostModel;
 
 impl CostModel for DefaultCostModel {
@@ -880,7 +880,7 @@ impl CostModel for DefaultCostModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_logical_optimizer::pass1::replacement::summary_candidates;
+    use asap_logical_optimizer::pass1::realization::summary_candidates;
     use asap_types::ir::operator::agg_intent::default_cardinality;
 
     #[test]
