@@ -310,11 +310,14 @@ fn count_item<'a>(
         })
 }
 
-/// The input and update of a whole-expression top-k over `target`'s inner
-/// aggregate, by the keyed-additive rule, or `None` when it does not
-/// apply. Rows that carry the full series identity rank it as a column, as
-/// [`summary_update`] does.
-fn whole_expression_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, SummaryUpdate)> {
+/// The input, update and partitions of a whole-expression top-k over
+/// `target`'s inner aggregate, by the keyed-additive rule, or `None` when it
+/// does not apply. Rows that carry the full series identity rank it as a
+/// column, as [`summary_update`] does. The partitions are `target`'s, moved
+/// onto the input the heap reads ([`partitions_over`]).
+fn whole_expression_input(
+    target: &OperatorNode,
+) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -362,7 +365,34 @@ fn whole_expression_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, Su
         // An encoded label set needs an open PromQL schema.
         return None;
     }
-    Some((realized.child, input))
+    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
+    Some((realized.child, input, partitions))
+}
+
+/// `reduction`'s keys, which index `inner` (the absorbed aggregate's
+/// output), as indices into `input` (the rows the heap reads), matched by
+/// column. `None` when a key is missing or ambiguous in `input`, or the keys
+/// are given by `without`: `input` carries columns `inner` dropped.
+fn partitions_over(reduction: &Reduction, inner: &Schema, input: &Schema) -> Option<Reduction> {
+    let Reduction::Reduce(keys) = reduction else {
+        return Some(Reduction::PerEntity);
+    };
+    if keys.is_without() {
+        return None;
+    }
+    let keys = keys
+        .iter()
+        .map(|&index| {
+            let key = column_ref(inner.fields.get(index)?);
+            let mut matches =
+                (0..input.fields.len()).filter(|&i| column_ref(&input.fields[i]) == key);
+            match (matches.next(), matches.next()) {
+                (Some(i), None) => Some(i),
+                _ => None,
+            }
+        })
+        .collect::<Option<_>>()?;
+    Some(Reduction::by(keys))
 }
 
 /// Number of whole-workload candidates: one per choice of an alternative for
@@ -645,9 +675,9 @@ fn realize(
             )?),
             false => None,
         };
-    let child = match &whole {
-        Some((input, _)) => memo[&Rc::as_ptr(input)].clone(),
-        None => memo[&Rc::as_ptr(child)].clone(),
+    let (child, reduction) = match &whole {
+        Some((input, _, partitions)) => (memo[&Rc::as_ptr(input)].clone(), partitions),
+        None => (memo[&Rc::as_ptr(child)].clone(), reduction),
     };
     let (family, query) = match realization {
         Realization::ExactAggregate { kind, params } => (
@@ -660,8 +690,8 @@ fn realize(
         ),
         _ => return Err(LogicalCandidateError::Unsupported("summary family")),
     };
-    let mut input = match whole {
-        Some((_, update)) => update,
+    let mut input = match &whole {
+        Some((_, update, _)) => update.clone(),
         None if *grouping != GroupingStrategy::PerSubpopulationInstance => {
             hydra_update(reduction, &child.schema)
                 .ok_or(LogicalCandidateError::Unsupported("Hydra item column"))?
@@ -973,6 +1003,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The whole-expression heap reads the inner sum's input, so the outer
+    /// top-k's partition keys (indices into the sum's output) are moved onto
+    /// that input by column.
+    #[test]
+    fn whole_expression_topk_partitions_index_the_heap_input() {
+        let root = lower_promql(
+            "topk by (job) (2, sum by (service, job) (rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.1),
+        );
+        let inventory = enumerate_local_logical_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut heaps = 0;
+        for choice in enumerate_choices(&inventory, usize::MAX) {
+            if !choice
+                .iter()
+                .enumerate()
+                .any(|(t, &c)| inventory.targets[t].absorbs[c].is_some())
+            {
+                continue;
+            }
+            let roots = compose_logical_candidate(&inventory, &choice).unwrap();
+            let QueryRoot::Operator(root) = &roots[0].1 else {
+                panic!("operator root")
+            };
+            for node in OperatorNode::reachable(root) {
+                if let Some(ASAPOp::SummaryAgg {
+                    child,
+                    reduction,
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) = node.asap()
+                {
+                    if !matches!(
+                        kind.algorithm(),
+                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                    ) {
+                        continue;
+                    }
+                    let names: Vec<_> = reduction
+                        .expect_reduce()
+                        .iter()
+                        .map(|&index| child.schema.fields[index].name.as_str())
+                        .collect();
+                    assert_eq!(names, ["job"], "{choice:?}");
+                    heaps += 1;
+                }
+            }
+        }
+        assert!(heaps > 0, "a whole-expression heap");
     }
 
     /// The weight domain of every heap-sketch update (Count-Min or
