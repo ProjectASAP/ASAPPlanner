@@ -1,5 +1,10 @@
 # ASAP-Aware Mapping contracts
 
+> **Historical:** this document describes the legacy replacement search
+> (`ReplacementStrategy`, `search_workload`, `CostModel`, `explanation.rs`),
+> which was removed (#635). The stage pipeline that replaced it is described in
+> [ASAP-aware mapping architecture](asap-aware-mapping-architecture.md).
+
 This reference defines the current public concepts and interface contracts used
 by ASAP-aware mapping. Read the [architecture](asap-aware-mapping-architecture.md)
 first; use the [extension guide](extend-asap-aware-mapping.md) when changing one.

@@ -50,8 +50,8 @@ column and grouping determine whether consumers refer to the same population.
 
 ## Rule: share one population across compatible readouts
 
-**Realization:** `MaintainedPopulationStrategy`, an opt-in `ReplacementStrategy`
-in [maintained_population.rs](../../../../crates/logical-optimizer/src/pass1/maintained_population.rs).
+**Realization:** `MaintainedPopulationStrategy::candidate`, an opt-in rule a
+deployment calls (the stage pipeline does not offer it), in [maintained_population.rs](../../../../crates/logical-optimizer/src/pass1/maintained_population.rs).
 
 **Target sub-DAGs:**
 

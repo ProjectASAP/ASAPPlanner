@@ -24,4 +24,7 @@ Additional opportunities:
     - reuse finer-grained aggregation through roll-up
 ```
 
-Implemented as `asap-logical-optimizer`'s `pass1::explanation` module (`explain_replacements`/`explain_replacements_with`, issue #257)
+The legacy replacement search implemented this (`pass1::explanation`,
+`explain_replacements`, issue #257); it was removed with that search. Today the
+`sketch_coverage` devtool lists, per query, the sketch alternatives Stage 1's
+Pass 1 offers.

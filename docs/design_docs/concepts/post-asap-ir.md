@@ -67,11 +67,8 @@ execution implement the actual build and update operations. Not every summary fa
 
 Exact work is represented by the ordinary operators, unchanged:
 
-- A sub-DAG the planner does not rewrite keeps its `NonASAPOp` nodes. Plan
-  assembly marks such a sub-DAG with an exact `ResultGuarantee`
-  (`asap_logical_optimizer::pass1::replacement::retain_exact`); a sub-DAG with no ASAP
-  operator and no guarantee is a logical rewrite candidate that has not been
-  assessed yet (`is_logical_rewrite`).
+- A sub-DAG the planner does not rewrite keeps its `NonASAPOp` nodes (Stage
+  1's `PassThrough` alternative).
 - `BinaryOp` combines independently planned operands. Summary planning may set
   its typed division guards (`checked_finite_division`,
   `checked_relative_division`); the operator's timing comes from the

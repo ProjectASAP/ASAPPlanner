@@ -1,40 +1,35 @@
 # Public library functions
 
-Audience: developers embedding ASAPPlanner or adding strategies/models. This is
-a compact reference for the public workflow APIs, not an
-exhaustive symbol reference. The [CLI guide](../user_guide_docs/run-a-query.md) covers command-line inspection; the [design overview](../design_docs/architecture/README.md) defines ownership.
+Audience: developers embedding ASAPPlanner or supplying deployment models. This
+is a compact reference for the public workflow APIs, not an exhaustive symbol
+reference. The [CLI guide](../user_guide_docs/run-a-query.md) covers
+command-line inspection; the [design overview](../design_docs/architecture/README.md)
+defines ownership.
 
-ASAPPlanner's primary output is `CandidateLogicalASAPDAGs`; ranking is a view over its candidates.
-Downstream owns physical binding and commitment. Selection/DAG assembly helpers
-do not deploy a plan, and a serializable DAG is not evidence of runtime readiness.
+ASAPPlanner runs the #509 stage pipeline: Stage 1 lists the logical
+alternatives of each query (Pass 1) and the sharing variants across queries
+(Pass 2), Stage 2 builds the physical candidates (materialization), and Stage 3
+checks each candidate's accuracy and capabilities and selects the cheapest.
+Downstream owns physical binding and commitment: a selected DAG is not evidence
+of runtime readiness.
 
 ## Choose a library workflow
 
 | Desired result | Calls | Example |
 | --- | --- | --- |
 | Pre-ASAP IR | Frontend `lower_*` | [Lower a query](#lower-a-query-into-pre-asap-ir) |
-| All ranked candidates | `search_workload_with_targets` -> `cost_sorted` | [Generate and rank](#generate-and-rank-candidates) |
-| Custom optimization set | Construct `Vec<Box<dyn ReplacementStrategy>>`, then search | [Strategies and models](#choose-strategies-and-models) |
-| Selected semantic DAG / export | `global_selection` -> `assemble_selected_dag` -> export | [Selection example](#optional-whole-plan-selection-and-dag-assembly) |
-
-Each recipe ends at a different artifact. Use only the stages needed for that
-artifact, while preserving the checks required by its intended consumer.
+| Selected plan for a workload | `asap_planner::e2e_plan` | [Plan a workload](#plan-a-workload) |
+| Selected plan from Pre-ASAP roots | `asap_plan_selection::plan_stages` | [Stage pipeline](#run-the-stage-pipeline-on-pre-asap-roots) |
+| Stage 1 alternatives only | `stage1_logical_candidates` | [Stage 1 inventory](#inspect-stage-1-alternatives) |
+| Exported DAG | `apply_materialization_timings` -> `compile_*_asap_dag` | [Export](#export) |
 
 ## Dependencies
 
-Inside this workspace, depend on the frontend you need,
-`asap-logical-optimizer` (Stage 1 candidate search), `asap-plan-selection`
-(cost models and selection) and `asap-types`. External users can use Git
+Inside this workspace, depend on the frontend you need, `asap-planner` (the
+facade), or `asap-logical-optimizer` (Stage 1) and `asap-plan-selection`
+(Stages 2 and 3 entry point), and `asap-types`. External users can use Git
 dependencies pinned to a compatible revision; use the same revision across
-these crates. For the example below:
-
-```toml
-[dependencies]
-asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
-asap-plan-selection = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
-asap-logical-optimizer = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
-asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
-```
+these crates.
 
 ## Lower a query into Pre-ASAP IR
 
@@ -82,9 +77,9 @@ own accuracy requirement, with these explicit target choices:
 | `AccuracyTarget::Epsilon(e)` | An epsilon error requirement interpreted by the relevant accuracy rule | `Epsilon(0.01)` |
 | `AccuracyTarget::EpsilonDelta { epsilon, delta }` | Error requirement with a failure-probability bound | `{ epsilon: 0.01, delta: 0.05 }` |
 
-Epsilon does not mean the same error quantity for every statistic. Inspect the
-candidate's guarantee and its error metric; a target is a requirement, not proof
-that a supported candidate exists.
+Epsilon does not mean the same error quantity for every statistic: the
+accuracy model checks it against each estimate's own error metric. A target is
+a requirement, not proof that a supported candidate exists.
 
 ```rust
 use asap_frontend_promql::lower_promql_workload;
@@ -143,91 +138,46 @@ async lower_sql_dialect(query: &str, catalog: &SqlCatalog,
 The catalog is required and describes your tables. For a complete schema-building
 example, see [the CLI frontend example](../../crates/devtools/src/bin/show_logical_dag.rs).
 
-## Generate and rank candidates
+## Plan a workload
 
-### Target sub-DAG candidates
+`e2e_plan(UserInput) -> Result<PlanOutput, PlanError>` lowers a
+`PlanningWorkload` with the frontend its language names and runs the stage
+pipeline. `UserInput::new(&workload, frontend_input, models)` takes:
 
-`TargetSubDAGCandidates` collects alternatives for one query subexpression
-discovered by search. `CandidateLogicalASAPDAGs` contains these per-target candidate sets and
-the workload's query roots. A root is a whole query; an inner expression can
-also be a target.
+| Argument | Choices |
+| --- | --- |
+| `FrontendInput` | `Promql { now_ms, histograms }`, `Sql { catalog }` or `Metricsql` |
+| `PlanningModels` | `PlanningModels::builtin()`, refined with `with_accuracy`, `with_calibration` and `with_capabilities` ([Models](#models)) |
 
-For example, a supported `quantile(0.99, latency)` subexpression may have multiple
-summary alternatives. Those alternatives belong to the same candidate set
-because they are choices for the same computation. Another subexpression has its
-own candidate set. If two queries reference a shared subexpression, they can
-share its selected computation.
-
-`cost_sorted()` returns a `RankedTargetSubDAGCandidates` for each target: the subexpression,
-its candidates in ranked order, and a cost entry aligned with each candidate.
-It keeps the alternatives available; it does not select an entire workload plan.
-
-### API definition
-
-```text
-search_workload_with_targets<'s, Id>(
-    roots: Vec<(Id, Rc<OperatorNode>, Option<AccuracyTarget>)>,
-    strategies: &[Box<dyn ReplacementStrategy + 's>],
-    accuracy_model: &dyn AccuracyModel,
-) -> CandidateLogicalASAPDAGs<Id>
-
-candidate_selection::cost_sorted<'a, Id>(space: &'a CandidateLogicalASAPDAGs<Id>, cost_model: &dyn CostModel)
-    -> Vec<RankedTargetSubDAGCandidates<'a>>
-```
-
-| Argument | Choices / meaning | Required? |
-| --- | --- | --- |
-| `roots` | One tuple per query: caller ID, canonical IR, and root target | Yes |
-| Root target | `Some(AccuracyTarget::…)` applies an explicit end-to-end requirement; `None` adds no explicit root target | Tuple field required; value optional |
-| `strategies` | Default factory output or an explicit strategy vector; see option tables below | Yes; even an empty vector does not disable automatic workload strategies |
-| `accuracy_model` | `DefaultAccuracyModel` or a custom `AccuracyModel` implementation | Yes |
-| Ranking `cost_model` | `DefaultCostModel` or an evidence-backed/custom `CostModel` | Yes |
-
-`search_workload_with_targets` normally rejects candidates without a guarantee
-that satisfies the root target. One exception is a direct DDSketch quantile
-ratio: without input-domain evidence, it remains in `CandidateLogicalASAPDAGs` with
-`guarantee: None` so the downstream backend can decide whether to select it.
-Its presence does **not** mean it satisfies the target. `cost_sorted` still
-shows it, but `global_selection` skips it and DAG assembly uses the exact fallback
-unless a certified alternative is available. A backend that wants the
-uncertified candidate must explicitly inspect it and check its own domain
-evidence and execution requirements before selecting or deploying it.
-
-### Example
-
-
-The following complete Rust example lowers one query, supplies an explicit root
-accuracy target, and prints every ranked candidate instead of selecting a winner.
-The default cost model is suitable for inspection, not deployment calibration.
+`PlanOutput::plans` holds one `QueryPlan { entry_index, root }` per workload
+entry, in `QueryWorkload::entries()` order; `PlanOutput::selection` reports
+which candidate was selected, the priced and rejected ones, and whether the
+selection is guaranteed optimal. A caller that already holds Pre-ASAP IR calls
+`asap_planner::optimize` instead.
 
 ```rust
-use asap_frontend_promql::lower_promql_workload;
-use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
-    PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
-};
-use asap_plan_selection::candidate_selection::cost_sorted;
-use asap_plan_selection::DefaultCostModel;
-use asap_logical_optimizer::{
-    default_strategies, search_workload_with_targets, DefaultAccuracyModel,
-};
+use asap_planner::{e2e_plan, FrontendInput, PlanningModels, UserInput};
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
+    Query, QueryLanguage, QueryRequirements, QueryWorkload,
+};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let accuracy = AccuracyTarget::Epsilon(0.01);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: Some(vec![BatchEntry {
-            query: Query("quantile(0.99, latency)".into()),
-            requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
-                ..Default::default()
-            },
-            predictability: Default::default(),
-            invocations: 1,
-            execute_at: None,
-            time_selection: Default::default(),
+                query: Query("quantile(0.99, latency)".into()),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.01)),
+                    ..Default::default()
+                },
+                predictability: Default::default(),
+                invocations: 1,
+                execute_at: None,
+                time_selection: Default::default(),
             }]),
             repeating_queries: None,
         },
@@ -239,263 +189,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         }),
     };
-    let root = lower_promql_workload(&workload, 0)?.remove(0);
-    let cost_model = DefaultCostModel;
-    let strategies = default_strategies();
-    let space = search_workload_with_targets(
-        vec![("q1", root, Some(accuracy))],
-        &strategies,
-        &DefaultAccuracyModel,
+    let input = UserInput::new(
+        &workload,
+        FrontendInput::Promql { now_ms: 0, histograms: None },
+        PlanningModels::builtin(),
     );
-    for group in cost_sorted(&space, &cost_model) {
-        for (candidate, cost) in group.candidates.iter().zip(&group.costs) {
-            println!("candidate={candidate:?}, reported_cost={cost:?}");
-        }
+    let output = e2e_plan(input).await?;
+    for plan in &output.plans {
+        println!("entry {}: {:#?}", plan.entry_index, plan.root);
     }
     Ok(())
 }
 ```
 
-| API (`asap_logical_optimizer`; `candidate_selection` is `asap_plan_selection::candidate_selection`) | Inputs | Output and limits |
-| --- | --- | --- |
-| `search_workload` | `(query_id, Rc<OperatorNode>)` roots | `CandidateLogicalASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
-| `search_workload_with` | Roots, strategy slice | `CandidateLogicalASAPDAGs`; callers choose context-free replacement strategies |
-| `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
-| `candidate_selection::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
-| `candidate_selection::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
-| `ASAPStrategies::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
-
-`cost_sorted` is a ranking view, not a request to discard all but the first
-candidate. Display costs follow model hooks and may be unavailable/non-finite;
-they are not necessarily a globally sortable physical-cost scalar. Unavailable
-cost alternatives may remain for explanation. Inspect eligibility and evidence
-before physical selection; do not treat their presence as deployment permission.
-
-### Enumerate candidate DAGs per root
+## Run the stage pipeline on Pre-ASAP roots
 
 ```text
-CandidateLogicalASAPDAGs::enumerate_candidate_dags_for_root(&self, id: &Id, expansion_limit: usize)
-    -> Result<CandidateDAGInventory<Id>, RealizationError>
+asap_plan_selection::plan_stages<Id: Clone>(
+    roots: Vec<(Id, QueryRoot)>,
+    demand: &[RootDemand],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    display: usize,
+) -> Result<StagePipelineRun<Id>, SelectionError>
 ```
 
-Returns every distinct finalized DAG for one root, unranked; other roots'
-choices are not multiplied in. Exceeding `expansion_limit` is an error, never a
-partial inventory.
+| Argument | Meaning |
+| --- | --- |
+| `roots` | One Pre-ASAP root per query, with a caller ID |
+| `demand` | Per root: accuracy target, recurrence, predictability and latency bound |
+| `data` | Data arrival and ingestion evidence Stage 2 and Stage 3 price with |
+| `models` | [Models](#models) |
+| `display` | Also build and price up to this many candidates for display (0: none) |
 
-For PromQL roots that carry a target, `search_workload_with_targets` also asks
-each strategy's `ReplacementStrategy::propose_for_root`. `ASAPStrategies`
-answers an instant-vector TopK with current-series heap realizations over rows
-carrying the complete series identity (`$promql_series_identity`). They are
-finalized, deduplicated, and marked `ReplacementProvenance::RootPhysicalRealization`.
-Callers do not apply `with_series_identity` themselves. Compile each with
-`promql_rows::compile_current_series_evaluation`; other queries keep their previous
-inventory. `global_selection` never commits these candidates; the backend
-compiles and prices them. CandidateLogicalASAPDAGs lists no placement variants: node timing
-comes from a `MaterializationAssignment` (all query time until Stage 2
-materialization, #509, decides otherwise).
+`StagePipelineRun::stage1` is Stage 1's inventory, `plan` the selected
+`SelectedPlan` (its `logical` roots, `physical` candidate and `selection`
+report), and `enumeration` the displayed candidates. `select_plan` and
+`select_exhaustive` run Stages 2 and 3 over an existing Stage 1 inventory.
 
-## Choose strategies and models
+## Inspect Stage 1 alternatives
 
-### Strategy options
+`asap_logical_optimizer::pass2::identical_expressions::stage1_logical_candidates(roots, &metric_types, &demand)`
+returns one `SharingVariant` per Pass 2 sharing form (independent,
+identical expressions, summary capability), each with its Pass 1
+`LocalLogicalCandidates`: the alternatives (`Realization`) of every target
+aggregate. `compose_logical_candidate(&inventory, &choice)` builds the
+Pre-ASAP-plus-summary roots for one choice per target. See
+[local logical candidates](local-logical-candidates.md). Alternatives are
+unranked and carry no accuracy certificate; Stage 3 checks accuracy.
 
-The `strategies` argument takes Rust objects implementing `ReplacementStrategy`,
-not string names or a closed enum. These built-in context-free choices can be
-combined in one vector; each proposes candidates where its applicability checks
-pass. An omitted strategy contributes no proposals of its own.
+## Models
 
-| Value to put inside `Box::new(...)` | Meaning | In default factories? |
+`PlanningModels` holds the planning logic a deployment can replace:
+
+| Field / builder | Built-in value | Meaning |
 | --- | --- | --- |
-| `ASAPStrategies::default()` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
-| `HydraGroupingStrategy::default()` | Considers a shared multi-subpopulation structure for supported grouped sketch families, subject to accuracy evidence | Yes |
-| `SharedSubDAGStrategy` | Proposes sharing versus independent recomputation at reused sub-DAGs | Yes |
-| `SemanticEquivalentRewriteStrategy` | Proposes supported equivalent aggregate rewrites, including decomposing average into sum/count | Yes |
-| `ExactCompositionStrategy` | Proposes exact operations around summary evaluations or in maintenance; not filtered by runtime support; `global_selection` commits one only with positive (`Some(true)`) cost-model support evidence | Yes |
-| Your `ReplacementStrategy` implementation | Adds domain-specific legal replacement proposals | No |
-
-`AvgToSumOverCountStrategy` is an alias for `SemanticEquivalentRewriteStrategy`
-at this revision; it is not a separate narrow rewrite to enable alongside it.
-
-The following are derived automatically from the workload by `search_workload*`:
-
-| Automatic behavior | Meaning | Can the strategy vector disable it? |
-| --- | --- | --- |
-| Canonical sharing/CSE | Interns structurally equal input subexpressions | No |
-| `RollupStrategy` | Proposes compatible reuse across grouping granularities | No |
-| `AccuracyReconciliationStrategy` | Proposes compatible sharing across different accuracy requirements | No |
-| `TopKLimitReuseStrategy` | Proposes reuse among compatible top-k limits | No |
-
-The current API does not expose a universal enable/disable flag for every pass.
-For inspecting only one strategy at one target, use
-`ReplacementStrategy::replacements(&TargetSubDAG)`; this does not perform the
-whole-workload search. Selecting a strategy does not force its candidate to win.
-
-### Factory choices
-
-```text
-default_strategies() -> Vec<Box<dyn ReplacementStrategy>>
-replacement::default_strategies_with_evidence<'a>(
-    evidence: &'a dyn AccuracyEvidenceProvider,
-) -> Vec<Box<dyn ReplacementStrategy + 'a>>
-```
-
-| Factory | Use when | Models used |
-| --- | --- | --- |
-| `default_strategies()` | Exploring with built-in defaults | Built-in accuracy/allocation defaults; no extra evidence |
-| `default_strategies_with_evidence(&evidence)` | Supplying planning-time accuracy evidence | Supplied evidence; default accuracy/allocation |
-| Explicit vector | Controlling which context-free strategies are supplied | Models passed into each constructor |
-
-No factory takes a cost model: candidate generation is cost-model independent.
-Pass the deployment cost model to `cost_sorted`/`global_selection`.
-
-### Example: supply two strategies and run search
-
-```rust
-use asap_frontend_promql::lower_promql_workload;
-use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
-    PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
-};
-use asap_plan_selection::candidate_selection::cost_sorted;
-use asap_plan_selection::DefaultCostModel;
-use asap_logical_optimizer::{
-    search_workload_with_targets, DefaultAccuracyModel, ReplacementStrategy,
-    ASAPStrategies, SharedSubDAGStrategy,
-};
-use asap_types::types::AccuracyTarget;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let accuracy = AccuracyTarget::Epsilon(0.01);
-    let workload = PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: Some(vec![BatchEntry {
-            query: Query("quantile(0.99, latency)".into()),
-            requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
-                ..Default::default()
-            },
-            predictability: Default::default(),
-            invocations: 1,
-            execute_at: None,
-            time_selection: Default::default(),
-            }]),
-            repeating_queries: None,
-        },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(1_000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-    };
-    let root = lower_promql_workload(&workload, 0)?.remove(0);
-    let model = DefaultCostModel;
-    let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
-        Box::new(ASAPStrategies::default()),
-        Box::new(SharedSubDAGStrategy),
-    ];
-    let space = search_workload_with_targets(
-        vec![("q1", root, Some(accuracy))], &strategies, &DefaultAccuracyModel,
-    );
-    println!("{:#?}", cost_sorted(&space, &model));
-    Ok(())
-}
-```
-
-This omits Hydra and semantic/exact-composition strategies from the supplied
-vector. Automatic workload strategies still run. Omitting an optimization does
-not waive semantic or accuracy requirements.
-
-### Model and evidence options
-
-Traits permit custom implementations; the following are concrete built-in options.
-Cost models are in `asap_plan_selection` (module-qualified paths below are
-relative to `asap_plan_selection::cost`); accuracy models and evidence are in `asap_logical_optimizer`.
-
-| Parameter | Available value / constructor | Meaning |
-| --- | --- | --- |
-| `&dyn CostModel` | `DefaultCostModel` | Built-in ordering and structural estimates; no measured deployment guarantee |
-| `&dyn CostModel` | `empirical_cost::EmpiricalCostModel::new(provider)` | Offline sketch-benchmark model: ranks algorithms using matching offline measurements |
-| `&dyn CostModel` | `physical_plan_cost_model::PhysicalPlanCostModel::new(&provider, calibration)?` | Deployment-specific physical-plan model: compares complete physical alternatives using provider evidence and resource calibration; evidence may be offline or online |
-| `&dyn AccuracyModel` | `DefaultAccuracyModel` | Built-in guarantee rules and satisfaction checks |
-| `&dyn AccuracyBudgetAllocator` | `EqualSplitAllocator` | Built-in allocation of composition accuracy budgets |
-| `&dyn AccuracyEvidenceProvider` | `NoAccuracyEvidence` | No extra planning-time statistics; evidence-dependent claims remain unavailable |
-| `&dyn AccuracyEvidenceProvider` | `WorkloadAccuracyEvidence { data: &data, now_ms }` | Uses fresh data-workload evidence at the planning time |
-| Any provider trait above | Your implementation | Supplies alternative models/evidence under the same contracts |
-
-### Offline measurements versus physical-plan costing
-
-These models differ in scope, not simply in whether they are offline or online.
-
-| Model | Evidence and comparison | Missing evidence / limits |
-| --- | --- | --- |
-| `EmpiricalCostModel` | Offline sketch benchmarks matched to exact parameters, distribution, environment and validity interval; current algorithm ranking uses measured update CPU nanoseconds | If the measurements required for ranking are incomplete, preserves the incoming algorithm order. `estimate_cost()` still uses `DefaultCostModel` structural scores |
-| `PhysicalPlanCostModel` | A downstream provider supplies a consistent evidence snapshot and complete physical alternatives; calibration converts modeled resource quantities into comparable costs | A candidate with incomplete evidence is unavailable, without structural-cost fallback. Current candidate admission also requires it to cost less than the raw alternative |
-
-`PhysicalPlanCostModel` does not collect online telemetry itself. Its provider
-may supply offline estimates/calibration or evidence derived from online
-observations. Therefore, “offline sketch-benchmark model” and “physical-plan cost
-model” describe their roles more accurately than “offline model” and “online model.”
-
-For example, a sketch with the lowest measured update cost can rank first under
-`EmpiricalCostModel`, while its complete execution plan can still cost more than
-another sketch or raw execution under `PhysicalPlanCostModel`. Offline error
-measurements alone do not authorize smaller sketch parameters or replace formal
-accuracy guarantees.
-
-### Example: configure all sketch-strategy providers
-
-```rust
-use asap_logical_optimizer::{
-    DefaultAccuracyModel, EqualSplitAllocator,
-    NoAccuracyEvidence, ReplacementStrategy, ASAPStrategies,
-};
-
-fn main() {
-    let accuracy = DefaultAccuracyModel;
-    let allocation = EqualSplitAllocator;
-    let evidence = NoAccuracyEvidence;
-    let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
-        ASAPStrategies::new_with_planning_inputs_and_evidence(
-            &accuracy, &allocation, &evidence,
-        ),
-    )];
-    // Use &strategies and &accuracy in search_workload_with_targets.
-    println!("{} explicitly configured strategy", strategies.len());
-}
-```
-
-Constructor definition:
-
-```text
-ASAPStrategies::new_with_planning_inputs_and_evidence(
-    accuracy_model: &dyn AccuracyModel,
-    allocator: &dyn AccuracyBudgetAllocator,
-    evidence: &dyn AccuracyEvidenceProvider,
-) -> ASAPStrategies
-```
-
-All provider arguments are required for this constructor. They must outlive the
-strategy vector. `ASAPStrategies::default()` uses default accuracy/allocation
-and no extra evidence.
-
-| Extension point | What it controls | What it cannot establish alone |
-| --- | --- | --- |
-| `ReplacementStrategy` | Proposed semantic alternatives | Permission to violate query semantics or downstream support |
-| `CostModel` | Selection-time ranking, cost, support-evidence and recurrence cost hooks | Correctness, measured costs without evidence, or installed runtime support |
-| `AccuracyModel` | Derivation, propagation and satisfaction of guarantees | A meaningful guarantee without its required assumptions/evidence |
-| `AccuracyBudgetAllocator` | Local accuracy requirements proposed within composition | End-to-end correctness without subsequent validation |
-| `AccuracyEvidenceProvider` | Planning-time statistics used by supported strategies | Authority to change query requirements |
-
-Accuracy models, allocators and evidence are consumed during generation; the cost
-model is consumed only at selection (`cost_sorted`, `global_selection` and their
-`_with_recurrence` variants). Sketch parameters come from the analytical
-estimators, not the cost model. For evidence-aware defaults, use
-`asap_logical_optimizer::pass1::replacement::default_strategies_with_evidence`.
-For custom accuracy/allocation/evidence on sketches,
-`ASAPStrategies::new_with_planning_inputs_and_evidence` exposes these providers.
-Keep each provider's evidence scope and freshness valid for the query population.
+| `accuracy` / `with_accuracy(&dyn AccuracyModel)` | `asap_plan_selection::DefaultAccuracyModel` | Each estimate's guarantee (`local_guarantee`) and whether it meets the query's target (`satisfies`); Stage 3 rejects an estimate whose family has no model |
+| `calibration` / `with_calibration(Stage3Calibration)` | `Stage3Calibration::ILLUSTRATIVE` | Weights that turn modeled resources into cost; illustrative, not measured |
+| `capabilities` / `with_capabilities(&DeploymentCapabilities)` | Unrestricted | What the deployment can build, read out and keep; candidates needing more are rejected |
+| `evidence` / `with_evidence(&dyn AccuracyEvidenceProvider)` | `NoAccuracyEvidence` | Planning-time accuracy evidence; the stage pipeline does not read it yet |
 
 ## Workload inputs and defaults
 
@@ -509,151 +261,36 @@ ingestion rate. `PlanningWorkload::validate()` shares these checks.
 
 | Type/input | Current behavior | Caller responsibility |
 | --- | --- | --- |
-| `QueryRequirements::default()` | `ImplicitExact`, unspecified response latency | Pass approximation explicitly and thread per-root requirements into search |
+| `QueryRequirements::default()` | `ImplicitExact`, unspecified response latency | Pass approximation explicitly; each root's requirement becomes its `RootDemand` |
 | `DataWorkload::default()` | Unknown arrival, unknown evidence | Supply facts needed for the requested comparisons |
 | `Evidence<T>::default()` | No value, unknown source | Unknown/stale evidence is not zero; provide scoped valid observations |
-| `DefaultCostModel` | Built-in ordering and structural cost hooks | Supply deployment evidence for calibrated comparisons |
+| `Stage3Calibration::ILLUSTRATIVE` | Illustrative, uncalibrated cost weights | Supply a calibration measured for your deployment |
 
 `Default` is a Rust constructor contract, not a general serde omission rule.
 Several workload fields require explicit serialized values. A struct field being
 optional also does not guarantee every planning operation can succeed without it.
 
-## Optional whole-plan selection and DAG assembly
-
-### What does global selection mean?
-
-`global_selection()` coordinates choices **across target sub-DAG candidate sets
-in the workload**. Here, “global” describes that cross-target scope. It does not
-mean a proven globally optimal solution over every possible physical plan, nor
-selection across every machine in a deployment.
-
-Consider this conceptual dependency DAG:
-
-```text
-Q1 --+
-     +--> A --> B
-Q2 --+
-
-A's candidate set: alternatives for computing A
-B's candidate set: alternatives for computing B
-```
-
-Both queries need A, and computing A needs B. Choosing to compute A once and
-share it, versus recomputing it for each consumer, changes how many evaluations
-of B are needed. That can change which choice for B is preferable.
-
-`cost_sorted()` ranks each target's alternatives using that target's recorded
-consumer count. `global_selection()` accounts for ancestor sharing decisions
-when deriving effective usage counts, and keeps coupled parent/child composition
-choices consistent. The result records coordinated choices; `assemble_selected_dag()` then
-constructs the selected semantic DAG while preserving shared nodes.
-
-| Operation | Question answered | Result |
-| --- | --- | --- |
-| `cost_sorted()` | How are the alternatives ranked for each subexpression? | Ranked alternatives per target |
-| `global_selection()` | Which compatible choices should be used together, accounting for sharing and dependencies? | A coordinated selection across targets under the supplied model |
-
-Plain `global_selection()` does not decide materialization or establish
-physical deployment feasibility. Stage 2 materialization (#509) will own
-materialization; downstream still owns physical commitment.
-
-| Function or method | Behavior |
-| --- | --- |
-| `candidate_selection::global_selection(&space, &model)` | Compatible structural selection across targets; no recurrence or materialization planning implied |
-| `candidate_selection::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no materialization commitments implied |
-| `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<OperatorNode>>, RealizationError>`; constructs untimed semantic IR, not stored summary data |
-
-Use a target associated with the searched space; DAG assembly can return `None`
-when that target is absent. A downstream integration can use these convenience
-APIs when its supplied model/evidence supports the intended comparison. Neither
-plain structural selection nor taking each target's first candidate substitutes
-for checking complete physical alternatives and deployment constraints.
-
-### API definition and example
-
-```text
-candidate_selection::global_selection<'a, Id>(space: &'a CandidateLogicalASAPDAGs<Id>, cost_model: &dyn CostModel)
-    -> CostedGlobalSelection<'a>  // derefs to GlobalSelection
-GlobalSelection::assemble_selected_dag(&self, target: &Rc<OperatorNode>)
-    -> Result<Option<Rc<OperatorNode>>, RealizationError>
-```
-
-For structural inspection only, this complete example selects a semantic root
-and exports its inspection DAG. It performs no materialization or deployment
-planning.
-
-```rust
-use asap_frontend_promql::lower_promql_workload;
-use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
-    PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
-};
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::DefaultCostModel;
-use asap_logical_optimizer::search_workload;
-use asap_types::types::AccuracyTarget;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let workload = PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: Some(vec![BatchEntry {
-            query: Query("sum(latency)".into()),
-            requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
-                ..Default::default()
-            },
-            predictability: Default::default(),
-            invocations: 1,
-            execute_at: None,
-            time_selection: Default::default(),
-            }]),
-            repeating_queries: None,
-        },
-        data_workload: Some(DataWorkload {
-            data_ingestion_interval: Evidence {
-                value: Some(DurationMs(1_000)),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-    };
-    let root = lower_promql_workload(&workload, 0)?.remove(0);
-    let space = search_workload(vec![("q1", root)]);
-    let selection = global_selection(&space, &DefaultCostModel);
-    // Search may canonicalize roots; use the root returned by CandidateLogicalASAPDAGs.
-    if let Some(summary) = selection.assemble_selected_dag(&space.roots[0].1)? {
-        let dag = asap_types::dag_export::export_summary(&summary);
-        println!("{dag:#?}");
-    }
-    Ok(())
-}
-```
-
-## Export and explain
+## Export
 
 | Function/type | Purpose |
 | --- | --- |
-| `asap_types::dag_export::export(&query)` | Pre-ASAP inspection dag |
-| `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection dag |
 | `asap_types::ir::apply_materialization_timings(&root, &assignment, &mut TimingMemo::new())` | Write execution timing into every node from a `MaterializationAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::execution_timed_dag()` applies the default to a planned workload |
-| `asap_types::ir::export::compile_post_asap_dag(&timed_root)` | Export a timed DAG as a `PostAsapDAG` (wire version 7); rejects an untimed node; not a physical plan |
-| `PostAsapDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
-| `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |
+| `asap_types::ir::export::compile_logical_asap_dag(&root)` | Export a DAG as a `LogicalASAPDAG` for inspection; not a physical plan |
+| `LogicalASAPDAGDocument::new(dag)` and `.validate()` | Versioned envelope and explicit validation; constructing it alone does not validate |
+| `asap_types::ir::export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as the `PhysicalASAPDAG` a deployment binds; rejects an untimed node |
 
-Choose the export matching your intended handoff: an inspection DAG is not
-interchangeable with a versioned execution contract. Preserve
-cost/guarantee evidence needed downstream instead of exporting only a bare DAG.
-For public symbol details, build local API documentation with:
+Choose the export matching your intended handoff, and preserve the selection
+report a downstream needs instead of exporting only a bare DAG. For public
+symbol details, build local API documentation with:
 
 ```sh
-cargo doc -p asap-logical-optimizer -p asap-plan-selection -p asap-types --no-deps
+cargo doc -p asap-planner -p asap-logical-optimizer -p asap-plan-selection -p asap-types --no-deps
 ```
 
 ## Source references
 
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
-- [Search, ranking and selection](../../crates/logical-optimizer/src/pass1/replacement.rs)
-- [Cost models](../../crates/plan-selection/src/cost/cost_model.rs)
+- [Facade](../../crates/planner/src/lib.rs)
+- [Stage 1](../../crates/logical-optimizer/src/lib.rs), [Stages 2 and 3 entry point](../../crates/plan-selection/src/lib.rs)
 - [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

@@ -1,14 +1,15 @@
 # ASAPPlanner design overview
 
 ASAPPlanner is a reusable planning library. It converts queries and workload
-requirements into a deployment-independent space of logical Post-ASAP candidates.
-It does not commit, deploy, or execute a physical plan; downstream systems such
-as ASAPQuery-backend bind the candidates to physical alternatives, make the
+requirements into a selected logical Post-ASAP plan, through the #509 stage
+pipeline. It does not deploy or execute a physical plan; downstream systems
+such as ASAPQuery-backend bind the plan to physical operators, make the
 deployment-level decision, and run the selected contract.
 
-For the integration workflow, start with [ASAPPlanner input, output, and
-workflows](input-output-workflow.md). It defines inputs, `CandidateLogicalASAPDAGs`, selection
-and assembly workflows, and future replanning support.
+For the integration workflow, start with the
+[library API](../../develop_docs/library-api.md);
+[ASAPPlanner input, output, and workflows](input-output-workflow.md) defines
+the workload inputs.
 
 ## Planner component flow
 
@@ -16,35 +17,27 @@ and assembly workflows, and future replanning support.
 flowchart TD
     W["PlanningWorkload: query demand + optional data facts"]
     F["Frontend dependencies: SQL catalog or PromQL time"]
-    E["Strategy, accuracy model, and applicable evidence"]
-    PRE["Frontend lowering → canonical Pre-ASAP OperatorNode roots"]
-    SEARCH["Whole-workload candidate search: sharing, legality, accuracy"]
-    SPACE["CandidateLogicalASAPDAGs: compact logical candidate DAG space"]
-    RANK["Optional cost_sorted: ranked inspection view"]
-    SELECT["Optional global_selection + assemble_selected_dag"]
-    DAG["Selected logical Post-ASAP DAG"]
-    BACKEND["Downstream: bind physical alternatives, decide deployment, compile and execute"]
+    M["PlanningModels: accuracy model, calibration, deployment capabilities"]
+    PRE["Frontend lowering → canonical Pre-ASAP roots"]
+    S1["Stage 1: Pass 1 alternatives per target; Pass 2 sharing variants"]
+    S2["Stage 2: physical candidates (materialization)"]
+    S3["Stage 3: accuracy and capability checks, pricing, selection"]
+    PLAN["Selected logical Post-ASAP plan + selection report"]
+    BACKEND["Downstream: bind physical operators, deploy, compile and execute"]
     W --> PRE
     F --> PRE
-    PRE --> SEARCH
-    E --> SEARCH
-    SEARCH --> SPACE
-    SPACE --> RANK --> BACKEND
-    SPACE --> SELECT --> DAG --> BACKEND
+    PRE --> S1 --> S2 --> S3
+    M --> S3
+    S3 --> PLAN --> BACKEND
 ```
 
-`CandidateLogicalASAPDAGs` is the output of logical candidate search. Each target's candidate set holds
-alternatives and rejection reasons, but no materialization decision.
-Choose between two branches: inspect candidates (optionally ranked), or select
-and assemble logical DAGs. Stage 2 materialization (#509) will decide per
-sub-DAG whether to materialize and whether at ingestion or query time; until
-then every summary runs at query time. No branch by itself deploys or executes
-a physical plan.
-Known-invalid evidence rejects a logical candidate. Missing accuracy evidence
-leaves a constructible candidate visible in `CandidateLogicalASAPDAGs` but uncertified; default
-selection does not commit it without the required guarantee. Cost evidence can
-rank eligible candidates, but it cannot establish a missing guarantee or turn
-an unsupported physical alternative into a deployable plan.
+Stage 1 lists alternatives without pricing them. Stage 3 rejects a candidate
+whose summary estimate misses its query's accuracy target (or has no accuracy
+model), that needs a capability the deployment lacks, or that exceeds its
+memory budget, and selects the cheapest remaining one. Rejection reasons are
+reported with the selection. Cost evidence can rank valid candidates, but it
+cannot establish a missing guarantee or turn an unsupported physical
+alternative into a deployable plan.
 
 ## Module map
 
@@ -53,7 +46,7 @@ an unsupported physical alternative into a deployable plan.
 | Shared IR | `asap-types` | The unified operator IR (`ir`: one `OperatorNode` before and after ASAP optimization), schemas, workloads, guarantees, and exported plan data |
 | Front-end common | `frontend-common` | Name-based `UnresolvedOp` tree shared by the front ends, and `resolve_root` into the operator IR |
 | Query frontends | `frontend-sql`, `frontend-promql`, `frontend-metricsql` | Parse source languages and produce canonical Pre-ASAP queries |
-| ASAP-aware mapping | `asap-logical-optimizer`, `asap-physical-optimizer`, `asap-plan-selection` | #509 Stages 1–3: candidate generation, CSE, legality and accuracy propagation; physical candidates; costing and selection |
+| ASAP-aware mapping | `asap-logical-optimizer`, `asap-physical-optimizer`, `asap-plan-selection` | #509 Stages 1–3: logical alternatives and sharing; physical candidates; accuracy checks, costing and selection |
 | Planner facade | `asap-planner` | Lowering dispatch, the optimization pass (`OptimizationPass`, `StagePipeline`) and `optimize` |
 | Developer inspection | `devtools` | Expose planner DAGs, alternatives, decisions, and explanations for inspection |
 | End-to-end validation | `integration-tests` | Verify behavior across frontends, mapping, and output IR |
@@ -66,26 +59,17 @@ requirements, the planning horizon, available materialized state, downstream
 capabilities, and complete cost evidence. Missing or stale evidence must remain
 explicit rather than being treated as zero.
 
-The primary output is `CandidateLogicalASAPDAGs`; `cost_sorted` derives an optional ranked
-view with index-aligned costs. Downstream may inspect compatible choices
-across targets rather than assuming the first candidate is a feasible
-physical workload plan. Candidates carry logical summary algorithms,
-parameters, and guarantees, but no materialization decision. Rejection reasons
-are retained in the candidate space.
+The output is the selected plan: one logical Post-ASAP root per query
+(`PlanOutput`), with the selection report — the priced candidates, the rejected
+ones with their reasons, and whether the selection is guaranteed optimal.
+`plan_stages` also returns Stage 1's alternatives for inspection.
 
-ASAPQuery-backend and other downstream applications translate the candidates
+ASAPQuery-backend and other downstream applications translate the selected plan
 into physical alternatives. They own concrete implementations, storage layout,
 placement, sharding, deployment-level cost and compatibility, final commitment,
 serving, and operational feedback. Their physical planning can reorder
 candidates because it has evidence that the reusable Planner does not, but it
 must not silently change Planner-owned semantics.
-
-`candidate_selection::global_selection` optionally coordinates structural choices across
-targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic DAG.
-Those APIs do not establish physical feasibility or a
-materialization decision. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
-for the distinction. Downstream may consume candidates directly and retains
-responsibility for physical commitment.
 
 ## Further reading
 
