@@ -1,6 +1,6 @@
 //! Unified operator and scalar representation from #511.
-//! Graph algorithms are added in the next stack layer; legacy consumers
-//! remain on their existing representation until the planner cutover.
+//! Legacy consumers remain on their existing representation until the
+//! planner cutover.
 pub mod aggregate_schema;
 pub mod asap;
 pub mod error;
@@ -15,3 +15,7 @@ pub use node::{Operator, OperatorNode, OperatorResultKind};
 pub use non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
 pub use query::QueryRoot;
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+
+pub mod canonicalize;
+pub mod cse;
+pub mod flat;
