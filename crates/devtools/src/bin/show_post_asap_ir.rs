@@ -182,7 +182,7 @@ mod tests {
             &mut asap_types::ir::timing::TimingMemo::new(),
         )
         .expect("the demo candidate has a legal default timing");
-        asap_types::ir::export::compile_physical_asap_dag(&timed)
+        asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
             .expect("the demo candidate remains executable");
     }
 

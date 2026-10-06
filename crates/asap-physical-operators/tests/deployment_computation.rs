@@ -9,7 +9,8 @@ use asap_physical_operators::{
 };
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::ASAPOp;
 use planner_types::{post_asap::*, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
@@ -75,22 +76,21 @@ fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(u64, Arc<Schema>, String)> {
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::Relational {
-                operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. },
-            } => {
+            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange {
+                ..
+            }) => {
                 let mut id = node.id;
                 loop {
                     let n = dag.nodes.iter().find(|n| n.id == id)?;
-                    if let PhysicalASAPOperatorPayload::Relational {
-                        operator:
-                            planner_types::ir::export::NonASAPOpKind::Scan {
-                                source: planner_types::pre_asap::Source::TimeSeries { metric },
-                                ..
-                            },
-                    } = &n.payload
+                    if let PhysicalASAPOperatorPayload::NonASAP(
+                        planner_types::ir::NonASAPOp::Scan {
+                            source: planner_types::pre_asap::Source::TimeSeries { metric },
+                            ..
+                        },
+                    ) = &n.payload
                     {
                         return Some((
-                            u64::from(node.id.0),
+                            node.id as u64,
                             Arc::new(node.output_schema.clone()),
                             metric.clone(),
                         ));
@@ -130,7 +130,7 @@ fn execute_relabeled(
             .iter()
             .map(|(id, schema, _)| (*id, InputContract::bounded(schema.clone())))
             .collect(),
-        &[u64::from(dag.roots[0].0)],
+        &[dag.roots[0] as u64],
     )
     .map_err(|e| e.to_string())?;
     let program: CompiledPhysicalDAG =
@@ -335,13 +335,11 @@ fn with_kind(
     bool_result: bool,
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
-        if let PhysicalASAPOperatorPayload::Relational {
-            operator:
-                planner_types::ir::export::NonASAPOpKind::BinaryOp {
-                    operator,
-                    return_bool,
-                },
-        } = &mut node.payload
+        if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
+            operator,
+            return_bool,
+            ..
+        }) = &mut node.payload
         {
             operator.kind = kind.clone();
             *return_bool = bool_result;
@@ -542,13 +540,10 @@ fn with_vector_match(
     labels: &[&str],
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
-        if let PhysicalASAPOperatorPayload::Relational {
-            operator:
-                planner_types::ir::export::NonASAPOpKind::BinaryOp {
-                    operator,
-                    return_bool: _,
-                },
-        } = &mut node.payload
+        if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
+            operator,
+            ..
+        }) = &mut node.payload
         {
             operator.vector_match = Some(planner_types::pre_asap::VectorMatch {
                 kind: kind.clone(),
@@ -636,15 +631,16 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
                 let bare_count = dag.nodes.iter().any(|n| {
                     matches!(
                         &n.payload,
-                        PhysicalASAPOperatorPayload::SummaryEstimate {
-                            query: SketchStatistic::PointCount { value: None, .. }
-                        }
+                        PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryEstimate {
+                            query: SketchStatistic::PointCount { value: None, .. },
+                            ..
+                        })
                     )
                 });
                 let count_min = dag.nodes.iter().any(|n| {
-                    matches!(&n.payload, PhysicalASAPOperatorPayload::SummaryAgg {
+                    matches!(&n.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                         family: FieldDataType::Sketch(kind, _), ..
-                    } if kind.algorithm() == &SketchAlgorithm::Cms)
+                    }) if kind.algorithm() == &SketchAlgorithm::Cms)
                 });
                 (bare_count && count_min).then_some(dag)
             }
@@ -654,12 +650,17 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let state = dag
         .nodes
         .iter()
-        .find(|n| matches!(n.payload, PhysicalASAPOperatorPayload::SummaryAgg { .. }))
+        .find(|n| {
+            matches!(
+                n.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .unwrap();
-    let PhysicalASAPOperatorPayload::SummaryAgg {
+    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family: FieldDataType::Sketch(kind, _),
         ..
-    } = &state.payload
+    }) = &state.payload
     else {
         unreachable!()
     };
@@ -669,11 +670,8 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let schema = Arc::new(state.output_schema.clone());
     let program = compile(
         &dag,
-        BTreeMap::from([(
-            u64::from(state.id.0),
-            InputContract::bounded(schema.clone()),
-        )]),
-        &[u64::from(dag.roots[0].0)],
+        BTreeMap::from([(state.id as u64, InputContract::bounded(schema.clone()))]),
+        &[dag.roots[0] as u64],
     )
     .unwrap();
     let program: CompiledPhysicalDAG =
@@ -695,7 +693,7 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let batch = Batch::try_new(schema.clone(), vec![row]).unwrap();
     let physical_dag = program
         .instantiate(BTreeMap::from([(
-            u64::from(state.id.0),
+            state.id as u64,
             Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
         )]))
         .unwrap();

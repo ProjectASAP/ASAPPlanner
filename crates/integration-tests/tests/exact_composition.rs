@@ -27,8 +27,8 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{post_asap_dag, timed};
 use asap_types::dag_export;
-use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
 use asap_types::ir::operator_properties::{Reduction, Source};
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::timing::data_state;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use asap_types::post_asap::{
@@ -800,9 +800,7 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
     let wire_root = wire.nodes.iter().find(|n| n.id == wire.roots[0]).unwrap();
     assert!(matches!(
         wire_root.payload,
-        PhysicalASAPOperatorPayload::Relational {
-            operator: NonASAPOpKind::Aggregate { .. }
-        }
+        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate { .. })
     ));
     assert_eq!(wire_root.output_state.timing, ExecutionTiming::QueryTime);
 

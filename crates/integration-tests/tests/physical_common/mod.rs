@@ -45,11 +45,13 @@ pub fn execute(
 #[allow(dead_code)]
 pub fn compile_physical_asap_dag(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
-) -> Result<asap_types::ir::export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
+) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     let root = asap_types::ir::apply_lifecycle_timings(
         root,
         &Default::default(),
         &mut Default::default(),
     )?;
-    Ok(asap_types::ir::export::compile_physical_asap_dag(&root)?)
+    Ok(asap_types::ir::physical_export::compile_physical_asap_dag(
+        &root,
+    )?)
 }

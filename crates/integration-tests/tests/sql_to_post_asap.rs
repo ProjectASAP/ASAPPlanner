@@ -26,11 +26,8 @@ use asap_aware_mapping::{
 };
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
-use asap_types::ir::export::{
-    EdgeRole, NonASAPOpKind, PhysicalASAPNodeId, PhysicalASAPOperatorPayload, WirePredicate,
-    WireScalarExpr,
-};
 use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::physical_export::{EdgeRole, PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
 use asap_types::post_asap::{
     ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind,
@@ -84,13 +81,10 @@ fn is_kept_non_asap(node: &OperatorNode) -> bool {
 }
 
 /// Mirror a scalar-only predicate (no operator references) to its wire form.
-fn wire_pred(pred: &Predicate) -> WirePredicate {
-    WirePredicate(WireScalarExpr::from_expr(
-        &pred.0,
-        &mut |_: &Rc<OperatorNode>| -> PhysicalASAPNodeId {
-            panic!("fixture predicate references no operator")
-        },
-    ))
+fn wire_pred(pred: &Predicate) -> Predicate<PhysicalASAPNodeId> {
+    Predicate(pred.0.map_operator_refs(&mut |_| -> PhysicalASAPNodeId {
+        panic!("fixture predicate references no operator")
+    }))
 }
 
 fn dtype<'a>(schema: &'a Schema, name: &str) -> &'a FieldDataType {
@@ -226,9 +220,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
         let dag = post_asap_dag(&root);
         assert!(dag.nodes.iter().any(|node| matches!(
             node.payload,
-            PhysicalASAPOperatorPayload::Relational {
-                operator: NonASAPOpKind::Aggregate { .. },
-            }
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate { .. })
         )));
     }
 }
@@ -396,9 +388,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         .find(|node| {
             matches!(
                 node.payload,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: NonASAPOpKind::Join { .. },
-                }
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Join { .. })
             )
         })
         .expect("relational join node")
@@ -587,9 +577,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     let expected_wire = wire_pred(retained_read_predicate.as_ref().unwrap());
     assert!(dag.nodes.iter().any(|node| matches!(
         &node.payload,
-        PhysicalASAPOperatorPayload::Relational {
-            operator: NonASAPOpKind::Filter { pred },
-        } if *pred == expected_wire
+        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Filter { pred, .. }) if *pred == expected_wire
     )));
 }
 
@@ -848,8 +836,8 @@ async fn map_projection_export_preserves_unsupported_child_boundary() {
         .unwrap();
     let dag = post_asap_dag(&root);
     assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-        PhysicalASAPOperatorPayload::Relational { operator: NonASAPOpKind::Project { cols, .. } }
-        if cols.iter().any(|item| matches!(&item.expr, WireScalarExpr::FunctionCall { name, .. } if name == "map"))
+        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Project { cols, .. })
+        if cols.iter().any(|item| matches!(&item.expr, ScalarExpr::FunctionCall { name, .. } if name == "map"))
     )));
     let mut node = root.as_ref();
     loop {

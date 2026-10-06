@@ -1,7 +1,8 @@
 //! Planner-selected summaries over raw samples compile as precompute DAGs
 //! and produce the same estimates as feeding their kernel sample by sample.
 mod physical_common;
-use asap_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use asap_types::ir::ASAPOp;
 use asap_types::ir::OperatorNode;
 use physical_common::compile_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
@@ -81,7 +82,12 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
 fn raw_summaries(dag: &PhysicalASAPDAG) -> Vec<(u64, u64)> {
     dag.nodes
         .iter()
-        .filter(|node| matches!(node.payload, PhysicalASAPOperatorPayload::SummaryAgg { .. }))
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .filter_map(|node| {
             let inputs = dag
                 .edges
@@ -94,11 +100,9 @@ fn raw_summaries(dag: &PhysicalASAPDAG) -> Vec<(u64, u64)> {
             let source = dag.nodes.iter().find(|n| n.id == edge.producer)?;
             matches!(
                 source.payload,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: asap_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                }
+                PhysicalASAPOperatorPayload::NonASAP(asap_types::ir::NonASAPOp::TimeRange { .. })
             )
-            .then_some((u64::from(source.id.0), u64::from(node.id.0)))
+            .then_some((source.id as u64, node.id as u64))
         })
         .collect()
 }
@@ -132,7 +136,7 @@ fn execute(
             "raw summary {root} does not compile: {error}; source {:?}",
             dag.nodes
                 .iter()
-                .find(|n| u64::from(n.id.0) == source)
+                .find(|n| n.id as u64 == source)
                 .map(|n| (&n.output_schema, &n.payload))
         );
     });
@@ -290,26 +294,18 @@ fn check(
     root: u64,
     rows: &[(Series, i64, f64)],
 ) -> Result<String, String> {
-    let node = dag
-        .nodes
-        .iter()
-        .find(|n| u64::from(n.id.0) == root)
-        .unwrap();
-    let PhysicalASAPOperatorPayload::SummaryAgg {
+    let node = dag.nodes.iter().find(|n| n.id as u64 == root).unwrap();
+    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family,
         input,
         reduction,
         grouping,
         ..
-    } = &node.payload
+    }) = &node.payload
     else {
         unreachable!()
     };
-    let source_node = dag
-        .nodes
-        .iter()
-        .find(|n| u64::from(n.id.0) == source)
-        .unwrap();
+    let source_node = dag.nodes.iter().find(|n| n.id as u64 == source).unwrap();
     let keys = match reduction {
         Reduction::Reduce(keys) => keys
             .keys()
@@ -476,16 +472,12 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     .unwrap();
     let mut dag = compile_physical_asap_dag(&candidate).unwrap();
     let (source, root) = raw_summaries(&dag)[0];
-    let node = dag
-        .nodes
-        .iter_mut()
-        .find(|n| u64::from(n.id.0) == root)
-        .unwrap();
-    let PhysicalASAPOperatorPayload::SummaryAgg {
+    let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
+    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family: old,
         input: update,
         ..
-    } = &mut node.payload
+    }) = &mut node.payload
     else {
         unreachable!()
     };
@@ -497,11 +489,7 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     *old = family;
     *update = input;
     let schema = node.output_schema.clone();
-    for edge in dag
-        .edges
-        .iter_mut()
-        .filter(|e| u64::from(e.producer.0) == root)
-    {
+    for edge in dag.edges.iter_mut().filter(|e| e.producer as u64 == root) {
         edge.intermediate_schema = schema.clone();
     }
     (dag, source, root)
@@ -603,19 +591,16 @@ fn raw_sample_without_grouping_drops_labels_and_name() {
     let service = dag
         .nodes
         .iter()
-        .find(|n| u64::from(n.id.0) == source)
+        .find(|n| n.id as u64 == source)
         .unwrap()
         .output_schema
         .fields
         .iter()
         .position(|f| f.name == "service")
         .unwrap();
-    let node = dag
-        .nodes
-        .iter_mut()
-        .find(|n| u64::from(n.id.0) == root)
-        .unwrap();
-    let PhysicalASAPOperatorPayload::SummaryAgg { reduction, .. } = &mut node.payload else {
+    let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
+    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) = &mut node.payload
+    else {
         unreachable!()
     };
     *reduction = Reduction::Reduce(GroupKeys::without(vec![service]));

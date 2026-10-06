@@ -264,7 +264,10 @@ impl PlanOutput {
     /// roots have no physical form yet and are left out.
     pub fn execution_timed_dag(
         &self,
-    ) -> Result<asap_types::ir::export::PhysicalASAPDAG, crate::SummaryMaintenanceTimingError> {
+    ) -> Result<
+        asap_types::ir::physical_export::PhysicalASAPDAG,
+        crate::SummaryMaintenanceTimingError,
+    > {
         let plans: Vec<_> = self.plans.iter().map(|p| &p.plan).collect();
         crate::execution_timed_workload_dag(&plans)
     }

@@ -330,7 +330,7 @@ mod tests {
     use super::*;
     use crate::test_support::lower_promql;
     use asap_types::ir::cse::share_common_sub_dags;
-    use asap_types::ir::export::compile_physical_asap_dag as export_timed;
+    use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
     use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
 
     /// Time `root` under the default lifecycle assignment (which runs the
