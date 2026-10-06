@@ -10,7 +10,7 @@ use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::operator_properties::Reduction;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
-use crate::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
+use crate::post_asap::sketch::{GroupingStrategy, SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
 /// Why an ASAP operator cannot be used yet.
@@ -42,7 +42,9 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     },
     /// Read an exact accumulator's state as its finalized value: the
     /// maintenance-to-read boundary before query-time operators.
-    FinalizeExactAccumulator { child: C },
+    FinalizeExactAccumulator {
+        child: C,
+    },
     /// Maintain the full declared population, including membership changes.
     MaintainPopulation {
         child: C,
@@ -54,7 +56,9 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         evaluation: PopulationStatistic,
     },
     /// Merge compatible partial states for the same grouping and family.
-    SummaryMerge { children: Vec<C> },
+    SummaryMerge {
+        children: Vec<C>,
+    },
     // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
         left: C,
@@ -497,6 +501,23 @@ impl ASAPOp {
                                 .into(),
                         ));
                     }
+                }
+                // A heap of top-k candidates does not merge exactly: an item heavy
+                // in only one input can be missing from the merged heap.
+                if first.schema.fields.iter().any(|field| {
+                    matches!(
+                        &field.dtype,
+                        FieldDataType::Sketch(kind, _) if matches!(
+                            kind.algorithm(),
+                            SketchAlgorithm::CmsWithHeap
+                                | SketchAlgorithm::CountSketchWithHeap
+                                | SketchAlgorithm::UnivMon
+                        )
+                    )
+                }) {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "summary merge does not support heap-based sketches".into(),
+                    ));
                 }
                 // Coverage records only time and population; what each state
                 // summarizes and how it is grouped come from the producers.

@@ -75,8 +75,10 @@ impl SummaryCoverage {
 
     /// Every observation in a region is assumed to contribute once to the state.
     /// Compose once-per-observation summaries only when their joint regions are
-    /// provably disjoint. Update/reduction compatibility, family merge capability
-    /// and accuracy are checked by `SummaryMerge`, not here.
+    /// provably disjoint. `SummaryMerge` checks the rest: equal schemas (so the
+    /// same family and parameters), equal update and reduction, and no
+    /// heap-based family. Accuracy of the merged state is not assessed; its
+    /// `guarantee` is `None`.
     pub fn merge_disjoint(inputs: &[Self]) -> Result<Self, CoverageError> {
         let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
         let mut merged = first.clone();

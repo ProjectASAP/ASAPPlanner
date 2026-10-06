@@ -7,6 +7,13 @@ use asap_types::{
 };
 use std::rc::Rc;
 fn state(k: u32) -> Rc<OperatorNode> {
+    state_with(FieldDataType::Sketch(
+        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
+        Default::default(),
+    ))
+}
+
+fn state_with(family: FieldDataType) -> Rc<OperatorNode> {
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: Source::Table {
             table_ref: "latencies".into(),
@@ -17,10 +24,7 @@ fn state(k: u32) -> Rc<OperatorNode> {
     .unwrap();
     let summary = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan,
-        family: FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
-            Default::default(),
-        ),
+        family,
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![]),
         grouping: GroupingStrategy::default(),
@@ -70,10 +74,34 @@ fn incompatible_merge_inputs_fail() {
 }
 
 fn shifted_state(k: u32, start: i64, end: i64) -> Rc<OperatorNode> {
-    let mut node = (*state(k)).clone();
+    shifted(&state(k), start, end)
+}
+
+fn shifted(state: &Rc<OperatorNode>, start: i64, end: i64) -> Rc<OperatorNode> {
+    let mut node = (**state).clone();
     let region = &mut node.coverage.as_mut().unwrap().regions[0];
     region.time_ms = Some(start..end);
     Rc::new(node)
+}
+
+/// A heap of top-k candidates does not merge exactly, even over disjoint panes.
+#[test]
+fn heap_based_sketches_do_not_merge() {
+    let heap = state_with(FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CmsWithHeap,
+            SketchParams::CmsWithHeap {
+                width: 1024,
+                depth: 4,
+                heap_size: 10,
+            },
+        ),
+        Default::default(),
+    ));
+    let result = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![Rc::clone(&heap), shifted(&heap, 1, 2)],
+    }));
+    assert!(result.is_err());
 }
 /// Schema equality cannot authorize overlapping or unknown observation coverage.
 #[test]
