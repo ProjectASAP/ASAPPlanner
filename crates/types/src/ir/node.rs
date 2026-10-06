@@ -30,26 +30,37 @@ pub enum OperatorResultKind {
 /// The operation a node performs: an ordinary query operator or an ASAP
 /// summary operator. Either category can consume the other's output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Operator {
-    NonASAP(NonASAPOp),
-    ASAP(ASAPOp),
+pub enum Operator<C = Rc<OperatorNode>> {
+    NonASAP(NonASAPOp<C>),
+    ASAP(ASAPOp<C>),
 }
 
-impl Operator {
-    pub fn children(&self) -> Vec<&Rc<OperatorNode>> {
+impl<C> Operator<C> {
+    pub fn children(&self) -> Vec<&C> {
         match self {
             Operator::NonASAP(op) => op.children(),
             Operator::ASAP(op) => op.children(),
         }
     }
 
-    pub fn map_children(&self, f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self {
+    /// `f` may change the reference type, e.g. from `Rc<OperatorNode>` to a
+    /// node id.
+    pub fn map_children<D>(&self, f: impl FnMut(&C) -> D) -> Operator<D> {
         match self {
             Operator::NonASAP(op) => Operator::NonASAP(op.map_children(f)),
             Operator::ASAP(op) => Operator::ASAP(op.map_children(f)),
         }
     }
 
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Operator::NonASAP(op) => op.kind_name(),
+            Operator::ASAP(op) => op.kind_name(),
+        }
+    }
+}
+
+impl Operator {
     pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         match self {
             Operator::NonASAP(op) => op.output_schema(),
@@ -68,13 +79,6 @@ impl Operator {
         match self {
             Operator::NonASAP(op) => op.validate_inputs(),
             Operator::ASAP(op) => op.validate_inputs(),
-        }
-    }
-
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            Operator::NonASAP(op) => op.kind_name(),
-            Operator::ASAP(op) => op.kind_name(),
         }
     }
 }

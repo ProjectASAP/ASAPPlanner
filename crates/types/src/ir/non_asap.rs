@@ -52,35 +52,34 @@ pub enum TimeRangeKind {
 /// ordinary operator can read a summary evaluation and a summary can read any
 /// relational sub-DAG.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum NonASAPOp {
+// `#[serde(default)]` fields would otherwise make serde require `C: Default`.
+#[serde(bound(deserialize = "C: Deserialize<'de>"))]
+pub enum NonASAPOp<C = Rc<OperatorNode>> {
     /// Leaf. `schema` is the binding schema every positional `ColumnId` in
     /// the tree indexes into; `predicates` are leaf-level row filters (PromQL
     /// label matchers, pushed-down `WHERE` conjuncts).
     Scan {
         source: Source,
         #[serde(default)]
-        predicates: Vec<Predicate>,
+        predicates: Vec<Predicate<C>>,
         schema: Schema,
     },
     /// SQL `VALUES` rows, or the one empty row of a `SELECT` without `FROM`.
     /// Row expressions have no input-column scope.
     Values {
-        rows: Vec<Vec<ScalarExpr>>,
+        rows: Vec<Vec<ScalarExpr<C>>>,
         schema: Schema,
     },
     /// σ — row-level filter. Output schema = child schema.
-    Filter {
-        pred: Predicate,
-        child: Rc<OperatorNode>,
-    },
+    Filter { pred: Predicate<C>, child: C },
     /// π — projection.
     Project {
-        cols: Vec<ProjectItem>,
+        cols: Vec<ProjectItem<C>>,
         /// Re-qualifies every output column with this table alias (a derived
         /// table / inline view). `None` for an ordinary SELECT list.
         #[serde(default)]
         qualifier: Option<String>,
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// γ + α — grouping + aggregate intents.
     Aggregate {
@@ -91,41 +90,38 @@ pub enum NonASAPOp {
         #[serde(default)]
         output_names: Vec<String>,
         #[serde(default)]
-        filters: Vec<Option<Predicate>>,
+        filters: Vec<Option<Predicate<C>>>,
         #[serde(default)]
-        having: Option<Predicate>,
-        child: Rc<OperatorNode>,
+        having: Option<Predicate<C>>,
+        child: C,
     },
     Join {
         kind: JoinKind,
-        pred: Predicate,
-        left: Rc<OperatorNode>,
-        right: Rc<OperatorNode>,
+        pred: Predicate<C>,
+        left: C,
+        right: C,
     },
     SetOp {
         kind: RelationalSetOpKind,
         all: bool,
-        left: Rc<OperatorNode>,
-        right: Rc<OperatorNode>,
+        left: C,
+        right: C,
     },
     /// ⊕ — exact n-ary `UNION ALL` of union-compatible branches. The output
     /// schema is the first child's.
     Concat {
-        children: Vec<Rc<OperatorNode>>,
+        children: Vec<C>,
         #[serde(default)]
         discriminator_unique_key: Option<ConcatDiscriminatorKey>,
     },
     /// δ — deduplication; empty `cols` = all columns.
-    Dedup {
-        cols: Vec<ColumnId>,
-        child: Rc<OperatorNode>,
-    },
+    Dedup { cols: Vec<ColumnId>, child: C },
     /// Order-by, per `partition_by` group when non-empty.
     Sort {
-        keys: Vec<SortKey>,
+        keys: Vec<SortKey<C>>,
         #[serde(default)]
         partition_by: GroupKeys,
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// Row selection; `n = None` is offset-only. `partition_by` applies the
     /// limit per group (PromQL `topk by (..)`).
@@ -134,7 +130,7 @@ pub enum NonASAPOp {
         offset: usize,
         #[serde(default)]
         partition_by: GroupKeys,
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// Arithmetic / comparison / set composition of two operands (PromQL
     /// binary operators). Mixed scalar/vector operations use Project or Filter.
@@ -144,68 +140,65 @@ pub enum NonASAPOp {
         /// filtering. Valid only for comparison operators.
         #[serde(default)]
         return_bool: bool,
-        lhs: Rc<OperatorNode>,
-        rhs: Rc<OperatorNode>,
+        lhs: C,
+        rhs: C,
     },
     /// SQL analytic window function. Output schema = child schema + one
     /// column named `output_name`.
     SQLWindowFunc {
         func: WindowFuncKind,
-        args: Vec<ScalarExpr>,
+        args: Vec<ScalarExpr<C>>,
         partition_by: GroupKeys,
-        order_by: Vec<SortKey>,
+        order_by: Vec<SortKey<C>>,
         #[serde(default)]
         frame: Option<WindowFrame>,
         output_name: String,
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// Temporal selection over a time-series input.
     TimeRange {
         range: Duration,
         kind: TimeRangeKind,
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// PromQL `offset` / `@`: moves when `child` is evaluated.
-    TimeShift {
-        shift: TimeShift,
-        child: Rc<OperatorNode>,
-    },
+    TimeShift { shift: TimeShift, child: C },
     /// PromQL `vector(s)`: a label-less instant vector carrying a scalar.
-    PromqlVectorFromScalar(ScalarExpr),
+    PromqlVectorFromScalar(ScalarExpr<C>),
     /// ρ — PromQL `label_replace` / `label_join`.
     PromqlRelabel {
         dst: String,
-        value: ScalarExpr,
-        child: Rc<OperatorNode>,
+        value: ScalarExpr<C>,
+        child: C,
     },
     /// PromQL `info(v, selector)` label enrichment.
     PromqlInfoEnrich {
         #[serde(default)]
         selector: Vec<InfoMatcher>,
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// PromQL `limitk` / `limit_ratio`.
     PromqlSeriesSample {
         #[serde(default)]
         by: GroupKeys,
         kind: SampleKind,
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// PromQL subquery `<expr>[range:resolution]`.
     PromqlSubquery {
         range: Duration,
         #[serde(default)]
         resolution: Option<Duration>,
-        child: Rc<OperatorNode>,
+        child: C,
     },
 }
 
-impl NonASAPOp {
+impl<C> NonASAPOp<C> {
     /// The direct operator inputs, in field order, followed by the operator
     /// nodes referenced from this operator's scalar expressions.
-    pub fn children(&self) -> Vec<&Rc<OperatorNode>> {
+    pub fn children(&self) -> Vec<&C> {
         use NonASAPOp::*;
-        let mut out: Vec<&Rc<OperatorNode>> = match self {
+        let mut out: Vec<&C> = match self {
             Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) => vec![],
             Filter { child, .. }
             | Project { child, .. }
@@ -231,7 +224,7 @@ impl NonASAPOp {
     }
 
     /// Every scalar expression this operator owns.
-    pub fn scalar_exprs(&self) -> Vec<&ScalarExpr> {
+    pub fn scalar_exprs(&self) -> Vec<&ScalarExpr<C>> {
         use NonASAPOp::*;
         match self {
             Scan { predicates, .. } => predicates.iter().map(|p| &p.0).collect(),
@@ -268,20 +261,17 @@ impl NonASAPOp {
 
     /// Rebuild this operator with `f` applied to every child, including the
     /// operator nodes referenced from scalar expressions. Every other field
-    /// is cloned.
-    pub fn map_children(&self, mut f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self {
+    /// is cloned. `f` may change the reference type, e.g. from
+    /// `Rc<OperatorNode>` to a node id.
+    pub fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> NonASAPOp<D> {
         use NonASAPOp::*;
-        let mut map_scalar = |e: &ScalarExpr| e.map_operator_refs(&mut f);
-        fn map_pred(p: &Predicate, f: &mut impl FnMut(&ScalarExpr) -> ScalarExpr) -> Predicate {
-            Predicate(f(&p.0))
+        fn map_pred<C, D>(p: &Predicate<C>, f: &mut impl FnMut(&C) -> D) -> Predicate<D> {
+            Predicate(p.0.map_operator_refs(f))
         }
-        fn map_keys(
-            keys: &[SortKey],
-            f: &mut impl FnMut(&ScalarExpr) -> ScalarExpr,
-        ) -> Vec<SortKey> {
+        fn map_keys<C, D>(keys: &[SortKey<C>], f: &mut impl FnMut(&C) -> D) -> Vec<SortKey<D>> {
             keys.iter()
                 .map(|k| SortKey {
-                    expr: f(&k.expr),
+                    expr: k.expr.map_operator_refs(f),
                     ascending: k.ascending,
                     nulls_first: k.nulls_first,
                 })
@@ -294,22 +284,19 @@ impl NonASAPOp {
                 schema,
             } => Scan {
                 source: source.clone(),
-                predicates: predicates
-                    .iter()
-                    .map(|p| map_pred(p, &mut map_scalar))
-                    .collect(),
+                predicates: predicates.iter().map(|p| map_pred(p, &mut f)).collect(),
                 schema: schema.clone(),
             },
             Values { rows, schema } => Values {
                 rows: rows
                     .iter()
-                    .map(|row| row.iter().map(&mut map_scalar).collect())
+                    .map(|row| row.iter().map(|e| e.map_operator_refs(&mut f)).collect())
                     .collect(),
                 schema: schema.clone(),
             },
-            PromqlVectorFromScalar(e) => PromqlVectorFromScalar(map_scalar(e)),
+            PromqlVectorFromScalar(e) => PromqlVectorFromScalar(e.map_operator_refs(&mut f)),
             Filter { pred, child } => {
-                let pred = map_pred(pred, &mut map_scalar);
+                let pred = map_pred(pred, &mut f);
                 Filter {
                     pred,
                     child: f(child),
@@ -324,7 +311,7 @@ impl NonASAPOp {
                     .iter()
                     .map(|c| ProjectItem {
                         alias: c.alias.clone(),
-                        expr: map_scalar(&c.expr),
+                        expr: c.expr.map_operator_refs(&mut f),
                     })
                     .collect();
                 Project {
@@ -343,9 +330,9 @@ impl NonASAPOp {
             } => {
                 let filters = filters
                     .iter()
-                    .map(|p| p.as_ref().map(|p| map_pred(p, &mut map_scalar)))
+                    .map(|p| p.as_ref().map(|p| map_pred(p, &mut f)))
                     .collect();
-                let having = having.as_ref().map(|p| map_pred(p, &mut map_scalar));
+                let having = having.as_ref().map(|p| map_pred(p, &mut f));
                 Aggregate {
                     reduction: reduction.clone(),
                     measures: measures.clone(),
@@ -361,7 +348,7 @@ impl NonASAPOp {
                 left,
                 right,
             } => {
-                let pred = map_pred(pred, &mut map_scalar);
+                let pred = map_pred(pred, &mut f);
                 Join {
                     kind: kind.clone(),
                     pred,
@@ -396,7 +383,7 @@ impl NonASAPOp {
                 partition_by,
                 child,
             } => {
-                let keys = map_keys(keys, &mut map_scalar);
+                let keys = map_keys(keys, &mut f);
                 Sort {
                     keys,
                     partition_by: partition_by.clone(),
@@ -434,8 +421,8 @@ impl NonASAPOp {
                 output_name,
                 child,
             } => {
-                let args = args.iter().map(&mut map_scalar).collect();
-                let order_by = map_keys(order_by, &mut map_scalar);
+                let args = args.iter().map(|e| e.map_operator_refs(&mut f)).collect();
+                let order_by = map_keys(order_by, &mut f);
                 SQLWindowFunc {
                     func: func.clone(),
                     args,
@@ -456,7 +443,7 @@ impl NonASAPOp {
                 child: f(child),
             },
             PromqlRelabel { dst, value, child } => {
-                let value = map_scalar(value);
+                let value = value.map_operator_refs(&mut f);
                 PromqlRelabel {
                     dst: dst.clone(),
                     value,
@@ -510,7 +497,9 @@ impl NonASAPOp {
             PromqlSubquery { .. } => "PromqlSubquery",
         }
     }
+}
 
+impl NonASAPOp {
     /// Output schema derived from this operator's parameters and its
     /// children's (already derived) schemas.
     pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {

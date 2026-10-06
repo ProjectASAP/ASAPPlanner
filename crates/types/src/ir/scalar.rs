@@ -31,56 +31,56 @@ pub enum ExprSemantics {
 /// A scalar expression over the owning operator's input schema. Column
 /// references are positional [`ColumnId`]s.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ScalarExpr {
+pub enum ScalarExpr<C = Rc<OperatorNode>> {
     Column(ColumnId),
     Literal(ScalarValue),
     /// Unary minus.
     Negative {
-        expr: Box<ScalarExpr>,
+        expr: Box<ScalarExpr<C>>,
         semantics: ExprSemantics,
     },
     Compare {
-        left: Box<ScalarExpr>,
+        left: Box<ScalarExpr<C>>,
         op: CompareOpKind,
-        right: Box<ScalarExpr>,
+        right: Box<ScalarExpr<C>>,
         semantics: ExprSemantics,
     },
     /// Flat conjunction (logical AND). An empty list is vacuously true.
-    BoolAnd(Vec<ScalarExpr>),
+    BoolAnd(Vec<ScalarExpr<C>>),
     /// Flat disjunction (logical OR). An empty list is vacuously false.
-    BoolOr(Vec<ScalarExpr>),
-    Not(Box<ScalarExpr>),
-    IsNull(Box<ScalarExpr>),
-    IsNotNull(Box<ScalarExpr>),
+    BoolOr(Vec<ScalarExpr<C>>),
+    Not(Box<ScalarExpr<C>>),
+    IsNull(Box<ScalarExpr<C>>),
+    IsNotNull(Box<ScalarExpr<C>>),
     /// `CAST(expr AS to)`; `try_cast` for SQL `TRY_CAST` (NULL on failure).
     Cast {
-        expr: Box<ScalarExpr>,
+        expr: Box<ScalarExpr<C>>,
         to: DataType,
         try_cast: bool,
     },
     /// `expr [NOT] IN (v1, v2, …)`.
     InList {
-        expr: Box<ScalarExpr>,
-        list: Vec<ScalarExpr>,
+        expr: Box<ScalarExpr<C>>,
+        list: Vec<ScalarExpr<C>>,
         negated: bool,
     },
     /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
     FunctionCall {
         name: String,
-        args: Vec<ScalarExpr>,
+        args: Vec<ScalarExpr<C>>,
     },
     Arithmetic {
         op: ArithmeticOpKind,
-        left: Box<ScalarExpr>,
-        right: Box<ScalarExpr>,
+        left: Box<ScalarExpr<C>>,
+        right: Box<ScalarExpr<C>>,
         semantics: ExprSemantics,
     },
     /// SQL `CASE` (both searched and simple forms). `operand` present for the
     /// simple form (`CASE expr WHEN …`), absent for searched.
     Case {
-        operand: Option<Box<ScalarExpr>>,
-        branches: Vec<(ScalarExpr, ScalarExpr)>,
-        else_expr: Option<Box<ScalarExpr>>,
+        operand: Option<Box<ScalarExpr<C>>>,
+        branches: Vec<(ScalarExpr<C>, ScalarExpr<C>)>,
+        else_expr: Option<Box<ScalarExpr<C>>>,
     },
     /// SQL `NOW()` / `CURRENT_TIMESTAMP`: the statement evaluation time.
     CurrentTimestamp,
@@ -88,37 +88,37 @@ pub enum ScalarExpr {
     EvalTimestamp,
     /// PromQL `scalar(v)`: the single sample of an instant vector, NaN
     /// otherwise. The referenced operator is a real plan dependency.
-    PromqlScalarFromVector(Rc<OperatorNode>),
+    PromqlScalarFromVector(C),
     /// An uncorrelated SQL scalar subquery: one column; zero rows is NULL,
     /// more than one row is an error.
-    ScalarSubquery(Rc<OperatorNode>),
+    ScalarSubquery(C),
     /// SQL `[NOT] EXISTS (subquery)`.
     Exists {
-        subquery: Rc<OperatorNode>,
+        subquery: C,
         negated: bool,
     },
     /// SQL `expr [NOT] IN (subquery)` over a one-column relation.
     InSubquery {
-        expr: Box<ScalarExpr>,
-        subquery: Rc<OperatorNode>,
+        expr: Box<ScalarExpr<C>>,
+        subquery: C,
         negated: bool,
     },
 }
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Predicate(pub ScalarExpr);
+pub struct Predicate<C = Rc<OperatorNode>>(pub ScalarExpr<C>);
 
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectItem {
+pub struct ProjectItem<C = Rc<OperatorNode>> {
     pub alias: Option<String>,
-    pub expr: ScalarExpr,
+    pub expr: ScalarExpr<C>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SortKey {
-    pub expr: ScalarExpr,
+pub struct SortKey<C = Rc<OperatorNode>> {
+    pub expr: ScalarExpr<C>,
     pub ascending: bool,
     pub nulls_first: bool,
 }
@@ -131,9 +131,11 @@ impl ScalarExpr {
     pub fn column(id: ColumnId) -> Self {
         ScalarExpr::Column(id)
     }
+}
 
+impl<C> ScalarExpr<C> {
     /// If this expression is a `BoolAnd`, its elements; otherwise `self` alone.
-    pub fn conjuncts(&self) -> &[ScalarExpr] {
+    pub fn conjuncts(&self) -> &[ScalarExpr<C>] {
         match self {
             ScalarExpr::BoolAnd(v) => v.as_slice(),
             _ => std::slice::from_ref(self),
@@ -141,7 +143,7 @@ impl ScalarExpr {
     }
 
     /// If this expression is a `BoolOr`, its elements; otherwise `self` alone.
-    pub fn disjuncts(&self) -> &[ScalarExpr] {
+    pub fn disjuncts(&self) -> &[ScalarExpr<C>] {
         match self {
             ScalarExpr::BoolOr(v) => v.as_slice(),
             _ => std::slice::from_ref(self),
@@ -149,7 +151,7 @@ impl ScalarExpr {
     }
 
     /// The direct scalar sub-expressions.
-    pub fn children(&self) -> Vec<&ScalarExpr> {
+    pub fn children(&self) -> Vec<&ScalarExpr<C>> {
         match self {
             ScalarExpr::Column(_)
             | ScalarExpr::Literal(_)
@@ -198,13 +200,13 @@ impl ScalarExpr {
 
     /// The operator nodes this expression (transitively) reads: the explicit
     /// plan-reading variants. Every DAG traversal must follow these.
-    pub fn operator_refs(&self) -> Vec<&Rc<OperatorNode>> {
+    pub fn operator_refs(&self) -> Vec<&C> {
         let mut out = Vec::new();
         self.collect_operator_refs(&mut out);
         out
     }
 
-    fn collect_operator_refs<'a>(&'a self, out: &mut Vec<&'a Rc<OperatorNode>>) {
+    fn collect_operator_refs<'a>(&'a self, out: &mut Vec<&'a C>) {
         match self {
             ScalarExpr::PromqlScalarFromVector(node) | ScalarExpr::ScalarSubquery(node) => {
                 out.push(node)
@@ -219,22 +221,17 @@ impl ScalarExpr {
     }
 
     /// Rebuild this expression with `f` applied to every operator node it
-    /// reads (recursively through scalar children).
-    pub fn map_operator_refs(
-        &self,
-        f: &mut impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,
-    ) -> ScalarExpr {
-        fn map_box<F: FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>>(
-            e: &ScalarExpr,
-            f: &mut F,
-        ) -> Box<ScalarExpr> {
+    /// reads (recursively through scalar children). `f` may change the
+    /// reference type, e.g. from `Rc<OperatorNode>` to a node id.
+    pub fn map_operator_refs<D>(&self, f: &mut impl FnMut(&C) -> D) -> ScalarExpr<D> {
+        fn map_box<C, D>(e: &ScalarExpr<C>, f: &mut impl FnMut(&C) -> D) -> Box<ScalarExpr<D>> {
             Box::new(e.map_operator_refs(f))
         }
         match self {
-            ScalarExpr::Column(_)
-            | ScalarExpr::Literal(_)
-            | ScalarExpr::CurrentTimestamp
-            | ScalarExpr::EvalTimestamp => self.clone(),
+            ScalarExpr::Column(c) => ScalarExpr::Column(*c),
+            ScalarExpr::Literal(v) => ScalarExpr::Literal(v.clone()),
+            ScalarExpr::CurrentTimestamp => ScalarExpr::CurrentTimestamp,
+            ScalarExpr::EvalTimestamp => ScalarExpr::EvalTimestamp,
             ScalarExpr::PromqlScalarFromVector(node) => ScalarExpr::PromqlScalarFromVector(f(node)),
             ScalarExpr::ScalarSubquery(node) => ScalarExpr::ScalarSubquery(f(node)),
             ScalarExpr::Exists { subquery, negated } => ScalarExpr::Exists {
@@ -334,7 +331,9 @@ impl ScalarExpr {
             child.collect_columns(out);
         }
     }
+}
 
+impl ScalarExpr {
     /// Infer the `(DataType, nullable)` this expression produces against the
     /// input schema its owner evaluates it in. Unregistered functions are
     /// rejected. A reference to a field carrying summary state is an error:

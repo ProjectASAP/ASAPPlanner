@@ -17,11 +17,13 @@ pub const UNIMPLEMENTED_ASAP_OP: &str =
     "this ASAP operator is reserved: schema, accuracy, timing and export are not implemented";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ASAPOp {
+// `#[serde(default)]` fields would otherwise make serde require `C: Default`.
+#[serde(bound(deserialize = "C: Deserialize<'de>"))]
+pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// Summary aggregation. Output: grouping columns + one field carrying
     /// partial summary state per group, typed `family`.
     SummaryAgg {
-        child: Rc<OperatorNode>,
+        child: C,
         /// Which summary family realizes this aggregation. Never
         /// `FieldDataType::Plain`.
         family: FieldDataType,
@@ -29,55 +31,55 @@ pub enum ASAPOp {
         reduction: Reduction,
         grouping: GroupingStrategy,
         #[serde(default)]
-        filter: Option<super::scalar::Predicate>,
+        filter: Option<super::scalar::Predicate<C>>,
     },
     /// Read out a query result from built summary state. Output is a
     /// row-shaped schema.
     SummaryEstimate {
-        summary_input: Rc<OperatorNode>,
+        summary_input: C,
         query: SketchStatistic,
     },
     /// Read an exact accumulator's state as its finalized value: the
     /// maintenance-to-read boundary before query-time operators.
     FinalizeExactAccumulator {
-        child: Rc<OperatorNode>,
+        child: C,
     },
     /// Maintain the full declared population, including membership changes.
     MaintainPopulation {
-        child: Rc<OperatorNode>,
+        child: C,
         population: MaintainedPopulation<OperatorNode>,
     },
     /// Read an aggregate or TopK prefix from the maintained population.
     EvaluatePopulation {
-        child: Rc<OperatorNode>,
+        child: C,
         evaluation: PopulationStatistic,
     },
     // ── Reserved: migrated but unimplemented (§1.3 of the proposal) ──
     SummaryMerge {
-        children: Vec<Rc<OperatorNode>>,
+        children: Vec<C>,
     },
     SummarySubtract {
-        left: Rc<OperatorNode>,
-        right: Rc<OperatorNode>,
+        left: C,
+        right: C,
     },
     SummaryDelete {
-        summary_input: Rc<OperatorNode>,
+        summary_input: C,
         key: ColumnId,
     },
     SummaryJoin {
-        outer: Rc<OperatorNode>,
-        inner: Rc<OperatorNode>,
+        outer: C,
+        inner: C,
         key: ColumnId,
         family: FieldDataType,
     },
     Extension {
-        child: Rc<OperatorNode>,
+        child: C,
         name: String,
     },
 }
 
-impl ASAPOp {
-    pub fn children(&self) -> Vec<&Rc<OperatorNode>> {
+impl<C> ASAPOp<C> {
+    pub fn children(&self) -> Vec<&C> {
         use ASAPOp::*;
         match self {
             SummaryAgg { child, filter, .. } => {
@@ -100,7 +102,9 @@ impl ASAPOp {
         }
     }
 
-    pub fn map_children(&self, mut f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self {
+    /// `f` may change the reference type, e.g. from `Rc<OperatorNode>` to a
+    /// node id.
+    pub fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> ASAPOp<D> {
         use ASAPOp::*;
         match self {
             SummaryAgg {
@@ -180,7 +184,9 @@ impl ASAPOp {
             Extension { .. } => "Extension",
         }
     }
+}
 
+impl ASAPOp {
     /// Reserved variants that are migrated but not implemented.
     pub fn is_unimplemented(&self) -> bool {
         use ASAPOp::*;

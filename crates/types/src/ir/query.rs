@@ -4,9 +4,9 @@ use super::{OperatorNode, ScalarExpr};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum QueryRoot {
-    Operator(Rc<OperatorNode>),
-    Scalar(ScalarExpr),
+pub enum QueryRoot<C = Rc<OperatorNode>> {
+    Operator(C),
+    Scalar(ScalarExpr<C>),
 }
 impl From<Rc<OperatorNode>> for QueryRoot {
     fn from(node: Rc<OperatorNode>) -> Self {
