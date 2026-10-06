@@ -2,7 +2,7 @@
 //! source workload -> PromQL lowering -> candidate search ->
 //! summary-maintenance lifecycle selection -> materialized deployment guarantees.
 
-use asap_types::ir::export::PhysicalASAPOperatorPayload;
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::ASAPOp;
 use physical_common::compile_physical_asap_dag;
 use std::rc::Rc;
@@ -297,7 +297,12 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
     let build = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PhysicalASAPOperatorPayload::SummaryAgg { .. }))
+        .find(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .unwrap();
     let input = dag
         .edges
@@ -309,9 +314,9 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
     let schema = Arc::new(raw.output_schema.clone());
     let candidate = compile_candidate(
         &dag,
-        BTreeMap::from([(u64::from(input.0), InputContract::bounded(schema.clone()))]),
-        &[u64::from(dag.roots[0].0)],
-        &[u64::from(build.id.0)],
+        BTreeMap::from([(input as u64, InputContract::bounded(schema.clone()))]),
+        &[dag.roots[0] as u64],
+        &[build.id as u64],
     )
     .unwrap();
 
@@ -322,15 +327,15 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
     unbounded.properties.boundedness = asap_physical_operators::plan::Boundedness::Unbounded;
     let rejected = compile_candidate(
         &dag,
-        BTreeMap::from([(u64::from(input.0), unbounded)]),
-        &[u64::from(dag.roots[0].0)],
-        &[u64::from(build.id.0)],
+        BTreeMap::from([(input as u64, unbounded)]),
+        &[dag.roots[0] as u64],
+        &[build.id as u64],
     );
     assert!(rejected.is_err());
     let request = compile_candidate(
         &dag,
-        BTreeMap::from([(u64::from(input.0), InputContract::bounded(schema.clone()))]),
-        &[u64::from(dag.roots[0].0)],
+        BTreeMap::from([(input as u64, InputContract::bounded(schema.clone()))]),
+        &[dag.roots[0] as u64],
         &[],
     )
     .unwrap();
@@ -376,7 +381,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         let raw_batch = Batch::try_new(schema.clone(), rows).unwrap();
         let direct = physical_common::execute(
             &feedback.candidate.1.query,
-            BTreeMap::from([(u64::from(input.0), raw_batch.clone())]),
+            BTreeMap::from([(input as u64, raw_batch.clone())]),
             Scope::Query {
                 evaluation_time_ms: 300_000,
                 revision,
@@ -384,7 +389,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         );
         let state = physical_common::execute(
             candidate.precompute.as_ref().unwrap(),
-            BTreeMap::from([(u64::from(input.0), raw_batch)]),
+            BTreeMap::from([(input as u64, raw_batch)]),
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 300_000,
@@ -393,7 +398,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         );
         let result = physical_common::execute(
             &candidate.query,
-            BTreeMap::from([(u64::from(build.id.0), state[0][0].clone())]),
+            BTreeMap::from([(build.id as u64, state[0][0].clone())]),
             Scope::Query {
                 evaluation_time_ms: 300_000,
                 revision,
@@ -447,7 +452,7 @@ fn quantile_workload(query: &str) -> PlanningWorkload {
 fn lifecycle_timed_dag(
     query: &str,
     lifecycle: &SummaryMaintenanceLifecycle,
-) -> (asap_types::ir::export::PhysicalASAPDAG, Vec<u64>) {
+) -> (asap_types::ir::physical_export::PhysicalASAPDAG, Vec<u64>) {
     use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
     let workload = quantile_workload(query);
     let mut lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
@@ -476,7 +481,7 @@ fn lifecycle_timed_dag(
         .iter()
         .map(|deployment| (deployment.post_asap_node_id, lifecycle.clone()))
         .collect();
-    let mut states: Vec<_> = choices.iter().map(|(id, _)| u64::from(id.0)).collect();
+    let mut states: Vec<_> = choices.iter().map(|(id, _)| *id as u64).collect();
     states.sort_unstable();
     let dag = candidates
         .select(&choices)
@@ -488,7 +493,7 @@ fn lifecycle_timed_dag(
 
 /// Compile inputs for a timed DAG: its raw source, available at either phase.
 fn raw_inputs(
-    dag: &asap_types::ir::export::PhysicalASAPDAG,
+    dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
 ) -> std::collections::BTreeMap<u64, asap_physical_operators::physical_planner::InputContract> {
     let raw = dag
         .nodes
@@ -496,14 +501,14 @@ fn raw_inputs(
         .find(|node| {
             matches!(
                 node.payload,
-                asap_types::ir::export::PhysicalASAPOperatorPayload::Relational {
-                    operator: asap_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                }
+                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::NonASAP(
+                    asap_types::ir::NonASAPOp::TimeRange { .. }
+                )
             )
         })
         .unwrap();
     std::collections::BTreeMap::from([(
-        u64::from(raw.id.0),
+        raw.id as u64,
         asap_physical_operators::physical_planner::InputContract::bounded(std::sync::Arc::new(
             raw.output_schema.clone(),
         )),
@@ -561,8 +566,7 @@ fn chosen_lifecycle_timing_decides_precompute_contents() {
         let (&raw_id, contract) = inputs.iter().next().unwrap();
         let schema = contract.schema.clone();
         let frontier = frontier_from_timing(&dag).unwrap();
-        let candidate =
-            compile_candidate(&dag, inputs, &[u64::from(dag.roots[0].0)], &frontier).unwrap();
+        let candidate = compile_candidate(&dag, inputs, &[dag.roots[0] as u64], &frontier).unwrap();
         let rows = (1..=100)
             .map(|value| {
                 schema
@@ -643,7 +647,7 @@ fn lifecycle_timing_cuts_one_compilation() {
         let ephemeral = SummaryMaintenanceLifecycle::Ephemeral;
         let (compiled_dag, _) = lifecycle_timed_dag(query, &ephemeral);
         let inputs = raw_inputs(&compiled_dag);
-        let roots = [u64::from(compiled_dag.roots[0].0)];
+        let roots = [compiled_dag.roots[0] as u64];
         let compiled = compile(&compiled_dag, inputs.clone(), &roots).unwrap();
         for lifecycle in [
             SummaryMaintenanceLifecycle::ContinuouslyMaintained,
@@ -654,7 +658,7 @@ fn lifecycle_timing_cuts_one_compilation() {
             // Retained states read by a query-time consumer, or the root itself.
             let query_time = |id: u64| {
                 dag.nodes.iter().any(|node| {
-                    u64::from(node.id.0) == id
+                    node.id as u64 == id
                         && node.output_state.timing
                             == asap_types::post_asap::ExecutionTiming::QueryTime
                 })
@@ -666,10 +670,9 @@ fn lifecycle_timing_cuts_one_compilation() {
                     .iter()
                     .copied()
                     .filter(|state| {
-                        *state == u64::from(dag.roots[0].0)
+                        *state == dag.roots[0] as u64
                             || dag.edges.iter().any(|edge| {
-                                u64::from(edge.producer.0) == *state
-                                    && query_time(u64::from(edge.consumer.0))
+                                edge.producer as u64 == *state && query_time(edge.consumer as u64)
                             })
                     })
                     .collect()
@@ -741,7 +744,8 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
             .execution_timed_dag()
             .unwrap();
         let population = dag.nodes.iter().find(|node| node.id == id).unwrap();
-        let PhysicalASAPOperatorPayload::MaintainPopulation { population } = &population.payload
+        let PhysicalASAPOperatorPayload::ASAP(ASAPOp::MaintainPopulation { population, .. }) =
+            &population.payload
         else {
             panic!("the deployment is the maintained population");
         };
@@ -755,19 +759,19 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
             .find(|node| {
                 matches!(
                     node.payload,
-                    PhysicalASAPOperatorPayload::Relational {
-                        operator: asap_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                    }
+                    PhysicalASAPOperatorPayload::NonASAP(
+                        asap_types::ir::NonASAPOp::TimeRange { .. }
+                    )
                 )
             })
             .unwrap();
-        let (raw_id, schema) = (u64::from(raw.id.0), Arc::new(raw.output_schema.clone()));
+        let (raw_id, schema) = (raw.id as u64, Arc::new(raw.output_schema.clone()));
         let frontier =
             asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
         let candidate = compile_candidate(
             &dag,
             BTreeMap::from([(raw_id, InputContract::bounded(schema.clone()))]),
-            &[u64::from(dag.roots[0].0)],
+            &[dag.roots[0] as u64],
             &frontier,
         )
         .unwrap();
@@ -801,7 +805,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
                 query_scope,
             )
         } else {
-            let state = u64::from(id.0);
+            let state = id as u64;
             assert_eq!(frontier, [state]);
             let stored = physical_common::execute(
                 candidate.precompute.as_ref().unwrap(),
@@ -911,9 +915,9 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
             .find(|node| {
                 matches!(
                     node.payload,
-                    PhysicalASAPOperatorPayload::Relational {
-                        operator: asap_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                    }
+                    PhysicalASAPOperatorPayload::NonASAP(
+                        asap_types::ir::NonASAPOp::TimeRange { .. }
+                    )
                 )
             })
             .unwrap();
@@ -925,15 +929,15 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         let boundary = dag
             .nodes
             .iter()
-            .find(|node| u64::from(node.id.0) == *boundary)
+            .find(|node| node.id as u64 == *boundary)
             .unwrap();
         let physical = compile_candidate(
             &dag,
             BTreeMap::from([(
-                u64::from(raw.id.0),
+                raw.id as u64,
                 InputContract::bounded(Arc::new(raw.output_schema.clone())),
             )]),
-            &[u64::from(dag.roots[0].0)],
+            &[dag.roots[0] as u64],
             &frontier,
         )
         .unwrap();
@@ -955,9 +959,9 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         unreachable!()
     };
     let state = |payload: &PhysicalASAPOperatorPayload, kind: ExactKind| {
-        matches!(payload, PhysicalASAPOperatorPayload::SummaryAgg {
+        matches!(payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::ExactAggregate(k, _), ..
-        } if *k == kind)
+        }) if *k == kind)
     };
     assert!(state(retained, ExactKind::Sum));
     assert!(builds(retained_pre, "Rate") && builds(retained_pre, "Sum"));
@@ -969,7 +973,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
 
 /// The lifecycle-timed DAG Planner selects for `query` with upfront series
 /// typing, and whether it keeps an ingestion-time Binary.
-fn typed_selection(query: &str) -> (asap_types::ir::export::PhysicalASAPDAG, bool) {
+fn typed_selection(query: &str) -> (asap_types::ir::physical_export::PhysicalASAPDAG, bool) {
     use asap_types::post_asap::ExecutionTiming;
     let workload = quantile_workload(query);
     let lowered = asap_types::ir::schema_support::with_promql_series_identity(
@@ -982,9 +986,7 @@ fn typed_selection(query: &str) -> (asap_types::ir::export::PhysicalASAPDAG, boo
     let ingestion_binary = dag.nodes.iter().any(|node| {
         matches!(
             node.payload,
-            PhysicalASAPOperatorPayload::Relational {
-                operator: asap_types::ir::export::NonASAPOpKind::BinaryOp { .. }
-            }
+            PhysicalASAPOperatorPayload::NonASAP(asap_types::ir::NonASAPOp::BinaryOp { .. })
         ) && node.output_state.timing == ExecutionTiming::IngestionTime
     });
     (dag, ingestion_binary)
@@ -993,7 +995,7 @@ fn typed_selection(query: &str) -> (asap_types::ir::export::PhysicalASAPDAG, boo
 /// Execute a timed DAG's precompute and query DAGs over `samples`
 /// (`(metric, job, seconds, value)`) at 300s; returns the root's values.
 fn execute_timed(
-    dag: &asap_types::ir::export::PhysicalASAPDAG,
+    dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
     samples: &[(&str, &str, i64, f64)],
 ) -> Vec<f64> {
     use asap_physical_operators::{
@@ -1001,7 +1003,7 @@ fn execute_timed(
         runtime::Scope,
         values::{Batch, Value},
     };
-    use asap_types::{ir::export::PhysicalASAPOperatorPayload, pre_asap::Source};
+    use asap_types::{ir::physical_export::PhysicalASAPOperatorPayload, pre_asap::Source};
     use std::{collections::BTreeMap, sync::Arc};
     // Raw inputs: a selector Fallback is itself the input; a retained
     // expression reads each of its selectors through its raw-series slots.
@@ -1009,26 +1011,23 @@ fn execute_timed(
     for node in &dag.nodes {
         if !matches!(
             node.payload,
-            PhysicalASAPOperatorPayload::Relational {
-                operator: asap_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                    | asap_types::ir::export::NonASAPOpKind::Scan { .. }
-            }
+            PhysicalASAPOperatorPayload::NonASAP(
+                asap_types::ir::NonASAPOp::TimeRange { .. }
+                    | asap_types::ir::NonASAPOp::Scan { .. }
+            )
         ) {
             continue;
         }
         let mut id = node.id;
         loop {
             let n = dag.nodes.iter().find(|n| n.id == id).unwrap();
-            if let PhysicalASAPOperatorPayload::Relational {
-                operator:
-                    asap_types::ir::export::NonASAPOpKind::Scan {
-                        source: Source::TimeSeries { metric },
-                        ..
-                    },
-            } = &n.payload
+            if let PhysicalASAPOperatorPayload::NonASAP(asap_types::ir::NonASAPOp::Scan {
+                source: Source::TimeSeries { metric },
+                ..
+            }) = &n.payload
             {
                 raw.insert(
-                    u64::from(node.id.0),
+                    node.id as u64,
                     (Arc::new(node.output_schema.clone()), metric.clone()),
                 );
                 break;
@@ -1061,7 +1060,7 @@ fn execute_timed(
         raw.iter()
             .map(|(id, (schema, _))| (*id, InputContract::bounded(schema.clone())))
             .collect(),
-        &[u64::from(dag.roots[0].0)],
+        &[dag.roots[0] as u64],
         &frontier,
     )
     .unwrap();

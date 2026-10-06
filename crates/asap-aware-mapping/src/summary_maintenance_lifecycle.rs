@@ -21,7 +21,7 @@ use asap_types::ir::cse::share_common_sub_dags;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::export::{
+use asap_types::ir::physical_export::{
     compile_physical_asap_dag_with_node_ids, compile_physical_asap_workload_with_node_ids,
     PhysicalASAPDAG, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
 };
@@ -1857,7 +1857,7 @@ mod tests {
         }
     }
     use super::*;
-    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use asap_types::ir::{BinaryOperator, NonASAPOp};
     use asap_types::post_asap::{
         ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, ResultGuarantee, Schema,
@@ -2708,7 +2708,7 @@ mod tests {
     fn whole_candidate_cost_is_evaluated_before_selecting_a_lifecycle() {
         let root = summary();
         let mut deployments = vec![SummaryMaintenanceDeployment {
-            post_asap_node_id: asap_types::ir::export::LogicalASAPNodeId(0),
+            post_asap_node_id: 0,
             summary: Rc::clone(&root),
             summary_maintenance_lifecycle_guarantee: None,
             selected_window_framework: None,
@@ -2771,7 +2771,7 @@ mod tests {
         ];
         let mut deployments: Vec<_> = (0..13)
             .map(|summary_index| SummaryMaintenanceDeployment {
-                post_asap_node_id: asap_types::ir::export::LogicalASAPNodeId(summary_index as u32),
+                post_asap_node_id: (summary_index as usize),
                 summary: Rc::clone(&root),
                 summary_maintenance_lifecycle_guarantee: None,
                 selected_window_framework: None,
@@ -3242,16 +3242,8 @@ mod tests {
             vec![(id, continuous.clone()), (id, continuous.clone())]
         });
         assert_eq!(error, E::DuplicateChoice(id));
-        let (_, error) = select(&UnitCosts, &|_| {
-            vec![(
-                asap_types::ir::export::LogicalASAPNodeId(u32::MAX),
-                continuous.clone(),
-            )]
-        });
-        assert_eq!(
-            error,
-            E::UnknownSummary(asap_types::ir::export::LogicalASAPNodeId(u32::MAX))
-        );
+        let (_, error) = select(&UnitCosts, &|_| vec![(usize::MAX, continuous.clone())]);
+        assert_eq!(error, E::UnknownSummary(usize::MAX));
     }
 
     // Nested states on one maintenance path must share an evaluation schedule.
@@ -3405,13 +3397,15 @@ mod tests {
             .iter()
             .map(|node| {
                 let kind = match node.payload {
-                    PhysicalASAPOperatorPayload::Relational {
-                        operator: NonASAPOpKind::BinaryOp { .. },
-                    } => "binary",
-                    PhysicalASAPOperatorPayload::Relational { .. } => "raw",
-                    PhysicalASAPOperatorPayload::SummaryAgg { .. } => "state",
-                    PhysicalASAPOperatorPayload::FinalizeExactAccumulator
-                    | PhysicalASAPOperatorPayload::EvaluatePopulation { .. } => "evaluation",
+                    PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::BinaryOp { .. }) => "binary",
+                    PhysicalASAPOperatorPayload::NonASAP(_) => "raw",
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. }) => "state",
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
+                        ..
+                    })
+                    | PhysicalASAPOperatorPayload::ASAP(ASAPOp::EvaluatePopulation { .. }) => {
+                        "evaluation"
+                    }
 
                     _ => "other",
                 };
@@ -3606,7 +3600,9 @@ mod tests {
             .iter()
             .zip(timings(dag))
             .map(|(node, (kind, timing))| match node.payload {
-                PhysicalASAPOperatorPayload::MaintainPopulation { .. } => ("population", timing),
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::MaintainPopulation { .. }) => {
+                    ("population", timing)
+                }
                 _ => (kind, timing),
             })
             .collect()

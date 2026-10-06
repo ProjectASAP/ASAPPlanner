@@ -11,7 +11,7 @@ use asap_physical_operators::{
 };
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::PhysicalASAPOperatorPayload;
+use planner_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use planner_types::{post_asap::*, pre_asap::DataType};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -357,20 +357,17 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .find(|node| {
             matches!(
                 node.payload,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                }
+                PhysicalASAPOperatorPayload::NonASAP(
+                    planner_types::ir::NonASAPOp::TimeRange { .. }
+                )
             )
         })
         .unwrap();
     let raw_schema = Arc::new(raw.output_schema.clone());
     let physical = compile(
         &logical,
-        BTreeMap::from([(
-            u64::from(raw.id.0),
-            InputContract::bounded(raw_schema.clone()),
-        )]),
-        &[u64::from(logical.roots[0].0)],
+        BTreeMap::from([(raw.id as u64, InputContract::bounded(raw_schema.clone()))]),
+        &[logical.roots[0] as u64],
     )
     .unwrap();
     let bytes = String::from_utf8(serde_json::to_vec(&physical).unwrap()).unwrap();

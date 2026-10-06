@@ -9,8 +9,8 @@ use asap_physical_operators::{
     values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::NonASAPOpKind as ValueOperation;
-use planner_types::ir::export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
 use planner_types::ir::ScalarExpr as QueryExpr;
 use planner_types::{
@@ -378,16 +378,15 @@ fn global_extrema_bind_with_planner_derived_schema() {
         )]);
         let node = PhysicalASAPDAGNode {
             coverage: None,
-            id: planner_types::ir::export::LogicalASAPNodeId(1),
-            payload: PhysicalASAPOperatorPayload::Relational {
-                operator: ValueOperation::Aggregate {
-                    reduction: PlanReduction::Reduce(GroupKeys::by(vec![])),
-                    measures: vec![measure],
-                    output_names: vec![result.name],
-                    filters: vec![],
-                    having: None,
-                },
-            },
+            id: 1,
+            payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
+                reduction: PlanReduction::Reduce(GroupKeys::by(vec![])),
+                measures: vec![measure],
+                output_names: vec![result.name],
+                filters: vec![],
+                having: None,
+                child: 0,
+            }),
             output_state: ExecutionDataState::QUERY_ROWS,
             output_schema: (*output).clone(),
             guarantee: None,

@@ -1408,7 +1408,9 @@ impl<'a> ASAPStrategies<'a> {
                 &mut asap_types::ir::timing::TimingMemo::new(),
             )
             .ok()
-            .and_then(|timed| asap_types::ir::export::compile_physical_asap_dag(&timed).ok())
+            .and_then(|timed| {
+                asap_types::ir::physical_export::compile_physical_asap_dag(&timed).ok()
+            })
         };
         let mut proposals = self.propose_with(root, None, None);
         proposals.candidates.retain_mut(|candidate| {
@@ -1419,17 +1421,21 @@ impl<'a> ASAPStrategies<'a> {
                 return false;
             };
             if !dag.nodes.iter().any(|node| match &node.payload {
-                asap_types::ir::export::PhysicalASAPOperatorPayload::SummaryAgg {
-                    family: FieldDataType::Sketch(kind, _),
-                    ..
-                } => matches!(
+                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                    asap_types::ir::ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    },
+                ) => matches!(
                     kind.algorithm(),
                     SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                 ),
-                asap_types::ir::export::PhysicalASAPOperatorPayload::SummaryAgg {
-                    family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
-                    ..
-                } => true,
+                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                    asap_types::ir::ASAPOp::SummaryAgg {
+                        family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
+                        ..
+                    },
+                ) => true,
                 _ => false,
             }) {
                 return false;
@@ -7051,7 +7057,7 @@ mod tests {
             }
         }
         let mut shape = serde_json::to_value(
-            asap_types::ir::export::compile_physical_asap_dag(&timed(node)).unwrap(),
+            asap_types::ir::physical_export::compile_physical_asap_dag(&timed(node)).unwrap(),
         )
         .unwrap();
         strip(&mut shape);
