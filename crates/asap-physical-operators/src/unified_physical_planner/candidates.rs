@@ -103,7 +103,7 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
     let mut frontier = BTreeSet::new();
     for root in &dag.roots {
         if timing.get(root) == Some(&IngestionTime) {
-            frontier.insert(u64::from(root.0));
+            frontier.insert(*root as u64);
         }
     }
     for edge in &dag.edges {
@@ -114,7 +114,7 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
         };
         match (producer == IngestionTime, consumer == IngestionTime) {
             (true, false) => {
-                frontier.insert(u64::from(edge.producer.0));
+                frontier.insert(edge.producer as u64);
             }
             (false, true) => return Err(invalid("query-time node feeds an ingestion-time node")),
             _ => {}
