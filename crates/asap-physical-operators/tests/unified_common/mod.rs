@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use planner_types::ir::export::PhysicalASAPDAG;
+use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::ir::{apply_lifecycle_timings, LifecycleAssignment, OperatorNode, TimingMemo};
 use std::rc::Rc;
 
@@ -11,5 +11,5 @@ pub fn compile_physical_asap_dag(
         &LifecycleAssignment::default(),
         &mut TimingMemo::default(),
     )?;
-    Ok(planner_types::ir::export::compile_physical_asap_dag(&root)?)
+    Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
 }

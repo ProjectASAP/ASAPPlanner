@@ -13,7 +13,7 @@ use asap_physical_operators::{
 };
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::PhysicalASAPDAG;
+use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::{
     post_asap::execution_data_state::lift_plain, types::AccuracyTarget, workload::*,
 };
@@ -108,7 +108,7 @@ fn compile_dag(
     expression: &planner_types::ir::OperatorNode,
     dag: &PhysicalASAPDAG,
 ) -> Result<CompiledPhysicalDAG, String> {
-    let root = u64::from(dag.roots[0].0);
+    let root = dag.roots[0] as u64;
     let inputs = promql_fallback::raw_series(expression)
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -454,7 +454,7 @@ fn dense_subquery_grids_are_rejected() {
 fn raw_series_contract_is_explicit() {
     let expression = lower("rate(m[5m])");
     let dag = fallback_dag(expression.clone());
-    let root = u64::from(dag.roots[0].0);
+    let root = dag.roots[0] as u64;
     let [(selector, schema)] = promql_fallback::raw_series(&expression)
         .unwrap()
         .try_into()
@@ -494,14 +494,10 @@ fn raw_series_contract_is_explicit() {
     assert!(compile(
         &consumed,
         BTreeMap::from([(
-            promql_fallback::raw_series_input(u64::from(consumed.roots[0].0), 0),
+            promql_fallback::raw_series_input(consumed.roots[0] as u64, 0),
             InputContract::bounded(raw)
         )]),
-        &consumed
-            .roots
-            .iter()
-            .map(|r| u64::from(r.0))
-            .collect::<Vec<_>>()
+        &consumed.roots.iter().map(|r| *r as u64).collect::<Vec<_>>()
     )
     .is_ok());
     // Implicit subquery resolution belongs to the deployment's evaluation interval.

@@ -1,7 +1,7 @@
 //! A bounded PromQL source row carries the entire label set, not just labels
 //! mentioned by the query. The source adapter owns this lossless encoding.
 use super::*;
-use planner_types::ir::export::{
+use planner_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_dag_with_node_ids,
 };
 use planner_types::post_asap::FieldDataType as SummaryFamilyType;
@@ -99,7 +99,7 @@ pub fn compile_current_series_evaluation(
     // Typed snapshot candidates already carry full identity throughout the DAG.
     // Cut at the population output, preserving all selected heap/evaluation nodes.
     let populations = dag.nodes.iter().filter(|node| matches!(&node.payload,
-        Payload::MaintainPopulation { population }
+        Payload::ASAP(ASAPOp::MaintainPopulation { population, .. })
             if matches!(population.input, planner_types::post_asap::maintained_population::PopulationInput::CurrentSeries(_))
     )).collect::<Vec<_>>();
     if let [population] = populations.as_slice() {
@@ -112,18 +112,18 @@ pub fn compile_current_series_evaluation(
             return compile(
                 &dag,
                 BTreeMap::from([(
-                    u64::from(population.id.0),
+                    population.id as u64,
                     InputContract::bounded(Arc::new(population.output_schema.clone())),
                 )]),
-                &dag.roots.iter().map(|r| u64::from(r.0)).collect::<Vec<_>>(),
+                &dag.roots.iter().map(|r| *r as u64).collect::<Vec<_>>(),
             );
         }
     }
     let mut frontier = None;
     for node in &mut dag.nodes {
         match &mut node.payload {
-            Payload::Relational { operator } => {
-                if let NonASAPOpKind::Scan { schema, .. } = operator {
+            Payload::NonASAP(operator) => {
+                if let NonASAPOp::Scan { schema, .. } = operator {
                     schema.fields.push(SummaryField::new(
                         SERIES_IDENTITY_COLUMN,
                         SummaryFamilyType::Plain(DataType::Utf8),
@@ -132,12 +132,13 @@ pub fn compile_current_series_evaluation(
                     schema.closed = true;
                 }
             }
-            Payload::MaintainPopulation { .. } => {
-                frontier = Some(u64::from(node.id.0));
+            Payload::ASAP(ASAPOp::MaintainPopulation { .. }) => {
+                frontier = Some(node.id as u64);
             }
-            Payload::EvaluatePopulation {
+            Payload::ASAP(ASAPOp::EvaluatePopulation {
                 evaluation: PopulationStatistic::TopK { .. },
-            } => {}
+                ..
+            }) => {}
             _ => return Err(invalid("unsupported current-series evaluation dependency")),
         }
         if node
@@ -170,7 +171,7 @@ pub fn compile_current_series_evaluation(
     let schema = Arc::new(
         dag.nodes
             .iter()
-            .find(|node| u64::from(node.id.0) == frontier)
+            .find(|node| node.id as u64 == frontier)
             .unwrap()
             .output_schema
             .clone(),
@@ -178,7 +179,7 @@ pub fn compile_current_series_evaluation(
     compile(
         &dag,
         BTreeMap::from([(frontier, InputContract::bounded(schema))]),
-        &dag.roots.iter().map(|r| u64::from(r.0)).collect::<Vec<_>>(),
+        &dag.roots.iter().map(|r| *r as u64).collect::<Vec<_>>(),
     )
 }
 
@@ -219,13 +220,10 @@ pub fn compile_rate_ranking(
     }
     let compiled = compile_physical_asap_dag_with_node_ids(&selected)
         .map_err(|error| invalid(error.to_string()))?;
-    let id = u64::from(
-        compiled
-            .node_ids
-            .node_id(&source)
-            .ok_or_else(|| invalid("missing Rate frontier"))?
-            .0,
-    );
+    let id = compiled
+        .node_ids
+        .node_id(&source)
+        .ok_or_else(|| invalid("missing Rate frontier"))? as u64;
     let program = compile(
         &compiled.dag,
         BTreeMap::from([(id, InputContract::bounded(Arc::new(source.schema.clone())))]),
@@ -233,7 +231,7 @@ pub fn compile_rate_ranking(
             .dag
             .roots
             .iter()
-            .map(|r| u64::from(r.0))
+            .map(|r| *r as u64)
             .collect::<Vec<_>>(),
     )?;
     Ok((source, program))
@@ -243,7 +241,7 @@ pub fn compile_rate_ranking(
 /// Rate evaluations runs at ingestion time: fresh aggregate state per closed
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
-    dag: &planner_types::ir::export::PhysicalASAPDAG,
+    dag: &planner_types::ir::physical_export::PhysicalASAPDAG,
 ) -> Result<CompiledPhysicalPlan, Error> {
     use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
     let sources = dag
@@ -252,11 +250,11 @@ pub fn compile_fixed_window_rate_aggregation(
         .filter(|n| {
             matches!(
                 &n.payload,
-                Payload::SummaryAgg {
+                Payload::ASAP(ASAPOp::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     reduction: planner_types::pre_asap::Reduction::PerEntity,
                     ..
-                }
+                })
             )
         })
         .collect::<Vec<_>>();
@@ -266,17 +264,17 @@ pub fn compile_fixed_window_rate_aggregation(
         .filter(|n| {
             n.output_state.timing == ExecutionTiming::IngestionTime
                 && match &n.payload {
-                    Payload::SummaryAgg {
+                    Payload::ASAP(ASAPOp::SummaryAgg {
                         family: SummaryFamilyType::Sketch(kind, _),
                         ..
-                    } => matches!(
+                    }) => matches!(
                         kind.algorithm(),
                         SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                     ),
-                    Payload::SummaryAgg {
+                    Payload::ASAP(ASAPOp::SummaryAgg {
                         family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
                         ..
-                    } => true,
+                    }) => true,
                     _ => false,
                 }
         })
@@ -299,10 +297,10 @@ pub fn compile_fixed_window_rate_aggregation(
     compile_candidate(
         dag,
         BTreeMap::from([(
-            u64::from(source.id.0),
+            source.id as u64,
             InputContract::bounded(Arc::new(source.output_schema.clone())),
         )]),
-        &dag.roots.iter().map(|r| u64::from(r.0)).collect::<Vec<_>>(),
-        &[u64::from(heap.id.0)],
+        &dag.roots.iter().map(|r| *r as u64).collect::<Vec<_>>(),
+        &[heap.id as u64],
     )
 }

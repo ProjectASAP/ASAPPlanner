@@ -86,12 +86,12 @@ pub fn raw_sample_row(
 pub fn boundary_schema(node: &PhysicalASAPDAGNode) -> Result<SchemaRef, Error> {
     if !matches!(
         &node.payload,
-        Payload::Relational {
-            operator: NonASAPOpKind::Scan {
+        Payload::NonASAP(
+            NonASAPOp::Scan {
                 source: planner_types::pre_asap::Source::TimeSeries { .. },
                 ..
-            } | NonASAPOpKind::TimeRange { .. }
-        }
+            } | NonASAPOp::TimeRange { .. }
+        )
     ) {
         return source_schema(&node.output_schema);
     }
@@ -164,7 +164,7 @@ pub fn compile(
     let nodes = dag
         .nodes
         .iter()
-        .map(|n| (u64::from(n.id.0), n))
+        .map(|n| (n.id as u64, n))
         .collect::<BTreeMap<_, _>>();
     let frontier = frontiers.iter().copied().collect::<BTreeSet<_>>();
     if frontier.len() != frontiers.len() || roots.iter().any(|r| frontier.contains(r)) {
@@ -176,20 +176,20 @@ pub fn compile(
     let mut edges = dag.edges.iter().collect::<Vec<_>>();
     edges.sort_by_key(|edge| {
         (
-            edge.consumer.0,
+            edge.consumer,
             match edge.role {
-                planner_types::ir::export::EdgeRole::Left => 0,
-                planner_types::ir::export::EdgeRole::Input => 1,
-                planner_types::ir::export::EdgeRole::Right => 2,
-                planner_types::ir::export::EdgeRole::ScalarRef => 3,
+                planner_types::ir::physical_export::EdgeRole::Left => 0,
+                planner_types::ir::physical_export::EdgeRole::Input => 1,
+                planner_types::ir::physical_export::EdgeRole::Right => 2,
+                planner_types::ir::physical_export::EdgeRole::ScalarRef => 3,
             },
         )
     });
     for edge in edges {
         dependencies
-            .entry(u64::from(edge.consumer.0))
+            .entry(edge.consumer as u64)
             .or_default()
-            .push(u64::from(edge.producer.0));
+            .push(edge.producer as u64);
     }
     let mut ordered = Vec::new();
     let mut seen = BTreeSet::new();
@@ -309,13 +309,11 @@ fn fragment(
         Ok(id)
     };
     let root = match &node.payload {
-        Payload::Relational {
-            operator:
-                NonASAPOpKind::BinaryOp {
-                    operator,
-                    return_bool,
-                },
-        } => {
+        Payload::NonASAP(NonASAPOp::BinaryOp {
+            operator,
+            return_bool,
+            ..
+        }) => {
             let operator =
                 crate::expressions::binary::BinaryOperator::from_logical(operator, *return_bool);
             validate_value_output(node)?;
@@ -340,7 +338,7 @@ fn fragment(
                 )?,
             )?
         }
-        Payload::FinalizeExactAccumulator => {
+        Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
             let [input] = schemas else {
                 return Err(invalid("finalize requires one state input"));
             };
@@ -385,13 +383,14 @@ fn fragment(
             )))?;
             add(vec![read], project)?
         }
-        Payload::SummaryAgg {
+        Payload::ASAP(ASAPOp::SummaryAgg {
             family,
             input: update,
             reduction,
             grouping,
             filter,
-        } => {
+            ..
+        }) => {
             if filter.is_some() {
                 return Err(invalid(
                     "filtered summary update has no native implementation",
@@ -539,7 +538,7 @@ fn fragment(
                 Operator::scope_timestamp(built, population_schema(family.clone()))?,
             )?
         }
-        Payload::SummaryMerge => {
+        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
             let Some(input) = schemas.first() else {
                 return Err(invalid("summary merge requires inputs"));
             };
