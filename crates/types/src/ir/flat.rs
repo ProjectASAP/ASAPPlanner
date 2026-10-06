@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use super::query::QueryRoot;
+use super::summary_coverage::SummaryCoverage;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
 use crate::pre_asap::schema::Schema;
@@ -30,6 +31,8 @@ pub struct FlatNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
+    #[serde(default)]
+    pub coverage: Option<SummaryCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,6 +80,7 @@ fn visit(
         schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
         timing: node.timing,
+        coverage: node.coverage.clone(),
     });
     originals.push(Rc::clone(node));
     ids.insert(Rc::as_ptr(node), id);
