@@ -2,7 +2,8 @@
 //!
 //! - [`ir`] — the unified operator IR: one operator language before and
 //!   after ASAP optimization ([`ir::OperatorNode`]), plus its passes
-//!   (canonicalize, CSE, timing) and the wire export ([`ir::export`]).
+//!   (canonicalize, CSE, timing), the flat DAG form ([`ir::flat`]) and the
+//!   physical ASAP DAG ([`ir::physical_export`]).
 //! - [`pre_asap`] — the shared field vocabulary the IR's operators are
 //!   built from (grouping keys, reductions, sources, aggregation intents,
 //!   scalar literal / operator kinds, [`pre_asap::Schema`]).
