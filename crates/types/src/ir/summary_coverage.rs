@@ -73,6 +73,18 @@ impl SummaryCoverage {
         Ok(())
     }
 
+    /// Coverage of a `SummaryMerge` over `inputs`: the disjoint union of their
+    /// coverage. Fails when an input has none or two inputs may overlap.
+    pub fn of_merge(
+        inputs: &[std::rc::Rc<super::node::OperatorNode>],
+    ) -> Result<Self, CoverageError> {
+        let coverage = inputs
+            .iter()
+            .map(|input| input.coverage.clone().ok_or(CoverageError::UnknownInput))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::merge_disjoint(&coverage)
+    }
+
     /// Every observation in a region is assumed to contribute once to the state.
     /// Compose once-per-observation summaries only when their joint regions are
     /// provably disjoint. `SummaryMerge` checks the rest: equal schemas (so the

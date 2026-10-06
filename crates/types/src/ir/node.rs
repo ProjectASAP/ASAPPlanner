@@ -113,8 +113,8 @@ impl OperatorNode {
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
         let mut node = Self::with_schema(operator, schema);
-        if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
-            node.coverage = Some(op.merged_coverage()?);
+        if let Some(ASAPOp::SummaryMerge { children }) = node.asap() {
+            node.coverage = Some(SummaryCoverage::of_merge(children)?);
         }
         Ok(node)
     }
@@ -165,8 +165,12 @@ impl OperatorNode {
         Ok(self)
     }
 
-    /// What a summary state is updated with and how it is grouped: the
-    /// `SummaryAgg` fields, or those shared by a `SummaryMerge`'s inputs.
+    /// What a summary state was built from: the update expression (`input`)
+    /// and grouping (`reduction`) of the `SummaryAgg` that produced it. For a
+    /// `SummaryMerge` these are its first input's, which merge validation
+    /// requires every input to share. `None` for any other node. Merging
+    /// compares it so that all inputs summarize the same expression with the
+    /// same grouping.
     pub fn summary_update(&self) -> Option<(&SummaryUpdate, &Reduction)> {
         match self.asap()? {
             ASAPOp::SummaryAgg {
@@ -343,8 +347,8 @@ impl OperatorNode {
                 None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
                 None => {}
             }
-            if let Some(op @ ASAPOp::SummaryMerge { .. }) = node.asap() {
-                if node.coverage.as_ref() != Some(&op.merged_coverage()?) {
+            if let Some(ASAPOp::SummaryMerge { children }) = node.asap() {
+                if node.coverage.as_ref() != Some(&SummaryCoverage::of_merge(children)?) {
                     return Err(CoverageError::MergeOutputMismatch.into());
                 }
             }

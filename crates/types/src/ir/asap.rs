@@ -6,7 +6,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
-use super::summary_coverage::{CoverageError, SummaryCoverage};
+use super::summary_coverage::SummaryCoverage;
 use crate::ir::operator_properties::Reduction;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
@@ -216,20 +216,6 @@ impl ASAPOp {
             }),
             _ => None,
         }
-    }
-
-    /// Derive the merged node's coverage; unknown or overlapping inputs fail closed.
-    pub fn merged_coverage(&self) -> Result<SummaryCoverage, SchemaDerivationError> {
-        let ASAPOp::SummaryMerge { children } = self else {
-            return Err(SchemaDerivationError::InvalidScalarSignature(
-                "coverage merge requires SummaryMerge".into(),
-            ));
-        };
-        let inputs = children
-            .iter()
-            .map(|child| child.coverage.clone().ok_or(CoverageError::UnknownInput))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(SummaryCoverage::merge_disjoint(&inputs)?)
     }
 
     /// Output schema derived from the operator and its children. Summary
@@ -527,7 +513,7 @@ impl ASAPOp {
                         "summary merge inputs must share update expression and reduction".into(),
                     ));
                 }
-                self.merged_coverage()?;
+                SummaryCoverage::of_merge(children)?;
                 Ok(())
             }
             SummaryEstimate {
