@@ -20,10 +20,15 @@ pub struct SummaryCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageRegion {
-    /// Half-open bounds on the source's time column, in milliseconds. `None`
-    /// means no time restriction, e.g. a source without a time column.
+    /// Half-open absolute bounds on the source's time column, in milliseconds.
+    /// Only a materialized state (for example an ingested pane) has absolute
+    /// bounds; a state in a logical plan that is not yet evaluated uses `None`,
+    /// as does a source without a time column. `None` means no time restriction.
     pub time_ms: Option<Range<i64>>,
-    /// Conjunction of non-null equality predicates; empty means unrestricted.
+    /// Conjunction of `field = 'text'` equality predicates (PromQL label
+    /// matchers, SQL text columns), keyed by field name. Only Utf8 equality is
+    /// represented, so values are strings; any other restriction is not
+    /// recorded here. Empty means unrestricted.
     pub population: BTreeMap<String, String>,
 }
 
