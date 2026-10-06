@@ -6,11 +6,11 @@ use asap_physical_operators::dag::{
     Error, Limits, OutputStream, RunContext, Scope,
 };
 use futures::{executor::block_on, stream, StreamExt};
-use planner_types::ir::export::NonASAPOpKind as ValueOperation;
-use planner_types::ir::export::{
+use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
 use planner_types::{
     post_asap::*,
@@ -71,15 +71,15 @@ fn plan(
 ) -> PhysicalASAPDAG {
     let node = |id, payload| PhysicalASAPDAGNode {
         coverage: None,
-        id: planner_types::ir::export::LogicalASAPNodeId(id),
+        id,
         payload,
         output_state: state,
         output_schema: (**schema).clone(),
         guarantee: None,
     };
     let edge = |producer, consumer| PhysicalASAPDAGEdge {
-        producer: planner_types::ir::export::LogicalASAPNodeId(producer),
-        consumer: planner_types::ir::export::LogicalASAPNodeId(consumer),
+        producer,
+        consumer,
         role: EdgeRole::Input,
         intermediate_schema: (**schema).clone(),
         data_state: state,
@@ -90,38 +90,34 @@ fn plan(
         nodes: vec![
             node(
                 0,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: planner_types::ir::export::NonASAPOpKind::from_op(&scan, &mut |_| {
-                        panic!("no plan refs")
-                    }),
-                },
+                PhysicalASAPOperatorPayload::NonASAP(
+                    scan.map_children(|_| -> usize { panic!("no plan refs") }),
+                ),
             ),
             node(
                 1,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Sort {
-                        keys: vec![planner_types::ir::export::WireSortKey {
-                            expr: planner_types::ir::export::WireScalarExpr::Column(0),
-                            ascending: false,
-                            nulls_first: false,
-                        }],
-                        partition_by: GroupKeys::by(vec![]),
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Sort {
+                    keys: vec![planner_types::ir::SortKey {
+                        expr: planner_types::ir::ScalarExpr::Column(0),
+                        ascending: false,
+                        nulls_first: false,
+                    }],
+                    partition_by: GroupKeys::by(vec![]),
+                    child: 0,
+                }),
             ),
             node(
                 2,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Limit {
-                        n: Some(2),
-                        offset: 0,
-                        partition_by: GroupKeys::by(vec![]),
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Limit {
+                    n: Some(2),
+                    offset: 0,
+                    partition_by: GroupKeys::by(vec![]),
+                    child: 1,
+                }),
             ),
         ],
         edges: vec![edge(0, 1), edge(1, 2)],
-        roots: vec![planner_types::ir::export::LogicalASAPNodeId(2)],
+        roots: vec![2],
     }
 }
 fn registry(source: Arc<dyn RawSource>) -> DataSources {

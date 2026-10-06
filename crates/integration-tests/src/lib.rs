@@ -99,7 +99,7 @@ pub mod fixtures {
 
 /// Timing and export helpers for post-ASAP plans.
 pub mod post_asap {
-    use asap_types::ir::export::{compile_physical_asap_dag, PhysicalASAPDAG};
+    use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
     use asap_types::ir::{apply_lifecycle_timings, LifecycleAssignment, OperatorNode, TimingMemo};
     use std::rc::Rc;
 

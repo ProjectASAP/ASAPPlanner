@@ -8,12 +8,13 @@ use asap_physical_operators::{
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::NonASAPOpKind as ValueOperation;
-use planner_types::ir::export::{
+use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
+use planner_types::ir::NonASAPOp;
 use planner_types::ir::ScalarExpr as QueryExpr;
 use planner_types::{
     post_asap::{ExactKind, ExactParams, Field, FieldDataType},
@@ -501,7 +502,7 @@ fn bind_post_asap_before_execution() {
     let schema = schema(&[("value", DataType::Float64, false)]);
     let node = |id, payload| PhysicalASAPDAGNode {
         coverage: None,
-        id: planner_types::ir::export::LogicalASAPNodeId(id),
+        id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
@@ -511,49 +512,42 @@ fn bind_post_asap_before_execution() {
         nodes: vec![
             node(
                 0,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Values {
-                        rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
-                            planner_types::pre_asap::ScalarValue::Float64(1.),
-                        )]],
-                        schema: (*schema).clone(),
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
+                    rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
+                        planner_types::pre_asap::ScalarValue::Float64(1.),
+                    )]],
+                    schema: (*schema).clone(),
+                }),
             ),
             node(
                 1,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Project {
-                        cols: vec![planner_types::ir::export::WireProjectItem {
-                            alias: None,
-                            expr: planner_types::ir::export::WireScalarExpr::Arithmetic {
-                                semantics: planner_types::ir::ExprSemantics::Sql,
-                                op: ArithmeticOpKind::Add,
-                                left: Box::new(planner_types::ir::export::WireScalarExpr::Column(
-                                    0,
-                                )),
-                                right: Box::new(
-                                    planner_types::ir::export::WireScalarExpr::Literal(
-                                        ScalarValue::Float64(2.),
-                                    ),
-                                ),
-                            },
-                        }],
-                        qualifier: None,
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Project {
+                    cols: vec![planner_types::ir::ProjectItem {
+                        alias: None,
+                        expr: planner_types::ir::ScalarExpr::Arithmetic {
+                            semantics: planner_types::ir::ExprSemantics::Sql,
+                            op: ArithmeticOpKind::Add,
+                            left: Box::new(planner_types::ir::ScalarExpr::Column(0)),
+                            right: Box::new(planner_types::ir::ScalarExpr::Literal(
+                                ScalarValue::Float64(2.),
+                            )),
+                        },
+                    }],
+                    qualifier: None,
+                    child: 0,
+                }),
             ),
         ],
         edges: vec![PhysicalASAPDAGEdge {
-            producer: planner_types::ir::export::LogicalASAPNodeId(0),
-            consumer: planner_types::ir::export::LogicalASAPNodeId(1),
+            producer: 0,
+            consumer: 1,
             role: EdgeRole::Input,
             intermediate_schema: (*schema).clone(),
             data_state: ExecutionDataState::QUERY_ROWS,
             grouping: GroupingEdgeCompatibility::NotApplicable,
             window: WindowEdgeCompatibility::NotApplicable,
         }],
-        roots: vec![planner_types::ir::export::LogicalASAPNodeId(1)],
+        roots: vec![1],
     };
     let sources = || -> BTreeMap<u64, asap_physical_operators::dag::planner::Source<'static>> {
         BTreeMap::from([(
@@ -572,9 +566,10 @@ fn bind_post_asap_before_execution() {
     // A literal Fallback needs no deployment input.
     let literal = bind(&dag, BTreeMap::new(), &[1]).unwrap();
     assert_eq!(floats(&run(&literal, 1, query()), 0), vec![3.]);
-    dag.nodes[1].payload = PhysicalASAPOperatorPayload::Extension {
+    dag.nodes[1].payload = PhysicalASAPOperatorPayload::ASAP(ASAPOp::Extension {
+        child: 0,
         name: "unsupported".into(),
-    };
+    });
     assert!(bind(&dag, sources(), &[1]).is_err());
 }
 
@@ -649,21 +644,19 @@ fn source_batches_must_match_the_bound_schema() {
     let plan = PhysicalASAPDAG {
         nodes: vec![PhysicalASAPDAGNode {
             coverage: None,
-            id: planner_types::ir::export::LogicalASAPNodeId(0),
-            payload: PhysicalASAPOperatorPayload::Relational {
-                operator: ValueOperation::Values {
-                    rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
-                        planner_types::pre_asap::ScalarValue::Float64(1.),
-                    )]],
-                    schema: (*expected).clone(),
-                },
-            },
+            id: 0,
+            payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
+                rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
+                    planner_types::pre_asap::ScalarValue::Float64(1.),
+                )]],
+                schema: (*expected).clone(),
+            }),
             output_state: ExecutionDataState::QUERY_ROWS,
             output_schema: (*expected).clone(),
             guarantee: None,
         }],
         edges: vec![],
-        roots: vec![planner_types::ir::export::LogicalASAPNodeId(0)],
+        roots: vec![0],
     };
     let source = Box::new(WrongSource {
         schema: expected,
@@ -736,7 +729,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
     let node =
         |id, payload, schema: &asap_physical_operators::values::SchemaRef| PhysicalASAPDAGNode {
             coverage: None,
-            id: planner_types::ir::export::LogicalASAPNodeId(id),
+            id,
             payload,
             output_schema: (**schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
@@ -744,8 +737,8 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         };
     let edge = |producer, consumer, role, schema: &asap_physical_operators::values::SchemaRef| {
         PhysicalASAPDAGEdge {
-            producer: planner_types::ir::export::LogicalASAPNodeId(producer),
-            consumer: planner_types::ir::export::LogicalASAPNodeId(consumer),
+            producer,
+            consumer,
             role,
             intermediate_schema: (**schema).clone(),
             data_state: ExecutionDataState::QUERY_ROWS,
@@ -758,72 +751,60 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         nodes: vec![
             node(
                 0,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Values {
-                        rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
-                            planner_types::pre_asap::ScalarValue::Float64(0.),
-                        )]],
-                        schema: (*rows_schema).clone(),
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
+                    rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
+                        planner_types::pre_asap::ScalarValue::Float64(0.),
+                    )]],
+                    schema: (*rows_schema).clone(),
+                }),
                 &rows_schema,
             ),
             node(
                 1,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Values {
-                        rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
-                            planner_types::pre_asap::ScalarValue::Float64(0.),
-                        )]],
-                        schema: (*keys_schema).clone(),
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
+                    rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
+                        planner_types::pre_asap::ScalarValue::Float64(0.),
+                    )]],
+                    schema: (*keys_schema).clone(),
+                }),
                 &keys_schema,
             ),
             node(
                 2,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: planner_types::ir::export::NonASAPOpKind::Join {
-                        join_kind: JoinKind::Semi,
-                        pred: planner_types::ir::export::WirePredicate(
-                            planner_types::ir::export::WireScalarExpr::Compare {
-                                left: Box::new(planner_types::ir::export::WireScalarExpr::Column(
-                                    1,
-                                )),
-                                op: CompareOpKind::Eq,
-                                right: Box::new(planner_types::ir::export::WireScalarExpr::Column(
-                                    3,
-                                )),
-                                semantics: planner_types::ir::ExprSemantics::Sql,
-                            },
-                        ),
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
+                    kind: JoinKind::Semi,
+                    pred: planner_types::ir::Predicate(planner_types::ir::ScalarExpr::Compare {
+                        left: Box::new(planner_types::ir::ScalarExpr::Column(1)),
+                        op: CompareOpKind::Eq,
+                        right: Box::new(planner_types::ir::ScalarExpr::Column(3)),
+                        semantics: planner_types::ir::ExprSemantics::Sql,
+                    }),
+                    left: 0,
+                    right: 1,
+                }),
                 &rows_schema,
             ),
             node(
                 3,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Sort {
-                        keys: vec![planner_types::ir::export::WireSortKey {
-                            expr: planner_types::ir::export::WireScalarExpr::Column(2),
-                            ascending: false,
-                            nulls_first: false,
-                        }],
-                        partition_by: groups.clone(),
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Sort {
+                    keys: vec![planner_types::ir::SortKey {
+                        expr: planner_types::ir::ScalarExpr::Column(2),
+                        ascending: false,
+                        nulls_first: false,
+                    }],
+                    partition_by: groups.clone(),
+                    child: 2,
+                }),
                 &rows_schema,
             ),
             node(
                 4,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Limit {
-                        n: Some(1),
-                        offset: 0,
-                        partition_by: groups,
-                    },
-                },
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Limit {
+                    n: Some(1),
+                    offset: 0,
+                    partition_by: groups,
+                    child: 3,
+                }),
                 &rows_schema,
             ),
         ],
@@ -834,7 +815,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             edge(2, 3, EdgeRole::Input, &rows_schema),
             edge(3, 4, EdgeRole::Input, &rows_schema),
         ],
-        roots: vec![planner_types::ir::export::LogicalASAPNodeId(4)],
+        roots: vec![4],
     };
     let text = |v: &str| Value::Utf8(v.into());
     for (phase, scope) in [
@@ -1180,7 +1161,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     use asap_physical_operators::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
-    use planner_types::ir::export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+    use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
     use planner_types::post_asap::ExecutionDataState;
 
     use planner_types::pre_asap::{
@@ -1213,10 +1194,8 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     );
     let node = |id, operation| PhysicalASAPDAGNode {
         coverage: None,
-        id: planner_types::ir::export::LogicalASAPNodeId(id),
-        payload: PhysicalASAPOperatorPayload::Relational {
-            operator: operation,
-        },
+        id,
+        payload: PhysicalASAPOperatorPayload::NonASAP(operation),
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*input).clone(),
         guarantee: None,
@@ -1224,13 +1203,14 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     let sort = compile_node(
         &node(
             1,
-            ValueOperation::Sort {
-                keys: vec![planner_types::ir::export::WireSortKey {
-                    expr: planner_types::ir::export::WireScalarExpr::Column(1),
+            NonASAPOp::Sort {
+                keys: vec![planner_types::ir::SortKey {
+                    expr: planner_types::ir::ScalarExpr::Column(1),
                     ascending: false,
                     nulls_first: false,
                 }],
                 partition_by: GroupKeys::none(),
+                child: 0,
             },
         ),
         std::slice::from_ref(&input),
@@ -1239,10 +1219,11 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     let limit = compile_node(
         &node(
             2,
-            ValueOperation::Limit {
+            NonASAPOp::Limit {
                 n: Some(1),
                 offset: 0,
                 partition_by: GroupKeys::none(),
+                child: 1,
             },
         ),
         std::slice::from_ref(&input),
@@ -1301,23 +1282,21 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     for certified in [false, true] {
         let node = PhysicalASAPDAGNode {
             coverage: None,
-            id: planner_types::ir::export::LogicalASAPNodeId(2),
+            id: 2,
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
             guarantee: None,
-            payload: PhysicalASAPOperatorPayload::Relational {
-                operator: planner_types::ir::export::NonASAPOpKind::Join {
-                    join_kind: JoinKind::Semi,
-                    pred: planner_types::ir::export::WirePredicate(
-                        planner_types::ir::export::WireScalarExpr::Compare {
-                            semantics: planner_types::ir::ExprSemantics::Sql,
-                            left: Box::new(planner_types::ir::export::WireScalarExpr::Column(0)),
-                            op: CompareOpKind::Eq,
-                            right: Box::new(planner_types::ir::export::WireScalarExpr::Column(1)),
-                        },
-                    ),
-                },
-            },
+            payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
+                kind: JoinKind::Semi,
+                pred: planner_types::ir::Predicate(planner_types::ir::ScalarExpr::Compare {
+                    semantics: planner_types::ir::ExprSemantics::Sql,
+                    left: Box::new(planner_types::ir::ScalarExpr::Column(0)),
+                    op: CompareOpKind::Eq,
+                    right: Box::new(planner_types::ir::ScalarExpr::Column(1)),
+                }),
+                left: 0,
+                right: 1,
+            }),
         };
         let dag = CompiledPhysicalDAG::from_operators(
             [
@@ -1419,21 +1398,21 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
     ]);
     let node = PhysicalASAPDAGNode {
         coverage: None,
-        id: planner_types::ir::export::LogicalASAPNodeId(2),
+        id: 2,
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
         guarantee: None,
-        payload: PhysicalASAPOperatorPayload::Relational {
-            operator: planner_types::ir::export::NonASAPOpKind::BinaryOp {
-                operator: BinaryOperator {
-                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
-                    vector_match: None,
-                    checked_relative_division: false,
-                    checked_finite_division: false,
-                },
-                return_bool: false,
+        payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
+                vector_match: None,
+                checked_relative_division: false,
+                checked_finite_division: false,
             },
-        },
+            return_bool: false,
+            lhs: 0,
+            rhs: 1,
+        }),
     };
     let program = CompiledPhysicalDAG::from_operators(
         [

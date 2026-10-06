@@ -6,7 +6,7 @@ use asap_aware_mapping::{
     ReplacementStrategy, TargetSubDAG,
 };
 mod support;
-use asap_types::ir::export::PhysicalASAPOperatorPayload;
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::post_asap::{
     ExactKind, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
@@ -103,7 +103,7 @@ fn frequency_count_candidates_use_unit_weights() {
             assert!(
                 dag.nodes.iter().any(|node| matches!(
                     &node.payload,
-                    PhysicalASAPOperatorPayload::SummaryAgg { input: actual, .. } if actual == input
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { input: actual, .. }) if actual == input
                 )),
                 "post-ASAP DAG must preserve the count update contract"
             );
@@ -240,7 +240,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
                 .iter()
                 .any(|node| {
                     matches!(&node.payload,
-            PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
                 if kind.algorithm() == &SketchAlgorithm::Cms)
                 })
                 .then_some(dag)
@@ -250,7 +250,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
         .nodes
         .iter()
         .find_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::SummaryAgg { input, .. } => Some(input),
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { input, .. }) => Some(input),
             _ => None,
         })
         .unwrap();

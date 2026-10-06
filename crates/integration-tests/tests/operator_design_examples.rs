@@ -144,7 +144,7 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
         assert!(wire
             .edges
             .iter()
-            .any(|e| e.role == asap_types::ir::export::EdgeRole::ScalarRef));
+            .any(|e| e.role == asap_types::ir::physical_export::EdgeRole::ScalarRef));
     }
 }
 
@@ -180,17 +180,17 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
         .find(|node| {
             matches!(
                 &node.payload,
-                asap_types::ir::export::PhysicalASAPOperatorPayload::Relational {
-                    operator: asap_types::ir::export::NonASAPOpKind::Scan { .. }
-                }
+                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::NonASAP(
+                    asap_types::ir::NonASAPOp::Scan { .. }
+                )
             )
         })
         .unwrap();
     let schema = Arc::new(scan.output_schema.clone());
     let plan = compile(
         &wire,
-        BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),
-        &[u64::from(wire.roots[0].0)],
+        BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+        &[wire.roots[0] as u64],
     )
     .unwrap();
     for (rows, expected) in [
@@ -220,7 +220,7 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
             .unwrap();
         let bound = plan
             .instantiate(BTreeMap::from([(
-                u64::from(scan.id.0),
+                scan.id as u64,
                 Box::new(sources.bind(&logical_scan).unwrap()) as Source<'_>,
             )]))
             .unwrap();
@@ -374,23 +374,23 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
             .find(|n| {
                 matches!(
                     n.payload,
-                    asap_types::ir::export::PhysicalASAPOperatorPayload::Relational {
-                        operator: asap_types::ir::export::NonASAPOpKind::Scan { .. }
-                    }
+                    asap_types::ir::physical_export::PhysicalASAPOperatorPayload::NonASAP(
+                        asap_types::ir::NonASAPOp::Scan { .. }
+                    )
                 )
             })
             .unwrap();
         let schema = Arc::new(scan.output_schema.clone());
         let program = compile(
             &wire,
-            BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),
-            &[u64::from(wire.roots[0].0)],
+            BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+            &[wire.roots[0] as u64],
         )
         .unwrap();
         let result = physical_common::execute(
             &program,
             BTreeMap::from([(
-                u64::from(scan.id.0),
+                scan.id as u64,
                 Batch::try_new(
                     schema,
                     vec![vec![Value::Float64(10.0)], vec![Value::Float64(20.0)]],
@@ -421,7 +421,9 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
             .iter()
             .filter(|n| matches!(
                 n.payload,
-                asap_types::ir::export::PhysicalASAPOperatorPayload::SummaryAgg { .. }
+                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                    asap_types::ir::ASAPOp::SummaryAgg { .. }
+                )
             ))
             .count(),
         1

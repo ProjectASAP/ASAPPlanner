@@ -1,4 +1,4 @@
-use asap_types::ir::export::WindowEdgeCompatibility;
+use asap_types::ir::physical_export::WindowEdgeCompatibility;
 use asap_types::post_asap::{validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
 use asap_types::pre_asap::{SchemaResolver, Source, UnresolvedQueryExpr};
 use asap_types::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};

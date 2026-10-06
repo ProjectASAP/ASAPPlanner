@@ -8,7 +8,7 @@ use asap_physical_operators::{
     sources::{DataSources, MemorySource},
     values::{Batch, Value},
 };
-use asap_types::ir::export::PhysicalASAPOperatorPayload;
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::{
     post_asap::FieldDataType,
     pre_asap::{DataType, Field, Schema},
@@ -49,9 +49,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PhysicalASAPOperatorPayload::Relational {
-                        operator: asap_types::ir::export::NonASAPOpKind::Scan { .. }
-                    }
+                    PhysicalASAPOperatorPayload::NonASAP(asap_types::ir::NonASAPOp::Scan { .. })
                 )
             })
             .expect("raw SQL scan");
@@ -62,8 +60,8 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
         let plan = compile(
             &dag,
-            BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),
-            &[u64::from(dag.roots[0].0)],
+            BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+            &[dag.roots[0] as u64],
         )
         .unwrap();
         for multiplier in [1., 2.] {
@@ -89,14 +87,11 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
                     .collect()
             })
             .collect();
-            let PhysicalASAPOperatorPayload::Relational {
-                operator:
-                    asap_types::ir::export::NonASAPOpKind::Scan {
-                        source,
-                        predicates: _,
-                        schema: _scan_schema,
-                    },
-            } = &scan.payload
+            let PhysicalASAPOperatorPayload::NonASAP(asap_types::ir::NonASAPOp::Scan {
+                source,
+                predicates: _,
+                schema: _scan_schema,
+            }) = &scan.payload
             else {
                 unreachable!()
             };
@@ -116,7 +111,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
                 .unwrap();
             let bound = plan
                 .instantiate(BTreeMap::from([(
-                    u64::from(scan.id.0),
+                    scan.id as u64,
                     Box::new(sources.bind(&expression).unwrap()) as Source<'_>,
                 )]))
                 .unwrap();

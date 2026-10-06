@@ -15,7 +15,8 @@ use asap_physical_operators::dag::{
 };
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::ASAPOp;
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 struct Evidence;
@@ -86,7 +87,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         })
         .unwrap();
     let dag = compile_physical_asap_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::SummaryAgg{family:FieldDataType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
+    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {family:FieldDataType::Sketch(kind,_),..})if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
         .iter()
@@ -152,18 +153,18 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
             as Source<'static>;
         let compiled = compile(
             &placed,
-            BTreeMap::from([(rate_id.0 as u64, InputContract::bounded(rates.clone()))]),
-            &[dag.roots[0].0 as u64],
+            BTreeMap::from([(rate_id as u64, InputContract::bounded(rates.clone()))]),
+            &[dag.roots[0] as u64],
         )
         .unwrap();
         let physical_dag = compiled
-            .instantiate(BTreeMap::from([(rate_id.0 as u64, source)]))
+            .instantiate(BTreeMap::from([(rate_id as u64, source)]))
             .unwrap();
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let output = block_on(async {
             let mut output = Vec::new();
             let mut stream = physical_dag
-                .execute(&[dag.roots[0].0 as u64], context)
+                .execute(&[dag.roots[0] as u64], context)
                 .unwrap()
                 .remove(0);
             while let Some(batch) = stream.next().await {
@@ -355,9 +356,9 @@ fn check_direct_rate_topk(dynamic: bool) {
         }
         let dag = compile_physical_asap_dag(candidate).unwrap();
         assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-            PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if kind.algorithm() == &algorithm)));
         let build = dag.nodes.iter().find(|node| matches!(&node.payload,
-            PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if kind.algorithm() == &algorithm)).unwrap();
         let input_id = dag
             .edges
             .iter()
@@ -378,20 +379,17 @@ fn check_direct_rate_topk(dynamic: bool) {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PhysicalASAPOperatorPayload::Relational {
-                        operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                    }
+                    PhysicalASAPOperatorPayload::NonASAP(
+                        planner_types::ir::NonASAPOp::TimeRange { .. }
+                    )
                 )
             })
             .unwrap_or_else(|| panic!("no raw counter source: {dag:?}"));
         let raw_schema = Arc::new(raw.output_schema.clone());
         let raw_compiled = compile(
             &dag,
-            BTreeMap::from([(
-                u64::from(raw.id.0),
-                InputContract::bounded(raw_schema.clone()),
-            )]),
-            &[u64::from(dag.roots[0].0)],
+            BTreeMap::from([(raw.id as u64, InputContract::bounded(raw_schema.clone()))]),
+            &[dag.roots[0] as u64],
         )
         .unwrap();
         let bytes = serde_json::to_vec(&raw_compiled).unwrap();
@@ -470,13 +468,13 @@ fn check_direct_rate_topk(dynamic: bool) {
                     Operator::source(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
                 ) as Source<'static>;
                 let physical_dag = raw_compiled
-                    .instantiate(BTreeMap::from([(u64::from(raw.id.0), source)]))
+                    .instantiate(BTreeMap::from([(raw.id as u64, source)]))
                     .unwrap();
                 let context = RunContext::new(scope, Limits::default()).unwrap();
                 let mut raw_scores = block_on(async {
                     let mut scores = Vec::new();
                     let mut stream = physical_dag
-                        .execute(&[u64::from(dag.roots[0].0)], context)
+                        .execute(&[dag.roots[0] as u64], context)
                         .unwrap()
                         .remove(0);
                     while let Some(batch) = stream.next().await {
@@ -522,11 +520,8 @@ fn check_direct_rate_topk(dynamic: bool) {
         }
         let compiled = compile(
             &dag,
-            BTreeMap::from([(
-                u64::from(input_id.0),
-                InputContract::bounded(schema.clone()),
-            )]),
-            &[u64::from(dag.roots[0].0)],
+            BTreeMap::from([(input_id as u64, InputContract::bounded(schema.clone()))]),
+            &[dag.roots[0] as u64],
         )
         .unwrap();
         for (time, values, expected) in [
@@ -586,13 +581,13 @@ fn check_direct_rate_topk(dynamic: bool) {
                     Box::new(Operator::source(schema.clone(), vec![batch.clone()]).unwrap())
                         as Source<'static>;
                 let physical_dag = compiled
-                    .instantiate(BTreeMap::from([(u64::from(input_id.0), source)]))
+                    .instantiate(BTreeMap::from([(input_id as u64, source)]))
                     .unwrap();
                 let context = RunContext::new(scope, Limits::default()).unwrap();
                 let mut scores = block_on(async {
                     let mut scores = vec![];
                     let mut stream = physical_dag
-                        .execute(&[u64::from(dag.roots[0].0)], context)
+                        .execute(&[dag.roots[0] as u64], context)
                         .unwrap()
                         .remove(0);
                     while let Some(batch) = stream.next().await {
@@ -663,17 +658,17 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         .find(|node| {
             matches!(
                 &node.payload,
-                PhysicalASAPOperatorPayload::Relational {
-                    operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                }
+                PhysicalASAPOperatorPayload::NonASAP(
+                    planner_types::ir::NonASAPOp::TimeRange { .. }
+                )
             )
         })
         .unwrap();
     let schema = Arc::new(raw.output_schema.clone());
     let program = compile(
         &dag,
-        BTreeMap::from([(u64::from(raw.id.0), InputContract::bounded(schema.clone()))]),
-        &[u64::from(dag.roots[0].0)],
+        BTreeMap::from([(raw.id as u64, InputContract::bounded(schema.clone()))]),
+        &[dag.roots[0] as u64],
     )
     .unwrap();
     let snapshot_program =
@@ -710,7 +705,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         let batch = Batch::try_new(schema.clone(), rows).unwrap();
         let physical_dag = program
             .instantiate(BTreeMap::from([(
-                u64::from(raw.id.0),
+                raw.id as u64,
                 Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'_>,
             )]))
             .unwrap();
@@ -888,10 +883,10 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PhysicalASAPOperatorPayload::SummaryAgg {
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                         family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                         ..
-                    }
+                    })
                 )
             })
             .unwrap();
@@ -901,10 +896,10 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PhysicalASAPOperatorPayload::SummaryAgg {
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                         family: FieldDataType::Sketch(..),
                         ..
-                    }
+                    })
                 )
             })
             .unwrap();
@@ -912,11 +907,11 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
         let physical = compile_candidate(
             &dag,
             BTreeMap::from([(
-                u64::from(state.id.0),
+                state.id as u64,
                 InputContract::bounded(Arc::new(state.output_schema.clone())),
             )]),
-            &[u64::from(dag.roots[0].0)],
-            &[u64::from(heap.id.0)],
+            &[dag.roots[0] as u64],
+            &[heap.id as u64],
         )
         .unwrap();
         let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&dag).unwrap();
@@ -950,12 +945,12 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             })
         };
         let (family, input, grouping) = match &state.payload {
-            PhysicalASAPOperatorPayload::SummaryAgg {
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 family,
                 input,
                 grouping,
                 ..
-            } => (family, input, grouping),
+            }) => (family, input, grouping),
             _ => unreachable!(),
         };
         for (end, samples, leader) in [

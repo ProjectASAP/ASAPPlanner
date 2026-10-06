@@ -103,7 +103,7 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
     let mut frontier = BTreeSet::new();
     for root in &dag.roots {
         if timing.get(root) == Some(&IngestionTime) {
-            frontier.insert(u64::from(root.0));
+            frontier.insert(*root as u64);
         }
     }
     for edge in &dag.edges {
@@ -114,7 +114,7 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
         };
         match (producer == IngestionTime, consumer == IngestionTime) {
             (true, false) => {
-                frontier.insert(u64::from(edge.producer.0));
+                frontier.insert(edge.producer as u64);
             }
             (false, true) => return Err(invalid("query-time node feeds an ingestion-time node")),
             _ => {}
@@ -376,17 +376,17 @@ mod tests {
             &mut Default::default(),
         )
         .unwrap();
-        let dag = planner_types::ir::export::compile_physical_asap_dag(&selected).unwrap();
+        let dag = planner_types::ir::physical_export::compile_physical_asap_dag(&selected).unwrap();
         let state = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, Payload::SummaryAgg { .. }))
+            .find(|node| matches!(node.payload, Payload::ASAP(ASAPOp::SummaryAgg { .. })))
             .unwrap();
         let inputs = BTreeMap::from([(
-            u64::from(state.id.0),
+            state.id as u64,
             InputContract::bounded(Arc::new(state.output_schema.clone())),
         )]);
-        (dag.clone(), inputs, u64::from(dag.roots[0].0))
+        (dag.clone(), inputs, dag.roots[0] as u64)
     }
 
     /// Enumerating and cutting every frontier lowers each Planner node once.
@@ -428,14 +428,12 @@ mod tests {
             .find(|node| {
                 matches!(
                     node.payload,
-                    Payload::Relational {
-                        operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
-                    }
+                    Payload::NonASAP(planner_types::ir::NonASAPOp::TimeRange { .. })
                 )
             })
             .unwrap();
         BTreeMap::from([(
-            u64::from(raw.id.0),
+            raw.id as u64,
             InputContract::bounded(Arc::new(raw.output_schema.clone())),
         )])
     }

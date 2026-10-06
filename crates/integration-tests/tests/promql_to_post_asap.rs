@@ -20,8 +20,8 @@ use asap_aware_mapping::{
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{post_asap_dag, timed};
-use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
 use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{
     CompositionOperator, EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
@@ -283,16 +283,14 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
     let dag = post_asap_dag(&plan);
     assert!(!dag.nodes.iter().any(|node| matches!(
         node.payload,
-        PhysicalASAPOperatorPayload::Relational {
-            operator: NonASAPOpKind::Join { .. }
-        }
+        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Join { .. })
     )));
     let node = dag
         .nodes
         .iter()
         .find(|node| {
             matches!(&node.payload,
-        PhysicalASAPOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+        PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
         if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
         })
         .unwrap();
@@ -300,7 +298,7 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
         node.output_state.timing,
         asap_types::post_asap::ExecutionTiming::QueryTime
     );
-    let PhysicalASAPOperatorPayload::SummaryAgg { input, .. } = &node.payload else {
+    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { input, .. }) = &node.payload else {
         unreachable!()
     };
     assert_eq!(
@@ -1130,9 +1128,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
             .find(|node| {
                 matches!(
                     node.payload,
-                    PhysicalASAPOperatorPayload::Relational {
-                        operator: NonASAPOpKind::BinaryOp { .. }
-                    }
+                    PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::BinaryOp { .. })
                 )
             })
             .unwrap();

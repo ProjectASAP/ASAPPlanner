@@ -3,8 +3,9 @@ use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::{
     ir::{
-        apply_lifecycle_timings, cse::share_common_sub_dags, export::compile_physical_asap_dag,
-        ASAPOp, LifecycleAssignment, NonASAPOp, Operator, OperatorNode, TimingMemo,
+        apply_lifecycle_timings, cse::share_common_sub_dags,
+        physical_export::compile_physical_asap_dag, ASAPOp, LifecycleAssignment, NonASAPOp,
+        Operator, OperatorNode, TimingMemo,
     },
     post_asap::maintained_population::{MaintainedPopulation, PopulationInput},
     pre_asap::{DataType, Field, Schema},

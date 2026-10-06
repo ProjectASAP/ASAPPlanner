@@ -8,10 +8,11 @@ use asap_physical_operators::{
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::{
+use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
 use planner_types::{
     post_asap::*,
@@ -56,25 +57,29 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         let nodes = vec![
             PhysicalASAPDAGNode {
                 coverage: None,
-                id: planner_types::ir::export::LogicalASAPNodeId(0),
-                payload: PhysicalASAPOperatorPayload::SummaryMerge,
+                id: 0,
+                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
+                    children: vec![],
+                }),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 output_schema: state_schema.clone(),
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
                 coverage: None,
-                id: planner_types::ir::export::LogicalASAPNodeId(1),
-                payload: PhysicalASAPOperatorPayload::FinalizeExactAccumulator,
+                id: 1,
+                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
+                    child: 0,
+                }),
                 output_state: ExecutionDataState::INGESTION_ROWS,
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
                 coverage: None,
-                id: planner_types::ir::export::LogicalASAPNodeId(2),
-                payload: PhysicalASAPOperatorPayload::Relational {
-                    operator: planner_types::ir::export::NonASAPOpKind::BinaryOp {
+                id: 2,
+                payload: PhysicalASAPOperatorPayload::NonASAP(
+                    planner_types::ir::NonASAPOp::BinaryOp {
                         operator: BinaryOperator {
                             kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
                             vector_match: None,
@@ -82,16 +87,18 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                             checked_finite_division: false,
                         },
                         return_bool: false,
+                        lhs: 1,
+                        rhs: 1,
                     },
-                },
+                ),
                 output_state: ExecutionDataState::INGESTION_ROWS,
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
                 coverage: None,
-                id: planner_types::ir::export::LogicalASAPNodeId(3),
-                payload: PhysicalASAPOperatorPayload::SummaryAgg {
+                id: 3,
+                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                     family: family.clone(),
                     input: SummaryUpdate {
                         weight,
@@ -100,7 +107,8 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     reduction: Reduction::Reduce(GroupKeys::by(vec![])),
                     grouping: GroupingStrategy::PerSubpopulationInstance,
                     filter: None,
-                },
+                    child: 2,
+                }),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 output_schema: state_schema.clone(),
                 guarantee: None,
@@ -114,11 +122,11 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         ]
         .into_iter()
         .map(|(producer, consumer, role)| PhysicalASAPDAGEdge {
-            producer: planner_types::ir::export::LogicalASAPNodeId(producer),
-            consumer: planner_types::ir::export::LogicalASAPNodeId(consumer),
+            producer,
+            consumer,
             role,
-            intermediate_schema: nodes[producer as usize].output_schema.clone(),
-            data_state: nodes[producer as usize].output_state,
+            intermediate_schema: nodes[producer].output_schema.clone(),
+            data_state: nodes[producer].output_state,
             grouping: GroupingEdgeCompatibility::NotApplicable,
             window: WindowEdgeCompatibility::NotApplicable,
         })
@@ -126,7 +134,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         let dag = PhysicalASAPDAG {
             nodes,
             edges,
-            roots: vec![planner_types::ir::export::LogicalASAPNodeId(3)],
+            roots: vec![3],
         };
         // Identity metadata must remain one non-null Utf8 column.
         for mutation in 0..3 {
@@ -140,7 +148,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             assert!(precompute::compile(&invalid_identity, &[0], &[3]).is_err());
         }
         let mut invalid_grouping = dag.clone();
-        let PhysicalASAPOperatorPayload::SummaryAgg { reduction, .. } =
+        let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) =
             &mut invalid_grouping.nodes[3].payload
         else {
             unreachable!()
@@ -249,24 +257,26 @@ fn state_dag(
 ) -> CompiledPhysicalDAG {
     let mut nodes = vec![PhysicalASAPDAGNode {
         coverage: None,
-        id: planner_types::ir::export::LogicalASAPNodeId(0),
-        payload: PhysicalASAPOperatorPayload::SummaryMerge,
+        id: 0,
+        payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![] }),
         output_state: ExecutionDataState::INGESTION_SUMMARY,
         output_schema: logical_schema(family.clone()),
         guarantee: None,
     }];
     if merge {
         nodes.push(PhysicalASAPDAGNode {
-            id: planner_types::ir::export::LogicalASAPNodeId(1),
-            payload: PhysicalASAPOperatorPayload::SummaryMerge,
+            id: 1,
+            payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![0] }),
             ..nodes[0].clone()
         });
     }
-    let read_id = nodes.len() as u32;
+    let read_id = nodes.len();
     nodes.push(PhysicalASAPDAGNode {
         coverage: None,
-        id: planner_types::ir::export::LogicalASAPNodeId(read_id),
-        payload: PhysicalASAPOperatorPayload::FinalizeExactAccumulator,
+        id: read_id,
+        payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: read_id - 1,
+        }),
         output_state: ExecutionDataState::INGESTION_ROWS,
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
@@ -274,14 +284,15 @@ fn state_dag(
     if let Some(target) = target {
         nodes.push(PhysicalASAPDAGNode {
             coverage: None,
-            id: planner_types::ir::export::LogicalASAPNodeId(nodes.len() as u32),
-            payload: PhysicalASAPOperatorPayload::SummaryAgg {
+            id: nodes.len(),
+            payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 family: target.clone(),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
                 filter: None,
-            },
+                child: read_id,
+            }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
             output_schema: logical_schema(target),
             guarantee: None,
@@ -306,7 +317,7 @@ fn state_dag(
             roots: vec![root],
         },
         &[0],
-        &[u64::from(root.0)],
+        &[root as u64],
     )
     .unwrap()
 }

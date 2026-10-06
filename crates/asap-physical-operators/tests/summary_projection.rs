@@ -8,11 +8,12 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::NonASAPOpKind as ValueOperation;
-use planner_types::ir::export::{
+use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::ASAPOp;
+use planner_types::ir::NonASAPOp;
 use planner_types::{
     post_asap::*,
     pre_asap::{ColumnRef, DataType},
@@ -59,42 +60,43 @@ fn post_asap_summary_projection_survives_recovery() {
         nodes: vec![
             PhysicalASAPDAGNode {
                 coverage: None,
-                id: planner_types::ir::export::LogicalASAPNodeId(0),
-                payload: PhysicalASAPOperatorPayload::SummaryMerge,
+                id: 0,
+                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
+                    children: vec![],
+                }),
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
                 coverage: None,
-                id: planner_types::ir::export::LogicalASAPNodeId(1),
-                payload: PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Project {
-                        cols: vec![1, 0]
-                            .into_iter()
-                            .map(|index| planner_types::ir::export::WireProjectItem {
-                                alias: None,
-                                expr: planner_types::ir::export::WireScalarExpr::Column(index),
-                            })
-                            .collect(),
-                        qualifier: None,
-                    },
-                },
+                id: 1,
+                payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Project {
+                    cols: vec![1, 0]
+                        .into_iter()
+                        .map(|index| planner_types::ir::ProjectItem {
+                            alias: None,
+                            expr: planner_types::ir::ScalarExpr::Column(index),
+                        })
+                        .collect(),
+                    qualifier: None,
+                    child: 0,
+                }),
                 output_schema: output.clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 guarantee: None,
             },
         ],
         edges: vec![PhysicalASAPDAGEdge {
-            producer: planner_types::ir::export::LogicalASAPNodeId(0),
-            consumer: planner_types::ir::export::LogicalASAPNodeId(1),
+            producer: 0,
+            consumer: 1,
             role: EdgeRole::Input,
             intermediate_schema: (*schema).clone(),
             data_state: ExecutionDataState::INGESTION_SUMMARY,
             grouping: GroupingEdgeCompatibility::NotApplicable,
             window: WindowEdgeCompatibility::NotApplicable,
         }],
-        roots: vec![planner_types::ir::export::LogicalASAPNodeId(1)],
+        roots: vec![1],
     };
     let program = compile(
         &dag,

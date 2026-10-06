@@ -73,7 +73,7 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
 /// assignment and export the post-ASAP DAG — the wire-6 export needs every
 /// node timed first.
 #[allow(dead_code)]
-pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::export::PhysicalASAPDAG {
+pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export::PhysicalASAPDAG {
     use asap_types::ir::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
     let timed = apply_lifecycle_timings(
         root,
@@ -81,7 +81,8 @@ pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::export::Physica
         &mut TimingMemo::new(),
     )
     .expect("default lifecycle timings");
-    asap_types::ir::export::compile_physical_asap_dag(&timed).expect("post-ASAP DAG export")
+    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
+        .expect("post-ASAP DAG export")
 }
 
 #[allow(dead_code)]

@@ -10,8 +10,7 @@ use crate::{
 };
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
-    PhysicalASAPOperatorPayload as Payload,
-};
+    PhysicalASAPOperatorPayload as Payload};
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr};
 use planner_types::{
     post_asap::{FieldDataType, SketchStatistic, SummaryInputExpr},

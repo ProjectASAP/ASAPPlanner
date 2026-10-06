@@ -12,7 +12,7 @@ use asap_types::ir::OperatorNode;
 use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDAG};
-use asap_types::ir::export::PhysicalASAPNodeId;
+use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::post_asap::{
     ResultGuarantee, SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee,
     SummaryWindowFramework,

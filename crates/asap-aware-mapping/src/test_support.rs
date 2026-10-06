@@ -189,7 +189,7 @@ pub(crate) fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 pub(crate) fn time_and_export(
     root: &Rc<OperatorNode>,
 ) -> Result<
-    asap_types::ir::export::PhysicalASAPDAG,
+    asap_types::ir::physical_export::PhysicalASAPDAG,
     asap_types::post_asap::execution_data_state::ExecutionDataStateError,
 > {
     let timed = apply_lifecycle_timings(
@@ -197,5 +197,5 @@ pub(crate) fn time_and_export(
         &LifecycleAssignment::default_maintained(),
         &mut TimingMemo::new(),
     )?;
-    asap_types::ir::export::compile_physical_asap_dag(&timed)
+    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
 }
