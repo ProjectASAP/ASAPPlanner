@@ -81,7 +81,8 @@ pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export
         &mut TimingMemo::new(),
     )
     .expect("default materialization timings");
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed).expect("post-ASAP DAG export")
+    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
+        .expect("post-ASAP DAG export")
 }
 
 #[allow(dead_code)]
