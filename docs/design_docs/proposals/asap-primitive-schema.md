@@ -41,6 +41,15 @@ Based on our requirement, each field should contain the following information.
 
 A node in the physical data will represent the data or summary instance, so a node has a field for **What data sources a ASAP primitive summarizes**.
 
+**Why this is a node field, not part of the schema.** Two summary states worth merging always cover different data. `SummaryMerge` requires all inputs to have the same schema; that check is how it knows they are the same kind of state (same sketch, parameters and grouping). For example, two KLL states for "latency by job", built from minute 0–1 and minute 1–2:
+
+| | State A | State B | Equal? |
+|---|---|---|---|
+| schema | `(job: Utf8, state: KLL{k=200})` | `(job: Utf8, state: KLL{k=200})` | yes, so the merge is allowed |
+| what it summarizes | time `[0,1)` | time `[1,2)` | no, which is why merging them is useful |
+
+If what a state summarizes were part of the schema, these two schemas would differ and the merge would be rejected; the only merge left would be a state with an exact copy of itself, which counts every observation twice. So the schema says *what kind of state* this is, and the node field says *which data it was built from*.
+
 Based on the above the proposed OperatorNode interface is as below:
 ```rust
 ```
