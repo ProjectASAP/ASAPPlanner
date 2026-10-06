@@ -22,7 +22,6 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{
     maintained, maintained_post_asap_dag, post_asap_dag, timed,
 };
-use asap_types::ir::physical_export::{ PhysicalASAPOperatorPayload};
 use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};

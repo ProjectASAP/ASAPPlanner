@@ -768,11 +768,16 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         &mut TimingMemo::new(),
     )
     .unwrap();
-    let dag = planner_types::ir::export::compile_physical_asap_dag(&timed).unwrap();
+    let dag = planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap();
     let mut pending: Vec<_> = dag
         .nodes
         .iter()
-        .filter(|node| matches!(node.payload, PhysicalASAPOperatorPayload::SummaryAgg { .. }))
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .map(|node| node.id)
         .collect();
     let mut ingestion = std::collections::HashSet::new();

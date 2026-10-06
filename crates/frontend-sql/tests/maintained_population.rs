@@ -4,11 +4,13 @@ use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::{
     ir::{
         apply_materialization_timings, cse::share_common_sub_dags,
-        physical_export::compile_physical_asap_dag, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-        OperatorNode, TimingMemo},
+        physical_export::compile_physical_asap_dag, ASAPOp, MaterializationAssignment, NonASAPOp,
+        Operator, OperatorNode, TimingMemo,
+    },
     post_asap::maintained_population::{MaintainedPopulation, PopulationInput},
     pre_asap::{DataType, Field, Schema},
-    types::AccuracyTarget};
+    types::AccuracyTarget,
+};
 use std::rc::Rc;
 
 async fn aggregate(q: &str) -> Rc<OperatorNode> {

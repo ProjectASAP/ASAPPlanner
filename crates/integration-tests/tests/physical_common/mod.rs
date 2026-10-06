@@ -70,5 +70,7 @@ fn compile_with(
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     let root =
         asap_types::ir::apply_materialization_timings(root, assignment, &mut Default::default())?;
-    Ok(asap_types::ir::physical_export::compile_physical_asap_dag(&root)?)
+    Ok(asap_types::ir::physical_export::compile_physical_asap_dag(
+        &root,
+    )?)
 }

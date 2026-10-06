@@ -3,8 +3,9 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::{
-    apply_materialization_timings, physical_export::compile_physical_asap_dag, MaterializationAssignment,
-    NonASAPOp, OperatorNode, ScalarExpr, TimingMemo};
+    apply_materialization_timings, physical_export::compile_physical_asap_dag,
+    MaterializationAssignment, NonASAPOp, OperatorNode, ScalarExpr, TimingMemo,
+};
 use asap_types::pre_asap::{AggIntent, DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
