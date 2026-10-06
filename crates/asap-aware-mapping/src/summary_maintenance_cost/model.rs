@@ -3037,27 +3037,25 @@ mod tests {
         let state_type = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
         let schema = count_state_schema();
         let child = metrics_scan();
-        let coverage = crate::replacement::whole_source_coverage(&child).unwrap();
-        let agg = std::rc::Rc::new(
-            OperatorNode::with_schema(
-                asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-                    child,
-                    family: state_type,
-                    input: SummaryUpdate {
-                        item: None,
-                        weight: asap_types::post_asap::SummaryInputExpr::Constant(1.0),
-                        weight_domain: Default::default(),
-                    },
-                    reduction: Reduction::by(vec![]),
-                    grouping: GroupingStrategy::PerSubpopulationInstance,
-                    filter: None,
-                }),
-                schema.clone(),
-            )
-            .with_guarantee(None)
-            .with_coverage(coverage)
-            .unwrap(),
-        );
+        let agg = OperatorNode::with_schema(
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                child,
+                family: state_type,
+                input: SummaryUpdate {
+                    item: None,
+                    weight: asap_types::post_asap::SummaryInputExpr::Constant(1.0),
+                    weight_domain: Default::default(),
+                },
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::PerSubpopulationInstance,
+                filter: None,
+            }),
+            schema.clone(),
+        )
+        .with_guarantee(None);
+        let coverage =
+            asap_types::ir::summary_coverage::SummaryCoverage::for_summary(&agg, None).unwrap();
+        let agg = std::rc::Rc::new(agg.with_coverage(coverage).unwrap());
         let mut root = Rc::clone(&agg);
         if merge {
             root = std::rc::Rc::new(
