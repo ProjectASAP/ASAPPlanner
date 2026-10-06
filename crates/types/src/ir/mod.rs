@@ -18,6 +18,6 @@ pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 pub mod canonicalize;
 pub mod cse;
 pub mod flat;
+pub mod schema_support;
 /// Semantic observation coverage, separate from field layout and physical timing.
 pub mod summary_coverage;
-pub mod schema_support;
