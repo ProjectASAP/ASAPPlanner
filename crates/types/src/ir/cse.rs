@@ -112,6 +112,7 @@ pub fn structural_hash(node: &OperatorNode, cache: &mut HashCache) -> u64 {
         &node.schema,
         &node.guarantee,
         node.timing,
+        &node.coverage,
     );
     serde_json::to_string(&own)
         .unwrap_or_default()
@@ -167,6 +168,7 @@ fn same_node(left: &OperatorNode, right: &OperatorNode, memo: &mut EqMemo) -> bo
         && left.result_kind == right.result_kind
         && left.schema == right.schema
         && left.timing == right.timing
+        && left.coverage == right.coverage
         && same_value(&left.guarantee, &right.guarantee)
         && same_value(&own_fields(left), &own_fields(right))
 }
@@ -254,6 +256,7 @@ fn intern_bottom_up(
         schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
         timing: node.timing,
+        coverage: node.coverage.clone(),
     };
     let interned = table.intern(rebuilt);
     visited.insert(Rc::as_ptr(node), (Rc::clone(node), Rc::clone(&interned)));

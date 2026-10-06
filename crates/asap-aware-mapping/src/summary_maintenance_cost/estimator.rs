@@ -86,14 +86,14 @@ pub(super) fn estimate_heterogeneous_summary(
         };
         let inputs = node_evidence.inputs.validate()?;
         validate_arrival_rate(scope.data_arrival, inputs.ingestion_rate_per_second)?;
-        match node_evidence.source_coverage_index {
+        match node_evidence.scan_selection_index {
             Some(index) => {
                 let declared =
                     scope
                         .sources
                         .get(index)
                         .ok_or(AnalyticalCostError::MissingComparisonScope(
-                            "summary source coverage",
+                            "summary scan selection",
                         ))?;
                 if !matches!(&child.expr, SummaryExpr::KeepPreAsap(_))
                     || inputs.initial_input_rows != raw.planning_time_input_rows
@@ -178,7 +178,7 @@ pub(super) fn estimate_heterogeneous_summary(
             let bootstrap_extra_rows = bootstrap
                 .checked_sub(inputs.initial_input_rows)
                 .ok_or(AnalyticalCostError::Overflow)?;
-            let source_scan_bytes = if node_evidence.source_coverage_index.is_some() {
+            let source_scan_bytes = if node_evidence.scan_selection_index.is_some() {
                 inputs
                     .initial_source_scan_bytes
                     .checked_add(
@@ -223,7 +223,7 @@ pub(super) fn estimate_heterogeneous_summary(
                 .checked_add(state_bytes)
                 .ok_or(AnalyticalCostError::Overflow)?;
         }
-        if let Some(source_index) = node_evidence.source_coverage_index {
+        if let Some(source_index) = node_evidence.scan_selection_index {
             if node_evidence.bootstrap_read_identity.is_empty() {
                 return Err(AnalyticalCostError::MissingOrStale(
                     "bootstrap_read_identity",

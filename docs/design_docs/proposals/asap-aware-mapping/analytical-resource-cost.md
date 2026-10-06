@@ -365,11 +365,11 @@ coverage set must equal the scope source set: a Scan query with an empty scope,
 or a source-free query with a non-empty scope, fails closed. Empty snapshot
 identifiers, invalid recurrence, or a zero horizon also fail closed.
 
-Every reachable physical `Scan` carries one exact `SourceCoverage` copied from
+Every reachable physical `Scan` carries one exact `ScanSelection` copied from
 this scope. That coverage includes the existing `Source`, its provider-owned
 snapshot ID, and canonical ordinary predicates or info-metric matchers. A scan with no coverage, or coverage
 not present in `ComparisonScope.sources`, makes the plan unavailable. Other
-operators cannot declare source coverage. This prevents a DAG over source B
+operators cannot declare scan selection. This prevents a DAG over source B
 from being estimated under source A's comparison scope.
 
 ## General DAG costing
@@ -554,7 +554,7 @@ counts, releases transient output after its last consumer, and keeps retained
 state live. Consequently a shared scan is charged once per execution and a
 fan-out's memory includes the outputs that really coexist.
 
-Each estimate independently requires the semantic set of source coverages on
+Each estimate independently requires the semantic set of scan selections on
 its reachable Scan nodes to equal `ComparisonScope.sources`. Multiple physical
 Scans may repeat one coverage, but no scope source may be omitted and no Scan
 may add another coverage. This invariant is enforced by the estimator itself,
@@ -596,7 +596,7 @@ It consumes the existing query and physical-operator enums; it does not
 introduce a parallel logical operator vocabulary. For every occurrence, the lowerer sends a
 `PhysicalNodeRequest` containing the logical node, selected existing
 `PhysicalOperator`, occurrence and synthetic-role metadata, already-lowered
-child physical IDs, and any source coverage to a
+child physical IDs, and any scan selection to a
 `PhysicalNodeEvidenceProvider`. The provider atomically returns its own stable
 `physical_id`, the authoritative `OperatorStatistics`, and explicit
 `output_buffer_bytes`; logical edge bytes are never substituted for an
@@ -604,14 +604,14 @@ allocation. Missing evidence makes the entire query unavailable. The returned
 `EvidenceBackedPhysicalDAG` snapshots this evidence so costing does not re-read a live
 catalog after lowering.
 
-Each lowered Scan is bound to exactly one `SourceCoverage` in the comparison
+Each lowered Scan is bound to exactly one `ScanSelection` in the comparison
 scope by the existing source and canonical predicate values. The bound value
 therefore also supplies the provider-owned snapshot ID. Zero matches fail as
 outside scope; multiple matching coverages fail as ambiguous rather than
 choosing an arbitrary snapshot. When a predicate-bearing logical Scan expands
 to Scan → Filter, the synthetic Scan has its own physical ID, statistics, and
 buffer evidence and carries that exact coverage; the Filter has separate
-evidence and no source coverage.
+evidence and no scan selection.
 `ComparisonScope.sources` is an order-independent set of semantic coverages;
 duplicates are invalid. After lowering, every reachable physical Scan must use
 a member of that set and every member must be used by at least one Scan.
@@ -837,7 +837,7 @@ its complete evidence and physical child identities also agree. The cost model
 holds owning `Rc` references for bound target and summary roots, so pointer
 keys cannot become stale and alias a later allocation.
 
-A `SummaryAgg` that reads storage declares `source_coverage_index = Some(i)`,
+A `SummaryAgg` that reads storage declares `scan_selection_index = Some(i)`,
 a non-empty bootstrap-read identity, and positive physical source bytes. An
 aggregate over an already-materialized summary edge declares `None`, an empty
 read identity, and zero source bytes. Its logical input rows and bytes remain
@@ -854,7 +854,7 @@ those evolving evaluations over the complete horizon. Marking its nodes
 rejected. Validation follows only nodes reachable from the physical root. If
 the raw algorithm intentionally reads the same semantic source more than once,
 each reachable scan carries the same evolved source statistics and is charged
-separately; equal source coverage does not deduplicate physical I/O.
+separately; equal scan selection does not deduplicate physical I/O.
 
 This raw-evolution contract currently supports exactly one distinct source
 coverage. A multi-source streaming target is unavailable until per-source
@@ -962,14 +962,14 @@ bound physical DAG for a `SummaryExpr` candidate. The deployment implements
 `PlannerPhysicalPlanProvider`: query-node evidence is consumed atomically by
 the generic query lowerer, while summary binding returns a complete
 `EvidenceBackedPhysicalDAG`, including embedded raw work, build/read operators, retained
-state, execution multiplicity, and source coverage. The adapter calls
+state, execution multiplicity, and scan selection. The adapter calls
 `estimate_physical_dag_comparison`; it never calls `DefaultCostModel` or a
 structural-node-count fallback for final cost.
 
 A candidate is exposed to global selection only when both complete DAGs are
 valid and its calibrated cost is strictly below the raw baseline. Missing or
 stale evidence, an unknown physical algorithm, invalid edges, incomplete
-source coverage, or a candidate that is not cheaper yields `None`. When no
+scan selection, or a candidate that is not cheaper yields `None`. When no
 candidate remains, `chosen = None` preserves the raw pre-ASAP target.
 
 Logical CSE share/recompute rewrites are not complete physical alternatives:

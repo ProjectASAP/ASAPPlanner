@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
+use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
@@ -99,6 +100,8 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
+    #[serde(default)]
+    pub coverage: Option<SummaryCoverage>,
 }
 
 impl OperatorNode {
@@ -121,6 +124,7 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
+            coverage: None,
         }
     }
 
@@ -139,6 +143,25 @@ impl OperatorNode {
     pub fn with_timing(mut self, timing: Option<ExecutionTiming>) -> Self {
         self.timing = timing;
         self
+    }
+
+    /// Attach caller-established coverage. Required on summary nodes; see
+    /// [`Self::requires_coverage`].
+    pub fn with_coverage(
+        mut self,
+        coverage: SummaryCoverage,
+    ) -> Result<Self, SchemaDerivationError> {
+        coverage.validate()?;
+        if self.result_kind != OperatorResultKind::State {
+            return Err(CoverageError::NotState.into());
+        }
+        self.coverage = Some(coverage);
+        Ok(self)
+    }
+
+    /// Summary nodes whose state can be composed must declare coverage.
+    pub fn requires_coverage(&self) -> bool {
+        matches!(self.asap(), Some(ASAPOp::SummaryAgg { .. }))
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -289,6 +312,13 @@ impl OperatorNode {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
                     "invalid time or identity column in schema".into(),
                 ));
+            }
+            match &node.coverage {
+                Some(coverage) => {
+                    (*node.as_ref()).clone().with_coverage(coverage.clone())?;
+                }
+                None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
+                None => {}
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {
