@@ -104,7 +104,7 @@ fn untimed_plan_is_rejected() {
 /// Two queries reading one summary state export once, with one root per query.
 #[test]
 fn batch_shares_the_summary_and_keeps_one_root_per_query() {
-    use asap_types::ir::export::compile_physical_asap_workload;
+    use asap_types::ir::physical_export::compile_physical_asap_workload;
     let first = plan();
     let state = first.children()[0].clone();
     let second = OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
