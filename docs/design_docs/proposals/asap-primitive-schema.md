@@ -50,8 +50,44 @@ A node in the physical data will represent the data or summary instance, so a no
 
 If what a state summarizes were part of the schema, these two schemas would differ and the merge would be rejected; the only merge left would be a state with an exact copy of itself, which counts every observation twice. So the schema says *what kind of state* this is, and the node field says *which data it was built from*.
 
+"Which data" has two parts, and the schema records neither:
+
+- **Rows**: which observations went in: the source, and joint time × population regions. In SQL terms this is `FROM` and `WHERE`.
+- **Columns**: which column of each row is fed into the state, and how rows are grouped. In SQL terms this is the argument of the aggregate and `GROUP BY`. A KLL over `latency` by `job` and a KLL over `size` by `job` both have schema `(job: Utf8, state: KLL{k=200})`.
+
+Two states can merge only when their columns are **identical** and their rows are **disjoint**. Columns that differ would mix latency and size in one state; rows that overlap would count observations twice.
+
+For `SELECT job, quantile(0.99, latency) FROM t WHERE region = 'us' AND ts in [0, 1min) GROUP BY job`:
+
+| Coverage field | Records | Value |
+|---|---|---|
+| `source` | rows | table `t` |
+| `regions` | rows | `{ time_ms: 0..60_000, population: { region: "us" } }` |
+| `input` | columns | `SummaryUpdate::column(Named("latency"))` |
+| `group_by` | columns | `by[job]` |
+
 Based on the above the proposed OperatorNode interface is as below:
 ```rust
+pub struct OperatorNode {
+    pub operator: Operator,
+    pub result_kind: OperatorResultKind,
+    pub schema: Schema,
+    pub guarantee: Option<ResultGuarantee>,
+    pub timing: Option<ExecutionTiming>,
+    pub coverage: Option<SummaryCoverage>,   // which data a state summarizes; required on SummaryAgg
+}
+
+pub struct SummaryCoverage {
+    pub source: Source,                 // rows: the scanned table or series
+    pub regions: Vec<CoverageRegion>,   // rows: union of joint regions
+    pub input: SummaryUpdate,           // columns: equals SummaryAgg.input
+    pub group_by: Reduction,            // columns: equals SummaryAgg.reduction (child-schema column ids)
+}
+
+pub struct CoverageRegion {
+    pub time_ms: Option<Range<i64>>,             // absolute, half-open; None = no time restriction
+    pub population: BTreeMap<String, String>,    // conjunction of `field = 'text'`; empty = unrestricted
+}
 ```
 
 ## 5. Examples on how OperatorNode, schema, and physical data information are being used with Summary operators
@@ -71,12 +107,13 @@ SummaryAgg(family = Sketch(KLL{k=200}, PerSubpopulationInstance),
            input = SummaryUpdate::column(Named("latency")), reduction = by[job],
            grouping = PerSubpopulationInstance, filter = None)
   ──State(job Utf8, state Sketch(KLL{k=200}, PerSubpopulationInstance))──▶
-  coverage = { source: Table "t", regions: [{ time_ms: 0..60_000, population: {} }] }
+  coverage = { source: Table "t", regions: [{ time_ms: 0..60_000, population: {} }],
+               input: column(Named("latency")), group_by: by[job] }
 ```
 
 - Output schema: the `by` keys followed by one non-nullable field `state` typed `family`; `unique_keys = [[0]]`, `closed = true`, no `time_index`. With `Reduction::PerEntity` the input columns are kept and the sample-value column is replaced by `state`.
 - Checks: `family` is not `Plain`; the child is not `State`; the `weight`/`item` columns resolve against the child schema; `filter`, if present, types as `Bool`.
-- Coverage: **required** and **declared**. `OperatorNode::new` leaves it `None`, `validate_structure` fails with `CoverageError::Missing`, and the planner attaches it with `with_coverage`.
+- Coverage: **required** and **declared**. `OperatorNode::new` leaves it `None`, `validate_structure` fails with `CoverageError::Missing`, and the planner attaches it with `with_coverage`. The declared `input`/`group_by` must equal the node's own `input`/`reduction`, or `with_coverage` (and `validate_structure`) fails with `ColumnMismatch`. #646 derives it instead.
 - Boundary: this is where values become state. The sketch family, algorithm and parameters are committed in the field type, and `guarantee` stays `None` because state is not a caller-visible value.
 
 ### 5.2 `SummaryEstimate`: sketch state → value
@@ -156,12 +193,12 @@ Scenario: combine two one-minute KLL panes over `Scan(t: value Float64)` into a 
 SummaryAgg(KLL k=200, column(SampleValue), by[]) ──State(state Sketch(KLL{k=200}))── coverage {t, [0..60_000)} ─┐
 SummaryAgg(KLL k=200, column(SampleValue), by[]) ──State(state Sketch(KLL{k=200}))── coverage {t, [60_000..120_000)} ─┴▶
 SummaryMerge
-  ──State(state Sketch(KLL{k=200}))──▶   coverage = { t, [0..120_000) }   (derived)
+  ──State(state Sketch(KLL{k=200}))──▶   coverage: none until #646
 ```
 
 - Output schema: `children[0].schema`.
-- Checks: at least one input; exactly one state column; every input is `State` with an identical schema (so family, params, grouping strategy and key positions match); every input has the same `summary_update()` (update expression and reduction); and `merged_coverage()` succeeds. Merging k=200 with k=300 fails, and so does merging raw rows.
-- Coverage: **required** and **derived**. `OperatorNode::new` sets it to `SummaryCoverage::merge_disjoint` of the input coverages. An input without coverage gives `UnknownInput`, and overlapping inputs give `PossibleOverlap`. `validate_structure` rejects a retained coverage that differs from the derived one (`MergeOutputMismatch`). Gapped inputs stay as two regions.
+- Checks: at least one input; exactly one state column; every input is `State` with an identical schema (so family, params, grouping strategy and key positions match); every input carries coverage (else `UnknownInput`), and all inputs have the same coverage columns, `input` and `group_by` (else `ColumnMismatch`). Merging k=200 with k=300 fails, and so do merging raw rows and merging a KLL over `latency` with one over `size`.
+- Coverage: **absent** in #560. #560 does not derive coverage or check that the input rows are disjoint, so a merge whose input is another merge is rejected with `UnknownInput`. #646 derives coverage for every summary node with one `SummaryCoverage::derive`: for a merge, the disjoint union of the input rows (overlapping inputs give `PossibleOverlap`; gapped inputs stay as two regions) with the shared columns.
 - Boundary: state in, state out. No value is produced until a readout.
 
 ### 5.7 Reserved operators (not implemented)
@@ -184,7 +221,7 @@ These variants exist so that plans can name them, but `output_schema()`/`validat
 | `FinalizeExactAccumulator` | `State` (`ExactAggregate`) | source's value kind | no | absent | implemented |
 | `MaintainPopulation` | `Relation` (table) / `InstantVector` (series) | `State` | yes (by kind; fields plain) | optional, not required | implemented |
 | `EvaluatePopulation` | `State` from `MaintainPopulation` | source's value kind | no | absent | implemented |
-| `SummaryMerge` | `State` × N | `State` | yes | required, derived | reserved; enabled by #560 |
+| `SummaryMerge` | `State` × N | `State` | yes | absent in #560; derived in #646 | reserved; enabled by #560 |
 | `SummarySubtract` | `State` × 2 | `State` | yes | — | reserved |
 | `SummaryDelete` | `State` | `State` | yes | — | reserved |
 | `SummaryJoin` | `State` × 2 | `State` | yes | — | reserved |
@@ -372,8 +409,6 @@ impl ASAPOp {
     pub fn is_unimplemented(&self) -> bool;
     /// SummaryAgg/SummaryJoin `family`; #560 adds SummaryMerge (its inputs' state type).
     pub fn produced_state(&self) -> Option<&FieldDataType>;
-    /// #560: merge_disjoint of the children's coverage; fails closed.
-    pub fn merged_coverage(&self) -> Result<SummaryCoverage, SchemaDerivationError>;
     pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
     pub fn output_kind(&self) -> OperatorResultKind;
     pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
