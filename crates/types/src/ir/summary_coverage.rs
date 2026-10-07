@@ -84,10 +84,6 @@ impl SummaryCoverage {
         Ok(())
     }
 
-    /// Every observation in a region is assumed to contribute once to the state.
-    /// Compose once-per-observation summaries only when they read the same
-    /// columns and their joint regions are provably disjoint. Family merge
-    /// capability and accuracy are not checked here.
     /// Rejects `other` unless it reads the same columns as `self`.
     pub fn check_columns(&self, other: &Self) -> Result<(), CoverageError> {
         if self.input != other.input || self.group_by != other.group_by {
@@ -96,6 +92,10 @@ impl SummaryCoverage {
         Ok(())
     }
 
+    /// Every observation in a region is assumed to contribute once to the state.
+    /// Compose once-per-observation summaries only when they read the same
+    /// columns and their joint regions are provably disjoint. Family merge
+    /// capability and accuracy are not checked here.
     pub fn merge_disjoint(inputs: &[Self]) -> Result<Self, CoverageError> {
         let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
         let mut merged = first.clone();
