@@ -8,7 +8,7 @@ use std::time::Duration;
 use asap_types::ir::operator_properties::{Reduction, Source};
 use asap_types::ir::summary_coverage::{ColumnIdentity, Constraint, CoverageError, SelectionBox};
 use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
     SchemaDerivationError, TimeRangeKind,
 };
 use asap_types::post_asap::{
@@ -409,4 +409,69 @@ fn forged_merges_fail_validation() {
 fn non_summary_nodes_have_no_coverage() {
     assert!(table().coverage().is_none());
     assert!(filter(table(), eq(REGION, "us")).coverage().is_none());
+}
+
+/// Two output columns with the same `(table, name)` cannot be told apart in
+/// a selection, so restrictions on them stay in the definition.
+#[test]
+fn ambiguous_column_names_do_not_lift() {
+    let renamed = |restricted: usize, value: &str| {
+        let item = |column: usize, alias: Option<&str>| ProjectItem {
+            alias: alias.map(Into::into),
+            expr: ScalarExpr::Column(column),
+        };
+        let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            cols: vec![
+                item(JOB, None),
+                item(REGION, Some("k")),
+                item(LATENCY, Some("k")),
+                item(LATENCY, None),
+            ],
+            qualifier: None,
+            child: table(),
+        }))
+        .unwrap();
+        kll(filter(project, eq(restricted, value)), "latency")
+    };
+    assert_eq!(
+        rejected(vec![renamed(1, "us"), renamed(2, "eu")]),
+        CoverageError::DefinitionMismatch
+    );
+}
+
+/// `latency = 1` and `latency = 1.0` select the same rows of a Float64 column.
+#[test]
+fn literals_of_different_types_are_not_proven_different() {
+    let one = |value| latency_where(compare(LATENCY, CompareOpKind::Eq, value));
+    assert!(merge(vec![
+        one(ScalarValue::Int64(1)),
+        one(ScalarValue::Float64(1.0))
+    ])
+    .is_err());
+}
+
+/// A scan predicate whose conjuncts only partly lift keeps just the rest.
+#[test]
+fn partly_lifted_scan_predicates_keep_only_the_rest() {
+    let doubled_positive = ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Mul,
+            left: Box::new(ScalarExpr::Column(1)),
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(2.0))),
+            semantics: ExprSemantics::Promql,
+        }),
+        op: CompareOpKind::Gt,
+        right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(0.0))),
+        semantics: ExprSemantics::Promql,
+    };
+    let job = |name: &str| {
+        pane(
+            0,
+            vec![Predicate(ScalarExpr::BoolAnd(vec![
+                eq(2, name),
+                doubled_positive.clone(),
+            ]))],
+        )
+    };
+    merge(vec![job("api"), job("web")]).unwrap();
 }
