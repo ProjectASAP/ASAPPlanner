@@ -199,12 +199,13 @@ impl OperatorNode {
         self.operator.children()
     }
 
-    /// Rebuild with new inputs, re-deriving all structural schema metadata.
-    /// Only names and qualifiers that override the old derived schema are
+    /// Replace the children and rebuild: each child is replaced by `f(child)`
+    /// and the node is rebuilt over the new children, re-deriving all
+    /// structural schema metadata. Only names and qualifiers that override the old derived schema are
     /// retained, for either operator category. A change in output arity with
     /// such overrides needs an explicit new naming assignment.
     /// `guarantee` and `timing` depend on the inputs and are cleared.
-    pub fn map_children(
+    pub fn with_new_children(
         &self,
         f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,
     ) -> Result<Self, SchemaDerivationError> {

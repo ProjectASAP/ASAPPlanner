@@ -93,7 +93,7 @@ fn canon(
                 .find(|(ptr, _)| *ptr == Rc::as_ptr(c))
                 .map_or_else(|| Rc::clone(c), |(_, new)| Rc::clone(new))
         };
-        Rc::new(node.map_children(rebuilt_child)?)
+        Rc::new(node.with_new_children(rebuilt_child)?)
     } else {
         Rc::clone(node)
     };

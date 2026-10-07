@@ -124,7 +124,7 @@ fn node_coverage_is_required_checked_and_cleared_by_rewrites() {
     std::rc::Rc::new(state.clone())
         .validate_structure()
         .unwrap();
-    let rebuilt = state.map_children(Clone::clone).unwrap();
+    let rebuilt = state.with_new_children(Clone::clone).unwrap();
     assert!(rebuilt.coverage.is_none());
 }
 
