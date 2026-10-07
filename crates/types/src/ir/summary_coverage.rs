@@ -22,7 +22,7 @@ use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 use super::scalar::{Predicate, ScalarExpr};
 use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-use crate::pre_asap::schema::ColumnId;
+use crate::pre_asap::schema::{ColumnId, Schema};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummaryCoverage {
@@ -173,17 +173,20 @@ fn of_summary_agg(node: &OperatorNode) -> SummaryCoverage {
         .count()
         == 1;
 
+    let top = &child.schema;
     // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
     let mut lifted = BTreeMap::new();
     let agg_filter = filter
         .as_ref()
-        .and_then(|pred| residual(pred, &[], &mut lifted));
+        .and_then(|pred| residual(pred, top, &[], &mut lifted));
     let kept: Vec<Option<Predicate>> = chain
         .iter()
         .enumerate()
         .map(|(depth, link)| match link.non_asap() {
-            Some(NonASAPOp::Filter { pred, .. }) => residual(pred, &chain[..depth], &mut lifted),
+            Some(NonASAPOp::Filter { pred, .. }) => {
+                residual(pred, top, &chain[..depth], &mut lifted)
+            }
             _ => None,
         })
         .collect();
@@ -191,7 +194,7 @@ fn of_summary_agg(node: &OperatorNode) -> SummaryCoverage {
         Some(NonASAPOp::Scan { predicates, .. }) => Some(
             predicates
                 .iter()
-                .filter_map(|pred| residual(pred, &chain, &mut lifted))
+                .filter_map(|pred| residual(pred, top, &chain, &mut lifted))
                 .collect::<Vec<_>>(),
         ),
         _ => None,
@@ -209,7 +212,7 @@ fn of_summary_agg(node: &OperatorNode) -> SummaryCoverage {
         }),
     ) = (scan_kept, base.non_asap())
     {
-        if kept.len() != predicates.len() {
+        if kept != *predicates {
             rebuilt = rebuild(
                 base,
                 NonASAPOp::Scan {
@@ -279,7 +282,6 @@ fn of_summary_agg(node: &OperatorNode) -> SummaryCoverage {
         },
     );
 
-    let top = &child.schema;
     let selection = SelectionBox {
         columns: lifted
             .into_iter()
@@ -319,11 +321,14 @@ fn rebuild_asap(original: &OperatorNode, op: ASAPOp) -> Rc<OperatorNode> {
     ))
 }
 
-/// Lift what `pred`'s conjuncts can into `lifted` (keyed by the agg child's
-/// column) and return the rest. `above` are the chain nodes between the
-/// predicate and the `SummaryAgg`, top to bottom.
+/// Lift what `pred`'s conjuncts can into `lifted` (keyed by the column of
+/// `top`, the agg child's schema) and return the rest. `above` are the chain
+/// nodes between the predicate and the `SummaryAgg`, top to bottom. A column
+/// whose `(table, name)` is not unique in `top` cannot be named in a
+/// selection, so its conjuncts stay.
 fn residual(
     pred: &Predicate,
+    top: &Schema,
     above: &[&Rc<OperatorNode>],
     lifted: &mut BTreeMap<ColumnId, Constraint>,
 ) -> Option<Predicate> {
@@ -331,6 +336,15 @@ fn residual(
     for conjunct in pred.0.conjuncts() {
         let lift = constraint_of(conjunct).and_then(|(column, constraint)| {
             let column = column_at_top(column, above)?;
+            let field = &top.fields[column];
+            let namesakes = top
+                .fields
+                .iter()
+                .filter(|f| f.name == field.name && f.table == field.table)
+                .count();
+            if namesakes != 1 {
+                return None;
+            }
             let combined = match lifted.get(&column) {
                 Some(existing) => existing.intersect(&constraint)?,
                 None => constraint,
@@ -454,6 +468,29 @@ fn dedup(values: Vec<ScalarValue>) -> Vec<ScalarValue> {
     out
 }
 
+/// Whether `v` equals one of `values`; `None` when some pair cannot be
+/// compared (different types, NaN), since `1` and `1.0` may select the same
+/// rows.
+fn among(v: &ScalarValue, values: &[ScalarValue]) -> Option<bool> {
+    for w in values {
+        if compare(v, w)? == Ordering::Equal {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// The values of `a` that are (`keep = true`) or are not in `b`.
+fn filter_values(a: &[ScalarValue], b: &[ScalarValue], keep: bool) -> Option<Vec<ScalarValue>> {
+    let mut out = Vec::new();
+    for v in a {
+        if among(v, b)? == keep {
+            out.push(v.clone());
+        }
+    }
+    Some(out)
+}
+
 /// Order of two literals of the same type; `None` across types or for NaN.
 fn compare(a: &ScalarValue, b: &ScalarValue) -> Option<Ordering> {
     match (a, b) {
@@ -535,10 +572,8 @@ impl Constraint {
     fn intersect(&self, other: &Self) -> Option<Self> {
         use Constraint::*;
         Some(match (self, other) {
-            (In(a), In(b)) => In(a.iter().filter(|v| b.contains(v)).cloned().collect()),
-            (In(a), NotIn(b)) | (NotIn(b), In(a)) => {
-                In(a.iter().filter(|v| !b.contains(v)).cloned().collect())
-            }
+            (In(a), In(b)) => In(filter_values(a, b, true)?),
+            (In(a), NotIn(b)) | (NotIn(b), In(a)) => In(filter_values(a, b, false)?),
             (NotIn(a), NotIn(b)) => NotIn(dedup(a.iter().chain(b).cloned().collect())),
             (In(a), Interval { lower, upper }) | (Interval { lower, upper }, In(a)) => {
                 let mut kept = Vec::new();
@@ -570,8 +605,8 @@ impl Constraint {
     fn disjoint(&self, other: &Self) -> bool {
         use Constraint::*;
         match (self, other) {
-            (In(a), In(b)) => !a.iter().any(|v| b.contains(v)),
-            (In(a), NotIn(b)) | (NotIn(b), In(a)) => a.iter().all(|v| b.contains(v)),
+            (In(a), In(b)) => a.iter().all(|v| among(v, b) == Some(false)),
+            (In(a), NotIn(b)) | (NotIn(b), In(a)) => a.iter().all(|v| among(v, b) == Some(true)),
             (In(a), Interval { lower, upper }) | (Interval { lower, upper }, In(a)) => a
                 .iter()
                 .all(|v| inside(v, (lower, upper), compare) == Some(false)),
