@@ -3053,9 +3053,7 @@ mod tests {
             schema.clone(),
         )
         .with_guarantee(None);
-        let coverage =
-            asap_types::ir::summary_coverage::SummaryCoverage::for_summary(&agg, None).unwrap();
-        let agg = std::rc::Rc::new(agg.with_coverage(coverage).unwrap());
+        let agg = std::rc::Rc::new(agg);
         let mut root = Rc::clone(&agg);
         if merge {
             root = std::rc::Rc::new(
