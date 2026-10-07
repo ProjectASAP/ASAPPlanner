@@ -1,8 +1,7 @@
-//! A timed plan exports as a PhysicalASAPDAG that keeps timing and coverage.
+//! A timed plan exports as a PhysicalASAPDAG that keeps timing.
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, PhysicalASAPDAGDocument, PhysicalASAPDAGValidationError,
 };
-use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
 use asap_types::ir::{
     apply_lifecycle_timings, ASAPOp, LifecycleAssignment, NonASAPOp, Operator, OperatorNode,
     TimingMemo,
@@ -13,11 +12,10 @@ use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.
 fn plan() -> Rc<OperatorNode> {
-    let source = Source::Table {
-        table_ref: "t".into(),
-    };
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-        source: source.clone(),
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
         predicates: vec![],
         schema: Schema::new(vec![
             Field::plain("key", DataType::Utf8, false),
@@ -33,14 +31,6 @@ fn plan() -> Rc<OperatorNode> {
         grouping: Default::default(),
         filter: None,
     }))
-    .unwrap()
-    .with_coverage(SummaryCoverage {
-        source,
-        regions: vec![CoverageRegion {
-            time_ms: Some(0..60_000),
-            population: Default::default(),
-        }],
-    })
     .unwrap();
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
         child: Rc::new(state),
@@ -50,7 +40,7 @@ fn plan() -> Rc<OperatorNode> {
 
 /// Default lifecycle: the summary is maintained at ingestion time and read at query time.
 #[test]
-fn timed_plan_exports_with_timing_and_coverage() {
+fn timed_plan_exports_with_timing() {
     let timed = apply_lifecycle_timings(
         &plan(),
         &LifecycleAssignment::default_maintained(),
@@ -70,7 +60,8 @@ fn timed_plan_exports_with_timing_and_coverage() {
             ExecutionTiming::QueryTime
         ]
     );
-    assert!(dag.nodes[1].coverage.is_some());
+    // Timing keeps what the summary covers.
+    assert!(timed.children()[0].coverage().is_some());
 
     let decoded: PhysicalASAPDAGDocument =
         serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
