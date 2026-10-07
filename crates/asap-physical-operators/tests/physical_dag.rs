@@ -501,7 +501,6 @@ fn bind_post_asap_before_execution() {
     use std::collections::BTreeMap;
     let schema = schema(&[("value", DataType::Float64, false)]);
     let node = |id, payload| PhysicalASAPDAGNode {
-        coverage: None,
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -643,7 +642,6 @@ fn source_batches_must_match_the_bound_schema() {
     let starts = Rc::new(Cell::new(0));
     let plan = PhysicalASAPDAG {
         nodes: vec![PhysicalASAPDAGNode {
-            coverage: None,
             id: 0,
             payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
                 rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
@@ -728,7 +726,6 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
     let node =
         |id, payload, schema: &asap_physical_operators::values::SchemaRef| PhysicalASAPDAGNode {
-            coverage: None,
             id,
             payload,
             output_schema: (**schema).clone(),
@@ -1193,7 +1190,6 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
             .collect::<Vec<_>>(),
     );
     let node = |id, operation| PhysicalASAPDAGNode {
-        coverage: None,
         id,
         payload: PhysicalASAPOperatorPayload::NonASAP(operation),
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -1281,7 +1277,6 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     let schema = schema(&[("key", DataType::Utf8, false)]);
     for certified in [false, true] {
         let node = PhysicalASAPDAGNode {
-            coverage: None,
             id: 2,
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
@@ -1397,7 +1392,6 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         ("value", DataType::Float64, false),
     ]);
     let node = PhysicalASAPDAGNode {
-        coverage: None,
         id: 2,
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,

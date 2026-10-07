@@ -415,10 +415,8 @@ fn with_grouping(
                     field.dtype = FieldDataType::Sketch(kind.clone(), grouping.clone());
                 }
             }
-            // Regrouping the same state leaves the observations it covers unchanged.
-            std::rc::Rc::new(OperatorNode {
-                coverage: node.coverage.clone(),
-                ..OperatorNode::with_schema(
+            std::rc::Rc::new(
+                OperatorNode::with_schema(
                     asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                         child: Rc::clone(child),
                         family: grouped_family,
@@ -429,8 +427,8 @@ fn with_grouping(
                     }),
                     grouped_schema,
                 )
-                .with_guarantee(None)
-            })
+                .with_guarantee(None),
+            )
         }
         // Never reached by this module's own callers (they only ever pass a
         // node `construct_summary_with` just bound for a `Sketch`

@@ -70,7 +70,6 @@ fn plan(
     state: ExecutionDataState,
 ) -> PhysicalASAPDAG {
     let node = |id, payload| PhysicalASAPDAGNode {
-        coverage: None,
         id,
         payload,
         output_state: state,
