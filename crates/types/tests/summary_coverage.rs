@@ -20,6 +20,8 @@ fn coverage(start: i64, end: i64, population: &[(&str, &str)]) -> SummaryCoverag
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         }],
+        input: SummaryUpdate::column(ColumnRef::Named("latency".into())),
+        group_by: Reduction::by(vec![]),
     }
 }
 /// Adjacent panes coalesce; gaps remain disconnected rather than becoming a hull.
@@ -146,5 +148,16 @@ fn regions_without_time_bounds() {
     assert_eq!(
         SummaryCoverage::merge_disjoint(&[tabular, coverage(5, 6, &[("region", "us")])]),
         Err(CoverageError::PossibleOverlap)
+    );
+}
+
+/// Disjoint rows do not make coverage of different columns composable.
+#[test]
+fn different_columns_do_not_compose() {
+    let mut by_job = coverage(1, 2, &[]);
+    by_job.group_by = Reduction::by(vec![0]);
+    assert_eq!(
+        SummaryCoverage::merge_disjoint(&[coverage(0, 1, &[]), by_job]),
+        Err(CoverageError::ColumnMismatch)
     );
 }

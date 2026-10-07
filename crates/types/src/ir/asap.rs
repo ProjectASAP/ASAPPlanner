@@ -6,6 +6,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
+use super::summary_coverage::CoverageError;
 use crate::ir::operator_properties::Reduction;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
@@ -487,17 +488,13 @@ impl ASAPOp {
                         ));
                     }
                 }
-                // Equal schemas do not prove the states summarize the same
-                // expression with the same grouping; the producers do.
-                let input_data = first.summary_input_data();
-                if input_data.is_none()
-                    || children
-                        .iter()
-                        .any(|c| c.summary_input_data() != input_data)
-                {
-                    return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "summary merge inputs must share update expression and reduction".into(),
-                    ));
+                // Equal schemas cannot tell a KLL over `latency` from one over
+                // `size`; the columns in each input's coverage can. A nested
+                // `SummaryMerge` carries no coverage yet (#646), so it is rejected.
+                let columns = first.coverage.as_ref().ok_or(CoverageError::UnknownInput)?;
+                for child in children {
+                    let coverage = child.coverage.as_ref().ok_or(CoverageError::UnknownInput)?;
+                    coverage.check_columns(columns)?;
                 }
                 Ok(())
             }

@@ -10,12 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
-use super::operator_properties::Reduction;
 use super::summary_coverage::{CoverageError, SummaryCoverage};
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
-use crate::post_asap::SummaryUpdate;
 use crate::pre_asap::schema::Schema;
 
 /// The output category of an operator, derived from the operation and its
@@ -148,7 +146,8 @@ impl OperatorNode {
     }
 
     /// Attach caller-established coverage. Required on summary nodes; see
-    /// [`Self::requires_coverage`].
+    /// [`Self::requires_coverage`]. On a `SummaryAgg` the coverage columns
+    /// must equal the node's `input` and `reduction`.
     pub fn with_coverage(
         mut self,
         coverage: SummaryCoverage,
@@ -157,26 +156,16 @@ impl OperatorNode {
         if self.result_kind != OperatorResultKind::State {
             return Err(CoverageError::NotState.into());
         }
+        if let Some(ASAPOp::SummaryAgg {
+            input, reduction, ..
+        }) = self.asap()
+        {
+            if &coverage.input != input || &coverage.group_by != reduction {
+                return Err(CoverageError::ColumnMismatch.into());
+            }
+        }
         self.coverage = Some(coverage);
         Ok(self)
-    }
-
-    /// What a summary state summarizes from each row: the update expression
-    /// fed into the state (`input`, e.g. the `latency` column) and the
-    /// grouping (`reduction`, e.g. by `job`) of the `SummaryAgg` that produced
-    /// it. Which rows were included is `coverage`, not this. For a
-    /// `SummaryMerge` these are its first input's, which merge validation
-    /// requires every input to share. `None` for any other node. Equal schemas
-    /// cannot tell a KLL over `latency` from one over `size`; merging compares
-    /// this instead.
-    pub fn summary_input_data(&self) -> Option<(&SummaryUpdate, &Reduction)> {
-        match self.asap()? {
-            ASAPOp::SummaryAgg {
-                input, reduction, ..
-            } => Some((input, reduction)),
-            ASAPOp::SummaryMerge { children } => children.first()?.summary_input_data(),
-            _ => None,
-        }
     }
 
     /// Summary nodes whose state can be composed must declare coverage.

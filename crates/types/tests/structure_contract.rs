@@ -24,6 +24,10 @@ fn whole_table() -> asap_types::ir::summary_coverage::SummaryCoverage {
             time_ms: None,
             population: Default::default(),
         }],
+        input: asap_types::post_asap::SummaryUpdate::column(
+            asap_types::pre_asap::ColumnRef::Named("x".into()),
+        ),
+        group_by: asap_types::pre_asap::Reduction::by(vec![]),
     }
 }
 /// Resolved filters cannot hide invalid scalar types or out-of-scope columns.
