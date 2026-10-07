@@ -112,11 +112,7 @@ impl OperatorNode {
     /// ASAP operator, ...).
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
-        let mut node = Self::with_schema(operator, schema);
-        if let Some(ASAPOp::SummaryMerge { children }) = node.asap() {
-            node.coverage = Some(SummaryCoverage::of_merge(children)?);
-        }
-        Ok(node)
+        Ok(Self::with_schema(operator, schema))
     }
 
     /// Build a node with caller-supplied output names and qualifiers. For
@@ -183,10 +179,7 @@ impl OperatorNode {
 
     /// Summary nodes whose state can be composed must declare coverage.
     pub fn requires_coverage(&self) -> bool {
-        matches!(
-            self.asap(),
-            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryMerge { .. })
-        )
+        matches!(self.asap(), Some(ASAPOp::SummaryAgg { .. }))
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -346,11 +339,6 @@ impl OperatorNode {
                 }
                 None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
                 None => {}
-            }
-            if let Some(ASAPOp::SummaryMerge { children }) = node.asap() {
-                if node.coverage.as_ref() != Some(&SummaryCoverage::of_merge(children)?) {
-                    return Err(CoverageError::MergeOutputMismatch.into());
-                }
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {

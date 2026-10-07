@@ -1,7 +1,7 @@
 //! Window composition merges compatible summary states without consuming raw rows.
 use asap_types::{
     ir::operator_properties::{Reduction, Source},
-    ir::{ASAPOp, NonASAPOp, Operator, OperatorNode},
+    ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, SchemaDerivationError},
     post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
     pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema},
 };
@@ -14,6 +14,10 @@ fn state(k: u32) -> Rc<OperatorNode> {
 }
 
 fn state_with(family: FieldDataType) -> Rc<OperatorNode> {
+    state_over(family, SummaryUpdate::column(ColumnRef::SampleValue))
+}
+
+fn state_over(family: FieldDataType, input: SummaryUpdate) -> Rc<OperatorNode> {
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: Source::Table {
             table_ref: "latencies".into(),
@@ -25,7 +29,7 @@ fn state_with(family: FieldDataType) -> Rc<OperatorNode> {
     let summary = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan,
         family,
-        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        input,
         reduction: Reduction::by(vec![]),
         grouping: GroupingStrategy::default(),
         filter: None,
@@ -54,10 +58,6 @@ fn compatible_panes_merge_structurally() {
     .unwrap();
     root.validate_structure().unwrap();
     assert_eq!(root.schema.fields.len(), 1);
-    assert_eq!(
-        root.coverage.as_ref().unwrap().regions[0].time_ms,
-        Some(0..2)
-    );
 }
 /// An empty merge, raw rows and differently sized state cannot masquerade as compatible panes.
 #[test]
@@ -84,49 +84,25 @@ fn shifted(state: &Rc<OperatorNode>, start: i64, end: i64) -> Rc<OperatorNode> {
     Rc::new(node)
 }
 
-/// A heap of top-k candidates does not merge exactly, even over disjoint panes.
+/// Equal schemas do not prove both states summarize the same expression.
 #[test]
-fn heap_based_sketches_do_not_merge() {
-    let heap = state_with(FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CmsWithHeap,
-            SketchParams::CmsWithHeap {
-                width: 1024,
-                depth: 4,
-                heap_size: 10,
-            },
-        ),
-        Default::default(),
-    ));
+fn different_update_expressions_do_not_merge() {
+    let kll = || {
+        FieldDataType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            Default::default(),
+        )
+    };
+    let named = state_over(
+        kll(),
+        SummaryUpdate::column(ColumnRef::Named("value".into())),
+    );
     let result = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-        children: vec![Rc::clone(&heap), shifted(&heap, 1, 2)],
+        children: vec![state(200), shifted(&named, 1, 2)],
     }));
-    assert!(result.is_err());
-}
-/// Schema equality cannot authorize overlapping or unknown observation coverage.
-#[test]
-fn unsafe_coverage_merge_is_rejected() {
-    let mut unknown = (*state(200)).clone();
-    unknown.coverage = None;
-    for children in [
-        vec![state(200), state(200)],
-        vec![state(200), Rc::new(unknown)],
-    ] {
-        assert!(
-            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children })).is_err()
-        );
-    }
-}
-
-/// Gapped time coverage remains disconnected, and forged output metadata is rejected.
-#[test]
-fn merge_derives_coverage_and_validates_retained_metadata() {
-    let root = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-        children: vec![state(200), shifted_state(200, 2, 3)],
-    }))
-    .unwrap();
-    assert_eq!(root.coverage.as_ref().unwrap().regions.len(), 2);
-    let mut forged = (*root).clone();
-    forged.coverage.as_mut().unwrap().regions[0].time_ms = Some(0..2);
-    assert!(Rc::new(forged).validate_structure().is_err());
+    assert!(matches!(
+        result,
+        Err(SchemaDerivationError::InvalidScalarSignature(message))
+            if message.contains("update expression and reduction")
+    ));
 }

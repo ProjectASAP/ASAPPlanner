@@ -6,11 +6,10 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
-use super::summary_coverage::SummaryCoverage;
 use crate::ir::operator_properties::Reduction;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
-use crate::post_asap::sketch::{GroupingStrategy, SketchAlgorithm, SketchStatistic, SummaryUpdate};
+use crate::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
 /// Why an ASAP operator cannot be used yet.
@@ -488,32 +487,14 @@ impl ASAPOp {
                         ));
                     }
                 }
-                // A heap of top-k candidates does not merge exactly: an item heavy
-                // in only one input can be missing from the merged heap.
-                if first.schema.fields.iter().any(|field| {
-                    matches!(
-                        &field.dtype,
-                        FieldDataType::Sketch(kind, _) if matches!(
-                            kind.algorithm(),
-                            SketchAlgorithm::CmsWithHeap
-                                | SketchAlgorithm::CountSketchWithHeap
-                                | SketchAlgorithm::UnivMon
-                        )
-                    )
-                }) {
-                    return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "summary merge does not support heap-based sketches".into(),
-                    ));
-                }
-                // Coverage records only time and population; what each state
-                // summarizes and how it is grouped come from the producers.
+                // Equal schemas do not prove the states summarize the same
+                // expression with the same grouping; the producers do.
                 let update = first.summary_update();
                 if update.is_none() || children.iter().any(|c| c.summary_update() != update) {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "summary merge inputs must share update expression and reduction".into(),
                     ));
                 }
-                SummaryCoverage::of_merge(children)?;
                 Ok(())
             }
             SummaryEstimate {

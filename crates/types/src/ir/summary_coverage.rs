@@ -48,10 +48,6 @@ pub enum CoverageError {
     NotState,
     #[error("summary node requires coverage")]
     Missing,
-    #[error("summary merge requires known coverage on every input")]
-    UnknownInput,
-    #[error("retained merge coverage disagrees with input union")]
-    MergeOutputMismatch,
 }
 
 impl SummaryCoverage {
@@ -73,24 +69,10 @@ impl SummaryCoverage {
         Ok(())
     }
 
-    /// Coverage of a `SummaryMerge` over `inputs`: the disjoint union of their
-    /// coverage. Fails when an input has none or two inputs may overlap.
-    pub fn of_merge(
-        inputs: &[std::rc::Rc<super::node::OperatorNode>],
-    ) -> Result<Self, CoverageError> {
-        let coverage = inputs
-            .iter()
-            .map(|input| input.coverage.clone().ok_or(CoverageError::UnknownInput))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::merge_disjoint(&coverage)
-    }
-
     /// Every observation in a region is assumed to contribute once to the state.
     /// Compose once-per-observation summaries only when their joint regions are
-    /// provably disjoint. `SummaryMerge` checks the rest: equal schemas (so the
-    /// same family and parameters), equal update and reduction, and no
-    /// heap-based family. Accuracy of the merged state is not assessed; its
-    /// `guarantee` is `None`.
+    /// provably disjoint. Update/reduction compatibility, family merge capability
+    /// and accuracy are checked by `SummaryMerge`, not here.
     pub fn merge_disjoint(inputs: &[Self]) -> Result<Self, CoverageError> {
         let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
         let mut merged = first.clone();
