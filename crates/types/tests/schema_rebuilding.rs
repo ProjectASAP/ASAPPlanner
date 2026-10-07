@@ -77,7 +77,7 @@ fn rebuilding_rederives_schema_for_both_categories() {
         let original = aggregate(scan(DataType::Int64, "key"), asap);
         original.validate_structure().unwrap();
         let replacement = scan(DataType::Utf8, "new_key");
-        let rebuilt = redeclare(original.map_children(|_| replacement.clone()).unwrap());
+        let rebuilt = redeclare(original.with_new_children(|_| replacement.clone()).unwrap());
         assert_eq!(rebuilt.schema, rebuilt.operator.output_schema().unwrap());
         rebuilt.validate_structure().unwrap();
     }
@@ -98,7 +98,7 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
         let original = Rc::new(renamed);
         original.validate_structure().unwrap();
         let replacement = scan(DataType::Utf8, "new_key");
-        let rebuilt = redeclare(original.map_children(|_| replacement.clone()).unwrap());
+        let rebuilt = redeclare(original.with_new_children(|_| replacement.clone()).unwrap());
         assert_eq!(rebuilt.schema.fields[0].name, "alias");
         assert_eq!(rebuilt.schema.fields[0].table.as_deref(), Some("result"));
         assert_eq!(
@@ -176,14 +176,14 @@ fn rebuilding_updates_metadata_and_requires_new_aliases_after_arity_changes() {
         schema: replacement_schema.clone(),
     }))
     .unwrap();
-    let rebuilt = Rc::new(original.map_children(|_| replacement.clone()).unwrap());
+    let rebuilt = Rc::new(original.with_new_children(|_| replacement.clone()).unwrap());
     assert_eq!(rebuilt.schema, replacement_schema);
     rebuilt.validate_structure().unwrap();
 
     let mut names = original.schema.clone();
     names.fields[0].name = "alias".into();
     let named = OperatorNode::with_schema(original.operator.clone(), names);
-    assert!(named.map_children(|_| replacement.clone()).is_err());
+    assert!(named.with_new_children(|_| replacement.clone()).is_err());
 }
 
 /// Maintaining membership and finalizing values preserve identity/time metadata.
