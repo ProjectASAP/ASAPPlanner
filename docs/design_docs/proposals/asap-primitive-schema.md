@@ -121,12 +121,12 @@ A conjunct that fails either rule stays in `definition` as a residual, as in Gol
 
 Columns are identified by lineage `(table, name)`, the identity `ColumnRef::Qualified` uses, not by `Field.name`. So `shipping.region` and `billing.region` stay different columns, and a direct alias keeps the identity of the column it renames.
 
-**Time** is a selection like any other, with two coordinate kinds:
+**Time** is a selection like any other:
 
-- A `TimeRange(w)` over a `TimeShift(s)` on the lifted chain gives time **relative to evaluation**: `(Excluded(−(s+w)), Included(−s))`. PromQL ranges are left-open, matching the executor (`series_window.rs`). This is how Stage 2 tumbling panes are built (`window_composition.rs` in #601), so their time is derived rather than declared.
-- An interval filter on the timestamp column (the schema's `time_index`) gives **absolute** time, for example `ts >= t0 AND ts < t1` gives `(Included(t0), Excluded(t1))`.
+- **Absolute** time needs nothing special: it is an interval on the timestamp column (the schema's `time_index`), for example `ts >= t0 AND ts < t1` gives `(Included(t0), Excluded(t1))` on `ts`. The IR has no timestamp literal yet, so such SQL filters stay residual until it does.
+- **Relative** time has its own field, because it is not a column value: a `TimeRange(w)` over a `TimeShift(s)` on the lifted chain gives `(Excluded(−(s+w)), Included(−s))` relative to evaluation. PromQL ranges are left-open, matching the executor (`series_window.rs`). This is how Stage 2 tumbling panes are built (`window_composition.rs` in #601), so their time is derived rather than declared. Time is lifted only from a single range `TimeRange`; an instant `TimeRange` picks the latest sample per series, which is not a selection of rows, so it stays in `definition`.
 
-A relative and an absolute interval are never compared: two states whose times are of different kinds are treated as possibly overlapping. Binding a relative pane to absolute timestamps for one evaluation (evaluation time plus the pane layout's phase) is a runtime coordinate, not coverage.
+Relative time and a timestamp-column interval are different dimensions, so they are never compared: two states restricted only by different kinds of time are treated as possibly overlapping. Binding a relative pane to absolute timestamps for one evaluation (evaluation time plus the pane layout's phase) is a runtime coordinate, not coverage.
 
 ### 4.4 Operations
 
@@ -160,12 +160,13 @@ pub struct OperatorNode {
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
     /// Cache for `coverage()`. Lazily filled, never serialized, ignored by
-    /// equality. Not a source of truth: coverage is always re-derivable.
+    /// equality, emptied on clone. Not a source of truth: coverage is always
+    /// re-derivable.
     coverage_cache: CoverageCache,
 }
 
 impl OperatorNode {
-    /// `Some` for `SummaryAgg` and `SummaryMerge`.
+    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`.
     pub fn coverage(&self) -> Option<&SummaryCoverage>;
 }
 
@@ -177,20 +178,20 @@ pub struct SummaryCoverage {
 }
 
 pub struct SelectionBox {
-    pub columns: BTreeMap<ColumnIdentity, Constraint>, // (table, name) lineage
-    pub time: Option<CoverageTime>,                    // None = unrestricted
+    pub columns: BTreeMap<ColumnIdentity, Constraint>, // missing column = unrestricted
+    pub relative_time: Option<(Bound<i64>, Bound<i64>)>, // ms from evaluation; None = unrestricted
+}
+
+pub struct ColumnIdentity {
+    pub table: Option<String>,
+    pub name: String,
 }
 
 pub enum Constraint {
-    In(BTreeSet<ScalarValue>),
-    NotIn(BTreeSet<ScalarValue>),
+    In(Vec<ScalarValue>),    // ScalarValue has no total order (Float64)
+    NotIn(Vec<ScalarValue>),
     Interval { lower: Bound<ScalarValue>, upper: Bound<ScalarValue> },
-    HashPartition { columns: Vec<ColumnIdentity>, of: u32, index: u32 },
-}
-
-pub enum CoverageTime {
-    RelativeToEvaluation { lower: Bound<i64>, upper: Bound<i64> },
-    Absolute { lower: Bound<i64>, upper: Bound<i64> },
+    // HashPartition { columns, of, index }: added with its first producer.
 }
 
 impl SummaryCoverage {
