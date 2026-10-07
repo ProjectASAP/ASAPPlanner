@@ -41,32 +41,117 @@ Based on our requirement, each field should contain the following information.
 
 A node in the physical data will represent the data or summary instance, so a node has a field for **What data sources a ASAP primitive summarizes**.
 
-**Why this is a node field, not part of the schema.** Two summary states worth merging always cover different data. `SummaryMerge` requires all inputs to have the same schema; that check is how it knows they are the same kind of state (same sketch, parameters and grouping). For example, two KLL states for "latency by job", built from minute 0–1 and minute 1–2:
+**Why coverage is not part of the schema.** Two summary states worth merging always cover different data. `SummaryMerge` requires all inputs to have the same schema; that check is how it knows they are the same kind of state (same sketch, parameters and grouping). For example, two KLL states for "latency by job", built from minute 0–1 and minute 1–2:
 
 | | State A | State B | Equal? |
 |---|---|---|---|
 | schema | `(job: Utf8, state: KLL{k=200})` | `(job: Utf8, state: KLL{k=200})` | yes, so the merge is allowed |
 | what it summarizes | time `[0,1)` | time `[1,2)` | no, which is why merging them is useful |
 
-If what a state summarizes were part of the schema, these two schemas would differ and the merge would be rejected; the only merge left would be a state with an exact copy of itself, which counts every observation twice. So the schema says *what kind of state* this is, and the node field says *which data it was built from*.
+If what a state summarizes were part of the schema, these two schemas would differ and the merge would be rejected; the only merge left would be a state with an exact copy of itself, which counts every observation twice. So the schema says *what kind of state* this is, and coverage says *which data it was built from*.
 
-"Which data" has two parts, and the schema records neither:
+A summary state summarizes the result of a whole computation, not a few columns of a raw table. A KLL over `rate(requests_total[5m])` summarizes rate outputs, and a KLL over a join summarizes join rows. So coverage describes the state by the sub-DAG below it, split into the part that says *what is computed* and the part that says *which of its rows were taken*.
 
-- **Rows**: which observations went in: the source, and joint time × population regions. In SQL terms this is `FROM` and `WHERE`.
-- **Columns**: which column of each row is fed into the state, and how rows are grouped. In SQL terms this is the argument of the aggregate and `GROUP BY`. A KLL over `latency` by `job` and a KLL over `size` by `job` both have schema `(job: Utf8, state: KLL{k=200})`.
+### 4.1 Design basis: view matching (Goldstein & Larson)
 
-Two states can merge only when their columns are **identical** and their rows are **disjoint**. Columns that differ would mix latency and size in one state; rows that overlap would count observations twice.
+The design follows the view matching algorithm of Goldstein and Larson, which decides when a query can be answered from a materialized select-project-join-group-by (SPJG) view:
 
-For `SELECT job, quantile(0.99, latency) FROM t WHERE region = 'us' AND ts in [0, 1min) GROUP BY job`:
+> J. Goldstein and P.-Å. Larson. *Optimizing Queries Using Materialized Views: A Practical, Scalable Solution.* SIGMOD 2001. <https://dsg.uwaterloo.ca/seminars/notes/larson-paper.pdf>
 
-| Coverage field | Records | Value |
+The algorithm splits a view's `WHERE` into column equivalence classes, a **range** per column and **residual** predicates. A view can answer a query when the residuals match, the query's ranges lie inside the view's (§3.1.2), the columns needed by compensating predicates are in the view output (§3.3, requirement 2), and the query's `GROUP BY` is a subset of the view's, so the query's groups are further aggregations of the view's groups (§3.3, requirement 3). The SPJ part is implemented for DataFusion in [`datafusion-contrib/datafusion-materialized-views`](https://github.com/datafusion-contrib/datafusion-materialized-views), `src/rewrite/normal_form.rs` (`SpjNormalForm`, `Predicate { eq_classes, ranges_by_equivalence_class, residuals }`); it rejects `Aggregate` and `Join` input plans.
+
+A summary state is an aggregation view whose aggregate is a summary family. The mapping is:
+
+| Goldstein & Larson | Summary coverage |
+|---|---|
+| SPJ part: tables, joins, residual predicates | the computation `C` below the `SummaryAgg` (§4.2), part of `definition` |
+| aggregate function and its argument | `family` and `input` (`SummaryUpdate`) of the `SummaryAgg`, part of `definition` |
+| `GROUP BY` | the `SummaryAgg` reduction `G`, part of `definition` |
+| ranges per column | `selection` (§4.3) |
+| compensating predicate on view output | slice on a column of `G` only (§4.4) |
+| query `GROUP BY` ⊆ view `GROUP BY` | rollup (§4.4) |
+
+What this design adds beyond the paper:
+
+- **Unions of states.** The paper considers single-view substitutes and notes that requirement 1 "is not required if substitutes containing unions of views are considered" (§3.1). `SummaryMerge` is exactly such a union, so it needs a disjointness check the paper does not have.
+- **Summary families.** The paper allows `SUM` and `COUNT_BIG` only. Here each family declares how the selections of its inputs may relate (§4.4).
+- **Value sets and hash partitions** next to ranges, and **evaluation-relative time** (§4.3).
+
+### 4.2 Coverage = definition + selection
+
+A state built by `SummaryAgg` means
+
+```text
+state_g = family( input( σ( C ) ) )  for each group value g of G, restricted to G = g
+```
+
+- `C` is the child sub-DAG with the selection removed. Its output rows are the contributions.
+- `σ` is the selection: which output rows of `C` went into the state.
+
+Coverage stores exactly these two things:
+
+- **`definition`**: the `SummaryAgg` node itself, with the selection removed from its child sub-DAG. It carries `C`, `input`, `family` and `G`. It is what the state *means*.
+- **`selection`**: a union of boxes over the output columns of `C`. It is *which rows* the state took.
+
+If two states have the same `definition`, their contributions come from the same rows of the same computation, whatever `C` contains (join, union, `rate`, dedup). Disjoint selections then cannot share a row, so no observation is counted twice. No per-operator occurrence rule is needed.
+
+Examples of what ends up where:
+
+| Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
 |---|---|---|
-| `source` | rows | table `t` |
-| `regions` | rows | `{ time_ms: 0..60_000, population: { region: "us" } }` |
-| `input` | columns | `SummaryUpdate::column(Named("latency"))` |
-| `group_by` | columns | `by[job]` |
+| `Filter(region = 'us', Scan t)` | `Scan t` | `region ∈ {us}` |
+| `Filter(latency < 100, Scan t)` | `Scan t` | `latency ∈ (−∞, 100)` |
+| `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | time `(−3m, −2m]` relative to evaluation |
+| `Filter(rate > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))`, `rate > 0` as residual | — |
+| `Filter(job = 'api', rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `job ∈ {api}` |
 
-Based on the above the proposed OperatorNode interface is as below:
+In the last two rows the `TimeRange(5m)` stays in `definition`: it sits below `rate` and changes the rate values, so it is not a selection of output rows. The 5-minute read window is a source dependency, not coverage (§4.6).
+
+### 4.3 Deriving the selection
+
+Coverage is derived from the node, never declared. Walking down from the `SummaryAgg` (its own `filter` included), a predicate conjunct goes into `selection` when both hold:
+
+1. **It can be lifted to the `SummaryAgg`.** Lifting is the inverse of DataFusion's `PushDownFilter` (`datafusion-optimizer`, `push_down_filter.rs`): a predicate passes `Filter`, `TimeRange`/`TimeShift` and a direct-column `Project` (renaming the column); passes an `Aggregate` only when every column it uses is a group column; and passes a window function or a per-series temporal function such as `rate` only when every column it uses is a partition column (a series label). Anything else stops it.
+2. **It is one of the box constraints.** Per column, one of:
+   - **value set**: `In` or `NotIn` a set of literals, from `=`, `!=`, `IN`, `NOT IN` and `OR` of equalities (as DataFusion's `LiteralGuarantee` extracts them);
+   - **interval**: lower and upper `std::ops::Bound` (`Included`, `Excluded` or `Unbounded`) from comparisons (as DataFusion's `Interval`);
+   - **hash partition**: `hash(columns) mod n = k`.
+
+A conjunct that fails either rule stays in `definition` as a residual, as in Goldstein & Larson. Column equalities (`a = b`) are residuals too: there are no column equivalence classes.
+
+Columns are identified by lineage `(table, name)`, the identity `ColumnRef::Qualified` uses, not by `Field.name`. So `shipping.region` and `billing.region` stay different columns, and a direct alias keeps the identity of the column it renames.
+
+**Time** is a selection like any other, with two coordinate kinds:
+
+- A `TimeRange(w)` over a `TimeShift(s)` on the lifted chain gives time **relative to evaluation**: `(Excluded(−(s+w)), Included(−s))`. PromQL ranges are left-open, matching the executor (`series_window.rs`). This is how Stage 2 tumbling panes are built (`window_composition.rs` in #601), so their time is derived rather than declared.
+- An interval filter on the timestamp column (the schema's `time_index`) gives **absolute** time, for example `ts >= t0 AND ts < t1` gives `(Included(t0), Excluded(t1))`.
+
+A relative and an absolute interval are never compared: two states whose times are of different kinds are treated as possibly overlapping. Binding a relative pane to absolute timestamps for one evaluation (evaluation time plus the pane layout's phase) is a runtime coordinate, not coverage.
+
+### 4.4 Operations
+
+| Operation | Example | Valid when |
+|---|---|---|
+| merge (`SummaryMerge`, same `G`) | `[0,1m)` ⊕ `[1m,2m)`; `region='us'` ⊕ `region='eu'` | all `definition`s equal; selections related as the family requires (below) |
+| rollup (`SummaryMerge` with `group_by: G'`) | `by[region, job]` → `by[job]` | `G'` ⊆ `G` and the family merges. Groups of one state are disjoint because a row has one value per group column, so no selection check is needed |
+| slice | `by[region, job]` state answering `region = 'us' … by[job]` | the restricted columns are all in `G`. A sketch cannot be filtered, so a restriction on any other column is invalid |
+| reuse for a query | a stored state answers a query | Goldstein & Larson containment: same `definition`, query selection inside the state's, any compensating restriction is a slice |
+| subtract (`SummarySubtract`, reserved) | `[0,10) − [0,5)` | same `definition`; the right selection is contained in the left |
+
+One `SummaryMerge { children, group_by }` covers both merge and rollup: one child with a coarser `group_by` is a rollup, and `group_by` equal to the children's is a plain merge. Its coverage is the children's `definition` with `G'` and the union of their selections; adjacent intervals are joined, gaps stay as separate boxes.
+
+How selections must relate is declared by the family, next to whether it merges (`FieldDataType::family_merges`, added in #592):
+
+- **disjoint** for counting families (KLL, Count-Min, exact `Sum`/`Count`): an overlapping row would be counted twice;
+- **overlap allowed** for idempotent families (HLL, exact `Min`/`Max`, distinct sets);
+- **contained** for subtraction.
+
+Two `definition`s are equal when their canonical forms (`canonicalize`) are structurally equal, ignoring planning metadata: `timing`, `guarantee` and `coverage_cache`. `SummaryUpdate.weight_domain` is compared: it is derived from `C` and `input`, so it differs only if a derivation is wrong. A state built at ingestion time and one built at query time can therefore merge.
+
+States over different sources have different `definition`s and do not merge. To combine tables, put `UNION ALL` with a marker column below one `SummaryAgg`; the marker is then an ordinary column for `selection` or `G`.
+
+### 4.5 Interface
+
 ```rust
 pub struct OperatorNode {
     pub operator: Operator,
@@ -74,21 +159,54 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
-    pub coverage: Option<SummaryCoverage>,   // which data a state summarizes; required on SummaryAgg
+    /// Cache for `coverage()`. Lazily filled, never serialized, ignored by
+    /// equality. Not a source of truth: coverage is always re-derivable.
+    coverage_cache: CoverageCache,
+}
+
+impl OperatorNode {
+    /// `Some` for `SummaryAgg` and `SummaryMerge`.
+    pub fn coverage(&self) -> Option<&SummaryCoverage>;
 }
 
 pub struct SummaryCoverage {
-    pub source: Source,                 // rows: the scanned table or series
-    pub regions: Vec<CoverageRegion>,   // rows: union of joint regions
-    pub input: SummaryUpdate,           // columns: equals SummaryAgg.input
-    pub group_by: Reduction,            // columns: equals SummaryAgg.reduction (child-schema column ids)
+    /// The `SummaryAgg` (or rolled-up equivalent) with the selection removed.
+    pub definition: Rc<OperatorNode>,
+    /// Union of boxes over the output rows of the definition's computation.
+    pub selection: Vec<SelectionBox>,
 }
 
-pub struct CoverageRegion {
-    pub time_ms: Option<Range<i64>>,             // absolute, half-open; None = no time restriction
-    pub population: BTreeMap<String, String>,    // conjunction of `field = 'text'`; empty = unrestricted
+pub struct SelectionBox {
+    pub columns: BTreeMap<ColumnIdentity, Constraint>, // (table, name) lineage
+    pub time: Option<CoverageTime>,                    // None = unrestricted
+}
+
+pub enum Constraint {
+    In(BTreeSet<ScalarValue>),
+    NotIn(BTreeSet<ScalarValue>),
+    Interval { lower: Bound<ScalarValue>, upper: Bound<ScalarValue> },
+    HashPartition { columns: Vec<ColumnIdentity>, of: u32, index: u32 },
+}
+
+pub enum CoverageTime {
+    RelativeToEvaluation { lower: Bound<i64>, upper: Bound<i64> },
+    Absolute { lower: Bound<i64>, upper: Bound<i64> },
+}
+
+impl SummaryCoverage {
+    pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
 }
 ```
+
+`OperatorNode::new` still rejects an invalid `SummaryMerge` (different definitions, or selections the family does not allow), but it does not store the result. A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
+
+### 4.6 What coverage does not contain
+
+- **Source dependencies**: which source rows must be read to compute the contributions, such as the 5-minute window under `rate`. This is read planning and maintenance (compare `materialized/dependencies.rs` in `datafusion-materialized-views`).
+- **Readiness and completeness**: whether a stored instance holds all of its rows.
+- **Absolute binding** of relative time, and deployment identity.
+
+These belong to ASAPQuery-backend. The SDS split matches coverage: `SummaryDefinition` stores the serialized `definition` (Planner provides its serde; Backend owns the format version, definition id and hash), and a `StoredSummary`'s coordinates are the `selection` bound to one evaluation plus the group value.
 
 ## 5. Examples on how OperatorNode, schema, and physical data information are being used with Summary operators
 
@@ -98,22 +216,25 @@ Notation: an edge is written `──Kind(field Type, …)──▶`. Schemas are
 
 ### 5.1 `SummaryAgg`: values → state
 
-Scenario: p99 latency by job, from KLL(k=200), over one minute of table `t`.
+Scenario: p99 latency by job, from KLL(k=200), over one minute of table `t`, US rows only.
 
 ```text
-Scan(t: job Utf8, latency Float64)
-  ──Relation(job Utf8, latency Float64)──▶
+Scan(t: job Utf8, region Utf8, ts Int64 [time_index], latency Float64)
+  ──Relation(job Utf8, region Utf8, ts Int64, latency Float64)──▶
+Filter(region = 'us' AND ts >= 0 AND ts < 60_000)
+  ──Relation(job Utf8, region Utf8, ts Int64, latency Float64)──▶
 SummaryAgg(family = Sketch(KLL{k=200}, PerSubpopulationInstance),
            input = SummaryUpdate::column(Named("latency")), reduction = by[job],
            grouping = PerSubpopulationInstance, filter = None)
   ──State(job Utf8, state Sketch(KLL{k=200}, PerSubpopulationInstance))──▶
-  coverage = { source: Table "t", regions: [{ time_ms: 0..60_000, population: {} }],
-               input: column(Named("latency")), group_by: by[job] }
+  coverage() = { definition: this SummaryAgg over Scan(t)   (the Filter removed),
+                 selection:  [{ columns: { t.region: In{'us'} },
+                                time: Absolute [Included(0), Excluded(60_000)) }] }
 ```
 
 - Output schema: the `by` keys followed by one non-nullable field `state` typed `family`; `unique_keys = [[0]]`, `closed = true`, no `time_index`. With `Reduction::PerEntity` the input columns are kept and the sample-value column is replaced by `state`.
 - Checks: `family` is not `Plain`; the child is not `State`; the `weight`/`item` columns resolve against the child schema; `filter`, if present, types as `Bool`.
-- Coverage: **required** and **declared**. `OperatorNode::new` leaves it `None`, `validate_structure` fails with `CoverageError::Missing`, and the planner attaches it with `with_coverage`. The declared `input`/`group_by` must equal the node's own `input`/`reduction`, or `with_coverage` (and `validate_structure`) fails with `ColumnMismatch`. #646 derives it instead.
+- Coverage: **always derived**, never declared (§4.3). Both conjuncts of the `Filter` lift into `selection`, so `definition` is this node over the bare `Scan`. A KLL over `latency` for `region = 'eu'` has the same `definition` and a disjoint selection, so the two can merge. A conjunct that cannot lift (say `latency * 2 > 10`) stays in `definition` as a residual; the node still has coverage.
 - Boundary: this is where values become state. The sketch family, algorithm and parameters are committed in the field type, and `guarantee` stays `None` because state is not a caller-visible value.
 
 ### 5.2 `SummaryEstimate`: sketch state → value
@@ -129,7 +250,7 @@ SummaryEstimate(query = SketchStatistic::Quantile { q: 0.99 })
 - Output schema: the input schema with the one non-plain field replaced by a non-nullable plain field. Its name and type come from the statistic: `quantile`/`frequency_l2`/`frequency_entropy` Float64, `cardinality`/`count` Int64 (Float64 if the producer is a `PerEntity` `SummaryAgg`). Keys and metadata pass through. A top-k readout is the exception: it returns the selected rows, one per ranked item, with the partition keys, the item identity columns, and a `value` Float64 score (#579). This is the same row shape as an exact Sort → Limit top-k, so the plans for one query share a root schema.
 - Result kind: the value kind of the source the state was built from (`Relation` here).
 - Checks: input is `State` with exactly one non-plain field, that field is `Sketch`, and its category accepts the statistic (§3). For example, `Cardinality` on KLL is rejected.
-- Coverage: **absent**. The output is a value, and `with_coverage` returns `NotState`.
+- Coverage: **none**. The output is a value; `coverage()` returns `None`.
 - Boundary: state is consumed and a value is produced; `guarantee` on this node carries the readout's error bound.
 
 ### 5.3 `FinalizeExactAccumulator`: exact state → value
@@ -140,14 +261,14 @@ Scenario: total bytes by host with an exact Sum accumulator.
 Scan(t: host Utf8, bytes Float64)
   ──Relation(host Utf8, bytes Float64)──▶
 SummaryAgg(family = ExactAggregate(Sum, Sum), input = column(Named("bytes")), reduction = by[host])
-  ──State(host Utf8, state ExactAggregate(Sum, Sum))──▶   coverage: required, declared
+  ──State(host Utf8, state ExactAggregate(Sum, Sum))──▶   coverage: derived
 FinalizeExactAccumulator
   ──Relation(host Utf8, state Float64)──▶
 ```
 
 - Output schema: each `ExactAggregate` field keeps its name (`state`) and takes the type and nullability the equivalent `NonASAPOp::Aggregate` would give: Sum/Min/Max follow the input column, Count is Int64, and Rate/IRate/Increase are Float64. If the child is not a `SummaryAgg` directly, Count falls back to Int64 and the others to Float64. `unique_keys`, `closed` and `time_index` are preserved (`schema_rebuilding.rs`).
 - Checks: the input is `State` and contains an `ExactAggregate` field; a sketch is rejected (`structure_contract.rs`).
-- Coverage: **absent** on the output.
+- Coverage: **none** on the output.
 - Boundary: this is the explicit maintenance-to-read boundary for exact state. Exact state is never read through `SummaryEstimate`.
 
 ### 5.4 `MaintainPopulation`: values → maintained membership (state)
@@ -165,7 +286,7 @@ MaintainPopulation(population = MaintainedPopulation {
 
 - Output schema: identical to the child's, all plain. Only `result_kind = State` marks it as maintained state.
 - Checks: `population.matches_node(child)`. For `Rows`, the child must be the same closed table `Scan`, the value column must be non-null Float64, and grouping must be `by` with in-range keys. For `CurrentSeries`, it must be a `TimeSeries` scan with the same metric, matchers and grouping labels, under an instant `TimeRange` of `lookback_ms` (which may be omitted only for the default 300 s lookback).
-- Coverage: **not required**. `with_coverage` accepts it because the output is `State`.
+- Coverage: **none**. Maintained membership is not combined by `SummaryMerge`. If maintained populations are later materialized per pane, they derive coverage the same way as `SummaryAgg`.
 - Boundary: the output is state because it must also track membership changes; downstream operators can only read it through `EvaluatePopulation`.
 
 ### 5.5 `EvaluatePopulation`: maintained membership → value
@@ -180,25 +301,40 @@ EvaluatePopulation(evaluation = PopulationStatistic::Quantile { q: 0.99 })
 
 - Output schema: the schema of `Aggregate(by grouping, measure)` over the maintained source. Quantile gives `quantile_<q>` Float64, Sum gives `sum` (value type), Count gives `count` Int64 and Average gives `avg` Float64; `unique_keys = [[0]]`, `closed`. `TopK { k }` instead returns the source schema unchanged (the selected rows).
 - Checks: the child is a `MaintainPopulation` node whose `supports(evaluation)` holds: `quantiles` must be set for `Quantile`, and `k <= max_k` for `TopK`.
-- Coverage: **absent**.
+- Coverage: **none**.
 - Boundary: maintained membership is read as a value; the result kind is the source's (`Relation`).
 
-### 5.6 `SummaryMerge` (#560): state × N → state
+### 5.6 `SummaryMerge`: state × N → state (merge and rollup)
 
-On this branch, `SummaryMerge { children }` is **reserved**. `is_unimplemented()` returns true, and `output_schema()` and `validate_inputs()` return `UNIMPLEMENTED_ASAP_OP`, so `OperatorNode::new` fails. Only `output_kind()` (= `State`), `children`, `map_children` and `kind_name` work. #560 enables it as follows (`summary_merge_structure.rs` in #560).
+On `main`, `SummaryMerge { children }` is **reserved**: `is_unimplemented()` returns true, and `output_schema()` and `validate_inputs()` return `UNIMPLEMENTED_ASAP_OP`, so `OperatorNode::new` fails. #560 enables it for children with identical schemas. This design adds `group_by`, so one operator does both merge and rollup (§4.4):
 
-Scenario: combine two one-minute KLL panes over `Scan(t: value Float64)` into a two-minute state.
-
-```text
-SummaryAgg(KLL k=200, column(SampleValue), by[]) ──State(state Sketch(KLL{k=200}))── coverage {t, [0..60_000)} ─┐
-SummaryAgg(KLL k=200, column(SampleValue), by[]) ──State(state Sketch(KLL{k=200}))── coverage {t, [60_000..120_000)} ─┴▶
-SummaryMerge
-  ──State(state Sketch(KLL{k=200}))──▶   coverage: none until #646
+```rust
+SummaryMerge { children: Vec<C>, group_by: Reduction }
 ```
 
-- Output schema: `children[0].schema`.
-- Checks: at least one input; exactly one state column; every input is `State` with an identical schema (so family, params, grouping strategy and key positions match); every input carries coverage (else `UnknownInput`), and all inputs have the same coverage columns, `input` and `group_by` (else `ColumnMismatch`). Merging k=200 with k=300 fails, and so do merging raw rows and merging a KLL over `latency` with one over `size`.
-- Coverage: **absent** in #560. #560 does not derive coverage or check that the input rows are disjoint, so a merge whose input is another merge is rejected with `UnknownInput`. #646 derives coverage for every summary node with one `SummaryCoverage::derive`: for a merge, the disjoint union of the input rows (overlapping inputs give `PossibleOverlap`; gapped inputs stay as two regions) with the shared columns.
+Scenario A, time panes: two one-minute KLL panes of PromQL `quantile_over_time(0.99, m[2m])` merged into the two-minute state. Each pane reads `TimeRange(1m)` over `TimeShift(s)` over the scan, as Stage 2 builds them.
+
+```text
+pane 0 = SummaryAgg(KLL k=200, column(SampleValue), by[]) over TimeRange(1m, TimeShift(0,  Scan m))
+         coverage() = { definition: SummaryAgg(...) over Scan m, selection: [{ time: Relative (−1m, 0] }] }
+pane 1 = SummaryAgg(KLL k=200, column(SampleValue), by[]) over TimeRange(1m, TimeShift(1m, Scan m))
+         coverage() = { definition: same,                        selection: [{ time: Relative (−2m, −1m] }] }
+SummaryMerge(children = [pane 0, pane 1], group_by = by[])
+  ──State(state Sketch(KLL{k=200}))──▶
+  coverage() = { definition: same, selection: [{ time: Relative (−2m, 0] }] }
+```
+
+Scenario B, populations: `KLL(latency) by[job]` for `region = 'us'` and for `region = 'eu'` (as in 5.1) merge into `selection: [{ t.region: In{'us', 'eu'} }]`.
+
+Scenario C, rollup: one `KLL(latency) by[region, job]` state merged with `group_by = by[job]`. Every job's state is the merge of that job's per-region states. The output's `definition` is the same `SummaryAgg` with `reduction = by[job]`, and `selection` is unchanged.
+
+- Output schema: the children's schema with the group key fields reduced to `group_by`.
+- Checks:
+  - at least one child, every child is `State` with exactly one state field;
+  - all children have equal `definition`s (§4.4), so family, parameters, `input`, `C` and grouping match. Merging k=200 with k=300, KLL over `latency` with KLL over `size`, or states over different sources fails;
+  - `group_by` ⊆ the children's `G`, and the family merges;
+  - the children's selections relate as the family requires: disjoint for KLL, so pane 0 with pane 0 is rejected; overlap is allowed for HLL.
+- Coverage: **derived**: the shared `definition` with `group_by`, and the union of the children's selections. Adjacent intervals join; gaps stay as separate boxes. Nested merges work because a child merge has coverage like any other summary node.
 - Boundary: state in, state out. No value is produced until a readout.
 
 ### 5.7 Reserved operators (not implemented)
@@ -207,7 +343,7 @@ These variants exist so that plans can name them, but `output_schema()`/`validat
 
 | Operator | Fields | Intended edge shape |
 |---|---|---|
-| `SummarySubtract` | `left, right` | State × State → State: remove one window's contribution, e.g. [0,10) − [0,5) |
+| `SummarySubtract` | `left, right` | State × State → State: remove one window's contribution, e.g. [0,10) − [0,5). Same `definition`; the right selection must lie inside the left (§4.4) |
 | `SummaryDelete` | `summary_input, key: ColumnId` | State → State with the entries for `key` removed |
 | `SummaryJoin` | `outer, inner, key, family` | State × State → State typed `family` (`produced_state()` returns it), e.g. join-size estimation |
 | `Extension` | `child, name` | deployment-named state operator |
@@ -216,13 +352,13 @@ These variants exist so that plans can name them, but `output_schema()`/`validat
 
 | Operator | Input kind | Output kind | Output carries state | Coverage on output | Status |
 |---|---|---|---|---|---|
-| `SummaryAgg` | value (not `State`) | `State` | yes (one `family` field) | required, declared | implemented |
-| `SummaryEstimate` | `State` (one `Sketch` field) | source's value kind | no | absent | implemented |
-| `FinalizeExactAccumulator` | `State` (`ExactAggregate`) | source's value kind | no | absent | implemented |
-| `MaintainPopulation` | `Relation` (table) / `InstantVector` (series) | `State` | yes (by kind; fields plain) | optional, not required | implemented |
-| `EvaluatePopulation` | `State` from `MaintainPopulation` | source's value kind | no | absent | implemented |
-| `SummaryMerge` | `State` × N | `State` | yes | absent in #560; derived in #646 | reserved; enabled by #560 |
-| `SummarySubtract` | `State` × 2 | `State` | yes | — | reserved |
+| `SummaryAgg` | value (not `State`) | `State` | yes (one `family` field) | derived: itself minus selection, plus selection | implemented |
+| `SummaryEstimate` | `State` (one `Sketch` field) | source's value kind | no | none | implemented |
+| `FinalizeExactAccumulator` | `State` (`ExactAggregate`) | source's value kind | no | none | implemented |
+| `MaintainPopulation` | `Relation` (table) / `InstantVector` (series) | `State` | yes (by kind; fields plain) | none | implemented |
+| `EvaluatePopulation` | `State` from `MaintainPopulation` | source's value kind | no | none | implemented |
+| `SummaryMerge` | `State` × N | `State` | yes | derived: shared definition with `group_by`, union of selections | reserved; enabled by #560, `group_by` added by this design |
+| `SummarySubtract` | `State` × 2 | `State` | yes | derived: left selection minus right (planned) | reserved |
 | `SummaryDelete` | `State` | `State` | yes | — | reserved |
 | `SummaryJoin` | `State` × 2 | `State` | yes | — | reserved |
 | `Extension` | any | `State` | yes | — | reserved |
