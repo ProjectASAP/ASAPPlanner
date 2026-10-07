@@ -67,8 +67,6 @@ pub struct PhysicalASAPDAGNode {
     pub output_state: ExecutionDataState,
     pub output_schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
-    #[serde(default)]
-    pub coverage: Option<super::summary_coverage::SummaryCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -413,7 +411,6 @@ pub fn compile_physical_asap_workload_with_node_ids(
             output_state,
             output_schema: flat_node.schema,
             guarantee: flat_node.guarantee,
-            coverage: flat_node.coverage,
         });
     }
     let dag = PhysicalASAPDAG {
