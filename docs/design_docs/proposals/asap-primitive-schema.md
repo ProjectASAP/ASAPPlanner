@@ -119,7 +119,7 @@ Coverage is derived from the node, never declared. Walking down from the `Summar
 
 A conjunct that fails either rule stays in `definition` as a residual, as in Goldstein & Larson. Column equalities (`a = b`) are residuals too: there are no column equivalence classes.
 
-Columns are identified by lineage `(table, name)`, the identity `ColumnRef::Qualified` uses, not by `Field.name`. So `shipping.region` and `billing.region` stay different columns, and a direct alias keeps the identity of the column it renames.
+Columns are identified by lineage `(table, name)`, the identity `ColumnRef::Qualified` uses, not by `Field.name`. So `shipping.region` and `billing.region` stay different columns, and a direct alias keeps the identity of the column it renames. A column whose `(table, name)` is not unique in the output (two items aliased `k`) cannot be named, so its conjuncts stay residual. Value sets compare literals by type: `1` and `1.0` are never proven different.
 
 **Time** is a selection like any other:
 
