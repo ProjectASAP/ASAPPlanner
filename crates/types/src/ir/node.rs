@@ -161,18 +161,20 @@ impl OperatorNode {
         Ok(self)
     }
 
-    /// What a summary state was built from: the update expression (`input`)
-    /// and grouping (`reduction`) of the `SummaryAgg` that produced it. For a
+    /// What a summary state summarizes from each row: the update expression
+    /// fed into the state (`input`, e.g. the `latency` column) and the
+    /// grouping (`reduction`, e.g. by `job`) of the `SummaryAgg` that produced
+    /// it. Which rows were included is `coverage`, not this. For a
     /// `SummaryMerge` these are its first input's, which merge validation
-    /// requires every input to share. `None` for any other node. Merging
-    /// compares it so that all inputs summarize the same expression with the
-    /// same grouping.
-    pub fn summary_update(&self) -> Option<(&SummaryUpdate, &Reduction)> {
+    /// requires every input to share. `None` for any other node. Equal schemas
+    /// cannot tell a KLL over `latency` from one over `size`; merging compares
+    /// this instead.
+    pub fn summary_input_data(&self) -> Option<(&SummaryUpdate, &Reduction)> {
         match self.asap()? {
             ASAPOp::SummaryAgg {
                 input, reduction, ..
             } => Some((input, reduction)),
-            ASAPOp::SummaryMerge { children } => children.first()?.summary_update(),
+            ASAPOp::SummaryMerge { children } => children.first()?.summary_input_data(),
             _ => None,
         }
     }

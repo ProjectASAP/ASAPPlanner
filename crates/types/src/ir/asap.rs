@@ -489,8 +489,12 @@ impl ASAPOp {
                 }
                 // Equal schemas do not prove the states summarize the same
                 // expression with the same grouping; the producers do.
-                let update = first.summary_update();
-                if update.is_none() || children.iter().any(|c| c.summary_update() != update) {
+                let input_data = first.summary_input_data();
+                if input_data.is_none()
+                    || children
+                        .iter()
+                        .any(|c| c.summary_input_data() != input_data)
+                {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "summary merge inputs must share update expression and reduction".into(),
                     ));
