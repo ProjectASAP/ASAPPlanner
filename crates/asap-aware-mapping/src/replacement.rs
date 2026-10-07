@@ -352,7 +352,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
-use asap_types::ir::summary_coverage::SummaryCoverage;
 use asap_types::ir::timing::validate_default;
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
@@ -2283,11 +2282,10 @@ fn retime_rate_finalize(
         _ => false,
     };
     let rebuilt = |operator: Operator, timing: Option<ExecutionTiming>| {
-        Rc::new(OperatorNode {
-            operator,
-            timing,
-            ..node.as_ref().clone()
-        })
+        let mut copy = node.as_ref().clone();
+        copy.operator = operator;
+        copy.timing = timing;
+        Rc::new(copy)
     };
     match &node.operator {
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) if is_rate_boundary(child) => {
@@ -3232,12 +3230,7 @@ fn construct_summary_agg(
         // finalized value does. An exact accumulator's state is its value.
         if estimate { None } else { guarantee.clone() },
     );
-    // Today's planner knows no time bounds; source and population come from
-    // the subtree. Over several sources no coverage can be declared.
-    let agg = std::rc::Rc::new(match SummaryCoverage::for_summary(&agg, None) {
-        Some(coverage) => agg.with_coverage(coverage)?,
-        None => agg,
-    });
+    let agg = std::rc::Rc::new(agg);
     match query {
         // The evaluation: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
@@ -5547,10 +5540,8 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
             }
-            // The same summary over a re-placed input keeps its coverage.
-            let rebuilt = std::rc::Rc::new(OperatorNode {
-                coverage: node.coverage.clone(),
-                ..OperatorNode::with_schema(
+            let rebuilt = std::rc::Rc::new(
+                OperatorNode::with_schema(
                     asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                         child: Rc::clone(new_child),
                         family: family.clone(),
@@ -5561,8 +5552,8 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
                     }),
                     node.schema.clone(),
                 )
-                .with_guarantee(node.guarantee.clone())
-            });
+                .with_guarantee(node.guarantee.clone()),
+            );
             match validate_default(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
@@ -11362,8 +11353,8 @@ mod tests {
         );
     }
 
-    // Every SummaryAgg a strategy proposes declares whole-source coverage of
-    // the one source it reads (trusted, #570).
+    // Every SummaryAgg a strategy proposes derives coverage of its whole
+    // source: an unrestricted selection over a definition reading that source.
     #[test]
     fn proposed_summary_states_cover_their_whole_source() {
         let root = agg(
@@ -11389,15 +11380,16 @@ mod tests {
             .collect();
         assert!(!states.is_empty());
         for state in states {
-            let coverage = state.coverage.as_ref().expect("summary state has coverage");
-            assert_eq!(coverage.source, source);
-            assert_eq!(
-                coverage.regions,
-                [asap_types::ir::summary_coverage::CoverageRegion {
-                    time_ms: None,
-                    population: Default::default(),
-                }]
-            );
+            let coverage = state.coverage().expect("summary state has coverage");
+            assert_eq!(coverage.selection, [Default::default()]);
+            let reads = OperatorNode::reachable(&coverage.definition)
+                .into_iter()
+                .filter_map(|node| match node.non_asap() {
+                    Some(NonASAPOp::Scan { source, .. }) => Some(source.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reads, std::slice::from_ref(&source));
         }
     }
 }

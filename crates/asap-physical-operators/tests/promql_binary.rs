@@ -69,7 +69,6 @@ fn program_for(operator: BinaryOperator) -> CompiledPhysicalDAG {
 fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhysicalDAG {
     let schema = schema();
     let node = PhysicalASAPDAGNode {
-        coverage: None,
         id: 2,
         payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
             operator,
@@ -372,7 +371,6 @@ fn stored_series_evaluations_support_filters_and_sets() {
             let nodes =
                 (0..5)
                     .map(|id| PhysicalASAPDAGNode {
-                        coverage: None,
                         id,
                         payload: match id {
                             0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {

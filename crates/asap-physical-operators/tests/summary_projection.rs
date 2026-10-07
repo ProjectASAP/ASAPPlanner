@@ -59,7 +59,6 @@ fn post_asap_summary_projection_survives_recovery() {
     let dag = PhysicalASAPDAG {
         nodes: vec![
             PhysicalASAPDAGNode {
-                coverage: None,
                 id: 0,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![],
@@ -69,7 +68,6 @@ fn post_asap_summary_projection_survives_recovery() {
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
-                coverage: None,
                 id: 1,
                 payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Project {
                     cols: vec![1, 0]

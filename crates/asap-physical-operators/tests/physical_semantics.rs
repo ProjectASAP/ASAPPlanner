@@ -377,7 +377,6 @@ fn global_extrema_bind_with_planner_derived_schema() {
             result.nullable,
         )]);
         let node = PhysicalASAPDAGNode {
-            coverage: None,
             id: 1,
             payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
                 reduction: PlanReduction::Reduce(GroupKeys::by(vec![])),

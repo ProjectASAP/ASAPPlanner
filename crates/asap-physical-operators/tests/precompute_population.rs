@@ -56,7 +56,6 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     ] {
         let nodes = vec![
             PhysicalASAPDAGNode {
-                coverage: None,
                 id: 0,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![],
@@ -66,7 +65,6 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
-                coverage: None,
                 id: 1,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
                     child: 0,
@@ -76,7 +74,6 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
-                coverage: None,
                 id: 2,
                 payload: PhysicalASAPOperatorPayload::NonASAP(
                     planner_types::ir::NonASAPOp::BinaryOp {
@@ -96,7 +93,6 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
-                coverage: None,
                 id: 3,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                     family: family.clone(),
@@ -256,7 +252,6 @@ fn state_dag(
     merge: bool,
 ) -> CompiledPhysicalDAG {
     let mut nodes = vec![PhysicalASAPDAGNode {
-        coverage: None,
         id: 0,
         payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![] }),
         output_state: ExecutionDataState::INGESTION_SUMMARY,
@@ -272,7 +267,6 @@ fn state_dag(
     }
     let read_id = nodes.len();
     nodes.push(PhysicalASAPDAGNode {
-        coverage: None,
         id: read_id,
         payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
             child: read_id - 1,
@@ -283,7 +277,6 @@ fn state_dag(
     });
     if let Some(target) = target {
         nodes.push(PhysicalASAPDAGNode {
-            coverage: None,
             id: nodes.len(),
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 family: target.clone(),

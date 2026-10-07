@@ -1,6 +1,5 @@
 //! #511 examples: source text → unified dag → summary rewrite → flat export.
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{
     ExactKind, ExactParams, FieldDataType, GroupingStrategy, SummaryUpdate,
@@ -85,17 +84,6 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
                     grouping: GroupingStrategy::default(),
                     filter: None,
                 }))
-                .unwrap()
-                // Whole-source coverage, as the planner declares it today (#570).
-                .with_coverage(SummaryCoverage {
-                    source: asap_types::pre_asap::Source::Table {
-                        table_ref: "requests".into(),
-                    },
-                    regions: vec![CoverageRegion {
-                        time_ms: None,
-                        population: Default::default(),
-                    }],
-                })
                 .unwrap(),
             );
             let finalize = std::rc::Rc::new(
@@ -109,7 +97,7 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
             );
             return finalize;
         }
-        Rc::new(node.map_children(rewrite).unwrap())
+        Rc::new(node.with_new_children(rewrite).unwrap())
     }
     let rewritten = rewrite(&root);
     rewritten.validate_structure().unwrap();

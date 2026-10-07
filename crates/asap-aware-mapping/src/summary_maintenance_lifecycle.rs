@@ -3763,17 +3763,16 @@ mod tests {
         else {
             unreachable!()
         };
-        let state = Rc::new(OperatorNode {
-            operator: Operator::ASAP(ASAPOp::SummaryAgg {
-                child: Rc::clone(population),
-                family: family.clone(),
-                input: input.clone(),
-                reduction: reduction.clone(),
-                grouping: grouping.clone(),
-                filter: None,
-            }),
-            ..state.as_ref().clone()
+        let mut copy = state.as_ref().clone();
+        copy.operator = Operator::ASAP(ASAPOp::SummaryAgg {
+            child: Rc::clone(population),
+            family: family.clone(),
+            input: input.clone(),
+            reduction: reduction.clone(),
+            grouping: grouping.clone(),
+            filter: None,
         });
+        let state = Rc::new(copy);
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
         let timed = |lifecycle: SummaryMaintenanceLifecycle| {
@@ -3833,17 +3832,16 @@ mod tests {
         else {
             unreachable!()
         };
-        let state = Rc::new(OperatorNode {
-            operator: Operator::ASAP(ASAPOp::SummaryAgg {
-                child: Rc::clone(population),
-                family: family.clone(),
-                input: input.clone(),
-                reduction: reduction.clone(),
-                grouping: grouping.clone(),
-                filter: None,
-            }),
-            ..state.as_ref().clone()
+        let mut copy = state.as_ref().clone();
+        copy.operator = Operator::ASAP(ASAPOp::SummaryAgg {
+            child: Rc::clone(population),
+            family: family.clone(),
+            input: input.clone(),
+            reduction: reduction.clone(),
+            grouping: grouping.clone(),
+            filter: None,
         });
+        let state = Rc::new(copy);
         let binary = test_binary;
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
