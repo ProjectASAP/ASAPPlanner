@@ -219,10 +219,10 @@ Notation: an edge is written `──Kind(field Type, …)──▶`. Schemas are
 Scenario: p99 latency by job, from KLL(k=200), over one minute of table `t`, US rows only.
 
 ```text
-Scan(t: job Utf8, region Utf8, ts Int64 [time_index], latency Float64)
-  ──Relation(job Utf8, region Utf8, ts Int64, latency Float64)──▶
+Scan(t: job Utf8, region Utf8, ts Timestamp [time_index], latency Float64)
+  ──Relation(job Utf8, region Utf8, ts Timestamp, latency Float64)──▶
 Filter(region = 'us' AND ts >= 0 AND ts < 60_000)
-  ──Relation(job Utf8, region Utf8, ts Int64, latency Float64)──▶
+  ──Relation(job Utf8, region Utf8, ts Timestamp, latency Float64)──▶
 SummaryAgg(family = Sketch(KLL{k=200}, PerSubpopulationInstance),
            input = SummaryUpdate::column(Named("latency")), reduction = by[job],
            grouping = PerSubpopulationInstance, filter = None)
