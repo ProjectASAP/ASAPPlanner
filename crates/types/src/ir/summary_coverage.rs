@@ -1,10 +1,6 @@
-//! What a summary state covers, independent of schema: which rows (source and
-//! joint time/population regions) and which columns (the update expression fed
-//! into the state and the grouping).
+//! Joint time/population coverage for summary composition, independent of schema.
 //! Equality predicates are a deliberately narrow proof vocabulary. Unsupported
 //! predicates cannot be declared disjoint merely by giving them different names.
-use crate::ir::operator_properties::Reduction;
-use crate::post_asap::SummaryUpdate;
 use crate::pre_asap::Source;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -17,15 +13,8 @@ pub struct SummaryCoverage {
     /// Observation data source, as named by `Scan`: a table or a time series.
     /// Region time bounds refer to its time column.
     pub source: Source,
-    /// Rows: union of joint regions; never the Cartesian product of
-    /// independent bounds.
+    /// Union of joint regions; never the Cartesian product of independent bounds.
     pub regions: Vec<CoverageRegion>,
-    /// Columns: the update expression fed into the state from each row, equal
-    /// to the producing `SummaryAgg`'s `input` (e.g. the `latency` column).
-    pub input: SummaryUpdate,
-    /// Columns: the grouping, equal to the producing `SummaryAgg`'s
-    /// `reduction` (e.g. by `job`). Compared by child-schema column index.
-    pub group_by: Reduction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,10 +48,6 @@ pub enum CoverageError {
     NotState,
     #[error("summary node requires coverage")]
     Missing,
-    #[error("summary coverage columns differ from the summary's input or grouping")]
-    ColumnMismatch,
-    #[error("summary merge requires coverage on every input")]
-    UnknownInput,
 }
 
 impl SummaryCoverage {
@@ -84,18 +69,10 @@ impl SummaryCoverage {
         Ok(())
     }
 
-    /// Rejects `other` unless it reads the same columns as `self`.
-    pub fn check_columns(&self, other: &Self) -> Result<(), CoverageError> {
-        if self.input != other.input || self.group_by != other.group_by {
-            return Err(CoverageError::ColumnMismatch);
-        }
-        Ok(())
-    }
-
     /// Every observation in a region is assumed to contribute once to the state.
-    /// Compose once-per-observation summaries only when they read the same
-    /// columns and their joint regions are provably disjoint. Family merge
-    /// capability and accuracy are not checked here.
+    /// Compose once-per-observation summaries only when their joint regions are
+    /// provably disjoint. Update/reduction compatibility, family merge capability
+    /// and accuracy are checked by `SummaryMerge`, not here.
     pub fn merge_disjoint(inputs: &[Self]) -> Result<Self, CoverageError> {
         let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
         let mut merged = first.clone();
@@ -105,7 +82,6 @@ impl SummaryCoverage {
             if input.source != first.source {
                 return Err(CoverageError::SourceMismatch);
             }
-            input.check_columns(first)?;
             merged.regions.extend(input.regions.iter().cloned());
         }
         merged.validate()?;

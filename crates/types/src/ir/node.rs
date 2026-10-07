@@ -146,8 +146,7 @@ impl OperatorNode {
     }
 
     /// Attach caller-established coverage. Required on summary nodes; see
-    /// [`Self::requires_coverage`]. On a `SummaryAgg` the coverage columns
-    /// must equal the node's `input` and `reduction`.
+    /// [`Self::requires_coverage`].
     pub fn with_coverage(
         mut self,
         coverage: SummaryCoverage,
@@ -155,14 +154,6 @@ impl OperatorNode {
         coverage.validate()?;
         if self.result_kind != OperatorResultKind::State {
             return Err(CoverageError::NotState.into());
-        }
-        if let Some(ASAPOp::SummaryAgg {
-            input, reduction, ..
-        }) = self.asap()
-        {
-            if &coverage.input != input || &coverage.group_by != reduction {
-                return Err(CoverageError::ColumnMismatch.into());
-            }
         }
         self.coverage = Some(coverage);
         Ok(self)

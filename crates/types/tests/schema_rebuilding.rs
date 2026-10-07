@@ -17,8 +17,6 @@ fn coverage() -> SummaryCoverage {
             time_ms: None,
             population: Default::default(),
         }],
-        input: SummaryUpdate::column(ColumnRef::Named("value".into())),
-        group_by: Reduction::by(vec![0]),
     }
 }
 /// Rewrites clear coverage; a rewriter must declare it again for summary nodes.
