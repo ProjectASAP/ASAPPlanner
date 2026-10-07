@@ -264,15 +264,11 @@ fn write(
     if let Some(e) = error {
         return Err(e);
     }
-    let timed = Rc::new(OperatorNode {
-        operator,
-        result_kind: node.result_kind,
-        schema: node.schema.clone(),
-        guarantee: node.guarantee.clone(),
-        timing: Some(timing),
-        // Timing copies the same logical sub-DAG; its observations are unchanged.
-        coverage: node.coverage.clone(),
-    });
+    let timed = Rc::new(
+        OperatorNode::with_schema(operator, node.schema.clone())
+            .with_guarantee(node.guarantee.clone())
+            .with_timing(Some(timing)),
+    );
     memo.done.insert(Rc::as_ptr(node), Rc::clone(&timed));
     Ok(timed)
 }
@@ -618,14 +614,11 @@ pub fn split_shared_by_phase(
             rebuilt
         });
         let out = if changed {
-            Rc::new(OperatorNode {
-                operator,
-                result_kind: node.result_kind,
-                schema: node.schema.clone(),
-                guarantee: node.guarantee.clone(),
-                timing: node.timing,
-                coverage: node.coverage.clone(),
-            })
+            Rc::new(
+                OperatorNode::with_schema(operator, node.schema.clone())
+                    .with_guarantee(node.guarantee.clone())
+                    .with_timing(node.timing),
+            )
         } else {
             Rc::clone(node)
         };
