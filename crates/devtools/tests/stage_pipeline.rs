@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
-use asap_types::ir::export::{LogicalASAPDAG, LogicalASAPDAGDocument};
+use asap_types::ir::flat::FlatDag;
+use asap_types::ir::QueryRoot;
 use serde_json::Value;
 
 const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
@@ -27,12 +28,24 @@ fn generate(extra: &[&str]) -> Value {
 }
 
 fn validated_dag(value: &Value, queries: usize) {
-    let dag: LogicalASAPDAG = serde_json::from_value(value.clone()).unwrap();
+    let dag: FlatDag = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(dag.roots.len(), queries);
-    LogicalASAPDAGDocument::new(dag).validate().unwrap();
+    // Children come before their parents.
+    for (id, node) in dag.nodes.iter().enumerate() {
+        assert!(node
+            .operator
+            .children()
+            .into_iter()
+            .all(|child| *child < id));
+    }
+    for root in &dag.roots {
+        if let QueryRoot::Operator(id) = root {
+            assert!(*id < dag.nodes.len());
+        }
+    }
 }
 
-/// Every exported DAG validates and has one root per query; ids are unique;
+/// Every DAG is a well-formed flat DAG with one root per query; ids are unique;
 /// only Stages 0 and 1 are present; the committed fixture is current.
 #[test]
 fn example1_document_is_valid_and_committed_fixture_is_current() {

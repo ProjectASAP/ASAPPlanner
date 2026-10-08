@@ -4,10 +4,9 @@
 //! target, not ranked plans or accuracy certificates. Workload composition and
 //! physical planning consume this inventory later; empirical models belong to
 //! selection. The legacy search API remains until planner cutover.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
@@ -197,7 +196,7 @@ fn rewrite(
         Some(realization) if **realization != Realization::PassThrough => {
             realize(node, realization, memo)?
         }
-        _ if changed => Rc::new(node.map_children(|child| memo[&Rc::as_ptr(child)].clone())?),
+        _ if changed => Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?),
         _ => node.clone(),
     };
     memo.insert(Rc::as_ptr(node), rebuilt.clone());
@@ -253,16 +252,7 @@ fn realize(
         grouping: GroupingStrategy::default(),
         filter: None,
     }))?;
-    // Whole-source coverage is declared, not proven: Pass 1 trusts that the
-    // state holds every observation of its source that reaches it (#570).
-    let coverage = SummaryCoverage {
-        source: single_source(&child)?,
-        regions: vec![CoverageRegion {
-            time_ms: None,
-            population: BTreeMap::new(),
-        }],
-    };
-    let state = Rc::new(state.with_coverage(coverage)?);
+    let state = Rc::new(state);
     let evaluation = match query {
         Some(query) => ASAPOp::SummaryEstimate {
             summary_input: state,
@@ -271,25 +261,6 @@ fn realize(
         None => ASAPOp::FinalizeExactAccumulator { child: state },
     };
     Ok(OperatorNode::new_shared(Operator::ASAP(evaluation))?)
-}
-
-fn single_source(
-    node: &Rc<OperatorNode>,
-) -> Result<asap_types::pre_asap::Source, LogicalCandidateError> {
-    let mut sources = Vec::new();
-    for node in OperatorNode::reachable(node) {
-        if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
-            if !sources.contains(source) {
-                sources.push(source.clone());
-            }
-        }
-    }
-    match <[_; 1]>::try_from(sources) {
-        Ok([source]) => Ok(source),
-        Err(_) => Err(LogicalCandidateError::Unsupported(
-            "summary coverage needs exactly one source",
-        )),
-    }
 }
 
 /// What each input row contributes, following the legacy realization rules:
