@@ -199,16 +199,16 @@ async fn example2_exact_candidates_execute() {
 fn bind_error(root: &Rc<OperatorNode>) -> String {
     use asap_executor::physical_planner::bind_with_data_sources;
     use asap_executor::sources::{DataSources, MemorySource};
-    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use std::{collections::BTreeMap, sync::Arc};
     let wire = physical_common::compile_physical_asap_dag(root).unwrap();
     let (source, schema) = wire
         .nodes
         .iter()
         .find_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::Relational {
-                operator: NonASAPOpKind::Scan { source, .. },
-            } => Some((source.clone(), node.output_schema.clone())),
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                Some((source.clone(), node.output_schema.clone()))
+            }
             _ => None,
         })
         .unwrap();
@@ -219,13 +219,8 @@ fn bind_error(root: &Rc<OperatorNode>) -> String {
             Arc::new(MemorySource::new(Arc::new(schema), vec![]).unwrap()),
         )
         .unwrap();
-    bind_with_data_sources(
-        &wire,
-        BTreeMap::new(),
-        &[u64::from(wire.roots[0].0)],
-        &sources,
-    )
-    .err()
-    .expect("binding fails")
-    .to_string()
+    bind_with_data_sources(&wire, BTreeMap::new(), &[wire.roots[0] as u64], &sources)
+        .err()
+        .expect("binding fails")
+        .to_string()
 }
