@@ -289,6 +289,7 @@ mod tests {
     use asap_types::ir::schema::SketchAlgorithm;
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{Predictability, RepetitionInterval};
+    use std::collections::BTreeMap;
     use std::ops::Bound;
 
     fn every(ms: u32) -> RootDemand {
@@ -503,16 +504,18 @@ mod tests {
         target: &crate::pass1::logical_candidates::LocalLogicalTarget,
     ) -> impl Fn(Rc<OperatorNode>) -> Result<Rc<OperatorNode>, LogicalCandidateError> + '_ {
         move |input| {
-            Ok(OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-                child: input,
-                family: family(&target.alternatives[1]).unwrap(),
-                input: asap_types::ir::schema::SummaryUpdate::column(
-                    asap_types::ir::scalar::ColumnRef::SampleValue,
-                ),
-                reduction: asap_types::ir::operator::Reduction::PerEntity,
-                grouping: GroupingStrategy::default(),
-                filter: None,
-            }))?)
+            Ok(OperatorNode::new_shared(Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    child: input,
+                    family: family(&target.alternatives[1]).unwrap(),
+                    input: asap_types::ir::schema::SummaryUpdate::column(
+                        asap_types::ir::scalar::ColumnRef::SampleValue,
+                    ),
+                    reduction: asap_types::ir::operator::Reduction::PerEntity,
+                    grouping: GroupingStrategy::default(),
+                    filter: None,
+                },
+            ))?)
         }
     }
 
@@ -537,7 +540,10 @@ mod tests {
         let Some(NonASAPOp::Aggregate { child, .. }) = target.target.non_asap() else {
             panic!("aggregate")
         };
-        let Some(NonASAPOp::TimeRange { kind, child: scan, .. }) = child.non_asap() else {
+        let Some(NonASAPOp::TimeRange {
+            kind, child: scan, ..
+        }) = child.non_asap()
+        else {
             panic!("range")
         };
         let pane = |shift_ms: i64, width_ms: u64| {
@@ -557,9 +563,8 @@ mod tests {
             .unwrap();
             kll_state(target)(range).unwrap()
         };
-        let merge = |children| {
-            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children }))
-        };
+        let merge =
+            |children| OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children }));
         merge(vec![pane(0, 60_000), pane(60_000, 60_000)]).unwrap();
         assert!(merge(vec![pane(0, 120_000), pane(60_000, 60_000)]).is_err());
         // Panes of 2m over a 5m window leave the oldest minute uncovered.

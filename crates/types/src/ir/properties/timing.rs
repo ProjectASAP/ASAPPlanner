@@ -803,27 +803,27 @@ mod tests {
         Rc::clone(node.children()[0])
     }
 
-    /// Tumbling pane `i` of width 60 s: a KLL over the scan, covering
-    /// `[-(i + 1)·60 s, -i·60 s)` relative to the evaluation.
+    /// Tumbling pane `i` of width 60 s: a KLL over `TimeRange(60 s)` over
+    /// `TimeShift(i·60 s)` over the scan, so its derived coverage is
+    /// `(-(i + 1)·60 s, -i·60 s]` relative to the evaluation.
     fn pane(i: i64) -> Rc<OperatorNode> {
-        use crate::ir::properties::summary_coverage::{
-            CoverageRegion, CoverageTime, SummaryCoverage,
-        };
-        let coverage = SummaryCoverage {
-            source: Source::TimeSeries { metric: "m".into() },
-            regions: vec![CoverageRegion {
-                time_ms: Some(CoverageTime::RelativeToEvaluation(
-                    -(i + 1) * 60_000..-i * 60_000,
-                )),
-                population: Default::default(),
-            }],
-        };
-        Rc::new(
-            (*agg(scan(), kll()))
-                .clone()
-                .with_coverage(coverage)
-                .unwrap(),
-        )
+        use crate::ir::operator::TimeShift;
+        use crate::ir::{NonASAPOp, Operator, TimeRangeKind};
+        let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: TimeShift {
+                offset_ms: i * 60_000,
+                at: None,
+            },
+            child: scan(),
+        }))
+        .unwrap();
+        let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+            range: std::time::Duration::from_secs(60),
+            kind: TimeRangeKind::Range,
+            child: shifted,
+        }))
+        .unwrap();
+        agg(range, kll())
     }
 
     fn merge(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
