@@ -25,7 +25,7 @@
 //! summary per segment of a grid that every window's boundaries lie on, and
 //! each query merges the segments its range covers.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -546,10 +546,11 @@ mod tests {
     use super::*;
     use crate::pass1::logical_candidates::enumerate_local_logical_candidates;
     use crate::test_support::lower_promql;
-    use std::ops::Bound;
     use asap_types::ir::schema::SketchAlgorithm;
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{Predictability, RepetitionInterval};
+    use std::collections::BTreeMap;
+    use std::ops::Bound;
 
     fn every(ms: u32) -> RootDemand {
         RootDemand {
@@ -675,9 +676,12 @@ mod tests {
             let Some(NonASAPOp::Aggregate { child, .. }) = target.target.non_asap() else {
                 panic!("aggregate")
             };
-            let merged =
-                tumbling_state(child, WindowForm::Tumbling { pane_ms: 60_000 }, kll_state(target))
-                    .unwrap();
+            let merged = tumbling_state(
+                child,
+                WindowForm::Tumbling { pane_ms: 60_000 },
+                kll_state(target),
+            )
+            .unwrap();
             let Operator::ASAP(ASAPOp::SummaryMerge { children }) = &merged.operator else {
                 panic!("merge")
             };
@@ -766,16 +770,18 @@ mod tests {
         target: &crate::pass1::logical_candidates::LocalLogicalTarget,
     ) -> impl Fn(Rc<OperatorNode>) -> Result<Rc<OperatorNode>, LogicalCandidateError> + '_ {
         move |input| {
-            Ok(OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-                child: input,
-                family: family(&target.alternatives[1], &GroupingStrategy::default()).unwrap(),
-                input: asap_types::ir::schema::SummaryUpdate::column(
-                    asap_types::ir::scalar::ColumnRef::SampleValue,
-                ),
-                reduction: asap_types::ir::operator::Reduction::PerEntity,
-                grouping: GroupingStrategy::default(),
-                filter: None,
-            }))?)
+            Ok(OperatorNode::new_shared(Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    child: input,
+                    family: family(&target.alternatives[1], &GroupingStrategy::default()).unwrap(),
+                    input: asap_types::ir::schema::SummaryUpdate::column(
+                        asap_types::ir::scalar::ColumnRef::SampleValue,
+                    ),
+                    reduction: asap_types::ir::operator::Reduction::PerEntity,
+                    grouping: GroupingStrategy::default(),
+                    filter: None,
+                },
+            ))?)
         }
     }
 
@@ -829,10 +835,12 @@ mod tests {
         merge(vec![pane(0, 60_000), pane(60_000, 60_000)]).unwrap();
         assert!(merge(vec![pane(0, 120_000), pane(60_000, 60_000)]).is_err());
         // Panes of 2m over a 5m window leave the oldest minute uncovered.
-        assert!(
-            tumbling_state(child, WindowForm::Tumbling { pane_ms: 120_000 }, kll_state(target))
-                .is_err()
-        );
+        assert!(tumbling_state(
+            child,
+            WindowForm::Tumbling { pane_ms: 120_000 },
+            kll_state(target)
+        )
+        .is_err());
     }
 
     const YEAR_MS: u64 = 365 * 86_400_000;

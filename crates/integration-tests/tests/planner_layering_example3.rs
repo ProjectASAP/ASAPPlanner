@@ -236,11 +236,12 @@ fn stage1_a_shared_segments_serve_all_five() {
         assert_eq!(estimates.len(), 5, "one estimate per query");
         for (estimate, statistic) in estimates {
             assert_eq!(statistic, SketchStatistic::Quantile { q: 0.99 });
-            let merged = c
-                .dag
-                .producers(estimate)
-                .into_iter()
-                .any(|p| matches!(c.dag.payload(p), Operator::ASAP(ASAPOp::SummaryMerge { .. })));
+            let merged = c.dag.producers(estimate).into_iter().any(|p| {
+                matches!(
+                    c.dag.payload(p),
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                )
+            });
             assert!(
                 merged,
                 "{}: estimate {estimate:?} does not read a merge",
