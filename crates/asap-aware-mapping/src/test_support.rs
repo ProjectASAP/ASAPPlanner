@@ -47,11 +47,6 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
 // `OperatorNode::new_shared`, so a fixture is exactly what a front end
 // would hand the planner.
 
-use asap_types::ir::operator::AggIntent;
-use asap_types::ir::operator::{GroupKeys, Reduction, Source};
-use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
-use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
-use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
@@ -126,87 +121,4 @@ pub(crate) fn agg(
     child: Rc<OperatorNode>,
 ) -> Rc<OperatorNode> {
     aggregate(Reduction::by(by), vec![intent], vec![], None, child)
-}
-
-/// `intent without (excluded)`.
-pub(crate) fn without_agg(
-    excluded: Vec<ColumnId>,
-    intent: AggIntent,
-    child: Rc<OperatorNode>,
-) -> Rc<OperatorNode> {
-    aggregate(
-        Reduction::Reduce(GroupKeys::without(excluded)),
-        vec![intent],
-        vec![],
-        None,
-        child,
-    )
-}
-
-/// A per-entity (per-series) single-measure aggregate.
-pub(crate) fn agg_per_entity(intent: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    aggregate(Reduction::PerEntity, vec![intent], vec![], None, child)
-}
-
-pub(crate) fn filter(pred: ScalarExpr, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
-        pred: Predicate(pred),
-        child,
-    }))
-    .unwrap()
-}
-
-pub(crate) fn dedup(cols: Vec<ColumnId>, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Dedup {
-        cols,
-        child,
-    }))
-    .unwrap()
-}
-
-/// An explicit range selector `child[range]`.
-pub(crate) fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
-        range,
-        kind: TimeRangeKind::Range,
-        child,
-    }))
-    .unwrap()
-}
-
-/// `root` timed under the default (every summary at query time)
-/// assignment — the shape export and the post-ASAP validators consume.
-pub(crate) fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_materialization_timings(
-        root,
-        &MaterializationAssignment::all_query_time(),
-        &mut TimingMemo::new(),
-    )
-    .expect("default materialization timings apply")
-}
-
-/// `root` timed with every summary maintained at ingestion time.
-pub(crate) fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_materialization_timings(
-        root,
-        &MaterializationAssignment::all_ingestion_time(),
-        &mut TimingMemo::new(),
-    )
-    .expect("maintained materialization timings apply")
-}
-
-/// Time `root` under the default materialization assignment (which runs every
-/// data-state / population-contract check) and export it as a physical ASAP DAG.
-pub(crate) fn time_and_export(
-    root: &Rc<OperatorNode>,
-) -> Result<
-    asap_types::ir::physical_export::PhysicalASAPDAG,
-    asap_types::ir::properties::ExecutionDataStateError,
-> {
-    let timed = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::all_query_time(),
-        &mut TimingMemo::new(),
-    )?;
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
 }
