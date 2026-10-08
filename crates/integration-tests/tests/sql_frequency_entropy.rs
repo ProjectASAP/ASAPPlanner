@@ -3,6 +3,7 @@ mod physical_common;
 use asap_executor::values::Value;
 use asap_frontend_common::resolve_root;
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlLowerer};
+use asap_types::ir::NonASAPOp;
 use asap_types::{
     ir::schema::{DataType, Field, Schema},
     types::AccuracyTarget,
@@ -68,8 +69,8 @@ async fn entropy_rewrite_executes_nats_and_empty_population_guard() {
 async fn native_sql_sum_window_rejects_other_frames() {
     use asap_executor::physical_planner::bind_with_data_sources;
     use asap_executor::sources::{DataSources, MemorySource};
-    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
     use asap_types::ir::operator::Source;
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use std::{collections::BTreeMap, sync::Arc};
     let schema = Schema::new(vec![Field::plain("src_ip", DataType::Int64, false)]);
     let catalog = SqlCatalog::new().with_table("flows", schema.clone());
@@ -88,9 +89,7 @@ async fn native_sql_sum_window_rejects_other_frames() {
                 .find(|node| {
                     matches!(
                         node.payload,
-                        PhysicalASAPOperatorPayload::Relational {
-                            operator: NonASAPOpKind::Scan { .. }
-                        }
+                        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
                     )
                 })
                 .unwrap()
@@ -106,14 +105,10 @@ async fn native_sql_sum_window_rejects_other_frames() {
                 Arc::new(MemorySource::new(scan_schema, vec![]).unwrap()),
             )
             .unwrap();
-        let error = bind_with_data_sources(
-            &wire,
-            BTreeMap::new(),
-            &[u64::from(wire.roots[0].0)],
-            &sources,
-        )
-        .err()
-        .expect("unsupported window rejected");
+        let error =
+            bind_with_data_sources(&wire, BTreeMap::new(), &[wire.roots[0] as u64], &sources)
+                .err()
+                .expect("unsupported window rejected");
         assert!(
             error
                 .to_string()
