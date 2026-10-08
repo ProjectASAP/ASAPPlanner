@@ -147,14 +147,14 @@ fn example3b_lists_tumbling_candidates() {
         ]
     );
     for candidate in &stage1["candidates"].as_array().unwrap()[3..] {
-        let dag: LogicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
+        let dag: FlatDag = serde_json::from_value(candidate["dag"].clone()).unwrap();
         let merges = dag
             .nodes
             .iter()
             .filter(|n| {
                 matches!(
-                    n.payload,
-                    asap_types::ir::export::LogicalASAPOperatorPayload::SummaryMerge
+                    n.operator,
+                    asap_types::ir::Operator::ASAP(asap_types::ir::ASAPOp::SummaryMerge { .. })
                 )
             })
             .count();

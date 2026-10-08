@@ -40,7 +40,6 @@ mod stages {
 
     use super::*;
     use asap_plan_selection::plan_stages;
-    use asap_types::ir::physical_export::{compile_logical_asap_workload, LogicalASAPQueryRoot};
     use asap_types::ir::{OperatorNode, QueryRoot};
 
     /// Every Example 1 candidate is built (88 with Q2's tumbling sums),
@@ -495,7 +494,7 @@ fn exact_accumulators(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> Vec<St
             Operator::ASAP(ASAPOp::SummaryAgg {
                 family: FieldDataType::ExactAggregate(kind, _),
                 ..
-            } => Some(match merged(id) {
+            }) => Some(match merged(id) {
                 true => format!("{kind:?} panes"),
                 false => format!("{kind:?}"),
             }),
