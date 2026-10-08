@@ -515,6 +515,8 @@ fn snake_case(name: &str) -> String {
         out.push(c.to_ascii_lowercase());
     }
     out
+}
+
 /// Example 1 with `http_requests_total` declared `metric_type`, or undeclared.
 fn example1_workload_with(metric_type: Option<MetricType>) -> PlanningWorkload {
     let mut workload = example1_workload();
