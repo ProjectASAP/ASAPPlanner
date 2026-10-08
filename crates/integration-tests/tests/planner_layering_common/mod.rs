@@ -19,12 +19,18 @@ mod executor_models;
 
 use asap_plan_selection::{plan_stages, PlanningModels, Selection};
 use asap_types::ir::flat::{flatten, FlatDag};
+use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::QueryRoot;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection, TimestampMs};
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
+    Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
+    RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection, TimestampMs,
+};
 use executor_models::executor_models;
 
 pub type Payload = Operator<PhysicalASAPNodeId>;
