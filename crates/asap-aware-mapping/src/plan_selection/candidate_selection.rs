@@ -1021,10 +1021,8 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
             }
-            // The same summary over a re-placed input keeps its coverage.
-            let rebuilt = std::rc::Rc::new(OperatorNode {
-                coverage: node.coverage.clone(),
-                ..OperatorNode::with_schema(
+            let rebuilt = std::rc::Rc::new(
+                OperatorNode::with_schema(
                     asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                         child: Rc::clone(new_child),
                         family: family.clone(),
@@ -1035,8 +1033,8 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
                     }),
                     node.schema.clone(),
                 )
-                .with_guarantee(node.guarantee.clone())
-            });
+                .with_guarantee(node.guarantee.clone()),
+            );
             match validate_maintained(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
