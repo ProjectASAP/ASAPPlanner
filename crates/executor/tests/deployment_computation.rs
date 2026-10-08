@@ -532,7 +532,6 @@ fn with_vector_match(
     for node in &mut dag.nodes {
         if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
             operator,
-            return_bool: _,
             ..
         }) = &mut node.payload
         {
