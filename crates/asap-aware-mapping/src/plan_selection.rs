@@ -12,10 +12,11 @@
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. These numbers are illustrative, not calibrated. Latency
 //! bounds and deployment capabilities are not checked yet.
+use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
 
-use asap_types::ir::export::{
-    NonASAPOpKind, PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+use asap_types::ir::physical_export::{
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
@@ -280,17 +281,17 @@ fn price(
             .min(input.rows.max(1))
         };
         let (out, estimate, detail) = match &node.payload {
-            Payload::Relational { operator } => match operator {
-                NonASAPOpKind::Scan { .. } => {
+            Payload::NonASAP(operator) => match operator {
+                NonASAPOp::Scan { .. } => {
                     // A scan reads what its time range keeps.
                     let lookback = dag
                         .edges
                         .iter()
                         .filter(|e| e.producer == node.id)
                         .filter_map(|e| match &nodes[&e.consumer].payload {
-                            Payload::Relational {
-                                operator: NonASAPOpKind::TimeRange { range, .. },
-                            } => Some(range.as_millis() as u64),
+                            Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                                Some(range.as_millis() as u64)
+                            }
                             _ => None,
                         })
                         .max()
@@ -309,7 +310,7 @@ fn price(
                     );
                     (out, estimate, format!("scan {} samples", out.rows))
                 }
-                NonASAPOpKind::Aggregate {
+                NonASAPOp::Aggregate {
                     reduction,
                     measures,
                     ..
@@ -341,7 +342,9 @@ fn price(
                         ),
                     )
                 }
-                NonASAPOpKind::Sort { keys, partition_by } => {
+                NonASAPOp::Sort {
+                    keys, partition_by, ..
+                } => {
                     let partitions = if partition_by.keys().is_empty() {
                         1
                     } else {
@@ -363,10 +366,11 @@ fn price(
                         format!("sort {} rows in {partitions} partitions", input.rows),
                     )
                 }
-                NonASAPOpKind::Limit {
+                NonASAPOp::Limit {
                     n,
                     offset,
                     partition_by,
+                    ..
                 } => {
                     let partitions = if partition_by.keys().is_empty() {
                         1
@@ -390,15 +394,15 @@ fn price(
                         },
                     );
                     let name = match other {
-                        NonASAPOpKind::TimeRange { range, .. } => format!("time range {range:?}"),
+                        NonASAPOp::TimeRange { range, .. } => format!("time range {range:?}"),
                         _ => "operator".into(),
                     };
                     (input, estimate, format!("{name}: pass {} rows", input.rows))
                 }
             },
-            Payload::SummaryAgg {
+            Payload::ASAP(ASAPOp::SummaryAgg {
                 family, reduction, ..
-            } => {
+            }) => {
                 let group_count = groups(reduction);
                 let (depth, state_bytes) = summary_shape(family);
                 let out = EdgeStatistics {
@@ -416,7 +420,7 @@ fn price(
                     ),
                 )
             }
-            Payload::SummaryEstimate { query } => {
+            Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
                 let per_group = match query {
                     SketchStatistic::TopK { k } => *k as u64,
                     _ => 1,
@@ -428,7 +432,7 @@ fn price(
                     format!("estimate {} groups x {per_group}", input.rows),
                 )
             }
-            Payload::FinalizeExactAccumulator => (
+            Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
                 edge(input.rows),
                 Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
                 format!("finalize {} accumulators", input.rows),
