@@ -240,7 +240,14 @@ impl<'a> SqlLowerer<'a> {
                 return Err(LoweringError::UnsupportedDialect("ElasticSQL".into()))
             }
         };
-        let config = SessionConfig::new().set_str("datafusion.sql_parser.dialect", dialect_name);
+        // ClickHouse identifiers are case-sensitive, so `UserID` must not be
+        // folded to `userid`. Function names are lowercased regardless.
+        let config = SessionConfig::new()
+            .set_str("datafusion.sql_parser.dialect", dialect_name)
+            .set_bool(
+                "datafusion.sql_parser.enable_ident_normalization",
+                !matches!(self.dialect, SqlDialect::ClickhouseSQL),
+            );
         let ctx = SessionContext::new_with_config(config);
         if matches!(self.dialect, SqlDialect::ClickhouseSQL) {
             collection_planning::register(&ctx);
