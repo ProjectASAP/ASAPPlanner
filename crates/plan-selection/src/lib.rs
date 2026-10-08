@@ -32,31 +32,57 @@ pub mod cost;
 #[cfg(test)]
 mod test_support;
 
-pub use candidate_selection::{CompositionDecision, CostedGlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap};
-pub use cost::cost_model::{maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate, CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs, ExactCompositionCostRequest, ValueOperationCapabilities};
-pub use cost::recurrence::{evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate};
+pub use candidate_selection::{
+    CompositionDecision, CostedGlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap,
+};
+pub use cost::cost_model::{
+    maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
+    CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, ValueOperationCapabilities,
+};
+pub use cost::recurrence::{
+    evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
+    Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
+    UpdateRate,
+};
 
 use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
-use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::operator::Reduction;
+use asap_types::ir::physical_export::{
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+};
 use asap_types::ir::schema::{DataType, Schema};
-use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain};
+use asap_types::ir::schema::{
+    FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
+};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::DataWorkload;
 use thiserror::Error;
 
-use crate::cost::analytical_cost::{estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate};
-use crate::cost::physical_operator_statistics::{EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics};
-use asap_logical_optimizer::accuracy::{AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence};
-use asap_logical_optimizer::pass1::logical_candidates::{choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets, LocalLogicalCandidates, LogicalCandidateError};
+use crate::cost::analytical_cost::{
+    estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
+};
+use crate::cost::physical_operator_statistics::{
+    EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
+};
+use asap_logical_optimizer::accuracy::{
+    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
+};
+use asap_logical_optimizer::pass1::logical_candidates::{
+    choice_index, combination_count, compose_logical_candidate, enumerate_choices, nested_targets,
+    LocalLogicalCandidates, LogicalCandidateError,
+};
 pub use asap_logical_optimizer::pass2::identical_expressions::SharingVariant;
-use asap_logical_optimizer::pass2::identical_expressions::{share_identical_expressions, stage1_logical_candidates};
-use asap_physical_optimizer::implementation::physical_candidates::{stage2_physical, PhysicalCandidate};
+use asap_logical_optimizer::pass2::identical_expressions::{
+    share_identical_expressions, stage1_logical_candidates,
+};
+use asap_physical_optimizer::implementation::physical_candidates::{
+    stage2_physical, PhysicalCandidate,
+};
 
 pub const COST_UNIT: &str = "cpu_ms_per_workload_evaluation";
 pub const COST_SOURCE: &str = "analytical-cost-v1 (illustrative statistics)";
