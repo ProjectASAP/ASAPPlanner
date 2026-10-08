@@ -21,9 +21,7 @@ use asap_aware_mapping::logical_candidates::{
     compose_logical_candidate, enumerate_local_logical_candidates, LocalLogicalCandidates,
 };
 use asap_aware_mapping::Realization;
-use asap_types::ir::export::{
-    compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPDAGDocument,
-};
+use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::post_asap::SketchAlgorithm;
 use asap_types::types::AccuracyTarget;
@@ -130,12 +128,14 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     }))
 }
 
-fn export(roots: &[QueryRoot]) -> Result<LogicalASAPDAG, String> {
-    let dag = compile_logical_asap_workload(roots).map_err(|e| format!("export: {e}"))?;
-    LogicalASAPDAGDocument::new(dag.clone())
-        .validate()
-        .map_err(|e| format!("export validation: {e}"))?;
-    Ok(dag)
+/// A logical DAG as a flat node list: node `i` is `nodes[i]`, and children are
+/// node indices inside each operator.
+fn export(roots: &[QueryRoot]) -> Result<FlatDag, String> {
+    for root in roots {
+        root.validate_structure()
+            .map_err(|e| format!("validation: {e}"))?;
+    }
+    Ok(flatten(roots).0)
 }
 
 /// The first query whose plan reaches each target (enumeration order).
