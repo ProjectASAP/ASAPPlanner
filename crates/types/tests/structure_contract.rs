@@ -259,8 +259,6 @@ fn topk_readout_derives_selected_rows() {
             grouping: GroupingStrategy::default(),
             filter: None,
         }))
-        .unwrap()
-        .with_coverage(whole_table())
         .unwrap(),
     );
     let topk = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
