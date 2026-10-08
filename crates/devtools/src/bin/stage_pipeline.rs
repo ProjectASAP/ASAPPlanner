@@ -30,12 +30,8 @@ use asap_aware_mapping::PlanningModels;
 use asap_logical_optimizer::pass1::logical_candidates::{
     choice_index, enumerate_local_logical_candidates, LocalLogicalCandidates,
 };
-use asap_aware_mapping::plan_selection::{select_exhaustive, Selection, MAX_ENUMERATED_CANDIDATES};
-use asap_aware_mapping::{PlanningModels, Realization};
-use asap_types::ir::flat::{flatten, FlatDag};
 use asap_logical_optimizer::Realization;
-use asap_types::ir::physical_export::{
-    compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPDAGDocument};
+use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
