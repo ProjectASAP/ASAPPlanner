@@ -329,15 +329,15 @@ async fn hand_filtered_kll_compiles_and_executes() {
 fn binds(root: &Rc<OperatorNode>) -> Result<(), String> {
     use asap_executor::sources::{DataSources, MemorySource};
     use asap_executor::values::Batch;
-    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     let wire = physical_common::compile_physical_asap_dag(root).map_err(|e| e.to_string())?;
     let (source, schema) = wire
         .nodes
         .iter()
         .find_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::Relational {
-                operator: NonASAPOpKind::Scan { source, .. },
-            } => Some((source.clone(), node.output_schema.clone())),
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                Some((source.clone(), node.output_schema.clone()))
+            }
             _ => None,
         })
         .unwrap();
@@ -353,7 +353,7 @@ fn binds(root: &Rc<OperatorNode>) -> Result<(), String> {
     asap_executor::physical_planner::bind_with_data_sources(
         &wire,
         BTreeMap::new(),
-        &[u64::from(wire.roots[0].0)],
+        &[wire.roots[0] as u64],
         &sources,
     )
     .map(|_| ())
