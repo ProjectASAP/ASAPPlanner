@@ -93,7 +93,12 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
 fn raw_summaries(dag: &PhysicalASAPDAG) -> Vec<(u64, u64)> {
     dag.nodes
         .iter()
-        .filter(|node| matches!(node.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })))
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .filter_map(|node| {
             let inputs = dag
                 .edges
@@ -314,11 +319,7 @@ fn check(
     root: u64,
     rows: &[(Series, i64, f64)],
 ) -> Result<String, String> {
-    let node = dag
-        .nodes
-        .iter()
-        .find(|n| n.id as u64 == root)
-        .unwrap();
+    let node = dag.nodes.iter().find(|n| n.id as u64 == root).unwrap();
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family,
         input,
@@ -329,11 +330,7 @@ fn check(
     else {
         unreachable!()
     };
-    let source_node = dag
-        .nodes
-        .iter()
-        .find(|n| n.id as u64 == source)
-        .unwrap();
+    let source_node = dag.nodes.iter().find(|n| n.id as u64 == source).unwrap();
     let keys = match reduction {
         Reduction::Reduce(keys) => keys
             .keys()
@@ -506,11 +503,7 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     .unwrap();
     let mut dag = compile_maintained_physical_asap_dag(&candidate).unwrap();
     let (source, root) = raw_summaries(&dag)[0];
-    let node = dag
-        .nodes
-        .iter_mut()
-        .find(|n| n.id as u64 == root)
-        .unwrap();
+    let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family: old,
         input: update,
@@ -527,11 +520,7 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     *old = family;
     *update = input;
     let schema = node.output_schema.clone();
-    for edge in dag
-        .edges
-        .iter_mut()
-        .filter(|e| u64::from(e.producer.0) == root)
-    {
+    for edge in dag.edges.iter_mut().filter(|e| e.producer as u64 == root) {
         edge.intermediate_schema = schema.clone();
     }
     (dag, source, root)
@@ -638,12 +627,9 @@ fn raw_sample_without_grouping_drops_labels_and_name() {
         .iter()
         .position(|f| f.name == "service")
         .unwrap();
-    let node = dag
-        .nodes
-        .iter_mut()
-        .find(|n| n.id as u64 == root)
-        .unwrap();
-    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) = &mut node.payload else {
+    let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
+    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) = &mut node.payload
+    else {
         unreachable!()
     };
     *reduction = Reduction::Reduce(GroupKeys::without(vec![service]));

@@ -1,7 +1,6 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
 //! the deployment supplies only raw rows at the ingestion frontier.
 mod common;
-use planner_types::ir::ASAPOp;
 use asap_executor::{
     operators::Operator,
     physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
@@ -11,6 +10,7 @@ use asap_executor::{
 use common::{compile_physical_asap_dag, selected_dag, stage1_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::ASAPOp;
 use planner_types::{ir::schema::*, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
@@ -71,14 +71,18 @@ fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(u64, Arc<Schema>, String)> {
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange { .. }) => {
+            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange {
+                ..
+            }) => {
                 let mut id = node.id;
                 loop {
                     let n = dag.nodes.iter().find(|n| n.id == id)?;
-                    if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Scan {
-                                source: planner_types::ir::operator::Source::TimeSeries { metric },
-                                ..
-                            }) = &n.payload
+                    if let PhysicalASAPOperatorPayload::NonASAP(
+                        planner_types::ir::NonASAPOp::Scan {
+                            source: planner_types::ir::operator::Source::TimeSeries { metric },
+                            ..
+                        },
+                    ) = &n.payload
                     {
                         return Some((
                             node.id as u64,
@@ -327,9 +331,10 @@ fn with_kind(
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
         if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
-                    operator,
-                    return_bool,
-                }) = &mut node.payload
+            operator,
+            return_bool,
+            ..
+        }) = &mut node.payload
         {
             operator.kind = kind.clone();
             *return_bool = bool_result;
@@ -526,9 +531,10 @@ fn with_vector_match(
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
         if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
-                    operator,
-                    return_bool: _,
-                }) = &mut node.payload
+            operator,
+            return_bool: _,
+            ..
+        }) = &mut node.payload
         {
             operator.vector_match = Some(planner_types::ir::operator::VectorMatch {
                 kind: kind.clone(),
@@ -614,7 +620,8 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
                 matches!(
                     &n.payload,
                     PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryEstimate {
-                        query: SketchStatistic::PointCount { value: None, .. }
+                        query: SketchStatistic::PointCount { value: None, .. },
+                        ..
                     })
                 )
             });
@@ -629,7 +636,12 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let state = dag
         .nodes
         .iter()
-        .find(|n| matches!(n.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })))
+        .find(|n| {
+            matches!(
+                n.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .unwrap();
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
         family: FieldDataType::Sketch(kind, _),
@@ -644,10 +656,7 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let schema = Arc::new(state.output_schema.clone());
     let program = compile(
         &dag,
-        BTreeMap::from([(
-            state.id as u64,
-            InputContract::bounded(schema.clone()),
-        )]),
+        BTreeMap::from([(state.id as u64, InputContract::bounded(schema.clone()))]),
         &[dag.roots[0] as u64],
     )
     .unwrap();

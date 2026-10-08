@@ -1,6 +1,5 @@
 //! Planner output binds directly to the shared runtime at a declared rate-value frontier.
 mod common;
-use planner_types::ir::ASAPOp;
 use asap_executor::dag::{
     operators::Operator,
     planner::{compile, InputContract, Source},
@@ -12,6 +11,7 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::*;
 use planner_types::ir::schema::{DataType, *};
+use planner_types::ir::ASAPOp;
 use planner_types::types::AccuracyTarget;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 #[test]
@@ -106,18 +106,18 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
             as Source<'static>;
         let compiled = compile(
             &placed,
-            BTreeMap::from([(rate_id.0 as u64, InputContract::bounded(rates.clone()))]),
-            &[dag.roots[0].0 as u64],
+            BTreeMap::from([(rate_id as u64, InputContract::bounded(rates.clone()))]),
+            &[dag.roots[0] as u64],
         )
         .unwrap();
         let physical_dag = compiled
-            .instantiate(BTreeMap::from([(rate_id.0 as u64, source)]))
+            .instantiate(BTreeMap::from([(rate_id as u64, source)]))
             .unwrap();
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let output = block_on(async {
             let mut output = Vec::new();
             let mut stream = physical_dag
-                .execute(&[dag.roots[0].0 as u64], context)
+                .execute(&[dag.roots[0] as u64], context)
                 .unwrap()
                 .remove(0);
             while let Some(batch) = stream.next().await {
@@ -287,17 +287,16 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
         .find(|node| {
             matches!(
                 &node.payload,
-                PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange { .. })
+                PhysicalASAPOperatorPayload::NonASAP(
+                    planner_types::ir::NonASAPOp::TimeRange { .. }
+                )
             )
         })
         .unwrap_or_else(|| panic!("no raw counter source: {dag:?}"));
     let raw_schema = Arc::new(raw.output_schema.clone());
     let raw_compiled = compile(
         &dag,
-        BTreeMap::from([(
-            raw.id as u64,
-            InputContract::bounded(raw_schema.clone()),
-        )]),
+        BTreeMap::from([(raw.id as u64, InputContract::bounded(raw_schema.clone()))]),
         &[dag.roots[0] as u64],
     )
     .unwrap();
@@ -407,10 +406,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
     }
     let compiled = compile(
         &dag,
-        BTreeMap::from([(
-            input_id as u64,
-            InputContract::bounded(schema.clone()),
-        )]),
+        BTreeMap::from([(input_id as u64, InputContract::bounded(schema.clone()))]),
         &[dag.roots[0] as u64],
     )
     .unwrap();
@@ -510,7 +506,12 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
     let mut pending: Vec<_> = dag
         .nodes
         .iter()
-        .filter(|node| matches!(node.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })))
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .map(|node| node.id)
         .collect();
     let mut ingestion = std::collections::HashSet::new();
