@@ -11,7 +11,8 @@ use crate::{
 use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlannerReduction};
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
-    PhysicalASAPOperatorPayload as Payload};
+    PhysicalASAPOperatorPayload as Payload,
+};
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::DataType;
 use planner_types::ir::schema::{FieldDataType, SketchStatistic, SummaryInputExpr};
@@ -833,6 +834,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 order_by,
                 frame: Some(frame),
                 output_name,
+                ..
             } => {
                 use planner_types::ir::{
                     operator::{WindowFrameBound, WindowFrameOffset},
