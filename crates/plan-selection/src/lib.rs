@@ -60,7 +60,8 @@ use std::rc::Rc;
 
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
@@ -1344,7 +1345,7 @@ fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
         producers(pane)
             .flat_map(producers)
             .find_map(|id| match &nodes[&id].payload {
-                Payload::NonASAP(NonASAPOp::TimeShift { shift }) => Some(shift.offset_ms),
+                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => Some(shift.offset_ms),
                 _ => None,
             })
             .unwrap_or(0)
@@ -1353,10 +1354,13 @@ fn pane_roles(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, PaneRole> {
     for merge in dag
         .nodes
         .iter()
-        .filter(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryMerge {})))
+        .filter(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })))
     {
         let panes: Vec<_> = producers(merge.id)
-            .filter(|&id| ingestion(id) && matches!(nodes[&id].payload, Payload::ASAP(ASAPOp::SummaryAgg { .. })))
+            .filter(|&id| {
+                ingestion(id)
+                    && matches!(nodes[&id].payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
+            })
             .collect();
         let Some(&newest) = panes.iter().min_by_key(|&&id| shift(id)) else {
             continue;
@@ -1431,11 +1435,7 @@ fn price_nodes(
     (CandidateCost, HashMap<PhysicalASAPNodeId, f64>),
     (PhysicalASAPNodeId, AnalyticalCostError),
 > {
-    let first = dag
-        .roots
-        .first()
-        .copied()
-        .unwrap_or(0);
+    let first = dag.roots.first().copied().unwrap_or(0);
     calibration.validate().map_err(|error| (first, error))?;
     let series = data
         .input_cardinality

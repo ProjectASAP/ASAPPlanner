@@ -12,11 +12,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use asap_types::ir::physical_export::{
-    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::operator::{AggIntent, Reduction};
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::physical_export::{
-    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG};
+    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
+};
 use asap_types::ir::properties::ExecutionDataStateError;
 use asap_types::ir::scalar::resolve_column_ref;
 use asap_types::ir::scalar::ColumnRef;
@@ -157,8 +157,10 @@ fn materialize(
         .nodes
         .iter()
         .filter(|n| {
-            matches!(n.payload, PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. }))
-                && !n.output_state.timing.is_query_time()
+            matches!(
+                n.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            ) && !n.output_state.timing.is_query_time()
         })
         .count();
     if maintained != assigned {
