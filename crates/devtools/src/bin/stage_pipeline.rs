@@ -29,17 +29,23 @@
 
 use std::rc::Rc;
 
-use asap_logical_optimizer::pass1::logical_candidates::{choice_index, combination_count, LocalLogicalCandidates};
+use asap_logical_optimizer::pass1::logical_candidates::{
+    choice_index, combination_count, LocalLogicalCandidates,
+};
 use asap_logical_optimizer::Realization;
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{plan_stages, Selection, MAX_ENUMERATED_CANDIDATES};
-use asap_plan_selection::{select_exhaustive};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection};
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
+    Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
+    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
+};
 use serde_json::{json, Value};
 
 const USAGE: &str = "usage: stage_pipeline (--example planner-layering-1 | --promql <query>... \
