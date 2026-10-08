@@ -24,10 +24,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use asap_types::ir::cse::share_common_sub_dags;
-use asap_types::ir::physical_export::{ PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
@@ -863,7 +863,7 @@ fn price(
                     ),
                 )
             }
-            Payload::ASAP(ASAPOp::SummaryEstimate { query }) => {
+            Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
                 let rows = match query {
                     // The logical result, as an exact Sort → Limit sizes it.
                     SketchStatistic::TopK { k } => {
