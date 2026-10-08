@@ -17,9 +17,11 @@ use asap_types::ir::{ASAPOp, Operator};
 use std::collections::{BTreeMap, BTreeSet};
 
 use asap_plan_selection::{DeploymentCapabilities, PlanningModels};
-use asap_types::ir::physical_export::{PhysicalASAPNodeId};
+use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::schema::SketchAlgorithm;
-use asap_types::workload::{DataArrival, DurationMs, PlanningWorkload, Query, Rate, RepeatedDemand, RepetitionInterval};
+use asap_types::workload::{
+    DataArrival, DurationMs, PlanningWorkload, Query, Rate, RepeatedDemand, RepetitionInterval,
+};
 use planner_layering_common::*;
 
 /// Pattern A as given: one ad hoc batch at T over mixed data.
