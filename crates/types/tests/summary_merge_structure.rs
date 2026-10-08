@@ -182,3 +182,86 @@ fn family_merge_capability() {
         assert_eq!(family.family_merges(), merges, "{family:?}");
     }
 }
+/// Idempotent families (HLL, exact Min/Max) merge states that may share rows;
+/// counting families (KLL, exact Sum) still need disjoint selections.
+#[test]
+fn idempotent_families_merge_overlapping_states() {
+    use asap_types::ir::schema::{ExactKind, ExactParams};
+    let hll = FieldDataType::Sketch(
+        SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
+        Default::default(),
+    );
+    let max = FieldDataType::ExactAggregate(ExactKind::Max, ExactParams::Max);
+    let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let kll = FieldDataType::Sketch(
+        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+        Default::default(),
+    );
+    let same_region = |family: FieldDataType| {
+        OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+            children: vec![
+                family_state(family.clone(), "us"),
+                family_state(family, "us"),
+            ],
+        }))
+    };
+    for family in [hll, max] {
+        let merged = same_region(family.clone()).unwrap_or_else(|e| panic!("{family:?}: {e}"));
+        merged.validate_structure().unwrap();
+        assert_eq!(
+            merged.coverage().unwrap().selection,
+            family_state(family, "us").coverage().unwrap().selection
+        );
+    }
+    for family in [sum, kll] {
+        assert!(same_region(family).is_err());
+    }
+}
+/// The selection relation a merge requires is declared per family.
+#[test]
+fn family_merge_selection_relation() {
+    use asap_types::ir::schema::{ExactKind, ExactParams, SelectionRelation};
+    let exact = |kind, params| FieldDataType::ExactAggregate(kind, params);
+    let sketch = |algorithm, params| {
+        FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
+    };
+    for (family, relation) in [
+        (
+            exact(ExactKind::Sum, ExactParams::Sum),
+            Some(SelectionRelation::Disjoint),
+        ),
+        (
+            exact(ExactKind::Count, ExactParams::Count),
+            Some(SelectionRelation::Disjoint),
+        ),
+        (
+            exact(ExactKind::Min, ExactParams::Min),
+            Some(SelectionRelation::OverlapAllowed),
+        ),
+        (
+            exact(ExactKind::Max, ExactParams::Max),
+            Some(SelectionRelation::OverlapAllowed),
+        ),
+        (exact(ExactKind::Rate, ExactParams::Rate), None),
+        (
+            sketch(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            Some(SelectionRelation::Disjoint),
+        ),
+        (
+            sketch(
+                SketchAlgorithm::Cms,
+                SketchParams::Cms {
+                    width: 64,
+                    depth: 4,
+                },
+            ),
+            Some(SelectionRelation::Disjoint),
+        ),
+        (
+            sketch(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
+            Some(SelectionRelation::OverlapAllowed),
+        ),
+    ] {
+        assert_eq!(family.merge_relation(), relation, "{family:?}");
+    }
+}
