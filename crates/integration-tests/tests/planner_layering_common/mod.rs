@@ -740,7 +740,7 @@ pub enum Materialization {
 /// Stage 2 runs a node at ingestion time or at query time, recomputed at
 /// each evaluation; it does not keep query-time output yet (Example 4 B3),
 /// so `QueryTimeKept` does not occur.
-pub fn materialization(p: &Physical, node: NodeId) -> Materialization {
+pub fn materialization(p: &Physical, node: PhysicalASAPNodeId) -> Materialization {
     let n = p.dag.nodes.iter().find(|n| n.id == node).expect("node");
     match n.output_state.timing {
         ExecutionTiming::IngestionTime => Materialization::IngestionTime,
@@ -755,16 +755,18 @@ pub fn materialization(p: &Physical, node: NodeId) -> Materialization {
 /// window being built and the completed one, `2 · window`. Taken over every
 /// query-time reader the node's ingestion-time work feeds. `None` for a
 /// query-time node.
-pub fn retention_ms(p: &Physical, node: NodeId) -> Option<u64> {
+pub fn retention_ms(p: &Physical, node: PhysicalASAPNodeId) -> Option<u64> {
     if !runs_at_ingestion(p, node) {
         return None;
     }
     // The longest raw range an ingestion-time node reads.
-    let window = |id: NodeId| {
+    let window = |id: PhysicalASAPNodeId| {
         closure(&p.dag, id)
             .into_iter()
             .filter_map(|n| match p.dag.payload(n) {
-                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => Some(range.as_millis() as u64),
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                    Some(range.as_millis() as u64)
+                }
                 _ => None,
             })
             .max()

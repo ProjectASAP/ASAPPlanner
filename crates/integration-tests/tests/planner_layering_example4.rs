@@ -13,9 +13,10 @@
 
 mod planner_layering_common;
 
+use asap_types::ir::{ASAPOp, Operator};
 use std::collections::{BTreeMap, BTreeSet};
 
-use asap_types::ir::export::{LogicalASAPNodeId, LogicalASAPOperatorPayload};
+use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::workload::{DataArrival, PlanningWorkload};
 use planner_layering_common::*;
@@ -39,7 +40,7 @@ fn window_build(
     c: &Logical,
     want: Option<WindowForm>,
     readers_count: usize,
-) -> Option<LogicalASAPNodeId> {
+) -> Option<PhysicalASAPNodeId> {
     sketch_builds(&c.dag)
         .into_iter()
         .find_map(|(id, algorithm, _)| {
@@ -63,7 +64,7 @@ fn options_of(
     run: &Run,
     form: Option<WindowForm>,
     readers_count: usize,
-) -> BTreeMap<Materialization, (String, LogicalASAPNodeId)> {
+) -> BTreeMap<Materialization, (String, PhysicalASAPNodeId)> {
     let logical = run
         .logical
         .iter()
@@ -90,7 +91,7 @@ fn options_of(
         .collect()
 }
 
-fn eh_options(run: &Run) -> BTreeMap<Materialization, (String, LogicalASAPNodeId)> {
+fn eh_options(run: &Run) -> BTreeMap<Materialization, (String, PhysicalASAPNodeId)> {
     options_of(run, None, 5)
 }
 
@@ -293,11 +294,12 @@ fn stage2_b_b1_builds_at_ingestion_and_merges_at_query_time() {
             !runs_at_ingestion(p, estimate),
             "{id}: estimate at ingestion"
         );
-        let merge = p
-            .dag
-            .producers(estimate)
-            .into_iter()
-            .find(|&m| matches!(p.dag.payload(m), LogicalASAPOperatorPayload::SummaryMerge));
+        let merge = p.dag.producers(estimate).into_iter().find(|&m| {
+            matches!(
+                p.dag.payload(m),
+                Operator::ASAP(ASAPOp::SummaryMerge { .. })
+            )
+        });
         let merge = merge.unwrap_or_else(|| panic!("{id}: no merge before the estimate"));
         assert!(!runs_at_ingestion(p, merge), "{id}: merge at ingestion");
     }
