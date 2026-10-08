@@ -50,12 +50,10 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
 
 use std::time::Duration;
 
-use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
-use asap_types::ir::properties::timing::{
-    apply_materialization_timings, MaterializationAssignment, TimingMemo,
-};
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
+use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
@@ -201,13 +199,13 @@ pub(crate) fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 pub(crate) fn time_and_export(
     root: &Rc<OperatorNode>,
 ) -> Result<
-    asap_types::ir::export::PhysicalASAPDAG,
-    asap_types::ir::properties::execution::ExecutionDataStateError,
+    asap_types::ir::physical_export::PhysicalASAPDAG,
+    asap_types::ir::properties::ExecutionDataStateError,
 > {
     let timed = apply_materialization_timings(
         root,
         &MaterializationAssignment::all_query_time(),
         &mut TimingMemo::new(),
     )?;
-    asap_types::ir::export::compile_physical_asap_dag(&timed)
+    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
 }

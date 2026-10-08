@@ -1,16 +1,16 @@
 //! SQL and PromQL use the same shared-state rule without sharing membership semantics.
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_optimizer::pass1::maintained_population::MaintainedPopulationStrategy;
-use asap_types::ir::cse::share_common_sub_dags;
-use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::operator::maintained_population::{MaintainedPopulation, PopulationInput};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::{
     ir::{
         apply_materialization_timings, cse::share_common_sub_dags,
         physical_export::compile_physical_asap_dag, ASAPOp, MaterializationAssignment, NonASAPOp,
-        Operator, OperatorNode, TimingMemo},
-    types::AccuracyTarget};
+        Operator, OperatorNode, TimingMemo,
+    },
+    types::AccuracyTarget,
+};
 use std::rc::Rc;
 
 async fn aggregate(q: &str) -> Rc<OperatorNode> {

@@ -351,7 +351,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction};
-use asap_types::ir::properties::summary_coverage::{CoverageRegion, SummaryCoverage};
 use asap_types::ir::properties::timing::validate_maintained;
 use asap_types::ir::properties::{
     AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee,
@@ -4784,10 +4783,8 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
             }
-            // The same summary over a re-placed input keeps its coverage.
-            let rebuilt = std::rc::Rc::new(OperatorNode {
-                coverage: node.coverage.clone(),
-                ..OperatorNode::with_schema(
+            let rebuilt = std::rc::Rc::new(
+                OperatorNode::with_schema(
                     asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                         child: Rc::clone(new_child),
                         family: family.clone(),
@@ -4798,8 +4795,8 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
                     }),
                     node.schema.clone(),
                 )
-                .with_guarantee(node.guarantee.clone())
-            });
+                .with_guarantee(node.guarantee.clone()),
+            );
             match validate_maintained(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
@@ -8400,20 +8397,13 @@ mod tests {
         }
     }
 
-    // Whole-source coverage names one source; over two it is not declared.
-    #[test]
-    fn whole_source_coverage_needs_exactly_one_source() {
-        let left = metric_scan(&["job"]);
-        let right = crate::test_support::scan("n", left.schema.clone());
-        assert!(whole_source_coverage(&left).is_some());
-        let join = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Join {
-            kind: asap_types::ir::operator::operator_properties::JoinKind::Inner,
-            pred: equi_pred(0, 2),
-            left,
-            right,
-        }))
-        .unwrap();
-        assert_eq!(whole_source_coverage(&join), None);
+    fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
+        Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(left)),
+            op: asap_types::ir::scalar::CompareOpKind::Eq,
+            right: Box::new(ScalarExpr::Column(right)),
+            semantics: asap_types::ir::ExprSemantics::Sql,
+        })
     }
 
     #[test]
