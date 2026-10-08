@@ -44,3 +44,7 @@ path = "tests/bgp_analytics/bgp_analytics.rs"
 [[test]]
 name = "bgp_jan2024_workload"
 path = "tests/bgp_jan2024_workload/bgp_jan2024_workload.rs"
+
+[[test]]
+name = "clickbench"
+path = "tests/clickbench/clickbench.rs"
