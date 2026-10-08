@@ -951,7 +951,7 @@ fn stage2_only_maintained_panes_run_at_ingestion_time() {
             }
             assert!(maintained, "{}: {:?} at ingestion", p.id, n.id);
             match &n.payload {
-                LogicalASAPOperatorPayload::SummaryAgg { .. } => panes += 1,
+                Operator::ASAP(ASAPOp::SummaryAgg { .. }) => panes += 1,
                 other => assert!(
                     matches!(
                         relational(other).as_deref(),
@@ -1168,9 +1168,9 @@ fn stage3_rejects_candidates_over_the_latency_bound() {
     assert!(!over.contains(selection.selected.as_str()));
     for p in &physical {
         let count_sketch = p.dag.nodes.iter().any(|n| {
-            matches!(&n.payload, LogicalASAPOperatorPayload::SummaryAgg {
+            matches!(&n.payload, Operator::ASAP(ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(kind, _), ..
-            } if *kind.algorithm() == SketchAlgorithm::CountSketchWithHeap)
+            }) if *kind.algorithm() == SketchAlgorithm::CountSketchWithHeap)
         });
         if count_sketch {
             assert!(over.contains(p.id.as_str()), "{}", p.id);

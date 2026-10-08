@@ -654,7 +654,7 @@ fn inputs_b(
             })
             .collect();
         inputs.insert(
-            u64::from(node.id.0),
+            node.id as u64,
             (Batch::try_new(schema, rows).expect("input batch"), window),
         );
     }
@@ -715,7 +715,7 @@ fn execute_b_maintained(p: &Physical) -> Vec<String> {
         .iter()
         .map(|(&id, (batch, _))| (id, InputContract::bounded(batch.schema().clone())))
         .collect();
-    let root = u64::from(p.dag.roots[0].0);
+    let root = p.dag.roots[0] as u64;
     let compiled = compile(&p.dag, contracts, &[root]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
     let frontier = frontier_from_timing(&p.dag).unwrap();
     assert_eq!(frontier.len(), 5, "{}: the five panes", p.id);
@@ -726,18 +726,14 @@ fn execute_b_maintained(p: &Physical) -> Vec<String> {
         // The pane's own minute; the other inputs are empty in its run.
         let (own, window) = p
             .dag
-            .producers(asap_types::ir::physical_export::NodeId(pane as u32))
+            .producers(pane as usize)
             .into_iter()
-            .find_map(|range| {
-                inputs
-                    .get(&u64::from(range.0))
-                    .map(|(_, w)| (range, w.clone()))
-            })
+            .find_map(|range| inputs.get(&(range as u64)).map(|(_, w)| (range, w.clone())))
             .expect("the pane reads one raw time range");
         let run_inputs = inputs
             .iter()
             .map(|(&id, (batch, _))| {
-                let batch = match id == u64::from(own.0) {
+                let batch = match id == own as u64 {
                     true => batch.clone(),
                     false => Batch::try_new(batch.schema().clone(), vec![]).unwrap(),
                 };
