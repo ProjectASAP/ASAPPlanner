@@ -204,14 +204,10 @@ fn with_summary_filter(
             filter: Some(filter.clone()),
         }))
         .unwrap();
-        let state = match &root.coverage {
-            Some(coverage) => state.with_coverage(coverage.clone()).unwrap(),
-            None => state,
-        };
         return Rc::new(state);
     }
     Rc::new(
-        root.map_children(|c| with_summary_filter(c, filter))
+        root.with_new_children(|c| with_summary_filter(c, filter))
             .unwrap(),
     )
 }
