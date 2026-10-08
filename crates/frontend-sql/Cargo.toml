@@ -70,5 +70,9 @@ name = "bgp_jan2024_workload"
 path = "tests/bgp_jan2024_workload/bgp_jan2024_workload.rs"
 
 [[test]]
+name = "clickbench"
+path = "tests/clickbench/clickbench.rs"
+
+[[test]]
 name = "sql"
 path = "tests/main.rs"
