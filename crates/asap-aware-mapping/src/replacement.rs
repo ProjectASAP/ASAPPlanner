@@ -351,7 +351,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, Reduction};
-use asap_types::ir::properties::summary_coverage::{CoverageRegion, SummaryCoverage};
 use asap_types::ir::properties::timing::validate_maintained;
 use asap_types::ir::properties::{
     AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee,
@@ -364,7 +363,6 @@ use asap_types::ir::schema::{
     SketchParams, SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams,
     SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
 };
-use asap_types::ir::validate_maintained;
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, ProjectItem, ScalarExpr, SortKey,
@@ -2217,7 +2215,7 @@ fn retime_rate_finalize(
                 None if strict => return None,
                 None => return Some(Rc::clone(node)),
             };
-            let operator = node.operator.with_new_children(|_| Rc::clone(&placed));
+            let operator = node.operator.map_children(|_| Rc::clone(&placed));
             Some(rebuilt(operator, node.timing))
         }
         _ if strict => None,
@@ -4968,11 +4966,10 @@ mod tests {
     use crate::cost_model::DefaultCostModel;
     use crate::plan_selection::candidate_selection::sketch_kind_of;
     use crate::test_support::{agg, agg_per_entity, lower_promql, maintained, metric_scan, timed};
+    use asap_types::ir::operator::operator_properties::{Reduction as ReductionTy, Source};
     use asap_types::ir::operator::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
-    use asap_types::ir::operator::operator_properties::{Reduction as ReductionTy, Source};
-    use asap_types::ir::schema::ColumnId;
     use asap_types::ir::schema::{DataType, Field, Schema as SchemaTy};
     use asap_types::ir::Predicate;
     use asap_types::ir::TimeRangeKind;
@@ -5189,15 +5186,6 @@ mod tests {
         let query = agg(vec![2], default_quantile(0.9), metric_scan(&["job"]));
         let space = search_workload(vec![(0usize, query)]);
         assert!(space.enumerate_candidate_dags(0).is_err());
-    }
-
-    fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
-        Predicate(ScalarExpr::Compare {
-            left: Box::new(ScalarExpr::Column(left)),
-            op: asap_types::ir::scalar::CompareOpKind::Eq,
-            right: Box::new(ScalarExpr::Column(right)),
-            semantics: asap_types::ir::ExprSemantics::Sql,
-        })
     }
 
     // Finite samples can overflow a sum although their native average is finite.
