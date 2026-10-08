@@ -14,7 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_aware_mapping::PlanningModels;
-use asap_types::ir::export::{LogicalASAPDAG, LogicalASAPNodeId, LogicalASAPOperatorPayload};
+use asap_types::ir::flat::{flatten, FlatDag, NodeId};
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::post_asap::sketch::{GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::pre_asap::schema::FieldDataType;
 use asap_types::types::AccuracyTarget;
@@ -24,6 +25,8 @@ use asap_types::workload::{
     QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
     RepetitionInterval, TimeSelection,
 };
+
+type Payload = Operator<NodeId>;
 
 /// Adapters from the Phase C stage APIs to the shapes these tests were written
 /// against. They only convert; every decision is the real stage's.
@@ -35,7 +38,6 @@ mod stages {
     use asap_aware_mapping::logical_candidates::{
         compose_logical_candidate, enumerate_local_logical_candidates,
     };
-    use asap_types::ir::export::{compile_logical_asap_workload, LogicalASAPQueryRoot};
     use asap_types::ir::{OperatorNode, QueryRoot};
 
     /// One whole-workload candidate. `query_roots` holds one root per
@@ -45,12 +47,12 @@ mod stages {
     pub struct LogicalCandidate {
         pub id: String,
         pub label: String,
-        pub dag: LogicalASAPDAG,
-        pub query_roots: Vec<LogicalASAPNodeId>,
+        pub dag: FlatDag,
+        pub query_roots: Vec<NodeId>,
         pub roots: Vec<Rc<OperatorNode>>,
     }
 
-    pub type PhysicalASAPDAG = asap_types::ir::export::PhysicalASAPDAG;
+    pub type PhysicalASAPDAG = asap_types::ir::physical_export::PhysicalASAPDAG;
 
     /// One Stage 2 candidate, derived from exactly one Stage 1 candidate.
     #[derive(Debug, Clone)]
@@ -59,7 +61,7 @@ mod stages {
         pub from_logical: String,
         pub label: String,
         pub dag: PhysicalASAPDAG,
-        pub query_roots: Vec<LogicalASAPNodeId>,
+        pub query_roots: Vec<NodeId>,
         pub stage2: asap_aware_mapping::physical_candidates::PhysicalCandidate,
     }
 
@@ -68,7 +70,7 @@ mod stages {
     #[derive(Debug, Clone)]
     pub struct CandidateCost {
         pub total: f64,
-        pub per_node: BTreeMap<LogicalASAPNodeId, f64>,
+        pub per_node: BTreeMap<NodeId, f64>,
     }
 
     /// A candidate Stage 3 did not select. `valid == false` means it failed
@@ -105,13 +107,16 @@ mod stages {
     }
 
     fn candidate(id: String, label: String, roots: Vec<QueryRoot>) -> LogicalCandidate {
-        let dag = compile_logical_asap_workload(&roots).expect("logical export");
+        for root in &roots {
+            root.validate_structure().expect("valid DAG");
+        }
+        let dag = flatten(&roots).0;
         let query_roots = dag
             .roots
             .iter()
             .map(|root| match root {
-                LogicalASAPQueryRoot::Operator(id) => *id,
-                LogicalASAPQueryRoot::Scalar(_) => panic!("Example 1 has operator roots"),
+                QueryRoot::Operator(id) => *id,
+                QueryRoot::Scalar(_) => panic!("Example 1 has operator roots"),
             })
             .collect();
         let roots = roots
@@ -251,7 +256,7 @@ mod stages {
         }
     }
 
-    pub fn runs_at_ingestion(candidate: &PhysicalCandidate, node: LogicalASAPNodeId) -> bool {
+    pub fn runs_at_ingestion(candidate: &PhysicalCandidate, node: NodeId) -> bool {
         candidate
             .dag
             .nodes
@@ -340,34 +345,33 @@ enum Q2Option {
     Hydra,
 }
 
-/// The logical and physical exports share node ids, payloads and edge
-/// endpoints; the helpers below read only those.
+/// The logical (flat) and physical DAGs share node ids and payloads; the
+/// helpers below read only those and each node's producers.
 trait ExportedDag {
-    fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId>;
-    fn node_payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload;
+    fn producers(&self, consumer: NodeId) -> Vec<NodeId>;
+    fn node_payload(&self, id: NodeId) -> &Payload;
 }
 
-impl ExportedDag for LogicalASAPDAG {
-    fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId> {
-        let edges = self.edges.iter().filter(|e| e.consumer == consumer);
-        edges.map(|e| e.producer).collect()
+impl ExportedDag for FlatDag {
+    fn producers(&self, consumer: NodeId) -> Vec<NodeId> {
+        self.nodes[consumer]
+            .operator
+            .children()
+            .into_iter()
+            .copied()
+            .collect()
     }
-    fn node_payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload {
-        &self
-            .nodes
-            .iter()
-            .find(|n| n.id == id)
-            .expect("node")
-            .payload
+    fn node_payload(&self, id: NodeId) -> &Payload {
+        &self.nodes[id].operator
     }
 }
 
 impl ExportedDag for PhysicalASAPDAG {
-    fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId> {
+    fn producers(&self, consumer: NodeId) -> Vec<NodeId> {
         let edges = self.edges.iter().filter(|e| e.consumer == consumer);
         edges.map(|e| e.producer).collect()
     }
-    fn node_payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload {
+    fn node_payload(&self, id: NodeId) -> &Payload {
         &self
             .nodes
             .iter()
@@ -378,7 +382,7 @@ impl ExportedDag for PhysicalASAPDAG {
 }
 
 /// Every node `root` depends on, including itself.
-fn closure(dag: &impl ExportedDag, root: LogicalASAPNodeId) -> HashSet<LogicalASAPNodeId> {
+fn closure(dag: &impl ExportedDag, root: NodeId) -> HashSet<NodeId> {
     let mut seen = HashSet::from([root]);
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -391,33 +395,32 @@ fn closure(dag: &impl ExportedDag, root: LogicalASAPNodeId) -> HashSet<LogicalAS
     seen
 }
 
-fn payload(dag: &impl ExportedDag, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload {
+fn payload(dag: &impl ExportedDag, id: NodeId) -> &Payload {
     dag.node_payload(id)
 }
 
-fn is_summary(payload: &LogicalASAPOperatorPayload) -> bool {
+fn is_summary(payload: &Payload) -> bool {
     matches!(
         payload,
-        LogicalASAPOperatorPayload::SummaryAgg {
-            family: FieldDataType::Sketch(..),
-            ..
-        } | LogicalASAPOperatorPayload::SummaryEstimate { .. }
-            | LogicalASAPOperatorPayload::SummaryMerge
+        Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(..),
+                ..
+            } | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::SummaryMerge { .. }
+        )
     )
 }
 
 /// Sketch families built in `nodes`, as Example 1's Q2 options.
-fn sketch_options(
-    dag: &impl ExportedDag,
-    nodes: &HashSet<LogicalASAPNodeId>,
-) -> BTreeSet<Q2Option> {
+fn sketch_options(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> BTreeSet<Q2Option> {
     nodes
         .iter()
         .filter_map(|&id| match payload(dag, id) {
-            LogicalASAPOperatorPayload::SummaryAgg {
+            Operator::ASAP(ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(kind, grouping),
                 ..
-            } => Some(match grouping {
+            }) => Some(match grouping {
                 GroupingStrategy::SharedMultiSubpopulation {
                     kind: HydraKind::HydraCms,
                     ..
@@ -434,13 +437,13 @@ fn sketch_options(
         .collect()
 }
 
-fn roots(query_roots: &[LogicalASAPNodeId]) -> (LogicalASAPNodeId, LogicalASAPNodeId) {
+fn roots(query_roots: &[NodeId]) -> (NodeId, NodeId) {
     assert_eq!(query_roots.len(), 2, "every candidate covers Q1 and Q2");
     (query_roots[0], query_roots[1])
 }
 
 /// Q2's option and whether Q1 and Q2 share any node, for one candidate.
-fn classify(dag: &impl ExportedDag, query_roots: &[LogicalASAPNodeId]) -> (Q2Option, bool) {
+fn classify(dag: &impl ExportedDag, query_roots: &[NodeId]) -> (Q2Option, bool) {
     let (q1, q2) = roots(query_roots);
     let (c1, c2) = (closure(dag, q1), closure(dag, q2));
     let options = sketch_options(dag, &c2);
@@ -449,16 +452,23 @@ fn classify(dag: &impl ExportedDag, query_roots: &[LogicalASAPNodeId]) -> (Q2Opt
     (option, !c1.is_disjoint(&c2))
 }
 
-/// The relational operator's wire `kind` (`"scan"`, `"sort"`, …); the
-/// operator enum itself is not public outside `asap-types`.
-fn relational(payload: &LogicalASAPOperatorPayload) -> Option<String> {
+/// The non-ASAP operator's kind in snake case (`"scan"`, `"sort"`, …).
+fn relational(payload: &Payload) -> Option<String> {
     match payload {
-        LogicalASAPOperatorPayload::Relational { .. } => {
-            let json = serde_json::to_value(payload).expect("payload serializes");
-            json["operator"]["kind"].as_str().map(str::to_owned)
-        }
-        _ => None,
+        Operator::NonASAP(_) => Some(snake_case(payload.kind_name())),
+        Operator::ASAP(_) => None,
     }
+}
+
+fn snake_case(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
 }
 
 fn pipeline() -> (
@@ -507,17 +517,15 @@ fn stage0_frontend_lowers_each_query_to_doc_chain() {
     let chains: Vec<Vec<String>> = roots
         .iter()
         .map(|root| {
-            let dag = asap_types::ir::export::compile_logical_asap_query(root).expect("compiles");
-            let json = serde_json::to_value(&dag).expect("serializes");
-            let mut ops: Vec<String> = json["nodes"]
-                .as_array()
-                .unwrap()
+            let dag = flatten(std::slice::from_ref(root)).0;
+            let mut ops: Vec<String> = dag
+                .nodes
                 .iter()
                 .map(|n| {
-                    let op = &n["payload"]["operator"];
-                    match op["measures"][0]["kind"].as_str() {
+                    let json = serde_json::to_value(&n.operator).expect("serializes");
+                    match json["NonASAP"]["Aggregate"]["measures"][0]["kind"].as_str() {
                         Some(measure) => format!("aggregate:{measure}"),
-                        None => op["kind"].as_str().unwrap_or("?").to_owned(),
+                        None => relational(&n.operator).unwrap_or_else(|| "?".into()),
                     }
                 })
                 .collect();
@@ -538,9 +546,8 @@ fn stage0_frontend_lowers_each_query_to_doc_chain() {
 #[test]
 fn stage0_one_summary_free_workload_dag() {
     let stage0 = stage0_logical(&example1_workload());
-    stage0.dag.validate().expect("valid DAG");
     roots(&stage0.query_roots);
-    assert!(stage0.dag.nodes.iter().all(|n| !is_summary(&n.payload)));
+    assert!(stage0.dag.nodes.iter().all(|n| !is_summary(&n.operator)));
 }
 
 /// Stage 0 keeps Q1 and Q2 separate; sharing is a Stage 1 decision.
@@ -650,7 +657,10 @@ fn stage1_candidates_are_valid_and_uniquely_named() {
     let ids: BTreeSet<_> = logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids.len(), logical.len());
     for c in &logical {
-        c.dag.validate().unwrap_or_else(|e| panic!("{}: {e}", c.id));
+        for root in &c.roots {
+            root.validate_structure()
+                .unwrap_or_else(|e| panic!("{}: {e}", c.id));
+        }
     }
 }
 
@@ -718,20 +728,20 @@ fn stage2_summary_topk_is_build_then_estimate() {
         assert!(
             !kinds
                 .iter()
-                .any(|k| matches!(k, LogicalASAPOperatorPayload::SummaryMerge)),
+                .any(|k| matches!(k, Operator::ASAP(ASAPOp::SummaryMerge { .. }))),
             "{}: no window summaries in the MVP, so no merge",
             p.id
         );
         let build_to_estimate = p.dag.edges.iter().any(|e| {
             matches!(
                 payload(&p.dag, e.producer),
-                LogicalASAPOperatorPayload::SummaryAgg {
+                Operator::ASAP(ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(..),
                     ..
-                }
+                })
             ) && matches!(
                 payload(&p.dag, e.consumer),
-                LogicalASAPOperatorPayload::SummaryEstimate { .. }
+                Operator::ASAP(ASAPOp::SummaryEstimate { .. })
             )
         });
         assert!(build_to_estimate, "{}: no build → estimate", p.id);
@@ -760,7 +770,7 @@ fn stage2_everything_runs_at_query_time() {
 /// native operator reads.
 fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
     use asap_physical_operators::physical_planner::{compile, promql_fallback, InputContract};
-    use asap_types::ir::export::compile_physical_asap_workload_with_node_ids;
+    use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
     use std::sync::Arc;
     let ids = compile_physical_asap_workload_with_node_ids(&p.stage2.roots)
         .expect("re-export")
@@ -780,7 +790,7 @@ fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
                 e.producer == id
                     && matches!(
                         payload(&p.dag, e.consumer),
-                        LogicalASAPOperatorPayload::SummaryAgg { .. }
+                        Operator::ASAP(ASAPOp::SummaryAgg { .. })
                     )
             });
         let fallback = (!node.contains_asap() && !summary_input)
@@ -788,18 +798,18 @@ fn compile_in_runtime(p: &PhysicalCandidate) -> Result<(), String> {
             .flatten();
         if let Some(selectors) = fallback {
             for (i, (_, schema)) in selectors.into_iter().enumerate() {
-                let slot = promql_fallback::raw_series_input(u64::from(id.0), i);
+                let slot = promql_fallback::raw_series_input(id as u64, i);
                 inputs.insert(slot, InputContract::bounded(schema));
             }
         } else if time_range {
             let schema = p.dag.nodes.iter().find(|n| n.id == id).unwrap();
             let schema = Arc::new(schema.output_schema.clone());
-            inputs.insert(u64::from(id.0), InputContract::bounded(schema));
+            inputs.insert(id as u64, InputContract::bounded(schema));
         } else {
             pending.extend(p.dag.producers(id));
         }
     }
-    let roots: Vec<u64> = p.dag.roots.iter().map(|id| u64::from(id.0)).collect();
+    let roots: Vec<u64> = p.dag.roots.iter().map(|&id| id as u64).collect();
     compile(&p.dag, inputs, &roots)
         .map(|_| ())
         .map_err(|e| format!("{} ({}): {e}", p.id, p.label))
