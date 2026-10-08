@@ -275,9 +275,8 @@ optional also does not guarantee every planning operation can succeed without it
 | Function/type | Purpose |
 | --- | --- |
 | `asap_types::ir::apply_materialization_timings(&root, &assignment, &mut TimingMemo::new())` | Write execution timing into every node from a `MaterializationAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::execution_timed_dag()` applies the default to a planned workload |
-| `asap_types::ir::export::compile_logical_asap_dag(&root)` | Export a DAG as a `LogicalASAPDAG` for inspection; not a physical plan |
-| `LogicalASAPDAGDocument::new(dag)` and `.validate()` | Versioned envelope and explicit validation; constructing it alone does not validate |
-| `asap_types::ir::export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as the `PhysicalASAPDAG` a deployment binds; rejects an untimed node |
+| `asap_types::ir::flat::flatten(&roots)` | A DAG as a flat, serializable node list (`FlatDag`, children as node ids) for inspection; not a physical plan |
+| `asap_types::ir::physical_export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as the `PhysicalASAPDAG` a deployment binds; rejects an untimed node |
 
 Choose the export matching your intended handoff, and preserve the selection
 report a downstream needs instead of exporting only a bare DAG. For public
