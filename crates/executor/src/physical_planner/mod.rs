@@ -555,7 +555,9 @@ fn compile_internal(
                     continue;
                 }
             }
-            if matches!(node.payload, Payload::SummaryMerge) && output.time_index.is_some() {
+            if matches!(node.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
+                && output.time_index.is_some()
+            {
                 // Pane timestamps describe their individual builds. A merged
                 // per-series state represents this evaluation's entire window,
                 // so merge by series identity and attach the execution scope's
