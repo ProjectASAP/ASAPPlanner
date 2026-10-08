@@ -11,7 +11,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_types::ir::export::{compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG};
+use asap_types::ir::physical_export::{
+    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
+};
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
     OperatorNode, ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
@@ -144,7 +146,7 @@ fn rebuilt(node: &Rc<OperatorNode>, memo: &Memo) -> Result<Rc<OperatorNode>, Sta
         .iter()
         .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
     Ok(if changed {
-        Rc::new(node.map_children(|child| memo[&Rc::as_ptr(child)].clone())?)
+        Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?)
     } else {
         node.clone()
     })
@@ -154,8 +156,8 @@ fn rebuilt(node: &Rc<OperatorNode>, memo: &Memo) -> Result<Rc<OperatorNode>, Sta
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::ir::export::PhysicalASAPOperatorPayload as Payload;
-    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPNodeId};
+    use asap_types::ir::physical_export::PhysicalASAPNodeId;
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
     use asap_types::ir::QueryRoot;
     use asap_types::post_asap::ExecutionTiming;
     use asap_types::types::AccuracyTarget;
@@ -171,7 +173,7 @@ mod tests {
         let NonASAPOp::Aggregate { child: shared, .. } = topk.expect_non_asap() else {
             panic!("topk aggregate")
         };
-        let sum = Rc::new(sum.map_children(|_| shared.clone()).unwrap());
+        let sum = Rc::new(sum.with_new_children(|_| shared.clone()).unwrap());
         let candidate = stage2_physical("L1", &[topk, sum]).unwrap();
 
         let NonASAPOp::Limit {
@@ -209,12 +211,8 @@ mod tests {
             .unwrap()
             .payload
         {
-            Payload::Relational {
-                operator: NonASAPOpKind::Sort { .. },
-            } => "sort",
-            Payload::Relational {
-                operator: NonASAPOpKind::Limit { .. },
-            } => "limit",
+            Payload::NonASAP(NonASAPOp::Sort { .. }) => "sort",
+            Payload::NonASAP(NonASAPOp::Limit { .. }) => "limit",
             _ => "other",
         };
         let sort_id = dag
@@ -269,7 +267,7 @@ mod tests {
             .dag
             .nodes
             .iter()
-            .any(|n| matches!(n.payload, Payload::SummaryAgg { .. })));
+            .any(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))));
         assert!(candidate
             .dag
             .nodes

@@ -181,7 +181,7 @@ fn stage3_json(selection: &Selection) -> Value {
                 .iter()
                 .map(|(node, c)| {
                     (
-                        node.0.to_string(),
+                        node.to_string(),
                         json!({ "cost": c.cost, "detail": c.detail }),
                     )
                 })

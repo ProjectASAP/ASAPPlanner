@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use asap_types::ir::flat::FlatDag;
-use asap_types::ir::QueryRoot;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
+use asap_types::ir::QueryRoot;
 use serde_json::Value;
 
 const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
