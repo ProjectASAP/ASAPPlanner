@@ -123,6 +123,19 @@ impl From<Field<DataType>> for Field<FieldDataType> {
     }
 }
 
+/// How the selections of a summary operation's inputs must relate for the
+/// result to keep the family's guarantee (#573 §4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionRelation {
+    /// No row in two inputs: a shared row would be counted twice.
+    Disjoint,
+    /// Inputs may share rows: the merge is idempotent.
+    OverlapAllowed,
+    /// The right input's selection lies inside the left's, as subtraction
+    /// (`SummarySubtract`, reserved) needs.
+    Contained,
+}
+
 /// What a schema field carries: an ordinary readable value, or the summary /
 /// exact-accumulator state produced by a `SummaryAgg`.
 ///
@@ -175,6 +188,25 @@ impl FieldDataType {
             ),
             _ => false,
         }
+    }
+
+    /// How the selections of merged states of this family must relate
+    /// (#573 §4.4); `None` when the family does not merge.
+    pub fn merge_relation(&self) -> Option<SelectionRelation> {
+        use state_type::{ExactKind as E, SketchAlgorithm as S};
+        if !self.family_merges() {
+            return None;
+        }
+        let idempotent = match self {
+            FieldDataType::ExactAggregate(kind, _) => matches!(kind, E::Min | E::Max),
+            FieldDataType::Sketch(kind, _) => *kind.algorithm() == S::Hll,
+            _ => false,
+        };
+        Some(if idempotent {
+            SelectionRelation::OverlapAllowed
+        } else {
+            SelectionRelation::Disjoint
+        })
     }
 
     pub fn plain(&self) -> Option<&DataType> {
