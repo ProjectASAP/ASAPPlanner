@@ -1,6 +1,7 @@
 //! Pass 1 alternatives over SQL row sources compose, compile and execute.
 mod executor_models;
 mod physical_common;
+use asap_types::ir::NonASAPOp;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -108,17 +109,15 @@ async fn sql_count_star_candidates_compose_and_execute() {
 
 /// Binds every root of `dag` in the executor, each scan reading an empty
 /// in-memory source.
-fn binds(dag: &asap_types::ir::export::PhysicalASAPDAG) -> Result<(), String> {
+fn binds(dag: &asap_types::ir::physical_export::PhysicalASAPDAG) -> Result<(), String> {
     use asap_executor::physical_planner::bind_with_data_sources;
     use asap_executor::sources::{DataSources, MemorySource};
-    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use std::sync::Arc;
     let mut sources = DataSources::default();
     let mut registered = vec![];
     for node in &dag.nodes {
-        if let PhysicalASAPOperatorPayload::Relational {
-            operator: NonASAPOpKind::Scan { source, .. },
-        } = &node.payload
+        if let PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload
         {
             if !registered.contains(source) {
                 let schema = Arc::new(node.output_schema.clone());
@@ -132,7 +131,7 @@ fn binds(dag: &asap_types::ir::export::PhysicalASAPDAG) -> Result<(), String> {
             }
         }
     }
-    let roots: Vec<_> = dag.roots.iter().map(|root| u64::from(root.0)).collect();
+    let roots: Vec<_> = dag.roots.iter().map(|&root| root as u64).collect();
     bind_with_data_sources(dag, BTreeMap::new(), &roots, &sources)
         .map(|_| ())
         .map_err(|e| e.to_string())
