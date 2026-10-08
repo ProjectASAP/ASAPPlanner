@@ -758,17 +758,15 @@ fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
             ),
         ] {
             let node = PhysicalASAPDAGNode {
-                coverage: None,
-                id: planner_types::ir::export::LogicalASAPNodeId(1),
-                payload: PhysicalASAPOperatorPayload::Relational {
-                    operator: ValueOperation::Aggregate {
-                        reduction: PlanReduction::Reduce(GroupKeys::none()),
-                        measures: vec![measure],
-                        output_names: vec![name.into()],
-                        filters: vec![],
-                        having: None,
-                    },
-                },
+                id: 1,
+                payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
+                    child: 0,
+                    reduction: PlanReduction::Reduce(GroupKeys::none()),
+                    measures: vec![measure],
+                    output_names: vec![name.into()],
+                    filters: vec![],
+                    having: None,
+                }),
                 output_state: ExecutionDataState::QUERY_ROWS,
                 output_schema: (*schema(&[(name, DataType::Float64, false)])).clone(),
                 guarantee: None,
@@ -842,20 +840,18 @@ fn exact_cardinality_binds_and_executes_typed_tuples() {
     ]);
     for (cols, expected) in [(vec![0], 2), (vec![0, 1], 3)] {
         let node = PhysicalASAPDAGNode {
-            coverage: None,
-            id: planner_types::ir::export::LogicalASAPNodeId(1),
-            payload: PhysicalASAPOperatorPayload::Relational {
-                operator: ValueOperation::Aggregate {
-                    reduction: PlanReduction::Reduce(GroupKeys::none()),
-                    measures: vec![AggIntent::Cardinality {
-                        cols,
-                        accuracy: AccuracyTarget::Exact,
-                    }],
-                    output_names: vec!["distinct".into()],
-                    filters: vec![],
-                    having: None,
-                },
-            },
+            id: 1,
+            payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
+                child: 0,
+                reduction: PlanReduction::Reduce(GroupKeys::none()),
+                measures: vec![AggIntent::Cardinality {
+                    cols,
+                    accuracy: AccuracyTarget::Exact,
+                }],
+                output_names: vec!["distinct".into()],
+                filters: vec![],
+                having: None,
+            }),
             output_state: ExecutionDataState::QUERY_ROWS,
             output_schema: (*schema(&[("distinct", DataType::Int64, false)])).clone(),
             guarantee: None,

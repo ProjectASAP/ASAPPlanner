@@ -4,6 +4,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::Batch,
 };
+use asap_types::ir::NonASAPOp;
 use futures::{executor::block_on, StreamExt};
 use std::collections::BTreeMap;
 
@@ -86,16 +87,16 @@ pub fn execute_raw_rows(
         physical_planner::bind_with_data_sources,
         sources::{DataSources, MemorySource},
     };
-    use asap_types::ir::export::{NonASAPOpKind, PhysicalASAPOperatorPayload};
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use std::sync::Arc;
     let wire = compile_physical_asap_dag(root).unwrap();
     let (source, schema) = wire
         .nodes
         .iter()
         .find_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::Relational {
-                operator: NonASAPOpKind::Scan { source, .. },
-            } => Some((source.clone(), node.output_schema.clone())),
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                Some((source.clone(), node.output_schema.clone()))
+            }
             _ => None,
         })
         .unwrap();
@@ -108,7 +109,7 @@ pub fn execute_raw_rows(
             Arc::new(MemorySource::new(input, vec![batch]).unwrap()),
         )
         .unwrap();
-    let root_id = u64::from(wire.roots[0].0);
+    let root_id = wire.roots[0] as u64;
     let plan = bind_with_data_sources(&wire, BTreeMap::new(), &[root_id], &sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
