@@ -371,7 +371,7 @@ mod tests {
     };
     use asap_logical_optimizer::pass2::identical_expressions::stage1_logical_candidates;
     use asap_logical_optimizer::pass2::window_composition::WindowForm;
-    use asap_types::ir::export::PhysicalASAPOperatorPayload as Payload;
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
     use asap_types::ir::QueryRoot;
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{RepetitionInterval, TimestampMs};
@@ -472,11 +472,11 @@ mod tests {
     }
 
     fn is_build(p: &Payload) -> bool {
-        matches!(p, Payload::SummaryAgg { .. })
+        matches!(p, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
     }
 
     fn is_merge(p: &Payload) -> bool {
-        matches!(p, Payload::SummaryMerge)
+        matches!(p, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
     }
 
     const P99_5M: &str = "quantile_over_time(0.99, m[5m])";
