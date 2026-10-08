@@ -6,8 +6,23 @@ This document is the single source of truth for the schema, and column design fo
 
 Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, it introduces new requirement when we design the schema and node definitions for LogicalASAPDAG and PhysicalASAPDAG.
 
-Assuming we have the Logical DAG defined for a canonicalized representation for a batch of queries. [TODO: add links for this here. ]
-The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG [TODO: link PR 511's doc here], but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives: SummaryCreation?, SummaryUpdate, SummaryMerge, SummaryDelete, SummarySubtraction, SummaryEstimate [TODO: check what is the complete list or discuss with others about the list]. 
+Assuming we have the Logical DAG defined for a canonicalized representation for a batch of queries (the `LogicalDAG` produced by the frontends, [planning stages §0](planner-layering.md#0-language-specific-frontends); the stages that follow are in [planner-layering.md](planner-layering.md#stages)).
+The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG ([decoupling operators from scalar expressions](decoupling_op_and_expr.md), with the unified operator type in [operator sharing §1.1](operator-sharing.md#11-unified-operator-type)), but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives. The complete list is `ASAPOp` in `crates/types/src/ir/asap.rs`:
+
+| Operator | Input → output | Status |
+|---|---|---|
+| `SummaryAgg` | values → summary state (creates and updates the state; `SummaryUpdate` is its input mapping, not a separate operator) | implemented |
+| `SummaryEstimate` | sketch state → value | implemented |
+| `FinalizeExactAccumulator` | exact accumulator state → value | implemented |
+| `MaintainPopulation` | values → maintained membership (state) | implemented |
+| `EvaluatePopulation` | maintained membership → value | implemented |
+| `SummaryMerge` | state × N → state | structure in #560, coverage check in #646 |
+| `SummarySubtract` | state × state → state | reserved |
+| `SummaryDelete` | state → state without one key | reserved |
+| `SummaryJoin` | state × state → state | reserved |
+| `Extension` | state → state, named by an extension | reserved |
+
+§5 walks through each of them.
 Each of the Summary operators also require the ASAP primitive information above to inter-operate correctly, preserving semantic correctness. 
 
 Basically, the following information should be represented to preserve the equivalent query semantics when we introduce ASAP Primitives to logical query representation, and following physical one. 
@@ -27,13 +42,30 @@ Therefore, these requirements drive the following schema and metadata, node info
 
 ## 2. Existing database terminology for schema, table, column, and physical data layout
 
+This section fixes the words used below. They follow relational databases and Apache Arrow / DataFusion, which ASAPPlanner's frontend already uses.
+
+| Term | Meaning in existing systems | In ASAPPlanner |
+|---|---|---|
+| **Relation / table** | A set (bag) of rows with the same columns. A base table is stored; a derived relation is the output of a query operator. | Every edge in the DAG carries a relation. A `Scan` reads a base table (SQL table or PromQL metric); every other operator outputs a derived relation. |
+| **Row / tuple** | One element of a relation: one value per column. | One output row of a node. For PromQL, one sample of one series at one time. |
+| **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; `(table, name)` identifies it across nodes (§4.3). |
+| **Schema** | The ordered list of columns of a relation: name, data type, nullability (Arrow `Schema` of `Field { name, data_type, nullable }`; DataFusion `DFSchema` adds the table qualifier). The schema is *metadata*: it describes rows, it contains none. | `Schema` of `Field { name, dtype, nullable, table }` in `crates/types/src/pre_asap/schema.rs`. Unlike Arrow, `dtype` can be a summary state type (§3). |
+| **Data type** | The type of a column's values (`Int64`, `Utf8`, `Timestamp`, …). | `DataType`, wrapped as `FieldDataType::Plain`. |
+| **Aggregate state** | The intermediate value of an aggregate function before its final result, e.g. `(sum, count)` for `AVG` (DataFusion `Accumulator::state`, partial/final aggregation). It is never exposed as a column type to users. | Summary state *is* a column type here (`FieldDataType::Sketch`, `ExactAggregate`, …), so state can flow along edges and be merged, stored and read by later operators. |
+| **View / materialized view** | A view is a named query (its *definition*). A materialized view also stores the query's result rows; a query can then be answered from it when its definition matches (view matching, §4.1). | A built summary state is a materialized aggregation view whose aggregate is a summary family. Its definition and which rows it took are its coverage (§4). |
+| **Physical data layout** | How rows are stored: row-oriented or columnar (Arrow `RecordBatch`: one array per column), split into partitions (hash or range) and batches. | Decided in physical planning ([planning stages §2](planner-layering.md#2-physical-asap-aware-optimization)) and by the executing backend. The logical schema does not depend on it. |
+
+Two consequences for the design:
+
+- A schema says what *kind* of values flow along an edge, never *which* rows. Which rows a relation contains is decided by the operators below it (its definition). This is why coverage is a node property and not part of the schema (§4).
+- Existing systems keep aggregate state internal to one operator. ASAPPlanner makes it a first-class column type so that one state can be shared, merged and stored across queries, which is what §3 and §4 add.
 
 ## 3. Proposed schema design 
 Schema represents the **metadata** of information flow along an **edge** between two nodes in a logical or physical DAG. The schema field is associated with the node in the DAG. The consumer of the node in the DAG takes the schema from the producer node as input. 
 
 Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
 Based on our requirement, each field should contain the following information.
-1. **What type of the ASAP Primitive is** A state column can be a raw data type (e.g., numerical number, string). It can also be a [summary type](TODO: add link), e.g., the summary family is sketch, and the sketch type is quantile KLL sketch algorithm, and KLL sketch has K  as parameter as the schema. (TODO: confirm the terminology with corresponding code/doc)  It has a family, an algorithm and parameters. 
+1. **What type of the ASAP Primitive is** A state column can be a raw data type (e.g., numerical number, string). It can also be a [summary type](#61-schema-and-field-types-cratestypessrcpre_asapschemars) (`FieldDataType` in `crates/types/src/pre_asap/schema.rs`), e.g., the summary family is sketch, and the sketch type is quantile KLL sketch algorithm, and KLL sketch has K  as parameter as the schema. In the code these are: **family** = the `FieldDataType` variant (`ExactAggregate`, `Sketch`, `Sample`, `Wavelet`, `StatModel`; `Plain` is a raw value); for sketches, **category** = `SketchCategory` (`Quantile`, `Frequency`, `Cardinality`, `TopK`, `Universal`), **algorithm** = `SketchAlgorithm` (`Kll`, `Cms`, `Hll`, …) and **parameters** = `SketchParams` (`Kll { k }`), bundled as `SketchKind` ([§6.2](#62-state-family-parameters-cratestypessrcpost_asapsketchrs)); a sketch also carries its `GroupingStrategy`. So the example is `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, …)`. It has a family, an algorithm and parameters. 
 2. **What query intent the summarized ASAP Primitive can support, e.g., statistical aggregation intents, time window aggregation intents** This information is being mapped based on the primitive type. 
 
 
