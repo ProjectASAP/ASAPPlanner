@@ -22,14 +22,20 @@ use std::rc::Rc;
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_logical_optimizer::pass1::replacement::{retain_exact, RealizationError};
-use asap_logical_optimizer::{search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
+use asap_logical_optimizer::{
+    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
+    TargetSubDAG,
+};
 use asap_plan_selection::candidate_selection::global_selection;
 use asap_plan_selection::DefaultCostModel;
-use asap_types::ir::physical_export::{EdgeRole, PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
 use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::physical_export::{EdgeRole, PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::schema::{ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate};
+use asap_types::ir::schema::{
+    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind,
+    SketchParams, SketchStatistic, SummaryUpdate,
+};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;

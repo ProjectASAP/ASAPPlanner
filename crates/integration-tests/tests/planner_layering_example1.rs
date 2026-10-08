@@ -15,12 +15,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_plan_selection::PlanningModels;
-use asap_types::ir::schema::state_type::{GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
+use asap_types::ir::schema::state_type::{GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection};
+use asap_types::workload::{
+    AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence,
+    EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage,
+    QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
+    RepetitionInterval, TimeSelection,
+};
 
 type Payload = Operator<NodeId>;
 
@@ -31,7 +36,9 @@ mod stages {
     use std::rc::Rc;
 
     use super::*;
-    use asap_logical_optimizer::pass1::logical_candidates::{compose_logical_candidate, enumerate_local_logical_candidates};
+    use asap_logical_optimizer::pass1::logical_candidates::{
+        compose_logical_candidate, enumerate_local_logical_candidates,
+    };
     use asap_types::ir::{OperatorNode, QueryRoot};
 
     /// One whole-workload candidate. `query_roots` holds one root per
