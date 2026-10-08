@@ -264,6 +264,7 @@ fn family_merge_selection_relation() {
     ] {
         assert_eq!(family.merge_relation(), relation, "{family:?}");
     }
+}
 
 /// Shared Hydra grids merge only for linear counter cells (#580 W7).
 #[test]
