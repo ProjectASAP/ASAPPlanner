@@ -57,7 +57,8 @@ use std::rc::Rc;
 
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
@@ -1098,8 +1099,12 @@ fn scan_extent_ms(dag: &PhysicalASAPDAG, id: PhysicalASAPNodeId, offset_ms: i64)
         .filter_map(|e| {
             let consumer = dag.nodes.iter().find(|n| n.id == e.consumer)?;
             match &consumer.payload {
-                Payload::NonASAP(NonASAPOp::TimeShift { shift }) => scan_extent_ms(dag, consumer.id, offset_ms.saturating_add(shift.offset_ms)),
-                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => Some((range.as_millis() as u64).saturating_add(offset_ms.max(0) as u64)),
+                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                    scan_extent_ms(dag, consumer.id, offset_ms.saturating_add(shift.offset_ms))
+                }
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                    Some((range.as_millis() as u64).saturating_add(offset_ms.max(0) as u64))
+                }
                 _ => None,
             }
         })
@@ -1118,11 +1123,7 @@ fn price(
     data: &DataWorkload,
     calibration: &Stage3Calibration,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let first = dag
-        .roots
-        .first()
-        .copied()
-        .unwrap_or(0);
+    let first = dag.roots.first().copied().unwrap_or(0);
     calibration.validate().map_err(|error| (first, error))?;
     let series = data
         .input_cardinality
@@ -2024,10 +2025,7 @@ mod tests {
     }
 
     fn is_scan(payload: &Payload) -> bool {
-        matches!(
-            payload,
-            Payload::NonASAP(NonASAPOp::Scan { .. })
-        )
+        matches!(payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
     }
 
     fn is_build(payload: &Payload) -> bool {
