@@ -11,9 +11,10 @@
 mod physical_common;
 mod planner_layering_common;
 
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use std::collections::BTreeSet;
 
-use asap_types::ir::export::{LogicalASAPNodeId, LogicalASAPOperatorPayload};
+use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::schema::{SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::workload::DataArrival;
 use planner_layering_common::*;
@@ -45,7 +46,7 @@ fn op(name: &str) -> String {
 fn windowed_builds(
     c: &Logical,
 ) -> Vec<(
-    LogicalASAPNodeId,
+    PhysicalASAPNodeId,
     SketchAlgorithm,
     WindowForm,
     BTreeSet<usize>,
@@ -108,9 +109,8 @@ fn stage0_a_lowers_each_query_to_its_interval() {
 fn stage0_a_one_summary_free_dag_without_sharing() {
     let run = run_a();
     let s0 = &run.stage0;
-    s0.dag.validate().expect("valid DAG");
     assert_eq!(s0.query_roots.len(), 5);
-    assert!(s0.dag.nodes.iter().all(|n| !is_summary(&n.payload)));
+    assert!(s0.dag.nodes.iter().all(|n| !is_summary(&n.operator)));
     assert!(cross_query_nodes(&s0.dag, &s0.query_roots).is_empty());
 }
 
@@ -197,11 +197,12 @@ fn stage1_a_window_composition_adds_one_eh_for_all_five() {
     assert_eq!(estimates.len(), 5, "one estimate per query");
     for (estimate, statistic) in estimates {
         assert_eq!(statistic, SketchStatistic::Quantile { q: 0.99 });
-        let merged = c
-            .dag
-            .producers(estimate)
-            .into_iter()
-            .any(|p| matches!(c.dag.payload(p), LogicalASAPOperatorPayload::SummaryMerge));
+        let merged = c.dag.producers(estimate).into_iter().any(|p| {
+            matches!(
+                c.dag.payload(p),
+                Operator::ASAP(ASAPOp::SummaryMerge { .. })
+            )
+        });
         assert!(
             merged,
             "{}: estimate {estimate:?} does not read a merge",
@@ -306,7 +307,12 @@ fn stage0_b_lowers_to_one_range_quantile() {
         stage0_operations(&roots[0]),
         [op("aggregate:quantile"), op("scan"), op("time_range")]
     );
-    assert!(run.stage0.dag.nodes.iter().all(|n| !is_summary(&n.payload)));
+    assert!(run
+        .stage0
+        .dag
+        .nodes
+        .iter()
+        .all(|n| !is_summary(&n.operator)));
 }
 
 /// Pass 1 offers an exact and a KLL candidate for the 5-min window.
@@ -390,10 +396,12 @@ fn stage1_b_merge_only_where_the_window_form_needs_it() {
     for c in &run.logical {
         for (build, _, form, _) in windowed_builds(c) {
             let merged = estimates_of(&c.dag, build).iter().any(|(e, _)| {
-                c.dag
-                    .producers(*e)
-                    .into_iter()
-                    .any(|p| matches!(c.dag.payload(p), LogicalASAPOperatorPayload::SummaryMerge))
+                c.dag.producers(*e).into_iter().any(|p| {
+                    matches!(
+                        c.dag.payload(p),
+                        Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                    )
+                })
             });
             assert_eq!(
                 merged,
@@ -456,25 +464,28 @@ fn stage1_b_window_composition_adds_tumbling_per_option() {
     assert_eq!(run.logical.len(), 5, "exact, 2 summaries x 2 window forms");
 }
 
-/// A tumbling candidate merges five 1-min panes, newest first, whose coverages tile the 5-min window relative to the evaluation, and estimates p99 from the merge.
+/// A tumbling candidate merges five 1-min panes, newest first, whose
+/// `TimeRange` over `TimeShift` windows tile the 5-min window relative to
+/// the evaluation, and estimates p99 from the merge.
 #[test]
 fn stage1_b_tumbling_merges_five_panes_before_the_estimate() {
-    use asap_types::ir::properties::summary_coverage::CoverageTime;
     let run = run_b();
     let mut tumbling = 0;
     for c in &run.logical {
-        let merges: Vec<_> = c
-            .dag
-            .nodes
-            .iter()
-            .filter(|n| matches!(n.payload, LogicalASAPOperatorPayload::SummaryMerge))
+        let merges: Vec<_> = (0..c.dag.nodes.len())
+            .filter(|&id| {
+                matches!(
+                    c.dag.payload(id),
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                )
+            })
             .collect();
         let [merge] = merges.as_slice() else {
             assert!(merges.is_empty(), "{}", c.id);
             continue;
         };
         tumbling += 1;
-        let panes = c.dag.producers(merge.id);
+        let panes = c.dag.producers(*merge);
         assert_eq!(panes.len(), 5, "{}", c.id);
         let mut covered: Vec<_> = panes
             .iter()
@@ -485,14 +496,27 @@ fn stage1_b_tumbling_merges_five_panes_before_the_estimate() {
                         length_ms: PATTERN_B_INTERVAL_MS
                     }
                 );
-                let node = c.dag.nodes.iter().find(|n| n.id == pane).unwrap();
-                match &node.coverage.as_ref().unwrap().regions[..] {
-                    [region] => match &region.time_ms {
-                        Some(CoverageTime::RelativeToEvaluation(range)) => range.clone(),
-                        other => panic!("{}: {other:?}", c.id),
-                    },
-                    other => panic!("{}: {other:?}", c.id),
-                }
+                // Pane window `(-(shift + range), -shift]`, as its coverage derives.
+                let [range] = c.dag.producers(pane)[..] else {
+                    panic!("{}: a pane reads one time range", c.id)
+                };
+                let Operator::NonASAP(NonASAPOp::TimeRange { range: width, .. }) =
+                    c.dag.payload(range)
+                else {
+                    panic!("{}: time range", c.id)
+                };
+                let shift = c
+                    .dag
+                    .producers(range)
+                    .into_iter()
+                    .find_map(|input| match c.dag.payload(input) {
+                        Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                            Some(shift.offset_ms)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                -(shift + width.as_millis() as i64)..-shift
             })
             .collect();
         covered.sort_by_key(|r| r.start);
@@ -504,18 +528,12 @@ fn stage1_b_tumbling_merges_five_panes_before_the_estimate() {
                 .map(|i| -(i + 1) * minute..-i * minute)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            merge.coverage.as_ref().unwrap().regions[0].time_ms,
-            Some(CoverageTime::RelativeToEvaluation(
-                -(PATTERN_B_WINDOW_MS as i64)..0
-            ))
-        );
         let estimates: Vec<_> = c
             .dag
-            .consumers(merge.id)
+            .consumers(*merge)
             .into_iter()
             .filter_map(|e| match c.dag.payload(e) {
-                LogicalASAPOperatorPayload::SummaryEstimate { query } => Some(query.clone()),
+                Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => Some(query.clone()),
                 _ => None,
             })
             .collect();
@@ -547,7 +565,7 @@ fn stage3_b_tumbling_candidates_are_valid() {
             .dag
             .nodes
             .iter()
-            .any(|n| matches!(n.payload, LogicalASAPOperatorPayload::SummaryMerge));
+            .any(|n| matches!(n.payload, Operator::ASAP(ASAPOp::SummaryMerge { .. })));
         if merged {
             tumbling += 1;
             assert!(
@@ -573,17 +591,16 @@ fn execute_b(p: &Physical) -> Vec<String> {
     use asap_executor::physical_planner::{compile, promql_rows::encode_series_identity};
     use asap_executor::runtime::Scope;
     use asap_executor::values::{Batch, Value};
-    use asap_types::ir::export::NonASAPOpKind;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
     let relational = |id| match p.dag.payload(id) {
-        LogicalASAPOperatorPayload::Relational { operator } => Some(operator),
+        Operator::NonASAP(operator) => Some(operator),
         _ => None,
     };
     let mut inputs = BTreeMap::new();
     for node in &p.dag.nodes {
-        let Some(NonASAPOpKind::TimeRange { range, .. }) = relational(node.id) else {
+        let Some(NonASAPOp::TimeRange { range, .. }) = relational(node.id) else {
             continue;
         };
         let offset = p
@@ -591,7 +608,7 @@ fn execute_b(p: &Physical) -> Vec<String> {
             .producers(node.id)
             .into_iter()
             .find_map(|input| match relational(input) {
-                Some(NonASAPOpKind::TimeShift { shift }) => Some(shift.offset_ms),
+                Some(NonASAPOp::TimeShift { shift, .. }) => Some(shift.offset_ms),
                 _ => None,
             })
             .unwrap_or(0);
@@ -621,7 +638,7 @@ fn execute_b(p: &Physical) -> Vec<String> {
             })
             .collect();
         inputs.insert(
-            u64::from(node.id.0),
+            node.id as u64,
             Batch::try_new(schema, rows).expect("input batch"),
         );
     }
@@ -629,7 +646,7 @@ fn execute_b(p: &Physical) -> Vec<String> {
         .iter()
         .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
         .collect();
-    let root = u64::from(p.dag.roots[0].0);
+    let root = p.dag.roots[0] as u64;
     let plan = compile(&p.dag, contracts, &[root]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
     let scope = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
@@ -688,10 +705,10 @@ fn runtime_b_tumbling_kll_matches_the_whole_window() {
             .find(|p| {
                 let nodes = || p.dag.nodes.iter().map(|n| &n.payload);
                 nodes().any(|n| {
-                    matches!(n, LogicalASAPOperatorPayload::SummaryAgg {
+                    matches!(n, Operator::ASAP(ASAPOp::SummaryAgg {
                         family: asap_types::ir::schema::FieldDataType::Sketch(kind, _), ..
-                    } if *kind.algorithm() == SketchAlgorithm::Kll)
-                }) && nodes().any(|n| matches!(n, LogicalASAPOperatorPayload::SummaryMerge))
+                    }) if *kind.algorithm() == SketchAlgorithm::Kll)
+                }) && nodes().any(|n| matches!(n, Operator::ASAP(ASAPOp::SummaryMerge { .. })))
                     == merged
             })
             .expect("KLL candidate")

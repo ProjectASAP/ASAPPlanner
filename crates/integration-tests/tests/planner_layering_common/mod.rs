@@ -10,17 +10,17 @@
 //! replaced. Tests that depend on them are `#[ignore]`d with the feature.
 #![allow(dead_code)]
 
+use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_physical_optimizer::implementation::physical_candidates::PhysicalCandidate;
 use asap_plan_selection::{plan_stages, PlanningModels, Selection};
-use asap_types::ir::export::{
-    compile_logical_asap_workload, LogicalASAPDAG, LogicalASAPNodeId, LogicalASAPOperatorPayload,
-    LogicalASAPQueryRoot, NonASAPOpKind, PhysicalASAPDAG,
-};
+use asap_types::ir::flat::{flatten, FlatDag};
+use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::QueryRoot;
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
@@ -28,6 +28,8 @@ use asap_types::workload::{
     QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
     RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection, TimestampMs,
 };
+
+pub type Payload = Operator<PhysicalASAPNodeId>;
 
 /// Every enumerated candidate is built and displayed; the largest example
 /// (Example 3, Pattern A) has 486 today.
@@ -234,17 +236,15 @@ pub fn lower_promql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 /// as `aggregate:<kind>`, for each node of one query's Stage 0 DAG, sorted
 /// (node ids are post-order; compare as a set of operations).
 pub fn stage0_operations(root: &QueryRoot) -> Vec<String> {
-    let dag = asap_types::ir::export::compile_logical_asap_query(root).expect("compiles");
-    let json = serde_json::to_value(&dag).expect("serializes");
-    let mut ops: Vec<String> = json["nodes"]
-        .as_array()
-        .unwrap()
+    let dag = flatten(std::slice::from_ref(root)).0;
+    let mut ops: Vec<String> = dag
+        .nodes
         .iter()
         .map(|n| {
-            let op = &n["payload"]["operator"];
-            match op["measures"][0]["kind"].as_str() {
+            let json = serde_json::to_value(&n.operator).expect("serializes");
+            match json["NonASAP"]["Aggregate"]["measures"][0]["kind"].as_str() {
                 Some(measure) => format!("aggregate:{measure}"),
-                None => op["kind"].as_str().unwrap_or("?").to_owned(),
+                None => relational(&n.operator).unwrap_or_else(|| "?".into()),
             }
         })
         .collect();
@@ -261,8 +261,8 @@ pub struct Logical {
     pub id: String,
     /// From Pass 2's identical-expression variant.
     pub shared_input: bool,
-    pub dag: LogicalASAPDAG,
-    pub query_roots: Vec<LogicalASAPNodeId>,
+    pub dag: FlatDag,
+    pub query_roots: Vec<PhysicalASAPNodeId>,
 }
 
 /// One Stage 2 candidate, derived from the Stage 1 candidate `from_logical`.
@@ -271,7 +271,7 @@ pub struct Physical {
     pub id: String,
     pub from_logical: String,
     pub dag: PhysicalASAPDAG,
-    pub query_roots: Vec<LogicalASAPNodeId>,
+    pub query_roots: Vec<PhysicalASAPNodeId>,
     pub stage2: PhysicalCandidate,
 }
 
@@ -308,14 +308,17 @@ impl Run {
     }
 }
 
-fn export(roots: &[QueryRoot]) -> (LogicalASAPDAG, Vec<LogicalASAPNodeId>) {
-    let dag = compile_logical_asap_workload(roots).expect("logical export");
+fn export(roots: &[QueryRoot]) -> (FlatDag, Vec<PhysicalASAPNodeId>) {
+    for root in roots {
+        root.validate_structure().expect("valid DAG");
+    }
+    let dag = flatten(roots).0;
     let query_roots = dag
         .roots
         .iter()
         .map(|root| match root {
-            LogicalASAPQueryRoot::Operator(id) => *id,
-            LogicalASAPQueryRoot::Scalar(_) => panic!("Examples 2–4 have operator roots"),
+            QueryRoot::Operator(id) => *id,
+            QueryRoot::Scalar(_) => panic!("Examples 2–4 have operator roots"),
         })
         .collect();
     (dag, query_roots)
@@ -386,45 +389,61 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
 
 // ── DAG helpers ──────────────────────────────────────────────────────────
 
-/// The logical and physical exports share node ids, payloads and edge
-/// endpoints; the helpers below read only those.
+/// The logical (flat) and physical DAGs share node ids and payloads; the
+/// helpers below read only those and each node's producers and consumers.
 pub trait ExportedDag {
-    fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId>;
-    fn consumers(&self, producer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId>;
-    fn node_ids(&self) -> Vec<LogicalASAPNodeId>;
-    fn payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload;
+    fn producers(&self, consumer: PhysicalASAPNodeId) -> Vec<PhysicalASAPNodeId>;
+    fn consumers(&self, producer: PhysicalASAPNodeId) -> Vec<PhysicalASAPNodeId>;
+    fn node_ids(&self) -> Vec<PhysicalASAPNodeId>;
+    fn payload(&self, id: PhysicalASAPNodeId) -> &Payload;
 }
 
-macro_rules! exported_dag {
-    ($t:ty) => {
-        impl ExportedDag for $t {
-            fn producers(&self, consumer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId> {
-                let edges = self.edges.iter().filter(|e| e.consumer == consumer);
-                edges.map(|e| e.producer).collect()
-            }
-            fn consumers(&self, producer: LogicalASAPNodeId) -> Vec<LogicalASAPNodeId> {
-                let edges = self.edges.iter().filter(|e| e.producer == producer);
-                edges.map(|e| e.consumer).collect()
-            }
-            fn node_ids(&self) -> Vec<LogicalASAPNodeId> {
-                self.nodes.iter().map(|n| n.id).collect()
-            }
-            fn payload(&self, id: LogicalASAPNodeId) -> &LogicalASAPOperatorPayload {
-                &self
-                    .nodes
-                    .iter()
-                    .find(|n| n.id == id)
-                    .expect("node")
-                    .payload
-            }
-        }
-    };
+impl ExportedDag for FlatDag {
+    fn producers(&self, consumer: PhysicalASAPNodeId) -> Vec<PhysicalASAPNodeId> {
+        self.nodes[consumer]
+            .operator
+            .children()
+            .into_iter()
+            .copied()
+            .collect()
+    }
+    fn consumers(&self, producer: PhysicalASAPNodeId) -> Vec<PhysicalASAPNodeId> {
+        (0..self.nodes.len())
+            .filter(|&id| self.producers(id).contains(&producer))
+            .collect()
+    }
+    fn node_ids(&self) -> Vec<PhysicalASAPNodeId> {
+        (0..self.nodes.len()).collect()
+    }
+    fn payload(&self, id: PhysicalASAPNodeId) -> &Payload {
+        &self.nodes[id].operator
+    }
 }
-exported_dag!(LogicalASAPDAG);
-exported_dag!(PhysicalASAPDAG);
+
+impl ExportedDag for PhysicalASAPDAG {
+    fn producers(&self, consumer: PhysicalASAPNodeId) -> Vec<PhysicalASAPNodeId> {
+        let edges = self.edges.iter().filter(|e| e.consumer == consumer);
+        edges.map(|e| e.producer).collect()
+    }
+    fn consumers(&self, producer: PhysicalASAPNodeId) -> Vec<PhysicalASAPNodeId> {
+        let edges = self.edges.iter().filter(|e| e.producer == producer);
+        edges.map(|e| e.consumer).collect()
+    }
+    fn node_ids(&self) -> Vec<PhysicalASAPNodeId> {
+        self.nodes.iter().map(|n| n.id).collect()
+    }
+    fn payload(&self, id: PhysicalASAPNodeId) -> &Payload {
+        &self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("node")
+            .payload
+    }
+}
 
 /// Every node `root` depends on, including itself.
-pub fn closure(dag: &impl ExportedDag, root: LogicalASAPNodeId) -> HashSet<LogicalASAPNodeId> {
+pub fn closure(dag: &impl ExportedDag, root: PhysicalASAPNodeId) -> HashSet<PhysicalASAPNodeId> {
     let mut seen = HashSet::from([root]);
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -440,8 +459,8 @@ pub fn closure(dag: &impl ExportedDag, root: LogicalASAPNodeId) -> HashSet<Logic
 /// The queries (indexes into `query_roots`) whose result depends on `node`.
 pub fn readers(
     dag: &impl ExportedDag,
-    query_roots: &[LogicalASAPNodeId],
-    node: LogicalASAPNodeId,
+    query_roots: &[PhysicalASAPNodeId],
+    node: PhysicalASAPNodeId,
 ) -> BTreeSet<usize> {
     query_roots
         .iter()
@@ -451,25 +470,31 @@ pub fn readers(
         .collect()
 }
 
-/// The relational operator's wire `kind` (`"scan"`, `"time_range"`, …).
-pub fn relational(payload: &LogicalASAPOperatorPayload) -> Option<String> {
+/// The non-ASAP operator's kind in snake case (`"scan"`, `"time_range"`, …).
+pub fn relational(payload: &Payload) -> Option<String> {
     match payload {
-        LogicalASAPOperatorPayload::Relational { .. } => {
-            let json = serde_json::to_value(payload).expect("payload serializes");
-            json["operator"]["kind"].as_str().map(str::to_owned)
+        Operator::NonASAP(_) => {
+            let mut out = String::new();
+            for (i, c) in payload.kind_name().chars().enumerate() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_lowercase());
+            }
+            Some(out)
         }
-        _ => None,
+        Operator::ASAP(_) => None,
     }
 }
 
-pub fn is_summary(payload: &LogicalASAPOperatorPayload) -> bool {
+pub fn is_summary(payload: &Payload) -> bool {
     matches!(
         payload,
-        LogicalASAPOperatorPayload::SummaryAgg {
+        Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(..),
             ..
-        } | LogicalASAPOperatorPayload::SummaryEstimate { .. }
-            | LogicalASAPOperatorPayload::SummaryMerge
+        }) | Operator::ASAP(ASAPOp::SummaryEstimate { .. })
+            | Operator::ASAP(ASAPOp::SummaryMerge { .. })
     )
 }
 
@@ -477,14 +502,14 @@ pub fn is_summary(payload: &LogicalASAPOperatorPayload) -> bool {
 /// with their algorithm and parameters.
 pub fn sketch_builds(
     dag: &impl ExportedDag,
-) -> Vec<(LogicalASAPNodeId, SketchAlgorithm, SketchParams)> {
+) -> Vec<(PhysicalASAPNodeId, SketchAlgorithm, SketchParams)> {
     dag.node_ids()
         .into_iter()
         .filter_map(|id| match dag.payload(id) {
-            LogicalASAPOperatorPayload::SummaryAgg {
+            Operator::ASAP(ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(kind, _),
                 ..
-            } => Some((id, kind.algorithm().clone(), kind.params().clone())),
+            }) => Some((id, kind.algorithm().clone(), kind.params().clone())),
             _ => None,
         })
         .collect()
@@ -493,8 +518,8 @@ pub fn sketch_builds(
 /// The estimation nodes that read `build`, directly or through merges.
 pub fn estimates_of(
     dag: &impl ExportedDag,
-    build: LogicalASAPNodeId,
-) -> Vec<(LogicalASAPNodeId, SketchStatistic)> {
+    build: PhysicalASAPNodeId,
+) -> Vec<(PhysicalASAPNodeId, SketchStatistic)> {
     let mut out = Vec::new();
     let mut stack = vec![build];
     let mut seen = HashSet::new();
@@ -504,10 +529,10 @@ pub fn estimates_of(
                 continue;
             }
             match dag.payload(consumer) {
-                LogicalASAPOperatorPayload::SummaryEstimate { query } => {
+                Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
                     out.push((consumer, query.clone()))
                 }
-                LogicalASAPOperatorPayload::SummaryMerge => stack.push(consumer),
+                Operator::ASAP(ASAPOp::SummaryMerge { .. }) => stack.push(consumer),
                 _ => {}
             }
         }
@@ -519,7 +544,7 @@ pub fn estimates_of(
 /// closure, or `"exact"` when it builds none.
 pub fn query_option(
     dag: &impl ExportedDag,
-    query_roots: &[LogicalASAPNodeId],
+    query_roots: &[PhysicalASAPNodeId],
     query: usize,
 ) -> String {
     let reach = closure(dag, query_roots[query]);
@@ -539,8 +564,8 @@ pub fn query_option(
 /// Nodes reachable from more than one query root.
 pub fn cross_query_nodes(
     dag: &impl ExportedDag,
-    query_roots: &[LogicalASAPNodeId],
-) -> BTreeSet<LogicalASAPNodeId> {
+    query_roots: &[PhysicalASAPNodeId],
+) -> BTreeSet<PhysicalASAPNodeId> {
     dag.node_ids()
         .into_iter()
         .filter(|&id| readers(dag, query_roots, id).len() > 1)
@@ -551,7 +576,16 @@ pub fn assert_valid_and_uniquely_named(run: &Run) {
     let ids: BTreeSet<_> = run.logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids.len(), run.logical.len(), "unique logical ids");
     for c in &run.logical {
-        c.dag.validate().unwrap_or_else(|e| panic!("{}: {e}", c.id));
+        for (id, node) in c.dag.nodes.iter().enumerate() {
+            assert!(
+                node.operator
+                    .children()
+                    .into_iter()
+                    .all(|child| *child < id),
+                "{}: children come before their parents",
+                c.id
+            );
+        }
     }
 }
 
@@ -659,11 +693,11 @@ pub enum WindowForm {
 /// `TimeShift(i·w)` over the scan); any other build is rebuilt from its
 /// query window. Sliding windows and Exponential Histograms are not planned
 /// yet.
-pub fn window_form(dag: &impl ExportedDag, build: LogicalASAPNodeId) -> WindowForm {
+pub fn window_form(dag: &impl ExportedDag, build: PhysicalASAPNodeId) -> WindowForm {
     let merged = dag
         .consumers(build)
         .into_iter()
-        .any(|c| matches!(dag.payload(c), LogicalASAPOperatorPayload::SummaryMerge));
+        .any(|c| matches!(dag.payload(c), Operator::ASAP(ASAPOp::SummaryMerge { .. })));
     if !merged {
         return WindowForm::None;
     }
@@ -671,9 +705,7 @@ pub fn window_form(dag: &impl ExportedDag, build: LogicalASAPNodeId) -> WindowFo
         .producers(build)
         .into_iter()
         .filter_map(|input| match dag.payload(input) {
-            LogicalASAPOperatorPayload::Relational {
-                operator: NonASAPOpKind::TimeRange { range, .. },
-            } => Some(range.as_millis() as u64),
+            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => Some(range.as_millis() as u64),
             _ => None,
         })
         .collect();
@@ -699,7 +731,7 @@ pub enum Materialization {
 
 /// Pending (needs Stage 2 materialization): the export records only the
 /// execution timing, so a query-time node is never kept.
-pub fn materialization(p: &Physical, node: LogicalASAPNodeId) -> Materialization {
+pub fn materialization(p: &Physical, node: PhysicalASAPNodeId) -> Materialization {
     let n = p.dag.nodes.iter().find(|n| n.id == node).expect("node");
     match n.output_state.timing {
         ExecutionTiming::IngestionTime => Materialization::IngestionTime,
@@ -709,11 +741,11 @@ pub fn materialization(p: &Physical, node: LogicalASAPNodeId) -> Materialization
 
 /// Pending (needs Stage 2 materialization): how long a materialized node's
 /// output is kept, in event time. `None` until Stage 2 records retention.
-pub fn retention_ms(_p: &Physical, _node: LogicalASAPNodeId) -> Option<u64> {
+pub fn retention_ms(_p: &Physical, _node: PhysicalASAPNodeId) -> Option<u64> {
     None
 }
 
-pub fn runs_at_ingestion(p: &Physical, node: LogicalASAPNodeId) -> bool {
+pub fn runs_at_ingestion(p: &Physical, node: PhysicalASAPNodeId) -> bool {
     materialization(p, node) == Materialization::IngestionTime
 }
 
