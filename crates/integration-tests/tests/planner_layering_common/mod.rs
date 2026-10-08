@@ -17,7 +17,7 @@ use asap_physical_optimizer::implementation::physical_candidates::PhysicalCandid
 #[path = "../executor_models/mod.rs"]
 mod executor_models;
 
-use asap_plan_selection::{plan_stages, PlanningModels, Selection};
+use asap_plan_selection::{plan_stages, Selection};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
