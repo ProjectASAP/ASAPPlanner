@@ -25,6 +25,85 @@ function stageRootNodeId(root) {
   return null;
 }
 
+// The planner writes operators as `{"NonASAP": {"Scan": {...}}}` or
+// `{"ASAP": {"SummaryAgg": {...}}}`, children as node ids inside the
+// operator, and logical stages as flat DAGs (node `i` is `nodes[i]`, no
+// edge list). The viewer reads `{kind, ...}` payloads and explicit edges;
+// these functions convert, and leave documents already in that shape alone.
+const STAGE_CHILD_FIELDS = ['child', 'children', 'left', 'right', 'summary_input', 'outer', 'inner'];
+const STAGE_RENAMED_KIND = { Join: 'join_kind', SetOp: 'set_kind', TimeRange: 'range_kind', PromqlSeriesSample: 'sample_kind' };
+
+function stageSnake(name) {
+  if (name === 'SQLWindowFunc') return 'sql_window_func';
+  return name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+}
+
+function stageOperatorParts(operator) {
+  const [category, inner] = Object.entries(operator)[0];
+  const [variant, fields] = typeof inner === 'string' ? [inner, {}] : Object.entries(inner)[0];
+  const body = fields && typeof fields === 'object' && !Array.isArray(fields) ? { ...fields } : { value: fields };
+  return [category, variant, body];
+}
+
+function stagePayloadOf(operator) {
+  if (!operator || typeof operator !== 'object' || typeof operator.kind === 'string') return operator;
+  const [category, variant, body] = stageOperatorParts(operator);
+  if ('kind' in body) { body[STAGE_RENAMED_KIND[variant] || 'variant_kind'] = body.kind; delete body.kind; }
+  return category === 'NonASAP'
+    ? { kind: 'relational', operator: { kind: stageSnake(variant), ...body } }
+    : { kind: stageSnake(variant), ...body };
+}
+
+// Node ids an operator reads: its inputs, then scalar-subquery references.
+function stageOperatorChildren(operator) {
+  const [, , body] = stageOperatorParts(operator);
+  const ids = [];
+  STAGE_CHILD_FIELDS.forEach((field) => {
+    const value = body[field];
+    if (typeof value === 'number') ids.push(value);
+    else if (Array.isArray(value)) value.forEach((id) => { if (typeof id === 'number') ids.push(id); });
+  });
+  const walk = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (typeof value.ScalarSubquery === 'number') ids.push(value.ScalarSubquery);
+    Object.values(value).forEach(walk);
+  };
+  Object.entries(body).forEach(([key, value]) => { if (!STAGE_CHILD_FIELDS.includes(key)) walk(value); });
+  return ids;
+}
+
+function normalizeStageDag(dag) {
+  if (!dag || !Array.isArray(dag.nodes)) return dag;
+  if (dag.nodes.every((node) => node && node.operator && !node.payload)) {
+    const edges = [];
+    const nodes = dag.nodes.map((node, id) => {
+      stageOperatorChildren(node.operator).forEach((producer) => edges.push({ producer, consumer: id }));
+      return {
+        id,
+        payload: stagePayloadOf(node.operator),
+        result_kind: node.result_kind,
+        output_schema: node.schema,
+        guarantee: node.guarantee,
+        timing: node.timing,
+      };
+    });
+    return { ...dag, nodes, edges };
+  }
+  return { ...dag, nodes: dag.nodes.map((node) => (node && node.payload ? { ...node, payload: stagePayloadOf(node.payload) } : node)) };
+}
+
+function normalizeStagePipeline(doc) {
+  if (!isStagePipelineDocument(doc)) return doc;
+  const candidates = (stage) => (stage && Array.isArray(stage.candidates)
+    ? { ...stage, candidates: stage.candidates.map((c) => (c ? { ...c, dag: normalizeStageDag(c.dag) } : c)) }
+    : stage);
+  const out = { ...doc };
+  if (doc.stage0_logical) out.stage0_logical = { ...doc.stage0_logical, dag: normalizeStageDag(doc.stage0_logical.dag) };
+  if (doc.stage1_logical_asap !== undefined) out.stage1_logical_asap = candidates(doc.stage1_logical_asap);
+  if (doc.stage2_physical_asap !== undefined) out.stage2_physical_asap = candidates(doc.stage2_physical_asap);
+  return out;
+}
+
 function validateStageDag(dag, where, physical, queryCount) {
   const errors = [];
   if (!dag || typeof dag !== 'object') return [`${where}: dag is missing`];

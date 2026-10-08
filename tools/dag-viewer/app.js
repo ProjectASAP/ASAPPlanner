@@ -135,6 +135,7 @@
 
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
+    data = normalizeStagePipeline(data);
     const errors = validateStagePipeline(data);
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));
     doc = data;

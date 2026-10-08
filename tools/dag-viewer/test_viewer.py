@@ -75,6 +75,20 @@ class StagePipelineTests(unittest.TestCase):
         """The committed sample passes the viewer's own shape validation."""
         self.assertEqual(self.validate(self.doc), [])
 
+    def test_planner_document_is_valid_after_normalizing(self):
+        """`stage_pipeline` writes operators as `{"NonASAP": {"Scan": ...}}`
+        and logical stages as flat DAGs; normalized, they validate, and a
+        flat DAG gets one edge per operator input."""
+        doc = json.loads((HERE / "examples" / "planner-layering-example1.json").read_text())
+        normalized = self.js.call("normalizeStagePipeline", doc)
+        self.assertEqual(self.validate(normalized), [])
+        stage0 = normalized["stage0_logical"]["dag"]
+        self.assertEqual(stage0["nodes"][0]["payload"]["kind"], "relational")
+        self.assertEqual(stage0["nodes"][0]["payload"]["operator"]["kind"], "scan")
+        self.assertTrue(stage0["edges"])
+        self.assertTrue(all(e["producer"] < e["consumer"] for e in stage0["edges"]))
+        self.assertEqual(self.js.call("normalizeStagePipeline", self.doc), self.doc)
+
     def test_partial_documents_are_valid(self):
         """A run that stopped after Stage 1 or Stage 2 still loads."""
         through_stage1 = self.copy()
