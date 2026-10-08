@@ -133,19 +133,13 @@ fn scalar_root_producers_are_discovered_once() {
     let candidates = enumerate_local_logical_candidates(roots).unwrap();
     assert_eq!(candidates.roots.len(), 2);
     for (_, root) in &candidates.roots {
-        asap_types::ir::export::compile_logical_asap_query(root)
-            .unwrap()
-            .validate()
-            .unwrap();
+        root.validate_structure().unwrap();
     }
     assert_eq!(candidates.targets.len(), 1);
     assert!(Rc::ptr_eq(&candidates.targets[0].target, &producer));
     assert!(producer.timing.is_none());
     assert!(producer.guarantee.is_none());
-    asap_types::ir::export::compile_logical_asap_dag(&producer)
-        .unwrap()
-        .validate()
-        .unwrap();
+    producer.validate_structure().unwrap();
 }
 
 /// Example 1 rate lowering reaches the exact accumulator choice without a cost model.
