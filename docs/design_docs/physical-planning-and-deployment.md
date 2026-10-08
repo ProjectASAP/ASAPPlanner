@@ -122,7 +122,7 @@ a complete summary computation: the same four fields can summarize different
 value expressions or produce different states. The semantic information a summary
 depends on, and where the IR records each part (field type, producing operator,
 or coverage), is specified in
-[Schema and physical data for ASAP primitives](proposals/asap-primitive-schema.md#23-consideration-3-the-metadata-preserves-summary-semantics).
+[Schema and physical data for ASAP primitives](proposals/asap-primitive-schema.md#4-proposed-node-field-design).
 
 The canonical selected computation is authoritative. Those categories describe
 what must be preserved, not a new flat IR or a second expression language.

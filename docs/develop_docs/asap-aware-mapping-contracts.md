@@ -328,7 +328,7 @@ backend inspection. Automatic selection skips those unproven ratios. Use
 A summary's identity has four levels: family (`FieldDataType` variant), sketch
 category (`SketchCategory`), algorithm (`SketchAlgorithm`), and the validated
 committed choice (`SketchKind`). The levels and their validation are specified in
-[Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#22-consideration-2-a-field-can-have-an-asap-primitive-type).
+[Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#3-proposed-schema-design).
 
 Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
 

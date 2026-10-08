@@ -20,7 +20,7 @@ The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of import
 `Schema` holds `Field` metadata (name, type, nullability, qualifier) and no
 values; an unresolved `ColumnRef` resolves to a positional `ColumnId` within one
 schema. The design, including how the same position selects a runtime value, is
-in [Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#21-consideration-1-the-schema-is-the-edge-between-two-nodes).
+in [Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#3-proposed-schema-design).
 
 ## Node index
 
