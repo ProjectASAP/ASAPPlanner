@@ -359,7 +359,7 @@ pub fn share_window_segments<Id: Clone>(
         let end = windows.iter().map(|w| bounds(w).1).max().unwrap_or(0);
         if width == 0
             || (end - start) / width > MAX_PANES
-            || !windows.iter().all(|w| panes_cover_window(w, width))
+            || !windows.iter().all(|w| panes_tile_window(w, width))
         {
             continue;
         }
