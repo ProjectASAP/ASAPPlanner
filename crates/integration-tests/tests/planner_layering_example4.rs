@@ -100,7 +100,7 @@ fn eh_options(run: &Run) -> BTreeMap<Materialization, (String, PhysicalASAPNodeI
 
 /// The physical candidates of the shared-segment candidate (Q60), keyed by
 /// the materialization of its segments, with the newest segment's id.
-fn segment_options(run: &Run) -> BTreeMap<Materialization, (String, LogicalASAPNodeId)> {
+fn segment_options(run: &Run) -> BTreeMap<Materialization, (String, PhysicalASAPNodeId)> {
     let logical = run
         .logical
         .iter()
@@ -224,7 +224,7 @@ fn stage2_a_segments_are_built_once_for_all_consumers() {
                 .dag
                 .nodes
                 .iter()
-                .filter(|n| matches!(n.payload, LogicalASAPOperatorPayload::SummaryMerge))
+                .filter(|n| matches!(n.payload, Operator::ASAP(ASAPOp::SummaryMerge { .. })))
                 .count();
             assert_eq!(merges, 5, "{id}");
             if let Some(cost) = run.selection.costs.get(id) {
