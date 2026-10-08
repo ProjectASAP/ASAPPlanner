@@ -9,13 +9,14 @@ use asap_executor::{
     physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::{
-    LogicalASAPNodeId, PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
-};
 use planner_types::ir::operator::{GroupKeys, Reduction};
+use planner_types::ir::physical_export::{
+    PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
+};
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::*;
+use planner_types::ir::ASAPOp;
 use std::{collections::BTreeMap, sync::Arc};
 
 const WIDTH: u32 = 64;
@@ -68,14 +69,13 @@ fn schema(fields: Vec<Field<FieldDataType>>) -> Schema {
     }
 }
 
-fn node(id: u32, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
+fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
     PhysicalASAPDAGNode {
-        id: LogicalASAPNodeId(id),
+        id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: output,
         guarantee: None,
-        coverage: None,
     }
 }
 
@@ -108,13 +108,14 @@ fn batch(rows: &[(&str, &str, f64)]) -> Batch {
 fn summary_agg(update: SummaryUpdate) -> PhysicalASAPDAGNode {
     node(
         1,
-        Payload::SummaryAgg {
+        Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
             family: family(),
             input: update,
             reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
             grouping: grouping(),
             filter: None,
-        },
+        }),
         schema(vec![
             Field::plain("job", DataType::Utf8, false),
             Field {
@@ -127,10 +128,13 @@ fn summary_agg(update: SummaryUpdate) -> PhysicalASAPDAGNode {
     )
 }
 
-fn estimate(id: u32, query: SketchStatistic, dtype: DataType) -> PhysicalASAPDAGNode {
+fn estimate(id: usize, query: SketchStatistic, dtype: DataType) -> PhysicalASAPDAGNode {
     node(
         id,
-        Payload::SummaryEstimate { query },
+        Payload::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: 1,
+            query,
+        }),
         schema(vec![
             Field::plain("job", DataType::Utf8, false),
             Field::plain("value", dtype, false),
@@ -168,7 +172,11 @@ fn run(
         let union = Operator::union(state.clone(), states.len()).unwrap();
         operators.insert(200, (states, union));
         let merge = compile_node(
-            &node(2, Payload::SummaryMerge, (*state).clone()),
+            &node(
+                2,
+                Payload::ASAP(ASAPOp::SummaryMerge { children: vec![1] }),
+                (*state).clone(),
+            ),
             std::slice::from_ref(&state),
         )
         .unwrap();
