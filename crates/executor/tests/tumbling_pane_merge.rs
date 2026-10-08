@@ -12,10 +12,9 @@ use asap_logical_optimizer::search_workload;
 use asap_plan_selection::candidate_selection::global_selection;
 use asap_plan_selection::cost::cost_model::DefaultCostModel;
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::export::PhysicalASAPDAG;
 use planner_types::ir::operator::operator_properties::TimeShift;
 use planner_types::ir::physical_export::compile_physical_asap_dag_with_node_ids;
-use planner_types::ir::properties::summary_coverage::{CoverageRegion, SummaryCoverage};
+use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::ir::{properties::ExecutionTiming, ASAPOp, NonASAPOp, Operator, OperatorNode};
 use planner_types::types::AccuracyTarget;
 use planner_types::workload::*;
@@ -64,8 +63,8 @@ fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 
 /// Rewrite the root's per-entity `SummaryAgg` over `TimeRange(5m)` into the
 /// shape #580 emits: pane `i` is `TimeRange(1m)` over `TimeShift(i·1m)` over
-/// the same `Scan`, and a `SummaryMerge` combines the panes. Coverage regions
-/// are absolute, ending at the evaluation time.
+/// the same `Scan`, and a `SummaryMerge` combines the panes. Each pane's
+/// coverage is derived from its `TimeRange` over `TimeShift`.
 fn tumbling_panes(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     let [agg] = root.operator.children()[..] else {
         panic!("expected one summary input");
@@ -74,7 +73,6 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     else {
         panic!("expected a raw time range under the summary");
     };
-    let source = agg.coverage.as_ref().unwrap().source.clone();
     let panes = (0..PANES)
         .map(|i| {
             let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
@@ -91,19 +89,10 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
                 child: shifted,
             }))
             .unwrap();
-            let end = EVALUATION_MS - i * PANE_MS;
             Rc::new(
-                agg.map_children(|_| range.clone())
+                agg.with_new_children(|_| range.clone())
                     .unwrap()
-                    .with_guarantee(agg.guarantee.clone())
-                    .with_coverage(SummaryCoverage {
-                        source: source.clone(),
-                        regions: vec![CoverageRegion {
-                            time_ms: Some((end - PANE_MS..end).into()),
-                            population: BTreeMap::new(),
-                        }],
-                    })
-                    .unwrap(),
+                    .with_guarantee(agg.guarantee.clone()),
             )
         })
         .collect();
@@ -111,7 +100,7 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children: panes })).unwrap();
     let merged = Rc::new((*merged).clone().with_guarantee(agg.guarantee.clone()));
     let root = Rc::new(
-        root.map_children(|_| merged.clone())
+        root.with_new_children(|_| merged.clone())
             .unwrap()
             .with_guarantee(root.guarantee.clone()),
     );
@@ -165,10 +154,10 @@ fn export(root: &Rc<OperatorNode>) -> Exported {
         let logical = compiled.node_ids.operator_node(node.id).unwrap();
         match &logical.operator {
             Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
-                ranges.push((u64::from(node.id.0), pane(logical)))
+                ranges.push((node.id as u64, pane(logical)))
             }
             Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
-                builds.push((u64::from(node.id.0), pane(child)))
+                builds.push((node.id as u64, pane(child)))
             }
             _ => {}
         }
@@ -184,7 +173,7 @@ fn schema_of(dag: &PhysicalASAPDAG, id: u64) -> Arc<planner_types::ir::schema::S
     Arc::new(
         dag.nodes
             .iter()
-            .find(|node| u64::from(node.id.0) == id)
+            .find(|node| node.id as u64 == id)
             .unwrap()
             .output_schema
             .clone(),
@@ -279,12 +268,7 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
         .iter()
         .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
         .collect();
-    let plan = compile(
-        &exported.dag,
-        contracts,
-        &[u64::from(exported.dag.roots[0].0)],
-    )
-    .unwrap();
+    let plan = compile(&exported.dag, contracts, &[exported.dag.roots[0] as u64]).unwrap();
     run(&plan, inputs, query_scope())
 }
 
@@ -328,7 +312,7 @@ fn execute_retained(root: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
             .iter()
             .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
             .collect(),
-        &[u64::from(exported.dag.roots[0].0)],
+        &[exported.dag.roots[0] as u64],
     )
     .unwrap();
     run(&plan, retained, query_scope())
