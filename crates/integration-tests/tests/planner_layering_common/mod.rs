@@ -790,7 +790,12 @@ pub fn retention_ms(p: &Physical, node: PhysicalASAPNodeId) -> Option<u64> {
             .dag
             .consumers(node)
             .into_iter()
-            .filter(|&c| matches!(p.dag.payload(c), Operator::ASAP(ASAPOp::SummaryMerge { .. })))
+            .filter(|&c| {
+                matches!(
+                    p.dag.payload(c),
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                )
+            })
             .map(|merge| p.dag.producers(merge).len() as u64 * window(node))
             .max();
     }
