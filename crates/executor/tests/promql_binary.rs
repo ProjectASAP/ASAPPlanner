@@ -394,6 +394,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                                 },
                             ),
                         },
+                        kept: false,
                         output_state: if id < 2 {
                             ExecutionDataState::INGESTION_SUMMARY
                         } else {
