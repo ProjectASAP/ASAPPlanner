@@ -64,7 +64,8 @@ use std::rc::Rc;
 
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload};
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
@@ -1538,11 +1539,7 @@ fn price_nodes(
     calibration: &Stage3Calibration,
     raw_bytes_per_sample: Option<u64>,
 ) -> Result<Priced, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let first = dag
-        .roots
-        .first()
-        .copied()
-        .unwrap_or(0);
+    let first = dag.roots.first().copied().unwrap_or(0);
     calibration.validate().map_err(|error| (first, error))?;
     let series = data
         .input_cardinality
@@ -1607,23 +1604,26 @@ fn price_nodes(
             }
         };
         let groups = |reduction: &Reduction| bounded_groups(reduction, input.rows);
-        let (out, estimate, detail) = match &node.payload {
-            Payload::NonASAP(operator) => match operator {
-                NonASAPOp::Scan { .. } => {
-                    // At ingestion time, one second of arriving rows; at
-                    // query time, as far back as the ranges reading it reach.
-                    let span_ms = match ingestion {
-                        true => 1_000,
-                        false => scan_extent_ms(dag, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS),
-                    };
-                    let out = edge(scan_rows(rows_per_ms, span_ms));
-                    let estimate = estimate_operator(
-                        PhysicalOperator::Scan,
-                        OperatorStatistics::Scan {
-                            edges: UnaryEdgeStatistics {
-                                input: out,
-                                output: out,
-                                promql: None,
+        let (out, estimate, detail) =
+            match &node.payload {
+                Payload::NonASAP(operator) => match operator {
+                    NonASAPOp::Scan { .. } => {
+                        // At ingestion time, one second of arriving rows; at
+                        // query time, as far back as the ranges reading it reach.
+                        let span_ms = match ingestion {
+                            true => 1_000,
+                            false => scan_extent_ms(dag, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS),
+                        };
+                        let out = edge(scan_rows(rows_per_ms, span_ms));
+                        let estimate = estimate_operator(
+                            PhysicalOperator::Scan,
+                            OperatorStatistics::Scan {
+                                edges: UnaryEdgeStatistics {
+                                    input: out,
+                                    output: out,
+                                    promql: None,
+                                },
+                                source_read_bytes: out.bytes,
                             },
                         );
                         (out, estimate, format!("scan {} samples", out.rows))
@@ -1910,10 +1910,7 @@ fn raw_retention(
         .iter()
         .filter(|n| {
             n.output_state.timing.is_query_time()
-                && matches!(
-                    n.payload,
-                    Payload::NonASAP(NonASAPOp::Scan { .. })
-                )
+                && matches!(n.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
         })
         .map(|n| {
             let span_ms = scan_extent_ms(dag, n.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS);
@@ -3105,7 +3102,8 @@ mod tests {
         let (p, _) = maintained_panes(&run);
         let p = p.clone();
         // data(): 10 000 series; the newest pane keeps itself and 5 others.
-        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &node_of(&p.dag, is_build).payload else {
+        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &node_of(&p.dag, is_build).payload
+        else {
             unreachable!()
         };
         let retained = 6 * 10_000 * summary_shape(family).1;
