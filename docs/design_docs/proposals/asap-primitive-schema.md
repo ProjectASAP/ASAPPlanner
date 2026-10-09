@@ -93,7 +93,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; the readouts are `SketchStatistic` ([§6.5](#65-update-input-and-readouts-post_asapsketchrs-post_asapmaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; exact accumulators come from `exact_realization` there (`Count`) and from `function_rules.rs` (the others); the readouts are `SketchStatistic` ([§6.5](#65-update-input-and-readouts-post_asapsketchrs-post_asapmaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint panes combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -113,7 +113,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | Why not put it in the schema? | States worth merging cover different data but must have the same schema | below |
 | What is it based on? | Goldstein & Larson view matching (SIGMOD 2001), explained with an example | §4.1 |
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
-| How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.2.2 |
+| How is it computed? | by the planner, from the sub-DAG the node covers, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; cached per node | §4.2.3 |
 | What uses it? | merge (in #646); rollup, slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.1, §6.6 |
@@ -127,7 +127,7 @@ A node in the physical data will represent the data or summary instance, so a no
   | | State A | State B | Equal? |
   |---|---|---|---|
   | schema | `(job: Utf8, state: KLL{k=200})` | `(job: Utf8, state: KLL{k=200})` | yes, so the merge is allowed |
-  | what it summarizes | time `[0,1)` | time `[1,2)` | no, which is why merging them is useful |
+  | what it summarizes | time `(0, 1m]` | time `(1m, 2m]` | no, which is why merging them is useful |
 
 - If coverage were part of the schema, these two schemas would differ and the merge would be rejected. The only merge left would be a state with an exact copy of itself, which counts every observation twice.
 
@@ -202,7 +202,7 @@ A summary state is a stored aggregation, like `V` in §4.1, whose aggregate is a
 | **`definition`** | *What* is computed? |
 | **`selection`** | *Which rows* went in? |
 
-**Example.** Three states over table `t`, all with the same schema `(job Utf8, state Sketch(KLL k=200))`:
+**Example.** Three states over table `t`, all with the same schema `(job Utf8, state Sketch(KLL k=200))`. `KLL(latency) by[job]` means a KLL sketch of `latency` for each `job`:
 
 | State | Sub-DAG | `definition` | `selection` |
 |---|---|---|---|
@@ -305,6 +305,7 @@ In the worked example, `value < 100`, `region = 'us'` and the time window move i
 3. **Putting the two rules together.**
    - If both answers are yes: take the condition out of the sub-DAG and put it into `selection`.
    - If either answer is no: leave it in the sub-DAG, so it is part of `definition`. The paper calls such conditions *residuals*.
+   - One more case stays in `definition`: a condition on a column that already has a lifted condition it cannot be combined with (a forbidden-value set and a range, or values of different types). Conditions are taken in walk order: the `SummaryAgg.filter`, then the `Filter`s from top to bottom, then `Scan.predicates`.
 
 In the worked example:
 
@@ -332,7 +333,7 @@ A condition *above* `rate` has nothing to pass. `Filter(value > 0, rate(...))` k
 
 (This is filter pushdown in reverse. DataFusion's `PushDownFilter` uses the same rules to move filters down.)
 
-**Rule 2 in detail.** `selection` can hold only three shapes of condition, each on a single column: allowed values, forbidden values, or a range. Hash partitions will be a fourth shape later.
+**Rule 2 in detail.** `selection` can hold only three shapes of condition, each on a single column compared with non-NULL constants (`region = 'us'` and `'us' = region` both work): allowed values, forbidden values, or a range. Hash partitions will be a fourth shape later.
 
 | Shape | Written as | Example | Stored as |
 |---|---|---|---|
@@ -353,7 +354,7 @@ Any other shape stays in `definition`:
 **Which column a condition is on.**
 
 - A column is named by its table and name, `(table, name)`, **as the `SummaryAgg` reads it** (in the schema of its child). Directly above a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions.
-- A `Project` gives its columns new names and drops the table: after `region AS r`, the column is `(none, r)`, so the condition becomes `r ∈ {us}`. Since the `definition` contains the same `Project`, two states that rename the same way still compare equal.
+- A `Project` gives its columns new names and replaces their table with its own qualifier (none by default): after `region AS r`, the column is `(none, r)`, so the condition becomes `r ∈ {us}`. Since the `definition` contains the same `Project`, two states that rename the same way still compare equal.
 - If two columns the `SummaryAgg` reads have the same `(table, name)` (for example `Project [a AS k, b AS k]`), a condition on `k` cannot tell them apart and stays in `definition`.
 - PromQL labels have no table, so a label is named by its name alone.
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
@@ -363,10 +364,10 @@ Any other shape stays in `definition`:
 | Kind | Comes from | Example |
 |---|---|---|
 | **Relative** to the evaluation time | a range `TimeRange(w)` over a `TimeShift(s)` → `(−(s+w), −s]` | `TimeRange(1m)` alone → `(−1m, 0]`; over `TimeShift(1m)` → `(−2m, −1m]` |
-| **Absolute** | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
+| **Absolute** (later) | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
 
 - PromQL windows exclude their start, so relative windows are open on the left.
-- Window composition (Pass 2 of logical optimization) builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
+- Window composition ([Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination) of logical optimization) builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
 - An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`.
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
 - Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
@@ -385,7 +386,7 @@ In the last two rows `TimeRange(5m)` stays in `definition`: it is the input wind
 
 #### 4.2.3 Cost of deriving coverage
 
-**When it runs.** `coverage()` derives a node's coverage the first time it is called and caches it on the node, so each node pays once. Building a `SummaryMerge` (`OperatorNode::new`) also derives its coverage once to reject an invalid merge.
+**When it runs.** `coverage()` derives a node's coverage the first time it is called and caches it on the node, so each node pays once. Building a `SummaryMerge` (`OperatorNode::new`) derives its coverage to reject an invalid merge and caches the result, so `coverage()` and `validate_structure` do not derive it again. `validate_structure` derives it only for a merge that was not built through `new`.
 
 **Sizes used below.**
 
@@ -393,28 +394,28 @@ In the last two rows `TimeRange(5m)` stays in `definition`: it is the input wind
 |---|---|---|
 | `d` | operators on the walk: the `Filter`, `Project`, `TimeRange` and `TimeShift` nodes directly under the `SummaryAgg` (§4.2.2) | a few |
 | `c` | filter conditions on the walk (after splitting at `AND`), including `SummaryAgg.filter` and `Scan.predicates` | a few |
-| `f` | columns in the `SummaryAgg`'s input schema | tens |
+| `f` | columns in the widest schema on the walk | tens |
 | `v` | values in one value set (`IN` list) | a few |
 | `n` | inputs of a `SummaryMerge` | panes per window, regions, … |
 | `b` | boxes in one input's selection | 1 for a `SummaryAgg` |
 | `N` | nodes in a `definition` | the sub-DAG size |
 
-**`SummaryAgg`: `O(c · (d·f + v²) + d)`.**
+**`SummaryAgg`: `O(c · (d·f + v²) + d·f)`.**
 
 - Each condition is checked once. Following its column up through the `Project`s costs `O(d·f)`; checking that the column's name is unique costs `O(f)`; building and intersecting a value set costs `O(v²)`, because values are compared by type, not hashed.
-- Rebuilding the definition creates at most `d` new nodes. Everything below the walk is shared, not copied.
+- Rebuilding the definition creates at most `d` new nodes, each copying a schema (`O(f)`). Everything below the walk is shared, not copied.
 - So the cost depends only on the few operators directly under the `SummaryAgg`, **not on the size of the sub-DAG below them**. A `SummaryAgg` over a large join costs the same as one over a `Scan`.
 
 **`SummaryMerge`: `O(n·N + n²·b²·f·v² + (n·b)³)` in the worst case.**
 
 | Step | Cost | Why |
 |---|---|---|
-| inputs' coverage | 0 extra | each input's coverage is already cached |
-| equal definitions | `O(n·N)` node comparisons (each compares an operator and a schema), often `O(n)` | structural comparison of each input's definition with the first one. Shared nodes (`Rc`) compare in `O(1)`, and node pairs already proven equal are remembered |
+| inputs' coverage | at most once per input | usually already cached; otherwise derived and cached now |
+| equal definitions | `O(n·N·f)`: `n·N` node comparisons, each comparing an operator and a schema; often `O(n·f)` | structural comparison of each input's definition with the first one. Shared nodes (`Rc`) compare in `O(1)`, and node pairs already proven equal are remembered |
 | no overlap | `O(n²·b²·f·v²)` | every pair of inputs, every pair of boxes, every shared column |
 | union of selections | `O((n·b)³)` box comparisons, worst case | joins touching ranges and value sets until nothing more joins; each join restarts the scan |
 
-For the common cases this is small: `n` one-minute panes have one box each with no columns, so the merge costs `O(n·N)` for the definitions and `O(n²)` for overlap. Nested merges keep `n` small: a merge of merges compares only its direct inputs, whose coverage is cached.
+For the common cases this is small: `n` one-minute panes in time order have one box each with no columns, so the merge costs `O(n·N·f)` for the definitions, `O(n²)` for overlap and `O(n²)` for the union. Nested merges keep `n` small: a merge of merges compares only its direct inputs, whose coverage is cached.
 
 ### 4.3 What coverage does not contain
 
@@ -442,7 +443,7 @@ This section walks through each summary operator with one small example. For eac
 | `( next operator )` | whatever consumes the result |
 | `selection: …` next to a node | the `selection` part of that node's `coverage()` |
 
-All examples read a table, so values are `Relation`. For PromQL series they would be `InstantVector`.
+All examples read a table, so values are `Relation`. For PromQL series they would be `InstantVector`. A *closed schema* lists every column of the table. For readability, a filter on a table is drawn as a `Filter` over the `Scan`; the frontend folds it into `Scan.predicates`, which gives the same coverage (§4.2.2).
 
 ### 5.1 `SummaryAgg`: values → state
 
@@ -474,8 +475,8 @@ coverage() of the SummaryAgg
 
 | Question | Answer |
 |---|---|
-| What comes out? | the group columns (`job`), then one field `state` whose type is the summary type, here `Sketch(KLL k=200)`. Each `job` appears once |
-| When is it rejected? | the summary type is a plain value type; the input is already state; the input column (`latency`) is not in the child's schema; `filter` is not a boolean |
+| What comes out? | the group columns (`job`), then one field `state` whose type is the summary type, here `Sketch(KLL k=200)`. Each `job` appears once. With `PerEntity` (one state per series), the input columns are kept and `state` replaces the value column |
+| When is it rejected? | the summary type is a plain value type; the input is already state; the input or item column (`latency`) is not in the child's schema; `filter` is not a boolean |
 | What is its coverage? | always present. Both `Filter` conditions are simple, so they move into `selection`, and the `definition` is the `SummaryAgg` over the bare `Scan t`. A condition like `latency * 2 > 10` would stay in the `definition` (§4.2.2) |
 | State or value? | state. This is where values become state, so the result has no error bound yet |
 
@@ -509,7 +510,7 @@ coverage() of the SummaryAgg
 
 | Question | Answer |
 |---|---|
-| What comes out? | the same columns, with `state` replaced by the answer: `quantile` Float64 here. Counts and cardinalities are Int64 (Float64 when the state was built per series, `PerEntity`). A top-k readout is a `topk` Utf8 field today; #579 changes it to return the top rows themselves (the same shape as an exact `Sort` + `Limit`) |
+| What comes out? | the same columns, with `state` replaced by the answer: `quantile` Float64 here. Counts and cardinalities are Int64 (Float64 when the state was built per series, `PerEntity`). A top-k readout is a `topk` Utf8 field today; #579 changes it to return the selected rows: the partition keys, the item identity columns and a Float64 `value` score |
 | When is it rejected? | the input is not a sketch, or the sketch cannot answer the question. For example, asking a KLL for a cardinality |
 | What is its coverage? | none: the output is a value |
 | State or value? | value. The node carries the readout's error bound |
@@ -603,7 +604,7 @@ coverage() of the SummaryAgg
 | Question | Answer |
 |---|---|
 | What comes out? | the same shape as an ordinary `Aggregate` by the grouping: `quantile_0_99` Float64 here, or `sum`, `count`, `avg`. Top-k instead returns the selected rows |
-| When is it rejected? | the population was not set up for the question: `quantiles` must be on for a quantile, and `k` must be at most `max_k` for top-k |
+| When is it rejected? | the child is not a `MaintainPopulation`, or the population was not set up for the question: `quantiles` must be on for a quantile (and `q` finite), and `k` must be at most `max_k` for top-k |
 | What is its coverage? | none |
 | State or value? | value |
 
@@ -659,7 +660,7 @@ pane 0                   (─────────────]
 merge      (───────────────────────────]
 ```
 
-**Example B: regions.** The US and EU states of 5.1 merge into one state for both regions:
+**Example B: regions.** `KLL(latency) by[job]` for `region = 'us'` and for `region = 'eu'` (as in 5.1, without the latency filter) merge into one state for both regions:
 
 ```text
                            ( next operator )
@@ -734,23 +735,23 @@ input groups                       output groups
 | `A + C` | ✗ | `(−60s, −30s]` is in both, so those rows would be counted twice | |
 | `A + A` | ✗ | every row is in both | |
 | `A + D` | ✗ | different definitions: `D` only has rows with `value * 2 > 10` | |
-| `A` + a KLL with `k = 400` | ✗ | different definitions (parameters) | |
+| `A` + a KLL with `k = 400` | ✗ | different schema: `k` is part of the state type, so the merge is rejected before coverage is checked | |
 | `(A + B)` + a state over `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
 
-**Whether inputs may overlap** depends on the summary family. This is #592 (open), which adds `FieldDataType::family_merges` and `merge_relation`; #646 alone requires every merge to be overlap-free:
+**Whether inputs may overlap** depends on the summary type (family and algorithm, §3). This is #592 (open), which adds `FieldDataType::family_merges` and `merge_relation`; #646 alone requires every merge to be overlap-free:
 
-| Rule | Families | Example |
+| Rule | Summary types | Example |
 |---|---|---|
-| **must not overlap** | counting families: KLL, Count-Min, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(−60s, −30s]` would be counted twice |
+| **must not overlap** | KLL, DDSketch, Count-Min, Count Sketch, UnivMon, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(−60s, −30s]` would be counted twice |
 | **may overlap** | HLL, exact `Min`/`Max` | HLL over `A`'s and `C`'s rows ✓: a value seen twice is still one distinct value. The result keeps both boxes, `(−1m, 0]` and `(−90s, −30s]`, which together cover `(−90s, 0]` |
-| **cannot merge** | `CmsWithHeap`, `CountSketchWithHeap`, Theta, KMV, exact `Rate`/`IRate`/`Increase`, samples, wavelets, models | no merge is defined for them |
+| **cannot merge (yet)** | `CmsWithHeap`, `CountSketchWithHeap`, Theta, KMV, exact `Rate`/`IRate`/`Increase`, samples, wavelets, models | no sound merge is modeled yet, so #592 rejects them |
 | **right inside left** | subtraction | 5.7 |
 
 | Question | Answer |
 |---|---|
 | What comes out? | the children's schema; with `group_by`, only the remaining group columns |
-| When is it rejected? | no children; a child is not state; the definitions differ (different column, parameters, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); `group_by` is not a subset of the children's grouping (planned) |
-| What is its coverage? | the shared `definition` (with the new grouping), and the union of the children's selections. Touching ranges join; gaps stay as separate pieces |
+| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); `group_by` is not a subset of the children's grouping (planned) |
+| What is its coverage? | the shared `definition` (with the new grouping, once `group_by` exists), and the union of the children's selections. Touching ranges join; gaps stay as separate pieces |
 | State or value? | state in, state out |
 
 **Other uses of coverage.** The planner also uses coverage to read or reuse a state without merging:
@@ -790,7 +791,7 @@ OperatorNode                                         §6.1
 │     ├── SummaryAgg
 │     │     ├── family: FieldDataType ───────────┐   §6.3 → §6.4
 │     │     └── input:  SummaryUpdate            │   §6.5  (what each row adds)
-│     ├── SummaryEstimate.query:  SketchStatistic│   §6.5  (what is read out)
+│     ├── SummaryEstimate.query: SketchStatistic │   §6.5  (what is read out)
 │     ├── MaintainPopulation.population          │   §6.5
 │     └── EvaluatePopulation.evaluation          │   §6.5
 ├── schema: Schema                               │   §6.3
@@ -1305,5 +1306,5 @@ impl SummaryCoverage {
 }
 ```
 
-- `OperatorNode::new` rejects an invalid `SummaryMerge` (different definitions, or selections that may overlap; #592 relaxes the overlap check per family), but it does not store the result.
+- `OperatorNode::new` and `validate_structure` reject an invalid `SummaryMerge` (different definitions, or selections that may overlap; #592 relaxes the overlap check per family). The derived coverage is cached on the node.
 - A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
