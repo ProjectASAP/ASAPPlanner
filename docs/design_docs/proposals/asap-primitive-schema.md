@@ -16,7 +16,7 @@ The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in
 | `FinalizeExactAccumulator` | exact accumulator state → value | implemented |
 | `MaintainPopulation` | values → maintained membership (state) | implemented |
 | `EvaluatePopulation` | maintained membership → value | implemented |
-| `SummaryMerge` | state × N → state | structure in #560, coverage check in #646 |
+| `SummaryMerge` | state × N → state | implemented (#560: identical schemas); coverage check in #646 |
 | `SummarySubtract` | state × state → state | reserved |
 | `SummaryDelete` | state → state without one key | reserved |
 | `SummaryJoin` | state × state → state | reserved |
@@ -442,7 +442,11 @@ EvaluatePopulation(evaluation = PopulationStatistic::Quantile { q: 0.99 })
 
 ### 5.6 `SummaryMerge`: state × N → state (merge and rollup)
 
-On `main`, `SummaryMerge { children }` is **reserved**: `is_unimplemented()` returns true, and `output_schema()` and `validate_inputs()` return `UNIMPLEMENTED_ASAP_OP`, so `OperatorNode::new` fails. #560 enables it for children with identical schemas. This design adds `group_by`, so one operator does both merge and rollup (§4.5):
+Current state:
+
+- **On `main` (since #560):** `SummaryMerge { children }` is implemented. `validate_inputs()` accepts it when there is at least one child, every child is `State` with exactly one state field, and all children have identical schemas. The output schema is the children's schema.
+- **#646 (open):** adds the coverage check. `OperatorNode::new` and `validate_structure` also require equal `definition`s and disjoint selections, and `coverage()` returns the merged coverage.
+- **Planned:** `group_by`, so one operator does both merge and rollup (§4.5):
 
 ```rust
 SummaryMerge { children: Vec<C>, group_by: Reduction }
@@ -493,7 +497,7 @@ These variants exist so that plans can name them, but `output_schema()`/`validat
 | `FinalizeExactAccumulator` | `State` (`ExactAggregate`) | source's value kind | no | none | implemented |
 | `MaintainPopulation` | `Relation` (table) / `InstantVector` (series) | `State` | yes (by kind; fields plain) | none | implemented |
 | `EvaluatePopulation` | `State` from `MaintainPopulation` | source's value kind | no | none | implemented |
-| `SummaryMerge` | `State` × N | `State` | yes | derived: shared definition with `group_by`, union of selections | reserved; enabled by #560, `group_by` added by this design |
+| `SummaryMerge` | `State` × N | `State` | yes | derived: shared definition with `group_by`, union of selections | implemented (#560); coverage check in #646; `group_by` planned |
 | `SummarySubtract` | `State` × 2 | `State` | yes | derived: left selection minus right (planned) | reserved |
 | `SummaryDelete` | `State` | `State` | yes | — | reserved |
 | `SummaryJoin` | `State` × 2 | `State` | yes | — | reserved |
@@ -665,8 +669,9 @@ pub enum ASAPOp {
     FinalizeExactAccumulator { child: Rc<OperatorNode> },
     MaintainPopulation { child: Rc<OperatorNode>, population: MaintainedPopulation<OperatorNode> },
     EvaluatePopulation { child: Rc<OperatorNode>, evaluation: PopulationStatistic },
-    // Reserved on this branch; #560 implements SummaryMerge.
+    // Implemented since #560 (identical child schemas).
     SummaryMerge { children: Vec<Rc<OperatorNode>> },
+    // Reserved: migrated but unimplemented.
     SummarySubtract { left: Rc<OperatorNode>, right: Rc<OperatorNode> },
     SummaryDelete { summary_input: Rc<OperatorNode>, key: ColumnId },
     SummaryJoin { outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnId, family: FieldDataType },
@@ -677,9 +682,9 @@ impl ASAPOp {
     pub fn children(&self) -> Vec<&Rc<OperatorNode>>;     // SummaryAgg includes its filter's subquery nodes
     pub fn map_children(&self, f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self;
     pub fn kind_name(&self) -> &'static str;
-    /// Merge, Subtract, Delete, Join, Extension on this branch; #560 removes Merge.
+    /// Subtract, Delete, Join, Extension.
     pub fn is_unimplemented(&self) -> bool;
-    /// SummaryAgg/SummaryJoin `family`; #560 adds SummaryMerge (its inputs' state type).
+    /// SummaryAgg/SummaryJoin `family`; SummaryMerge: its inputs' state type.
     pub fn produced_state(&self) -> Option<&FieldDataType>;
     pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
     pub fn output_kind(&self) -> OperatorResultKind;
