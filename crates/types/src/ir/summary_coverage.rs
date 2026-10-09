@@ -39,12 +39,14 @@ pub struct SelectionBox {
     pub columns: BTreeMap<ColumnIdentity, Constraint>,
     /// Offsets from the evaluation time in milliseconds: a PromQL range
     /// `TimeRange(w)` over `TimeShift(s)` is `(-(s + w), -s]`. Absolute
-    /// time is an ordinary interval on the timestamp column.
+    /// time will be an ordinary interval on the timestamp column once the IR
+    /// has timestamp literals.
     pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
 }
 
 /// A column of the definition child's output, by `(table, name)`. A
-/// `Project` below renames its columns and drops their table.
+/// `Project` below renames its columns and sets their table to its
+/// qualifier (none by default).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ColumnIdentity {
     pub table: Option<String>,

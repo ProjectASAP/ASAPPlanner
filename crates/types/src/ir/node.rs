@@ -184,10 +184,16 @@ impl OperatorNode {
 
     /// A `SummaryMerge` is valid only over inputs with the same definition
     /// and disjoint selections.
+    /// The derived coverage is cached, so a merge built by `new` is not
+    /// derived again by `coverage()` or `validate_structure`.
     fn check_merge(&self) -> Result<(), SchemaDerivationError> {
-        if matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. })) {
-            SummaryCoverage::derive(self)?;
+        if !matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. }))
+            || matches!(self.coverage_cache.0.get(), Some(Some(_)))
+        {
+            return Ok(());
         }
+        let coverage = SummaryCoverage::derive(self)?;
+        let _ = self.coverage_cache.0.set(Some(coverage));
         Ok(())
     }
 
