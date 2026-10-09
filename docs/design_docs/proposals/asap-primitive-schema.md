@@ -416,7 +416,7 @@ Coverage tells the planner which states can be combined, and what the result cov
 
 Two `definition`s count as equal as described in §4.3.1.
 
-### 4.5 Interface
+### 4.5 Code interface: `OperatorNode::coverage()` and `SummaryCoverage` (`crates/types/src/ir/node.rs`, `summary_coverage.rs`)
 
 ```rust
 pub struct OperatorNode {
