@@ -219,9 +219,9 @@ selection:  region ∈ {us}, latency ∈ (−∞, 100)
 | `Filter(latency < 100, Scan t)` | `Scan t` | `latency ∈ (−∞, 100)` |
 | `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
 | `Filter(job = 'api', rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `job ∈ {api}` |
-| `Filter(rate > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` and the condition `rate > 0` | nothing |
+| `Filter(value * 2 > 10, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` and the condition `value * 2 > 10` | nothing |
 
-In the last two rows `TimeRange(5m)` stays in `definition`: it is the input window of `rate` and changes the rate values, so it does not just pick rows. `rate > 0` stays too, because it filters on a computed value (§4.4).
+In the last two rows `TimeRange(5m)` stays in `definition`: it is the input window of `rate` and changes the rate values, so it does not just pick rows. `value * 2 > 10` stays too, because it is a condition on an expression, not on a column (§4.4).
 
 Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` is the sub-DAG without its row filters, `σ` is the selection, and `G` the grouping.
 
@@ -244,76 +244,131 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 ### 4.4 Deriving the selection
 
-Nobody declares coverage: the planner computes it from the sub-DAG. It starts at the `SummaryAgg`, walks down, and looks at each filter condition on the way (split at `AND`). A condition moves into `selection` only when both rules below hold. Otherwise it stays in `definition`, like a residual in the paper.
+Nobody declares coverage: the planner computes it from the sub-DAG. It starts at the `SummaryAgg`, walks down, and looks at each filter condition on the way (split at `AND`). A condition moves into `selection` only when both rules hold:
 
-**Rule 1: the condition can move up to the `SummaryAgg` without changing its meaning.** This is the reverse of filter pushdown (DataFusion's `PushDownFilter`).
+- **Rule 1: it can move up to the `SummaryAgg` without changing its meaning.**
+- **Rule 2: it is a simple condition on one column.**
 
-| Operator between the condition and the `SummaryAgg` | The condition can pass when |
-|---|---|
-| `Filter`, `Scan.predicates`, `SummaryAgg.filter` | always |
-| range `TimeRange`, `TimeShift` without `@` | always |
-| `Project` | the column is passed through as is (a rename is fine) |
-| `Aggregate` (later) | it uses only group columns |
-| window function, or a per-series function such as `rate` (later) | it uses only partition columns (series labels) |
-| anything else | never |
+Otherwise it stays in `definition`, like a residual in the paper.
 
-**Rule 2: the condition is a simple condition on one column.**
+**Worked example.** A KLL of request latency per job, over metric `m` with columns `region`, `job`, `value`:
 
-| Kind | Written as | Example | DataFusion analogue |
+```text
+SummaryAgg  KLL(value) by[job]          filter: value < 100
+└─ Project  [job, region AS r, value]
+   └─ Filter  region = 'us' AND value * 2 > 10
+      └─ TimeRange  1m (range)
+         └─ TimeShift  2m
+            └─ Scan m
+```
+
+| Condition | Found at | Rule 1: moves up? | Rule 2: simple? | Result |
+|---|---|---|---|---|
+| `value < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `value ∈ (−∞, 100)` |
+| `region = 'us'` | `Filter` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `m.region ∈ {us}` |
+| `value * 2 > 10` | `Filter` | yes | **no**: it is on an expression, not a column | stays in `definition` |
+| 1 minute, shifted by 2 | `TimeRange` + `TimeShift` | yes | yes, relative time | `selection`: `(−3m, −2m]` |
+
+Result:
+
+```text
+definition: KLL(value) by[job] over Project[job, region AS r, value] over Filter(value * 2 > 10) over Scan m
+selection:  value ∈ (−∞, 100), m.region ∈ {us}, time (−3m, −2m]
+```
+
+**Rule 1 in detail.** This is the reverse of filter pushdown (DataFusion's `PushDownFilter`). A condition can move up past:
+
+| Operator | Moves up? | Example |
+|---|---|---|
+| `Filter`, `Scan.predicates`, `SummaryAgg.filter` | always | above |
+| range `TimeRange`, `TimeShift` without `@` | always | above |
+| `Project` | only for a column passed through as is (a rename is fine) | `region AS r` ✓; `value * 2 AS v2` ✗ |
+| `Aggregate` (later) | only on group columns | below `SUM(value) by[job]`: `job = 'api'` ✓, `value > 5` ✗ |
+| window function, or per-series function such as `rate` (later) | only on series labels | below `rate(...)`: `job = 'api'` ✓, `value > 5` ✗ (it would filter raw samples, which changes the rate) |
+| anything else | never | |
+
+A condition *above* `rate` is different: it filters the rate outputs, which are exactly the rows the `SummaryAgg` sees. `Filter(job = 'api', rate(...))` gives `job ∈ {api}`, and `Filter(value > 0, rate(...))` gives `value ∈ (0, ∞)` on the rate values. The `TimeRange(5m)` below `rate` stays in `definition` either way.
+
+**Rule 2 in detail.** A simple condition is one of:
+
+| Kind | Written as | Example | Becomes |
 |---|---|---|---|
-| value set | `=`, `!=`, `IN`, `NOT IN`, `OR` of `=` on the same column | `region IN ('us', 'eu')` | `LiteralGuarantee` |
-| interval | `<`, `<=`, `>`, `>=` | `latency < 100` | `Interval` |
-| hash partition (later) | `hash(columns) mod n = k` | `hash(job) mod 4 = 1` | `Partitioning::Hash` |
+| value set | `=`, `!=`, `IN`, `NOT IN`, `OR` of `=` on one column | `region IN ('us', 'eu')` | `region ∈ {us, eu}` |
+| | | `region != 'test'` | `region ∉ {test}` |
+| interval | `<`, `<=`, `>`, `>=` | `value >= 10 AND value < 100` | `value ∈ [10, 100)` |
+| hash partition (later) | `hash(columns) mod n = k` | `hash(job) mod 4 = 1` | partition 1 of 4 |
 
-A column equality such as `a = b` is not a simple condition, so it stays in `definition`.
+Not simple, so they stay in `definition`: `value * 2 > 10` (expression), `a = b` (two columns), `region = 'us' OR job = 'api'` (two columns), `name LIKE 'web%'` (pattern).
 
 **Which column a condition is on.**
 
-- A column is named by its source table and name, `(table, name)`. So `shipping.region` and `billing.region` are different columns.
-- A rename keeps the original name.
-- If two output columns have the same `(table, name)`, the condition cannot tell them apart and stays in `definition`.
-- Values of different types are never treated as different: `1` and `1.0` might be equal.
+- A column is named by its source table and name, `(table, name)`: in a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions.
+- A rename keeps the original name: `region AS r` is still `m.region`.
+- If two output columns have the same `(table, name)` (for example `Project [a AS k, b AS k]`), a condition on `k` cannot tell them apart and stays in `definition`.
+- Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
 
 **Time.** There are two kinds:
 
-| Kind | Where it comes from | Example |
+| Kind | Comes from | Example |
 |---|---|---|
+| **Relative** to the evaluation time | a range `TimeRange(w)` over a `TimeShift(s)` → `(−(s+w), −s]` | `TimeRange(1m)` alone → `(−1m, 0]`; over `TimeShift(1m)` → `(−2m, −1m]` |
 | **Absolute** | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
-| **Relative** to the evaluation time | a range `TimeRange(w)` over a `TimeShift(s)` | `TimeRange(1m)` over `TimeShift(2m)` → `(−3m, −2m]` |
 
 - PromQL windows exclude their start, so relative windows are open on the left.
+- Stage 2 builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
+- An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`.
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
-- Stage 2 builds its tumbling panes from `TimeRange` and `TimeShift`, so pane times are derived, not declared (#601).
-- An instant `TimeRange` takes the latest sample of each series. That does not pick rows by time, so it stays in `definition`.
-- Absolute and relative time are never compared. Two states that differ only in the kind of time are treated as possibly overlapping.
+- Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
 
 ### 4.5 Operations
 
-Coverage tells the planner which states can be combined, and what the result covers.
+Coverage tells the planner which states can be combined, and what the result covers. The examples below use these states. All are `KLL(value) by[job] over Scan m` unless noted:
 
-| Operation | Example | Allowed when |
-|---|---|---|
-| **merge** (`SummaryMerge`) | minute 0–1 + minute 1–2; `region='us'` + `region='eu'` | all `definition`s are equal, and the selections relate as the family requires (below) |
-| **rollup** (`SummaryMerge` with `group_by`, later) | `by[region, job]` → `by[job]` | the new grouping is a subset of the old one. Different groups never share a row, so no overlap check is needed |
-| **slice** | read `region = 'us'` from a `by[region, job]` state | the condition is on a grouping column. A sketch cannot be filtered on any other column |
-| **reuse** for a query | a stored state answers a new query | same `definition`, and the query's selection lies inside the state's (as in the paper) |
-| **subtract** (`SummarySubtract`, reserved) | `[0, 10) − [0, 5)` | same `definition`, and the right selection lies inside the left |
+| State | Selection |
+|---|---|
+| `A` | time `(−1m, 0]` |
+| `B` | time `(−2m, −1m]` |
+| `C` | time `(−90s, −30s]` |
+| `D` | time `(−1m, 0]`, but the `definition` has the residual `value * 2 > 10` |
+| `E` | time `(−1m, 0]`, `region ∈ {us}` |
+| `F` | time `(−1m, 0]`, `region ∈ {eu}` |
 
-**Merge and rollup are one operator,** `SummaryMerge { children, group_by }`. With the children's own grouping it is a plain merge; with a smaller one it is a rollup. The result's `definition` is the children's, with the new grouping; its `selection` is the union of theirs. Adjacent ranges join into one (minute 0–1 + minute 1–2 = minute 0–2); gaps stay as separate pieces.
+**Merge** (`SummaryMerge`): combine states into one. Allowed when all `definition`s are equal and the selections relate as the family requires.
+
+| Merge | Allowed? | Why | Result's selection |
+|---|---|---|---|
+| `A + B` | ✓ | same definition, no overlap | `(−2m, 0]` (adjacent ranges join) |
+| `E + F` | ✓ | same definition, `us` and `eu` do not overlap | `(−1m, 0]`, `region ∈ {us, eu}` |
+| `A + C` | ✗ | `(−60s, −30s]` is in both: those rows would be counted twice | |
+| `A + A` | ✗ | every row is in both | |
+| `A + D` | ✗ | different definitions: `D` only has rows with `value * 2 > 10` | |
+| `A + B'` where `B'` is KLL with `k = 400` | ✗ | different definitions (parameters) | |
+| `(A + B) + B''` where `B''` covers `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
 
 **How inputs may overlap** depends on the summary family (`FieldDataType::family_merges` and `merge_relation`, #592):
 
-| Rule | Families | Why |
+| Rule | Families | Example |
 |---|---|---|
-| **must not overlap** | counting families: KLL, Count-Min, exact `Sum`/`Count` | a row in both inputs would be counted twice |
-| **may overlap** | HLL, exact `Min`/`Max`, distinct sets | adding the same row twice does not change the result |
-| **right inside left** | subtraction | you can only remove what is there |
+| **must not overlap** | counting families: KLL, Count-Min, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(−60s, −30s]` would be counted twice |
+| **may overlap** | HLL, exact `Min`/`Max`, distinct sets | HLL over `A`'s and `C`'s selections ✓: a value seen twice is still one distinct value; the result covers `(−90s, 0]` |
+| **right inside left** | subtraction | see subtract below |
+
+**Rollup** (`SummaryMerge` with `group_by`, later): make the grouping coarser. A `by[region, job]` state rolls up to `by[job]`: the state for `job = api` is the merge of `(us, api)`, `(eu, api)`, …. No overlap check is needed, because a row has one `region` and so is in only one group. The selection is unchanged.
+
+**Slice**: read only some groups. From a `by[region, job]` state, a query for `region = 'us'` by job reads the groups with `region = us` ✓. A query for `value < 50` ✗: `value` is not a grouping column, and a sketch cannot be filtered after it is built.
+
+**Reuse** for a query: a stored state answers a query when the `definition`s are equal and the query's rows are all in the state, with any difference covered by a slice. A stored `by[region, job]` state over `(−5m, 0]`:
+
+- p99 by job over the last 5 minutes for `region = 'us'`: ✓ (slice on `region`).
+- p99 by job over the last 1 minute: ✗. The state also holds minutes 2–5, and time is not a grouping column, so they cannot be taken out.
+
+**Subtract** (`SummarySubtract`, reserved): remove one state from another, for families that allow it (e.g. exact `Sum`/`Count`, Count-Min). A sum over `(−10m, 0]` minus a sum over `(−10m, −5m]` gives `(−5m, 0]`. Allowed when the `definition`s are equal and the right selection is inside the left.
 
 **When two `definition`s are equal.**
 
-- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a state built at ingestion time can merge with one built at query time.
+- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a pane built at ingestion time can merge with one built at query time.
 - `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
-- States over different tables never merge. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
+- States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
 ### 4.6 Interface
 
@@ -519,21 +574,6 @@ These variants exist so that plans can name them, but `output_schema()`/`validat
 | `SummaryDelete` | `summary_input, key: ColumnId` | State → State with the entries for `key` removed |
 | `SummaryJoin` | `outer, inner, key, family` | State × State → State typed `family` (`produced_state()` returns it), e.g. join-size estimation |
 | `Extension` | `child, name` | deployment-named state operator |
-
-### 5.8 Summary
-
-| Operator | Input kind | Output kind | Output carries state | Coverage on output | Status |
-|---|---|---|---|---|---|
-| `SummaryAgg` | value (not `State`) | `State` | yes (one `family` field) | derived: itself minus selection, plus selection | implemented |
-| `SummaryEstimate` | `State` (one `Sketch` field) | source's value kind | no | none | implemented |
-| `FinalizeExactAccumulator` | `State` (`ExactAggregate`) | source's value kind | no | none | implemented |
-| `MaintainPopulation` | `Relation` (table) / `InstantVector` (series) | `State` | yes (by kind; fields plain) | none | implemented |
-| `EvaluatePopulation` | `State` from `MaintainPopulation` | source's value kind | no | none | implemented |
-| `SummaryMerge` | `State` × N | `State` | yes | derived: shared definition with `group_by`, union of selections | implemented (#560); coverage check in #646; `group_by` planned |
-| `SummarySubtract` | `State` × 2 | `State` | yes | derived: left selection minus right (planned) | reserved |
-| `SummaryDelete` | `State` | `State` | yes | — | reserved |
-| `SummaryJoin` | `State` × 2 | `State` | yes | — | reserved |
-| `Extension` | any | `State` | yes | — | reserved |
 
 ## 6. Key code interfaces
 
