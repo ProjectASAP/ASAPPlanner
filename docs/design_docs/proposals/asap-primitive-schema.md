@@ -104,18 +104,35 @@ Based on our requirement, each field should contain the following information.
 
 ## 4. Proposed Node field design 
 
-A node in the physical data will represent the data or summary instance, so a node has a field for **What data sources a ASAP primitive summarizes**.
+A node in the physical data will represent the data or summary instance, so a node has a field for **What data sources a ASAP primitive summarizes**. This field is the node's **coverage**.
 
-**Why coverage is not part of the schema.** Two summary states worth merging always cover different data. `SummaryMerge` requires all inputs to have the same schema; that check is how it knows they are the same kind of state (same sketch, parameters and grouping). For example, two KLL states for "latency by job", built from minute 0–1 and minute 1–2:
+**At a glance**
 
-| | State A | State B | Equal? |
-|---|---|---|---|
-| schema | `(job: Utf8, state: KLL{k=200})` | `(job: Utf8, state: KLL{k=200})` | yes, so the merge is allowed |
-| what it summarizes | time `[0,1)` | time `[1,2)` | no, which is why merging them is useful |
+| Question | Answer | Section |
+|---|---|---|
+| Why not put it in the schema? | States worth merging cover different data but must have the same schema | below |
+| What is it based on? | Goldstein & Larson view matching (SIGMOD 2001) | §4.1 |
+| What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2 |
+| Who sets it? | Nobody: it is derived from the sub-DAG | §4.3 |
+| What uses it? | merge, rollup, slice, reuse, subtract | §4.4 |
+| Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §4.5 |
+| What is left out? | source dependencies, readiness, absolute time binding | §4.6 |
 
-If what a state summarizes were part of the schema, these two schemas would differ and the merge would be rejected; the only merge left would be a state with an exact copy of itself, which counts every observation twice. So the schema says *what kind of state* this is, and coverage says *which data it was built from*.
+**Why coverage is not part of the schema.**
 
-A summary state summarizes the result of a whole computation, not a few columns of a raw table. A KLL over `rate(requests_total[5m])` summarizes rate outputs, and a KLL over a join summarizes join rows. So coverage describes the state by the sub-DAG below it, split into the part that says *what is computed* and the part that says *which of its rows were taken*.
+- `SummaryMerge` requires all inputs to have the same schema; that check is how it knows they are the same kind of state (same sketch, parameters and grouping).
+- Two summary states worth merging always cover different data. For example, two KLL states for "latency by job", built from minute 0–1 and minute 1–2:
+
+  | | State A | State B | Equal? |
+  |---|---|---|---|
+  | schema | `(job: Utf8, state: KLL{k=200})` | `(job: Utf8, state: KLL{k=200})` | yes, so the merge is allowed |
+  | what it summarizes | time `[0,1)` | time `[1,2)` | no, which is why merging them is useful |
+
+- If coverage were part of the schema, these two schemas would differ and the merge would be rejected. The only merge left would be a state with an exact copy of itself, which counts every observation twice.
+
+So the schema says *what kind of state* this is, and coverage says *which data it was built from*.
+
+**Why coverage is a sub-DAG, not a few table columns.** A summary state summarizes the result of a whole computation: a KLL over `rate(requests_total[5m])` summarizes rate outputs, and a KLL over a join summarizes join rows. So coverage describes the state by the sub-DAG below it, split into *what is computed* and *which of its rows were taken*.
 
 ### 4.1 Design basis: view matching (Goldstein & Larson)
 
@@ -123,9 +140,22 @@ The design follows the view matching algorithm of Goldstein and Larson, which de
 
 > J. Goldstein and P.-Å. Larson. *Optimizing Queries Using Materialized Views: A Practical, Scalable Solution.* SIGMOD 2001. <https://dsg.uwaterloo.ca/seminars/notes/larson-paper.pdf>
 
-The algorithm splits a view's `WHERE` into column equivalence classes, a **range** per column and **residual** predicates. A view can answer a query when the residuals match, the query's ranges lie inside the view's (§3.1.2), the columns needed by compensating predicates are in the view output (§3.3, requirement 2), and the query's `GROUP BY` is a subset of the view's, so the query's groups are further aggregations of the view's groups (§3.3, requirement 3). The SPJ part is implemented for DataFusion in [`datafusion-contrib/datafusion-materialized-views`](https://github.com/datafusion-contrib/datafusion-materialized-views), `src/rewrite/normal_form.rs` (`SpjNormalForm`, `Predicate { eq_classes, ranges_by_equivalence_class, residuals }`); it rejects `Aggregate` and `Join` input plans.
+**The algorithm.** It splits a view's `WHERE` into three parts:
 
-A summary state is an aggregation view whose aggregate is a summary family. The mapping is:
+- column **equivalence classes**,
+- a **range** per column,
+- **residual** predicates (everything else).
+
+A view can answer a query when all of these hold:
+
+1. the residuals match;
+2. the query's ranges lie inside the view's (§3.1.2);
+3. the columns needed by compensating predicates are in the view output (§3.3, requirement 2);
+4. the query's `GROUP BY` is a subset of the view's, so the query's groups are further aggregations of the view's groups (§3.3, requirement 3).
+
+**Existing implementation.** The SPJ part is implemented for DataFusion in [`datafusion-contrib/datafusion-materialized-views`](https://github.com/datafusion-contrib/datafusion-materialized-views), `src/rewrite/normal_form.rs` (`SpjNormalForm`, `Predicate { eq_classes, ranges_by_equivalence_class, residuals }`). It rejects `Aggregate` and `Join` input plans.
+
+**Mapping.** A summary state is an aggregation view whose aggregate is a summary family:
 
 | Goldstein & Larson | Summary coverage |
 |---|---|
@@ -136,7 +166,7 @@ A summary state is an aggregation view whose aggregate is a summary family. The 
 | compensating predicate on view output | slice on a column of `G` only (§4.4) |
 | query `GROUP BY` ⊆ view `GROUP BY` | rollup (§4.4) |
 
-What this design adds beyond the paper:
+**What this design adds beyond the paper:**
 
 - **Unions of states.** The paper considers single-view substitutes and notes that requirement 1 "is not required if substitutes containing unions of views are considered" (§3.1). `SummaryMerge` is exactly such a union, so it needs a disjointness check the paper does not have.
 - **Summary families.** The paper allows `SUM` and `COUNT_BIG` only. Here each family declares how the selections of its inputs may relate (§4.4).
@@ -155,12 +185,14 @@ state_g = family( input( σ( C ) ) )  for each group value g of G, restricted to
 
 Coverage stores exactly these two things:
 
-- **`definition`**: the `SummaryAgg` node itself, with the selection removed from its child sub-DAG. It carries `C`, `input`, `family` and `G`. It is what the state *means*.
-- **`selection`**: a union of boxes over the output columns of `C`. It is *which rows* the state took.
+| Part | Contents | Meaning |
+|---|---|---|
+| **`definition`** | the `SummaryAgg` node itself, with the selection removed from its child sub-DAG; carries `C`, `input`, `family` and `G` | what the state *means* |
+| **`selection`** | a union of boxes over the output columns of `C` | *which rows* the state took |
 
-If two states have the same `definition`, their contributions come from the same rows of the same computation, whatever `C` contains (join, union, `rate`, dedup). Disjoint selections then cannot share a row, so no observation is counted twice. No per-operator occurrence rule is needed.
+**Why this is enough.** If two states have the same `definition`, their contributions come from the same rows of the same computation, whatever `C` contains (join, union, `rate`, dedup). Disjoint selections then cannot share a row, so no observation is counted twice. No per-operator occurrence rule is needed.
 
-Examples of what ends up where:
+**Examples** of what ends up where:
 
 | Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
 |---|---|---|
@@ -174,46 +206,75 @@ In the last two rows the `TimeRange(5m)` stays in `definition`: it sits below `r
 
 ### 4.3 Deriving the selection
 
-Coverage is derived from the node, never declared. Walking down from the `SummaryAgg` (its own `filter` included), a predicate conjunct goes into `selection` when both hold:
+Coverage is derived from the node, never declared. Walking down from the `SummaryAgg` (its own `filter` included), a predicate conjunct goes into `selection` when both rules hold. Otherwise it stays in `definition` as a residual, as in Goldstein & Larson.
 
-1. **It can be lifted to the `SummaryAgg`.** Lifting is the inverse of DataFusion's `PushDownFilter` (`datafusion-optimizer`, `push_down_filter.rs`): a predicate passes `Filter`, `TimeRange`/`TimeShift` and a direct-column `Project` (renaming the column); passes an `Aggregate` only when every column it uses is a group column; and passes a window function or a per-series temporal function such as `rate` only when every column it uses is a partition column (a series label). Anything else stops it.
-2. **It is one of the box constraints.** Per column, one of:
-   - **value set**: `In` or `NotIn` a set of literals, from `=`, `!=`, `IN`, `NOT IN` and `OR` of equalities (as DataFusion's `LiteralGuarantee` extracts them);
-   - **interval**: lower and upper `std::ops::Bound` (`Included`, `Excluded` or `Unbounded`) from comparisons (as DataFusion's `Interval`);
-   - **hash partition**: `hash(columns) mod n = k`.
+**Rule 1: it can be lifted to the `SummaryAgg`.** Lifting is the inverse of DataFusion's `PushDownFilter` (`datafusion-optimizer`, `push_down_filter.rs`):
 
-A conjunct that fails either rule stays in `definition` as a residual, as in Goldstein & Larson. Column equalities (`a = b`) are residuals too: there are no column equivalence classes.
+| Operator on the path | The predicate passes when |
+|---|---|
+| `Filter`, `Scan.predicates`, `SummaryAgg.filter` | always |
+| range `TimeRange`, `TimeShift` without `@` | always |
+| `Project` | the column is a direct column item (renaming keeps its identity) |
+| `Aggregate` (later) | every column it uses is a group column |
+| window function, per-series temporal function such as `rate` (later) | every column it uses is a partition column (a series label) |
+| anything else | never |
 
-Columns are identified by lineage `(table, name)`, the identity `ColumnRef::Qualified` uses, not by `Field.name`. So `shipping.region` and `billing.region` stay different columns, and a direct alias keeps the identity of the column it renames. A column whose `(table, name)` is not unique in the output (two items aliased `k`) cannot be named, so its conjuncts stay residual. Value sets compare literals by type: `1` and `1.0` are never proven different.
+**Rule 2: it is a box constraint on one column.**
+
+| Constraint | From | DataFusion analogue |
+|---|---|---|
+| value set: `In` / `NotIn` literals | `=`, `!=`, `IN`, `NOT IN`, `OR` of equalities | `LiteralGuarantee` |
+| interval: lower and upper `std::ops::Bound` (`Included`, `Excluded`, `Unbounded`) | `<`, `<=`, `>`, `>=` | `Interval` |
+| hash partition (later): `hash(columns) mod n = k` | partitioned producers | `Partitioning::Hash` |
+
+Column equalities (`a = b`) are residuals: there are no column equivalence classes.
+
+**Column identity.**
+
+- Columns are identified by lineage `(table, name)`, the identity `ColumnRef::Qualified` uses, not by `Field.name`. So `shipping.region` and `billing.region` stay different columns.
+- A direct alias keeps the identity of the column it renames.
+- A column whose `(table, name)` is not unique in the output (two items aliased `k`) cannot be named, so its conjuncts stay residual.
+- Value sets compare literals by type: `1` and `1.0` are never proven different.
 
 **Time** is a selection like any other:
 
-- **Absolute** time needs nothing special: it is an interval on the timestamp column (the schema's `time_index`), for example `ts >= t0 AND ts < t1` gives `(Included(t0), Excluded(t1))` on `ts`. The IR has no timestamp literal yet, so such SQL filters stay residual until it does.
-- **Relative** time has its own field, because it is not a column value: a `TimeRange(w)` over a `TimeShift(s)` on the lifted chain gives `(Excluded(−(s+w)), Included(−s))` relative to evaluation. PromQL ranges are left-open, matching the executor (`series_window.rs`). This is how Stage 2 tumbling panes are built (`window_composition.rs` in #601), so their time is derived rather than declared. Time is lifted only from a single range `TimeRange`; an instant `TimeRange` picks the latest sample per series, which is not a selection of rows, so it stays in `definition`.
+| Kind | How it is selected | Example |
+|---|---|---|
+| **Absolute** | an interval on the timestamp column (the schema's `time_index`) | `ts >= t0 AND ts < t1` → `(Included(t0), Excluded(t1))` on `ts` |
+| **Relative** | its own field `relative_time`, because it is not a column value: one range `TimeRange(w)` over a `TimeShift(s)` | `(Excluded(−(s+w)), Included(−s))` relative to evaluation |
 
-Relative time and a timestamp-column interval are different dimensions, so they are never compared: two states restricted only by different kinds of time are treated as possibly overlapping. Binding a relative pane to absolute timestamps for one evaluation (evaluation time plus the pane layout's phase) is a runtime coordinate, not coverage.
+- PromQL ranges are left-open, matching the executor (`series_window.rs`).
+- The IR has no timestamp literal yet, so absolute SQL time filters stay residual until it does.
+- Stage 2 tumbling panes (`window_composition.rs` in #601) get their time this way, so it is derived rather than declared.
+- An instant `TimeRange` picks the latest sample per series, which is not a selection of rows, so it stays in `definition`.
+- Relative time and a timestamp-column interval are different dimensions, so they are never compared: two states restricted only by different kinds of time are treated as possibly overlapping.
+- Binding a relative pane to absolute timestamps for one evaluation (evaluation time plus the pane layout's phase) is a runtime coordinate, not coverage.
 
 ### 4.4 Operations
 
 | Operation | Example | Valid when |
 |---|---|---|
 | merge (`SummaryMerge`, same `G`) | `[0,1m)` ⊕ `[1m,2m)`; `region='us'` ⊕ `region='eu'` | all `definition`s equal; selections related as the family requires (below) |
-| rollup (`SummaryMerge` with `group_by: G'`) | `by[region, job]` → `by[job]` | `G'` ⊆ `G` and the family merges. Groups of one state are disjoint because a row has one value per group column, so no selection check is needed |
+| rollup (`SummaryMerge` with `group_by: G'`, later) | `by[region, job]` → `by[job]` | `G'` ⊆ `G` and the family merges. Groups of one state are disjoint because a row has one value per group column, so no selection check is needed |
 | slice | `by[region, job]` state answering `region = 'us' … by[job]` | the restricted columns are all in `G`. A sketch cannot be filtered, so a restriction on any other column is invalid |
 | reuse for a query | a stored state answers a query | Goldstein & Larson containment: same `definition`, query selection inside the state's, any compensating restriction is a slice |
 | subtract (`SummarySubtract`, reserved) | `[0,10) − [0,5)` | same `definition`; the right selection is contained in the left |
 
-One `SummaryMerge { children, group_by }` covers both merge and rollup: one child with a coarser `group_by` is a rollup, and `group_by` equal to the children's is a plain merge. Its coverage is the children's `definition` with `G'` and the union of their selections; adjacent intervals are joined, gaps stay as separate boxes.
+**Merge and rollup are one operator.** `SummaryMerge { children, group_by }`: one child with a coarser `group_by` is a rollup, and `group_by` equal to the children's is a plain merge. Its coverage is the children's `definition` with `G'` and the union of their selections; adjacent intervals are joined, gaps stay as separate boxes.
 
-How selections must relate is declared by the family, next to whether it merges (`FieldDataType::family_merges`, added in #592):
+**How selections must relate** is declared by the family, next to whether it merges (`FieldDataType::family_merges` and `merge_relation`, added in #592):
 
-- **disjoint** for counting families (KLL, Count-Min, exact `Sum`/`Count`): an overlapping row would be counted twice;
-- **overlap allowed** for idempotent families (HLL, exact `Min`/`Max`, distinct sets);
-- **contained** for subtraction.
+| Relation | Families | Why |
+|---|---|---|
+| **disjoint** | counting families: KLL, Count-Min, exact `Sum`/`Count` | an overlapping row would be counted twice |
+| **overlap allowed** | idempotent families: HLL, exact `Min`/`Max`, distinct sets | adding a row twice does not change the state |
+| **contained** | subtraction | the right state must be part of the left |
 
-Two `definition`s are equal when their canonical forms (`canonicalize`) are structurally equal, ignoring planning metadata: `timing`, `guarantee` and `coverage_cache`. `SummaryUpdate.weight_domain` is compared: it is derived from `C` and `input`, so it differs only if a derivation is wrong. A state built at ingestion time and one built at query time can therefore merge.
+**When two `definition`s are equal.**
 
-States over different sources have different `definition`s and do not merge. To combine tables, put `UNION ALL` with a marker column below one `SummaryAgg`; the marker is then an ordinary column for `selection` or `G`.
+- They must be structurally equal, ignoring planning metadata: `timing`, `guarantee` and `coverage_cache`. So a state built at ingestion time and one built at query time can merge.
+- `SummaryUpdate.weight_domain` is compared: it is derived from `C` and `input`, so it differs only if a derivation is wrong.
+- States over different sources have different `definition`s and do not merge. To combine tables, put `UNION ALL` with a marker column below one `SummaryAgg`; the marker is then an ordinary column for `selection` or `G`.
 
 ### 4.5 Interface
 
@@ -264,15 +325,21 @@ impl SummaryCoverage {
 }
 ```
 
-`OperatorNode::new` still rejects an invalid `SummaryMerge` (different definitions, or selections the family does not allow), but it does not store the result. A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
+- `OperatorNode::new` rejects an invalid `SummaryMerge` (different definitions, or selections the family does not allow), but it does not store the result.
+- A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
 
 ### 4.6 What coverage does not contain
 
-- **Source dependencies**: which source rows must be read to compute the contributions, such as the 5-minute window under `rate`. This is read planning and maintenance (compare `materialized/dependencies.rs` in `datafusion-materialized-views`).
-- **Readiness and completeness**: whether a stored instance holds all of its rows.
-- **Absolute binding** of relative time, and deployment identity.
+| Left out | Example | Owner |
+|---|---|---|
+| **Source dependencies**: which source rows must be read to compute the contributions | the 5-minute window under `rate` | ASAPQuery-backend: read planning and maintenance (compare `materialized/dependencies.rs` in `datafusion-materialized-views`) |
+| **Readiness and completeness**: whether a stored instance holds all of its rows | a pane still being filled | ASAPQuery-backend |
+| **Absolute binding** of relative time, and deployment identity | pane `(−3m, −2m]` at evaluation time `t` | ASAPQuery-backend |
 
-These belong to ASAPQuery-backend. The SDS split matches coverage: `SummaryDefinition` stores the serialized `definition` (Planner provides its serde; Backend owns the format version, definition id and hash), and a `StoredSummary`'s coordinates are the `selection` bound to one evaluation plus the group value.
+**SDS mapping.** The SDS split matches coverage:
+
+- `SummaryDefinition` stores the serialized `definition`. Planner provides its serde; Backend owns the format version, definition id and hash.
+- A `StoredSummary`'s coordinates are the `selection` bound to one evaluation, plus the group value.
 
 ## 5. Examples on how OperatorNode, schema, and physical data information are being used with Summary operators
 
