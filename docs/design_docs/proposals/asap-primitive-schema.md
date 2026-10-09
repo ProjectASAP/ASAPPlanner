@@ -725,7 +725,7 @@ result                         (────────────────
 
 ## 6. Key code interfaces
 
-`OperatorNode`, `OperatorResultKind` and coverage are in §4. Bodies and serde/derive attributes are elided below.
+`OperatorNode` and coverage are in §6.5. Bodies and serde/derive attributes are elided below.
 
 ### 6.1 Schema and field types (`crates/types/src/pre_asap/schema.rs`)
 
