@@ -115,8 +115,8 @@ A node in the physical data will represent the data or summary instance, so a no
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2 |
 | How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.3 |
 | What uses it? | merge, rollup, slice, reuse, subtract | §4.4 |
-| Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §4.5 |
-| What is left out? | the deployment and runtime implementation, e.g. SDS | §4.6 |
+| Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.5 |
+| What is left out? | the deployment and runtime implementation, e.g. SDS | §4.5 |
 
 **Why coverage is not part of the schema.**
 
@@ -416,59 +416,7 @@ Coverage tells the planner which states can be combined, and what the result cov
 
 Two `definition`s count as equal as described in §4.3.1.
 
-### 4.5 Code interface: `OperatorNode::coverage()` and `SummaryCoverage` (`crates/types/src/ir/node.rs`, `summary_coverage.rs`)
-
-```rust
-pub struct OperatorNode {
-    pub operator: Operator,
-    pub result_kind: OperatorResultKind,
-    pub schema: Schema,
-    pub guarantee: Option<ResultGuarantee>,
-    pub timing: Option<ExecutionTiming>,
-    /// Cache for `coverage()`. Lazily filled, never serialized, ignored by
-    /// equality, emptied on clone. Not a source of truth: coverage is always
-    /// re-derivable.
-    coverage_cache: CoverageCache,
-}
-
-impl OperatorNode {
-    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`.
-    pub fn coverage(&self) -> Option<&SummaryCoverage>;
-}
-
-pub struct SummaryCoverage {
-    /// The `SummaryAgg` (or rolled-up equivalent) with the selection removed.
-    pub definition: Rc<OperatorNode>,
-    /// Union of boxes over the output rows of the definition's computation.
-    pub selection: Vec<SelectionBox>,
-}
-
-pub struct SelectionBox {
-    pub columns: BTreeMap<ColumnIdentity, Constraint>, // missing column = unrestricted
-    pub relative_time: Option<(Bound<i64>, Bound<i64>)>, // ms from evaluation; None = unrestricted
-}
-
-pub struct ColumnIdentity {
-    pub table: Option<String>,
-    pub name: String,
-}
-
-pub enum Constraint {
-    In(Vec<ScalarValue>),    // ScalarValue has no total order (Float64)
-    NotIn(Vec<ScalarValue>),
-    Interval { lower: Bound<ScalarValue>, upper: Bound<ScalarValue> },
-    // HashPartition { columns, of, index }: added with its first producer.
-}
-
-impl SummaryCoverage {
-    pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
-}
-```
-
-- `OperatorNode::new` rejects an invalid `SummaryMerge` (different definitions, or selections the family does not allow), but it does not store the result.
-- A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
-
-### 4.6 What coverage does not contain
+### 4.5 What coverage does not contain
 
 Coverage only says what a state means and which rows it took. The deployment and runtime implementation is not part of coverage: it belongs to ASAPQuery-backend, for example the summary data store (SDS), reading source data, and building, storing and serving summary instances.
 
@@ -963,3 +911,57 @@ impl ASAPOp {
     pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
 }
 ```
+
+### 6.5 Summary coverage (`crates/types/src/ir/node.rs`, `crates/types/src/ir/summary_coverage.rs`)
+
+The code for §4.
+
+```rust
+pub struct OperatorNode {
+    pub operator: Operator,
+    pub result_kind: OperatorResultKind,
+    pub schema: Schema,
+    pub guarantee: Option<ResultGuarantee>,
+    pub timing: Option<ExecutionTiming>,
+    /// Cache for `coverage()`. Lazily filled, never serialized, ignored by
+    /// equality, emptied on clone. Not a source of truth: coverage is always
+    /// re-derivable.
+    coverage_cache: CoverageCache,
+}
+
+impl OperatorNode {
+    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`.
+    pub fn coverage(&self) -> Option<&SummaryCoverage>;
+}
+
+pub struct SummaryCoverage {
+    /// The `SummaryAgg` (or rolled-up equivalent) with the selection removed.
+    pub definition: Rc<OperatorNode>,
+    /// Union of boxes over the output rows of the definition's computation.
+    pub selection: Vec<SelectionBox>,
+}
+
+pub struct SelectionBox {
+    pub columns: BTreeMap<ColumnIdentity, Constraint>, // missing column = unrestricted
+    pub relative_time: Option<(Bound<i64>, Bound<i64>)>, // ms from evaluation; None = unrestricted
+}
+
+pub struct ColumnIdentity {
+    pub table: Option<String>,
+    pub name: String,
+}
+
+pub enum Constraint {
+    In(Vec<ScalarValue>),    // ScalarValue has no total order (Float64)
+    NotIn(Vec<ScalarValue>),
+    Interval { lower: Bound<ScalarValue>, upper: Bound<ScalarValue> },
+    // HashPartition { columns, of, index }: added with its first producer.
+}
+
+impl SummaryCoverage {
+    pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
+}
+```
+
+- `OperatorNode::new` rejects an invalid `SummaryMerge` (different definitions, or selections the family does not allow), but it does not store the result.
+- A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
