@@ -114,6 +114,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | What is it based on? | Goldstein & Larson view matching (SIGMOD 2001), explained with an example | §4.1 |
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
 | How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.2.2 |
+| How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; cached per node | §4.2.3 |
 | What uses it? | merge, rollup, slice, reuse, subtract | §5.6 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.1, §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
@@ -379,6 +380,39 @@ Any other shape stays in `definition`:
 | `Filter(value * 2 > 10, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` and the condition `value * 2 > 10` | nothing |
 
 In the last two rows `TimeRange(5m)` stays in `definition`: it is the input window of `rate` and changes the rate values, so it does not just pick rows. `value * 2 > 10` stays too, because it is a condition on an expression, not on a column.
+
+#### 4.2.3 Cost of deriving coverage
+
+**When it runs.** `coverage()` derives a node's coverage the first time it is called and caches it on the node, so each node pays once. Building a `SummaryMerge` (`OperatorNode::new`) also derives its coverage once to reject an invalid merge.
+
+**Sizes used below.**
+
+| Symbol | Meaning | Typical size |
+|---|---|---|
+| `d` | operators on the walk: the `Filter`, `Project`, `TimeRange` and `TimeShift` nodes directly under the `SummaryAgg` (§4.2.2) | a few |
+| `c` | filter conditions on the walk (after splitting at `AND`), including `SummaryAgg.filter` and `Scan.predicates` | a few |
+| `f` | columns in the `SummaryAgg`'s input schema | tens |
+| `v` | values in one value set (`IN` list) | a few |
+| `n` | inputs of a `SummaryMerge` | panes per window, regions, … |
+| `b` | boxes in one input's selection | 1 for a `SummaryAgg` |
+| `N` | nodes in a `definition` | the sub-DAG size |
+
+**`SummaryAgg`: `O(c · (d·f + v²) + d)`.**
+
+- Each condition is checked once. Following its column up through the `Project`s costs `O(d·f)`; checking that the column's name is unique costs `O(f)`; building and intersecting a value set costs `O(v²)`, because values are compared by type, not hashed.
+- Rebuilding the definition creates at most `d` new nodes. Everything below the walk is shared, not copied.
+- So the cost depends only on the few operators directly under the `SummaryAgg`, **not on the size of the sub-DAG below them**. A `SummaryAgg` over a large join costs the same as one over a `Scan`.
+
+**`SummaryMerge`: `O(n·N + n²·b²·f·v² + (n·b)³)` in the worst case.**
+
+| Step | Cost | Why |
+|---|---|---|
+| inputs' coverage | 0 extra | each input's coverage is already cached |
+| equal definitions | `O(n·N)` node comparisons (each compares an operator and a schema), often `O(n)` | structural comparison of each input's definition with the first one. Shared nodes (`Rc`) compare in `O(1)`, and node pairs already proven equal are remembered |
+| no overlap | `O(n²·b²·f·v²)` | every pair of inputs, every pair of boxes, every shared column |
+| union of selections | `O((n·b)³)` box comparisons, worst case | joins touching ranges and value sets until nothing more joins; each join restarts the scan |
+
+For the common cases this is small: `n` one-minute panes have one box each with no columns, so the merge costs `O(n·N)` for the definitions and `O(n²)` for overlap. Nested merges keep `n` small: a merge of merges compares only its direct inputs, whose coverage is cached.
 
 ### 4.3 What coverage does not contain
 
