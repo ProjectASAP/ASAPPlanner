@@ -1613,6 +1613,51 @@ async fn array_agg_is_deliberately_rejected() {
     );
 }
 
+// ── ClickHouse identifier case (ClickBench corpus, issue #132) ──────────────
+
+/// ClickHouse identifiers are case-sensitive: a mixed-case column resolves
+/// verbatim under `ClickhouseSQL`, and a case-folded spelling does not. The
+/// generic dialect still folds unquoted identifiers.
+#[tokio::test]
+async fn clickhouse_identifiers_keep_their_case() {
+    let hits = SqlCatalog::new().with_table(
+        "hits",
+        Schema::new(vec![
+            col("RegionID", DataType::Int64),
+            col("UserID", DataType::Int64),
+        ]),
+    );
+    let qe = lower_sql_dialect(
+        "SELECT RegionID, COUNT(DISTINCT UserID) FROM hits GROUP BY RegionID",
+        &hits,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("mixed-case ClickHouse columns must resolve: {e}"));
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(*by, GroupKeys::by(vec![0]));
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Cardinality { cols, .. }] if cols == &[1]),
+        "expected COUNT(DISTINCT UserID) over column 1, got {measures:?}"
+    );
+
+    let err = lower_sql_dialect(
+        "SELECT userid FROM hits",
+        &hits,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("ClickHouse must not match `userid` to `UserID`");
+    assert!(
+        format!("{err}").contains("userid"),
+        "unexpected error: {err}"
+    );
+
+    lower("SELECT SERVICE FROM metrics").await;
+}
+
 // ── Issue #225: catalog-driven ClickHouse builtins (countIf, generalizing
 // uniqExact from #221) ───────────────────────────────────────────────────
 
