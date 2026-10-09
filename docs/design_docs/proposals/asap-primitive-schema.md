@@ -745,6 +745,36 @@ result                         (────────────────
 
 Every struct field and enum-variant field below has a comment saying what it holds. Function bodies and serde/derive attributes are left out.
 
+**How the subsections connect.** Everything hangs off one DAG node, `OperatorNode` (§6.5):
+
+```text
+OperatorNode                                         §6.5
+├── operator: Operator::ASAP(ASAPOp)                 §6.4
+│     ├── SummaryAgg
+│     │     ├── family: FieldDataType ───────────┐   §6.1 → §6.2
+│     │     └── input:  SummaryUpdate            │   §6.3  (what each row adds)
+│     ├── SummaryEstimate.query:  SketchStatistic│   §6.3  (what is read out)
+│     ├── MaintainPopulation.population          │   §6.3
+│     └── EvaluatePopulation.evaluation          │   §6.3
+├── schema: Schema                               │   §6.1
+│     └── fields[i].dtype: FieldDataType ◀───────┘   §6.1  (the same type: the output
+│           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
+│                 └── category, algorithm, params    §6.2
+├── guarantee: ResultGuarantee                       §6.3  (accuracy of a readout)
+└── coverage() → SummaryCoverage                     §6.5
+      └── definition: OperatorNode   (again a node, so the same structure)
+```
+
+| Subsection | Defines | Used by |
+|---|---|---|
+| §6.1 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
+| §6.2 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
+| §6.3 Update input and readouts | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.4 |
+| §6.4 ASAP operators | `ASAPOp` | `OperatorNode.operator` |
+| §6.5 Summary coverage | `OperatorNode`, `SummaryCoverage` | the DAG itself; `coverage()` on summary nodes |
+
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.5) holds `ASAPOp::SummaryAgg` (§6.4) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.1, §6.2) and `input = SummaryUpdate::column(latency)` (§6.3). Its `schema` (§6.1) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.3), and its node carries the `guarantee` of the readout. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.5).
+
 ### 6.1 Schema and field types (`crates/types/src/pre_asap/schema.rs`)
 
 ```rust
