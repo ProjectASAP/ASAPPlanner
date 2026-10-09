@@ -943,6 +943,23 @@ pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { 
 
 ### 6.3 Update input and readouts (`post_asap/sketch.rs`, `post_asap/maintained_population.rs`)
 
+This part of the code answers two questions about summary state:
+
+1. **Update input** (`SummaryUpdate`): when a `SummaryAgg` reads one input row, what does it add to the state? It adds a **weight**, optionally under an **item** key.
+2. **Readouts**: once the state is built, what can be asked of it? `SketchStatistic` is what `SummaryEstimate` asks a sketch (§5.2). `MaintainedPopulation` and `PopulationStatistic` are the exact-population counterpart, used by `MaintainPopulation` and `EvaluatePopulation` (§5.4, §5.5).
+
+**Update input examples** (as the planner builds them in `asap-aware-mapping`):
+
+| Query | Sketch | `item` | `weight` | `weight_domain` |
+|---|---|---|---|---|
+| p99 of `latency` | KLL | none: KLL has no keys | `Column(latency)`: the value itself | `UnknownOrSigned` |
+| how often each `endpoint` occurs | Count-Min | `Column(endpoint)` | `Constant(1.0)`: each row counts once | `NonNegative(UnitCount)` |
+| `topk(5, rate(http_requests_total[5m]))` | Count-Min with heap | `Tuple(label columns)`: one item per series | `Column(value)`: the rate | `NonNegative(ResetAwareCounterDerivative)` |
+
+`weight_domain` matters because some sketches (e.g. Count-Min) are only accurate when weights are never negative. The planner records why a weight is non-negative; if it cannot prove it, the weight counts as possibly negative.
+
+**Readout examples:** `Quantile { q: 0.99 }` reads p99 from a KLL; `PointCount { key: endpoint, value: Some("checkout") }` reads how often `checkout` occurred from a Count-Min; `TopK { k: 5 }` reads the 5 heaviest items.
+
 ```rust
 /// What one input row adds to the state.
 pub struct SummaryUpdate {
