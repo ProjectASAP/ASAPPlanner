@@ -142,9 +142,9 @@ The design follows the view matching algorithm of Goldstein and Larson, which de
 
 **The algorithm.** It splits a view's `WHERE` into three parts:
 
-- column **equivalence classes**,
-- a **range** per column,
-- **residual** predicates (everything else).
+- column **equivalence classes**: columns known to be equal, from column equalities such as `a = b` (e.g. join keys);
+- a **range** per column: the interval a column must lie in, from comparisons with a constant such as `x > 5 AND x <= 10` (an equality `x = 5` is the range `[5, 5]`);
+- **residual** predicates: every conjunct that is neither of the above, such as `a + b > 10`, `lower(name) LIKE 'a%'`, or `x = 1 OR y = 2`. The algorithm does not interpret them; it only checks whether the same predicate appears in the query.
 
 A view can answer a query when all of these hold:
 
