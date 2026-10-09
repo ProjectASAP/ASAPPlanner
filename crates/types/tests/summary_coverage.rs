@@ -1,5 +1,5 @@
 //! Summary coverage is `definition + selection`, derived from the sub-DAG
-//! (`docs/design_docs/proposals/asap-primitive-schema.md` §4). Merges need
+//! (`docs/design_docs/proposals/asap-primitive-schema.md` §4.2). Merges need
 //! the same definition and disjoint selections.
 use std::ops::Bound;
 use std::rc::Rc;
@@ -474,4 +474,111 @@ fn partly_lifted_scan_predicates_keep_only_the_rest() {
         )
     };
     merge(vec![job("api"), job("web")]).unwrap();
+}
+
+/// The worked example of the design doc (§4.2.2): conditions on the
+/// `SummaryAgg` filter, through a renaming `Project`, and the time window
+/// move into the selection; the condition on an expression stays.
+#[test]
+fn design_doc_worked_example() {
+    let (value, job, region) = (1, 2, 3);
+    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "m".into() },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+                Field::plain("job", DataType::Utf8, true),
+                Field::plain("region", DataType::Utf8, true),
+            ],
+            0,
+            vec![],
+        ),
+    }))
+    .unwrap();
+    let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms: 120_000,
+            at: None,
+        },
+        child: Rc::clone(&scan),
+    }))
+    .unwrap();
+    let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_millis(60_000),
+        kind: TimeRangeKind::Range,
+        child: shifted,
+    }))
+    .unwrap();
+    let doubled_above_10 = ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Mul,
+            left: Box::new(ScalarExpr::Column(value)),
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(2.0))),
+            semantics: ExprSemantics::Sql,
+        }),
+        op: CompareOpKind::Gt,
+        right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(10.0))),
+        semantics: ExprSemantics::Sql,
+    };
+    let filtered = filter(
+        range,
+        ScalarExpr::BoolAnd(vec![eq(region, "us"), doubled_above_10.clone()]),
+    );
+    let item = |column: usize, alias: Option<&str>| ProjectItem {
+        alias: alias.map(Into::into),
+        expr: ScalarExpr::Column(column),
+    };
+    let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+        cols: vec![item(job, None), item(region, Some("r")), item(value, None)],
+        qualifier: None,
+        child: filtered,
+    }))
+    .unwrap();
+    let below_100 = compare(2, CompareOpKind::Lt, ScalarValue::Float64(100.0));
+    let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: project,
+        family: FieldDataType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            Default::default(),
+        ),
+        input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+        reduction: Reduction::by(vec![0]),
+        grouping: GroupingStrategy::default(),
+        filter: Some(Predicate(below_100)),
+    }))
+    .unwrap();
+
+    let coverage = state.coverage().unwrap();
+    assert_eq!(
+        coverage.selection,
+        vec![SelectionBox {
+            columns: [
+                (column("r"), utf8(&["us"])),
+                (
+                    column("value"),
+                    Constraint::Interval {
+                        lower: Bound::Unbounded,
+                        upper: Bound::Excluded(ScalarValue::Float64(100.0)),
+                    },
+                ),
+            ]
+            .into(),
+            relative_time: relative(-180_000, -120_000),
+        }]
+    );
+    // definition: SummaryAgg (no filter) over Project over
+    // Filter(value * 2 > 10) over the bare Scan.
+    let Some(ASAPOp::SummaryAgg { filter, child, .. }) = coverage.definition.asap() else {
+        panic!("definition is a SummaryAgg");
+    };
+    assert!(filter.is_none());
+    assert!(matches!(child.non_asap(), Some(NonASAPOp::Project { .. })));
+    let kept = child.children()[0];
+    assert!(matches!(
+        kept.non_asap(),
+        Some(NonASAPOp::Filter { pred, .. }) if pred.0 == doubled_above_10
+    ));
+    assert!(Rc::ptr_eq(kept.children()[0], &scan));
 }

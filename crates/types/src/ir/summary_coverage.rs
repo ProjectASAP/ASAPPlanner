@@ -1,6 +1,6 @@
 //! What a summary state covers: `definition` (what it computes) and
 //! `selection` (which output rows of that computation it took). Design:
-//! `docs/design_docs/proposals/asap-primitive-schema.md` §4, after
+//! `docs/design_docs/proposals/asap-primitive-schema.md` §4.2, after
 //! Goldstein & Larson's view matching.
 //!
 //! Coverage is derived from the node, never declared. Walking down from a
@@ -43,7 +43,8 @@ pub struct SelectionBox {
     pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
 }
 
-/// A column of the definition child's output, by `(table, name)`.
+/// A column of the definition child's output, by `(table, name)`. A
+/// `Project` below renames its columns and drops their table.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ColumnIdentity {
     pub table: Option<String>,
