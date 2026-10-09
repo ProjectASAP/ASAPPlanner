@@ -203,7 +203,7 @@ A summary state is an aggregation view whose aggregate is a summary family:
 
 **What this design adds beyond the paper**:
 
-- **Unions of states.** The paper considers single-view substitutes and notes that requirement 1 "is not required if substitutes containing unions of views are considered" (§3.1). `SummaryMerge` is exactly such a union, so it needs a disjointness check the paper does not have.
+- **Unions of states.** The paper considers single-view substitutes and notes that its requirement 1, that the view contains all rows the query needs, "is not required if substitutes containing unions of views are considered" (§3.1). `SummaryMerge` is exactly such a union, so it needs a disjointness check the paper does not have.
 - **Summary families.** The paper allows `SUM` and `COUNT_BIG` only. Here each family declares how the selections of its inputs may relate (§4.5).
 - **Value sets and hash partitions** next to ranges, and **evaluation-relative time** (§4.4).
 
