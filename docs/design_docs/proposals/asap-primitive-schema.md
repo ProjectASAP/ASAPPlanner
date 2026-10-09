@@ -117,7 +117,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | Who sets it? | Nobody: it is derived from the sub-DAG | §4.4 |
 | What uses it? | merge, rollup, slice, reuse, subtract | §4.5 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §4.6 |
-| What is left out? | source dependencies, readiness, absolute time binding | §4.7 |
+| What is left out? | the deployment and runtime implementation, e.g. SDS | §4.7 |
 
 **Why coverage is not part of the schema.**
 
@@ -186,7 +186,7 @@ Coverage stores exactly these two things:
 | `Filter(rate > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))`, `rate > 0` as residual | — |
 | `Filter(job = 'api', rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `job ∈ {api}` |
 
-In the last two rows the `TimeRange(5m)` stays in `definition`: it sits below `rate` and changes the rate values, so it is not a selection of output rows. The 5-minute read window is a source dependency, not coverage (§4.7).
+In the last two rows the `TimeRange(5m)` stays in `definition`: it sits below `rate` and changes the rate values, so it is not a selection of output rows. Reading those 5 minutes of source data is the runtime's job, not coverage (§4.7).
 
 ### 4.3 Mapping to Goldstein & Larson
 
@@ -333,11 +333,7 @@ impl SummaryCoverage {
 
 ### 4.7 What coverage does not contain
 
-| Left out | Example | Owner |
-|---|---|---|
-| **Source dependencies**: which source rows must be read to compute the contributions | the 5-minute window under `rate` | ASAPQuery-backend: read planning and maintenance (compare `materialized/dependencies.rs` in `datafusion-materialized-views`) |
-| **Readiness and completeness**: whether a stored instance holds all of its rows | a pane still being filled | ASAPQuery-backend |
-| **Absolute binding** of relative time, and deployment identity | pane `(−3m, −2m]` at evaluation time `t` | ASAPQuery-backend |
+Coverage only says what a state means and which rows it took. The deployment and runtime implementation is not part of coverage: it belongs to ASAPQuery-backend, for example the summary data store (SDS), reading source data, and building, storing and serving summary instances.
 
 **SDS mapping.** The SDS split matches coverage:
 
