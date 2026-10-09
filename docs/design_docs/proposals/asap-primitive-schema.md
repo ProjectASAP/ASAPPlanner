@@ -91,7 +91,7 @@ Based on our requirement, each field should contain the following information.
      | `Count` (approximate) | `Sketch`: `Cms`, `CountSketch`, `UnivMon` | `SummaryEstimate(PointCount { .. })` |
      | `TopK` | `Sketch`: `CmsWithHeap`, `CountSketchWithHeap` | `SummaryEstimate(TopK { k })` |
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
-     | `Sum`, `Count`, `Min`, `Max`, `Rate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
+     | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
      The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; the readouts are `SketchStatistic` ([§6.5](#65-update-input-and-readouts-post_asapsketchrs-post_asapmaintained_populationrs)).
 
@@ -115,7 +115,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
 | How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; cached per node | §4.2.3 |
-| What uses it? | merge, rollup, slice, reuse, subtract | §5.6 |
+| What uses it? | merge (in #646); rollup, slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.1, §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
@@ -165,13 +165,13 @@ GROUP BY job;
 | **Ranges** | for each column, the interval of values it may have | comparisons with a constant: `x > 5`, `x = 5`, `BETWEEN` | `day ∈ [1, 31]` | `day ∈ [5, 10]`, `region ∈ ['us', 'us']` |
 | **Residuals** | every other condition; the algorithm does not try to understand them | e.g. `a + b > 10`, `lower(name) LIKE 'a%'`, `x = 1 OR y = 2` | none | none |
 
-**Step 2: does `V` contain every row `Q` needs?** (§3.1.2 of the paper)
+**Step 2: does `V` contain every row `Q` needs?**
 
 - **Ranges:** each range of `Q` lies inside the same column's range in `V`. `day ∈ [5, 10]` is inside `[1, 31]` ✓. `V` has no range on `region`, so any `region` is in `V` ✓.
 - **Residuals:** each residual of `V` also appears in `Q`. Since residuals are not understood, the only safe case is when `Q` has the same condition.
 - **Equivalence classes:** each column equality of `V` also holds in `Q`.
 
-**Step 3: can the answer be computed from `V`'s output?** (§3.3)
+**Step 3: can the answer be computed from `V`'s output?**
 
 - **Compensating filter:** where `Q` is narrower than `V`, the extra condition is applied to `V`'s rows. So its columns must be in `V`'s output: `day` and `region` are ✓.
 - **Regrouping:** `Q`'s `GROUP BY` must be a subset of `V`'s. `{job}` ⊆ `{region, job, day}` ✓, so each group of `Q` is the sum of some groups of `V`.
@@ -186,8 +186,8 @@ GROUP BY job;
 
 **Limits that matter for us:**
 
-- It answers a query from **one** view. Combining several views (a union) is left out (§3.1).
-- It supports only `SUM` and `COUNT`, whose groups can be added up again.
+- It answers a query from **one** view. Combining several views (a union) is left out.
+- It supports aggregates whose groups can be added up again: `SUM` and `COUNT` (and `AVG` computed from them).
 
 **Existing implementation.** The `WHERE` split is implemented for DataFusion in [`datafusion-contrib/datafusion-materialized-views`](https://github.com/datafusion-contrib/datafusion-materialized-views), `src/rewrite/normal_form.rs` (`SpjNormalForm`, `Predicate { eq_classes, ranges_by_equivalence_class, residuals }`). It rejects plans that contain an `Aggregate` or a `Join`.
 
@@ -220,7 +220,7 @@ If coverage were one thing, for example the whole sub-DAG compared as a unit, `S
 
 Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` is the sub-DAG without its row filters, `σ` is the selection, and `G` the grouping.
 
-[^gl]: **What we take from Goldstein & Larson, and what we add.** The view's tables, joins and residuals become the sub-DAG `C` below the `SummaryAgg`; the aggregate and its argument become the summary family and its input; `GROUP BY` becomes the `SummaryAgg` grouping `G`. These three are in `definition`. The paper's ranges become `selection` (§4.2.2). A compensating filter on the view's output becomes slicing, allowed only on a column of `G`, and regrouping to a smaller `GROUP BY` becomes rollup (§5.6). We add three things: **unions of states** (the paper uses one view at a time; `SummaryMerge` combines several, so we also check that their selections do not overlap), **summary families** (the paper only re-adds `SUM` and `COUNT`; each family says how its inputs may overlap, §5.6), and **more kinds of conditions** (value sets, hash partitions, and time relative to the evaluation time, §4.2.2).
+[^gl]: **What we take from Goldstein & Larson, and what we add.** The view's tables, joins and residuals become the sub-DAG `C` below the `SummaryAgg`; the aggregate and its argument become the summary family and its input; `GROUP BY` becomes the `SummaryAgg` grouping `G`. These three are in `definition`. The paper's ranges become `selection` (§4.2.2). A compensating filter on the view's output becomes slicing, allowed only on a column of `G`, and regrouping to a smaller `GROUP BY` becomes rollup (§5.6). We add three things: **unions of states** (the paper uses one view at a time; `SummaryMerge` combines several, so we also check that their selections do not overlap), **summary families** (the paper only re-aggregates `SUM` and `COUNT`; each family says how its inputs may overlap, §5.6), and **more kinds of conditions** (value sets, hash partitions, and time relative to the evaluation time, §4.2.2).
 
 
 #### 4.2.2 Deriving the definition and the selection
@@ -261,7 +261,8 @@ The `definition` is the `SummaryAgg` together with its sub-DAG, with every condi
 | a `Filter` whose conditions all move into `selection` | removed |
 | a `Filter` with some conditions that stay | kept, with only the conditions that stay |
 | `Scan.predicates` and `SummaryAgg.filter` | trimmed the same way |
-| a range `TimeRange` over a `TimeShift` that becomes relative time | removed |
+| the one range `TimeRange`, and any `TimeShift`s, when they become relative time | removed |
+| a `TimeShift` with no range `TimeRange`, or two or more range `TimeRange`s | unchanged: no time is taken out |
 | any other operator | unchanged |
 
 So the `definition` holds what the state computes: the computation `C` with its remaining conditions, the summary family and its parameters, the input column, and the grouping `G`.
@@ -310,11 +311,11 @@ In the worked example:
 | Condition | Found at | Rule 1: same rows at the `SummaryAgg`? | Rule 2: simple? | Result |
 |---|---|---|---|---|
 | `value < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `value ∈ (−∞, 100)` |
-| `region = 'us'` | `Filter` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `m.region ∈ {us}` |
+| `region = 'us'` | `Filter` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `r ∈ {us}` |
 | `value * 2 > 10` | `Filter` | yes | **no**: it is on an expression, not a column | stays in `definition` |
 | 1 minute, shifted by 2 | `TimeRange` + `TimeShift` | yes | yes, relative time | `selection`: `(−3m, −2m]` |
 
-So the `selection` is `value ∈ (−∞, 100)`, `m.region ∈ {us}`, time `(−3m, −2m]`.
+So the `selection` is `value ∈ (−∞, 100)`, `r ∈ {us}`, time `(−3m, −2m]`.
 
 **Rule 1 in detail.** Imagine moving the condition up, one operator at a time, until it is just below the `SummaryAgg`. Every operator it passes must leave the picked rows unchanged. Whether it can pass depends on what the operator does:
 
@@ -331,7 +332,7 @@ A condition *above* `rate` has nothing to pass. `Filter(value > 0, rate(...))` k
 
 (This is filter pushdown in reverse. DataFusion's `PushDownFilter` uses the same rules to move filters down.)
 
-**Rule 2 in detail.** `selection` can hold only two shapes of condition, each on a single column: a set of values, or a range. Hash partitions will be a third shape later.
+**Rule 2 in detail.** `selection` can hold only three shapes of condition, each on a single column: allowed values, forbidden values, or a range. Hash partitions will be a fourth shape later.
 
 | Shape | Written as | Example | Stored as |
 |---|---|---|---|
@@ -351,9 +352,10 @@ Any other shape stays in `definition`:
 
 **Which column a condition is on.**
 
-- A column is named by its source table and name, `(table, name)`: in a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions.
-- A rename keeps the original name: `region AS r` is still `m.region`.
-- If two output columns have the same `(table, name)` (for example `Project [a AS k, b AS k]`), a condition on `k` cannot tell them apart and stays in `definition`.
+- A column is named by its table and name, `(table, name)`, **as the `SummaryAgg` reads it** (in the schema of its child). Directly above a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions.
+- A `Project` gives its columns new names and drops the table: after `region AS r`, the column is `(none, r)`, so the condition becomes `r ∈ {us}`. Since the `definition` contains the same `Project`, two states that rename the same way still compare equal.
+- If two columns the `SummaryAgg` reads have the same `(table, name)` (for example `Project [a AS k, b AS k]`), a condition on `k` cannot tell them apart and stays in `definition`.
+- PromQL labels have no table, so a label is named by its name alone.
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
 
 **Time.** There are two kinds:
@@ -364,7 +366,7 @@ Any other shape stays in `definition`:
 | **Absolute** | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
 
 - PromQL windows exclude their start, so relative windows are open on the left.
-- Stage 2 builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
+- Window composition (Pass 2 of logical optimization) builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
 - An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`.
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
 - Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
@@ -466,7 +468,7 @@ All examples read a table, so values are `Relation`. For PromQL series they woul
 coverage() of the SummaryAgg
 ┌──────────────────────────────────────────────────────────────────┐
 │ definition: this SummaryAgg over Scan t   (the Filter removed)   │
-│ selection:  t.region ∈ {us},  t.latency ∈ (−∞, 10000)            │
+│ selection:  region ∈ {us},  latency ∈ (−∞, 10000)                │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -507,7 +509,7 @@ coverage() of the SummaryAgg
 
 | Question | Answer |
 |---|---|
-| What comes out? | the same columns, with `state` replaced by the answer: `quantile` Float64 here. Counts and cardinalities are Int64. A top-k readout instead returns the top rows themselves (the same shape as an exact `Sort` + `Limit`) |
+| What comes out? | the same columns, with `state` replaced by the answer: `quantile` Float64 here. Counts and cardinalities are Int64 (Float64 when the state was built per series, `PerEntity`). A top-k readout is a `topk` Utf8 field today; #579 changes it to return the top rows themselves (the same shape as an exact `Sort` + `Limit`) |
 | When is it rejected? | the input is not a sketch, or the sketch cannot answer the question. For example, asking a KLL for a cardinality |
 | What is its coverage? | none: the output is a value |
 | State or value? | value. The node carries the readout's error bound |
@@ -568,7 +570,7 @@ coverage() of the SummaryAgg
 | Question | Answer |
 |---|---|
 | What comes out? | the same columns as the input, all plain. Only the result kind `State` marks it as maintained |
-| When is it rejected? | the population description does not match the child. For table rows: the child must be that same table `Scan`, the value column a non-null Float64, and the grouping valid. For PromQL series: a scan of the same metric, labels and grouping, under an instant `TimeRange` |
+| When is it rejected? | the population description does not match the child. For table rows: the child must be that same table `Scan`, the value column a non-null Float64, and the grouping valid. For PromQL series: a scan of the same metric, labels and grouping, under an instant `TimeRange` of the lookback (which may be left out for the default 5-minute lookback) |
 | What is its coverage? | none. Maintained populations are not merged today |
 | State or value? | state, because it must also track membership changes. It is read only through `EvaluatePopulation` |
 
@@ -619,14 +621,14 @@ coverage() of the SummaryAgg
 SummaryMerge { children: Vec<C>, group_by: Reduction }
 ```
 
-**Example A: time panes.** PromQL `quantile_over_time(0.99, m[2m])` built from two one-minute panes, the way Stage 2 builds them. Both panes read the same `Scan`.
+**Example A: time panes.** The p99 of all samples of metric `m` over the last 2 minutes (one KLL over every series), built from two one-minute panes, the way window composition (Pass 2) builds them. Both panes read the same `Scan`.
 
 ```text
                            ( next operator )
                                    ▲
                                    │  State: state Sketch(KLL k=200)
                                    │
-                          [[ SummaryMerge ]]     group_by: nothing
+                          [[ SummaryMerge ]]
                                    ▲             selection: time (−2m, 0]
                                    │
                  ┌─────────────────┴─────────────────┐
@@ -664,7 +666,7 @@ merge      (──────────────────────�
                                    ▲
                                    │  State: job Utf8, state Sketch(KLL k=200)
                                    │
-                          [[ SummaryMerge ]]     group_by: by job
+                          [[ SummaryMerge ]]
                                    ▲             selection: region ∈ {us, eu}
                                    │
                  ┌─────────────────┴─────────────────┐
@@ -735,18 +737,19 @@ input groups                       output groups
 | `A` + a KLL with `k = 400` | ✗ | different definitions (parameters) | |
 | `(A + B)` + a state over `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
 
-**Whether inputs may overlap** depends on the summary family (`FieldDataType::family_merges` and `merge_relation`, #592):
+**Whether inputs may overlap** depends on the summary family. This is #592 (open), which adds `FieldDataType::family_merges` and `merge_relation`; #646 alone requires every merge to be overlap-free:
 
 | Rule | Families | Example |
 |---|---|---|
 | **must not overlap** | counting families: KLL, Count-Min, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(−60s, −30s]` would be counted twice |
-| **may overlap** | HLL, exact `Min`/`Max`, distinct sets | HLL over `A`'s and `C`'s rows ✓: a value seen twice is still one distinct value; the result covers `(−90s, 0]` |
+| **may overlap** | HLL, exact `Min`/`Max` | HLL over `A`'s and `C`'s rows ✓: a value seen twice is still one distinct value. The result keeps both boxes, `(−1m, 0]` and `(−90s, −30s]`, which together cover `(−90s, 0]` |
+| **cannot merge** | `CmsWithHeap`, `CountSketchWithHeap`, Theta, KMV, exact `Rate`/`IRate`/`Increase`, samples, wavelets, models | no merge is defined for them |
 | **right inside left** | subtraction | 5.7 |
 
 | Question | Answer |
 |---|---|
 | What comes out? | the children's schema; with `group_by`, only the remaining group columns |
-| When is it rejected? | no children; a child is not state; the definitions differ (different column, parameters, filters or source); the selections overlap where the family does not allow it; `group_by` is not a subset of the children's grouping |
+| When is it rejected? | no children; a child is not state; the definitions differ (different column, parameters, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); `group_by` is not a subset of the children's grouping (planned) |
 | What is its coverage? | the shared `definition` (with the new grouping), and the union of the children's selections. Touching ranges join; gaps stay as separate pieces |
 | State or value? | state in, state out |
 
@@ -814,6 +817,8 @@ OperatorNode                                         §6.1
 
 Every operator in a DAG is wrapped in an `OperatorNode`. `coverage()` is explained in §6.6.
 
+Shown as of #646. On `main` today the node still has a declared `pub coverage: Option<SummaryCoverage>` field (with `with_coverage()` and `requires_coverage()`); #646 replaces it with the derived `coverage()` below.
+
 ```rust
 /// One node of the DAG. Immutable and shared through `Rc`.
 pub struct OperatorNode {
@@ -845,6 +850,8 @@ impl OperatorNode {
 ```
 
 ### 6.2 ASAP operators (`crates/types/src/ir/asap.rs`)
+
+In the code `ASAPOp<C = Rc<OperatorNode>>` is generic over how it refers to its inputs (`C` can also be a node id). It is shown here with `C = Rc<OperatorNode>`.
 
 ```rust
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -918,8 +925,9 @@ impl ASAPOp {
     /// The input nodes. For `SummaryAgg` this also includes nodes used by
     /// subqueries inside its `filter`.
     pub fn children(&self) -> Vec<&Rc<OperatorNode>>;
-    /// The same operator with each input replaced by `f(input)`.
-    pub fn map_children(&self, f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self;
+    /// The same operator with each input replaced by `f(input)`; `f` may
+    /// change how inputs are referred to (e.g. `Rc<OperatorNode>` to a node id).
+    pub fn map_children<D>(&self, f: impl FnMut(&Rc<OperatorNode>) -> D) -> ASAPOp<D>;
     /// The operator's name, e.g. `"SummaryAgg"`, for messages and display.
     pub fn kind_name(&self) -> &'static str;
     /// Whether the operator is reserved and cannot be built yet: Subtract,
@@ -1054,7 +1062,7 @@ pub struct SketchKind {
     /// Which aggregation intents the sketch answers: `Quantile` (quantiles),
     /// `Cardinality` (distinct counts), `Frequency` (item counts), `TopK`
     /// (heavy hitters), or `Universal` (frequency moments such as L2 and
-    /// entropy, plus counts and distinct counts). Derived from `algorithm`.
+    /// entropy, plus counts, distinct counts and top-k). Derived from `algorithm`.
     category: SketchCategory,
     /// Which sketch algorithm.
     algorithm: SketchAlgorithm,
@@ -1149,7 +1157,7 @@ This part of the code answers two questions about summary state:
 |---|---|---|---|---|
 | p99 of `latency` | KLL | none: KLL has no keys | `Column(latency)`: the value itself | `UnknownOrSigned` |
 | how often each `endpoint` occurs | Count-Min | `Column(endpoint)` | `Constant(1.0)`: each row counts once | `NonNegative(UnitCount)` |
-| `topk(5, rate(http_requests_total[5m]))` | Count-Min with heap | `Tuple(label columns)`: one item per series | `Column(value)`: the rate | `NonNegative(ResetAwareCounterDerivative)` |
+| `topk(5, rate(http_requests_total[5m]))` | Count-Min with heap | `Tuple(every column except value and the group columns)`: one item per series, including its timestamp | `Column(value)`: the rate | `NonNegative(ResetAwareCounterDerivative)` |
 
 `weight_domain` matters because some sketches (e.g. Count-Min) are only accurate when weights are never negative. The planner records why a weight is non-negative; if it cannot prove it, the weight counts as possibly negative.
 
@@ -1240,11 +1248,11 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to readout and finalized nodes, never to raw state.
+A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to readout and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
 ### 6.6 Summary coverage (`crates/types/src/ir/summary_coverage.rs`)
 
-The code for §4.
+The code for §4, as of #646. On `main` today `SummaryCoverage` is still the older declared form (`source` plus `regions`).
 
 ```rust
 pub struct SummaryCoverage {
@@ -1290,12 +1298,12 @@ pub enum Constraint {
 impl SummaryCoverage {
     /// Computes the coverage of a summary node from its sub-DAG (§4.2.2).
     /// Errors: `NotSummary` for a node that is not a `SummaryAgg` or
-    /// `SummaryMerge`; for a merge, `EmptyMerge` (no inputs),
+    /// `SummaryMerge`, or a merge input that has no coverage; for a merge, `EmptyMerge` (no inputs),
     /// `DefinitionMismatch` (inputs compute different things) or
     /// `PossibleOverlap` (inputs may share rows).
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
 }
 ```
 
-- `OperatorNode::new` rejects an invalid `SummaryMerge` (different definitions, or selections the family does not allow), but it does not store the result.
+- `OperatorNode::new` rejects an invalid `SummaryMerge` (different definitions, or selections that may overlap; #592 relaxes the overlap check per family), but it does not store the result.
 - A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
