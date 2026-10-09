@@ -111,9 +111,9 @@ A node in the physical data will represent the data or summary instance, so a no
 | Question | Answer | Section |
 |---|---|---|
 | Why not put it in the schema? | States worth merging cover different data but must have the same schema | below |
-| What is it based on? | Goldstein & Larson view matching (SIGMOD 2001) | §4.1 |
+| What is it based on? | Goldstein & Larson view matching (SIGMOD 2001), explained with an example | §4.1 |
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2 |
-| How does it map to the paper? | computation, aggregate and `GROUP BY` → `definition`; ranges → `selection` | §4.3 |
+| What do we take from the paper, and what do we add? | computation, aggregate and `GROUP BY` → `definition`; ranges → `selection`; plus unions and summary families | §4.3 |
 | Who sets it? | Nobody: it is derived from the sub-DAG | §4.4 |
 | What uses it? | merge, rollup, slice, reuse, subtract | §4.5 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §4.6 |
@@ -135,149 +135,185 @@ So the schema says *what kind of state* this is, and coverage says *which data i
 
 **Why coverage is a sub-DAG, not a few table columns.** A summary state summarizes the result of a whole computation: a KLL over `rate(requests_total[5m])` summarizes rate outputs, and a KLL over a join summarizes join rows. So coverage describes the state by the sub-DAG below it, split into *what is computed* and *which of its rows were taken*.
 
-### 4.1 Design basis: view matching (Goldstein & Larson)
+### 4.1 Background: view matching (Goldstein & Larson)
 
-The design follows the view matching algorithm of Goldstein and Larson, which decides when a query can be answered from a materialized select-project-join-group-by (SPJG) view:
+Our design is based on this paper:
 
 > J. Goldstein and P.-Å. Larson. *Optimizing Queries Using Materialized Views: A Practical, Scalable Solution.* SIGMOD 2001. <https://dsg.uwaterloo.ca/seminars/notes/larson-paper.pdf>
 
-**The algorithm.** It splits a view's `WHERE` into three parts:
+**The problem it solves.** A materialized view is a query whose result is stored. When a new query arrives, the optimizer wants to answer it from the stored result instead of the base tables. It has to decide two things: does the view contain every row the query needs, and can the answer be computed from the view's output?
 
-- **Column equivalence classes.** An equivalence class is a set of columns that have the same value in every row that satisfies the `WHERE`. They come from column equalities: `a = b AND b = c` gives the class `{a, b, c}`. For example, the join condition `orders.cust_id = customers.id` puts both columns in one class. The algorithm uses the classes to recognize that a query and a view mean the same thing even when they name different but equal columns.
-- **A range per column.** The range of a column (more precisely, of an equivalence class) is the interval of values it can have in rows that satisfy the `WHERE`. It comes from comparisons with a constant: `x > 5 AND x <= 10` gives `x ∈ (5, 10]`, and `x = 5` gives `x ∈ [5, 5]`. A column with no such comparison has the range `(−∞, +∞)`. Ranges let the algorithm prove containment: a view with `x ∈ (0, 100]` holds every row a query with `x ∈ (5, 10]` needs.
-- **Residual predicates.** A residual predicate is a conjunct of the `WHERE` (one of its `AND`-ed terms) that is neither a column equality nor a comparison of a column with a constant, such as `a + b > 10`, `lower(name) LIKE 'a%'`, or `x = 1 OR y = 2`. The algorithm does not interpret them; it only checks whether the same predicate appears in the query.
+**Example.** View `V` is stored; query `Q` arrives:
 
-A view can answer a query when all of these hold:
+```sql
+-- V: stored
+SELECT region, job, day, SUM(bytes) AS s
+FROM t WHERE day BETWEEN 1 AND 31
+GROUP BY region, job, day;
 
-1. every residual predicate of the view also appears in the query (§3.1.2, residual subsumption, checked by matching the predicates' text after normalization). Residuals cannot be reasoned about, so the view must not filter out any row the query needs. For example, a view with `WHERE lower(name) LIKE 'a%'` can answer a query only if the query has the same `lower(name) LIKE 'a%'`. The query may have extra residuals; they are applied to the view's output as compensating predicates;
-2. the query's ranges lie inside the view's (§3.1.2);
-3. the columns needed by compensating predicates are in the view output (§3.3, requirement 2);
-4. the query's `GROUP BY` is a subset of the view's, so the query's groups are further aggregations of the view's groups (§3.3, requirement 3).
+-- Q: new query
+SELECT job, SUM(bytes)
+FROM t WHERE day BETWEEN 5 AND 10 AND region = 'us'
+GROUP BY job;
+```
 
-**Existing implementation.** The SPJ part is implemented for DataFusion in [`datafusion-contrib/datafusion-materialized-views`](https://github.com/datafusion-contrib/datafusion-materialized-views), `src/rewrite/normal_form.rs` (`SpjNormalForm`, `Predicate { eq_classes, ranges_by_equivalence_class, residuals }`). It rejects `Aggregate` and `Join` input plans.
+**Step 1: split each `WHERE` into three parts.** Each part is a list of `AND`-ed conditions:
+
+| Part | What it is | Comes from | In `V` | In `Q` |
+|---|---|---|---|---|
+| **Equivalence classes** | sets of columns that are equal in every row | column equalities, e.g. the join condition `orders.cust_id = customers.id` | none | none |
+| **Ranges** | for each column, the interval of values it may have | comparisons with a constant: `x > 5`, `x = 5`, `BETWEEN` | `day ∈ [1, 31]` | `day ∈ [5, 10]`, `region ∈ ['us', 'us']` |
+| **Residuals** | every other condition; the algorithm does not try to understand them | e.g. `a + b > 10`, `lower(name) LIKE 'a%'`, `x = 1 OR y = 2` | none | none |
+
+**Step 2: does `V` contain every row `Q` needs?** (§3.1.2 of the paper)
+
+- **Ranges:** each range of `Q` lies inside the same column's range in `V`. `day ∈ [5, 10]` is inside `[1, 31]` ✓. `V` has no range on `region`, so any `region` is in `V` ✓.
+- **Residuals:** each residual of `V` also appears in `Q`. Since residuals are not understood, the only safe case is when `Q` has the same condition.
+- **Equivalence classes:** each column equality of `V` also holds in `Q`.
+
+**Step 3: can the answer be computed from `V`'s output?** (§3.3)
+
+- **Compensating filter:** where `Q` is narrower than `V`, the extra condition is applied to `V`'s rows. So its columns must be in `V`'s output: `day` and `region` are ✓.
+- **Regrouping:** `Q`'s `GROUP BY` must be a subset of `V`'s. `{job}` ⊆ `{region, job, day}` ✓, so each group of `Q` is the sum of some groups of `V`.
+
+**Result:**
+
+```sql
+SELECT job, SUM(s) FROM V
+WHERE day BETWEEN 5 AND 10 AND region = 'us'
+GROUP BY job;
+```
+
+**Limits that matter for us:**
+
+- It answers a query from **one** view. Combining several views (a union) is left out (§3.1).
+- It supports only `SUM` and `COUNT`, whose groups can be added up again.
+
+**Existing implementation.** The `WHERE` split is implemented for DataFusion in [`datafusion-contrib/datafusion-materialized-views`](https://github.com/datafusion-contrib/datafusion-materialized-views), `src/rewrite/normal_form.rs` (`SpjNormalForm`, `Predicate { eq_classes, ranges_by_equivalence_class, residuals }`). It rejects plans that contain an `Aggregate` or a `Join`.
 
 ### 4.2 Summary Coverage = Summary definition + selection
 
-A state built by `SummaryAgg` means
+A summary state is a stored aggregation, like `V` above, whose aggregate is a sketch. So we describe it the way the paper describes a view, in two parts:
+
+| Part | Question it answers | What it is |
+|---|---|---|
+| **`definition`** | *What* is computed? | the `SummaryAgg` node with its row filters taken out: the sub-DAG below it, the summary family and parameters, its input column, and its `GROUP BY` |
+| **`selection`** | *Which rows* went in? | the row filters that were taken out, as simple conditions on columns |
+
+**Example:**
 
 ```text
-state_g = family( input( σ( C ) ) )  for each group value g of G, restricted to G = g
+state = KLL(latency) by[job] over Filter(region = 'us' AND latency < 100, Scan t)
+
+definition: KLL(latency) by[job] over Scan t
+selection:  region ∈ {us}, latency ∈ (−∞, 100)
 ```
 
-- `C` is the child sub-DAG with the selection removed. Its output rows are the contributions.
-- `σ` is the selection: which output rows of `C` went into the state.
+**Why this is enough.** Two states with the same `definition` come from the same computation. If their selections do not overlap, no row is in both, so merging them counts every row once. This holds whatever the computation contains (joins, unions, `rate`, dedup), so we need no special rule per operator.
 
-Coverage stores exactly these two things:
-
-| Part | Contents | Meaning |
-|---|---|---|
-| **`definition`** | the `SummaryAgg` node itself, with the selection removed from its child sub-DAG; carries `C`, `input`, `family` and `G` | what the state *means* |
-| **`selection`** | a union of boxes over the output columns of `C` | *which rows* the state took |
-
-**Why this is enough.** If two states have the same `definition`, their contributions come from the same rows of the same computation, whatever `C` contains (join, union, `rate`, dedup). Disjoint selections then cannot share a row, so no observation is counted twice. No per-operator occurrence rule is needed.
-
-**Examples** of what ends up where:
+**More examples** of what goes where:
 
 | Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
 |---|---|---|
 | `Filter(region = 'us', Scan t)` | `Scan t` | `region ∈ {us}` |
 | `Filter(latency < 100, Scan t)` | `Scan t` | `latency ∈ (−∞, 100)` |
-| `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | time `(−3m, −2m]` relative to evaluation |
-| `Filter(rate > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))`, `rate > 0` as residual | — |
+| `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
 | `Filter(job = 'api', rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `job ∈ {api}` |
+| `Filter(rate > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` and the condition `rate > 0` | nothing |
 
-In the last two rows the `TimeRange(5m)` stays in `definition`: it sits below `rate` and changes the rate values, so it is not a selection of output rows. Reading those 5 minutes of source data is the runtime's job, not coverage (§4.7).
+In the last two rows `TimeRange(5m)` stays in `definition`: it is the input window of `rate` and changes the rate values, so it does not just pick rows. `rate > 0` stays too, because it filters on a computed value (§4.4).
 
-### 4.3 Mapping to Goldstein & Larson
+Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` is the sub-DAG without its row filters, `σ` is the selection, and `G` the grouping.
 
-A summary state is an aggregation view whose aggregate is a summary family:
+### 4.3 What we take from Goldstein & Larson, and what we add
 
 | Goldstein & Larson | Summary coverage |
 |---|---|
-| SPJ part: tables, joins, residual predicates | the computation `C` below the `SummaryAgg` (§4.2), part of `definition` |
-| aggregate function and its argument | `family` and `input` (`SummaryUpdate`) of the `SummaryAgg`, part of `definition` |
-| `GROUP BY` | the `SummaryAgg` reduction `G`, part of `definition` |
-| ranges per column | `selection` (§4.4) |
-| compensating predicate on view output | slice on a column of `G` only (§4.5) |
-| query `GROUP BY` ⊆ view `GROUP BY` | rollup (§4.5) |
+| tables, joins and residuals of the view | the sub-DAG `C` below the `SummaryAgg`, in `definition` |
+| the aggregate and its argument | the summary family and its input, in `definition` |
+| `GROUP BY` | the `SummaryAgg` grouping `G`, in `definition` |
+| ranges | `selection` (§4.4) |
+| compensating filter on the view's output | slicing: allowed only on a column of `G` (§4.5) |
+| regrouping to a smaller `GROUP BY` | rollup (§4.5) |
 
-**What this design adds beyond the paper**:
+**What we add:**
 
-- **Unions of states.** The paper considers single-view substitutes and notes that its requirement 1, that the view contains all rows the query needs, "is not required if substitutes containing unions of views are considered" (§3.1). `SummaryMerge` is exactly such a union, so it needs a disjointness check the paper does not have.
-- **Summary families.** The paper allows `SUM` and `COUNT_BIG` only. Here each family declares how the selections of its inputs may relate (§4.5).
-- **Value sets and hash partitions** next to ranges, and **evaluation-relative time** (§4.4).
+- **Unions of states.** The paper uses one view at a time. `SummaryMerge` combines several states, so we must also check that their selections do not overlap.
+- **Summary families.** The paper only re-adds `SUM` and `COUNT`. Each summary family says how its inputs may overlap (§4.5).
+- **More kinds of conditions:** value sets (`IN`, `NOT IN`), hash partitions, and time relative to the evaluation time (§4.4).
 
 ### 4.4 Deriving the selection
 
-Coverage is derived from the node, never declared. Walking down from the `SummaryAgg` (its own `filter` included), a predicate conjunct goes into `selection` when both rules hold. Otherwise it stays in `definition` as a residual, as in Goldstein & Larson.
+Nobody declares coverage: the planner computes it from the sub-DAG. It starts at the `SummaryAgg`, walks down, and looks at each filter condition on the way (split at `AND`). A condition moves into `selection` only when both rules below hold. Otherwise it stays in `definition`, like a residual in the paper.
 
-**Rule 1: it can be lifted to the `SummaryAgg`.** Lifting is the inverse of DataFusion's `PushDownFilter` (`datafusion-optimizer`, `push_down_filter.rs`):
+**Rule 1: the condition can move up to the `SummaryAgg` without changing its meaning.** This is the reverse of filter pushdown (DataFusion's `PushDownFilter`).
 
-| Operator on the path | The predicate passes when |
+| Operator between the condition and the `SummaryAgg` | The condition can pass when |
 |---|---|
 | `Filter`, `Scan.predicates`, `SummaryAgg.filter` | always |
 | range `TimeRange`, `TimeShift` without `@` | always |
-| `Project` | the column is a direct column item (renaming keeps its identity) |
-| `Aggregate` (later) | every column it uses is a group column |
-| window function, per-series temporal function such as `rate` (later) | every column it uses is a partition column (a series label) |
+| `Project` | the column is passed through as is (a rename is fine) |
+| `Aggregate` (later) | it uses only group columns |
+| window function, or a per-series function such as `rate` (later) | it uses only partition columns (series labels) |
 | anything else | never |
 
-**Rule 2: it is a box constraint on one column.**
+**Rule 2: the condition is a simple condition on one column.**
 
-| Constraint | From | DataFusion analogue |
+| Kind | Written as | Example | DataFusion analogue |
+|---|---|---|---|
+| value set | `=`, `!=`, `IN`, `NOT IN`, `OR` of `=` on the same column | `region IN ('us', 'eu')` | `LiteralGuarantee` |
+| interval | `<`, `<=`, `>`, `>=` | `latency < 100` | `Interval` |
+| hash partition (later) | `hash(columns) mod n = k` | `hash(job) mod 4 = 1` | `Partitioning::Hash` |
+
+A column equality such as `a = b` is not a simple condition, so it stays in `definition`.
+
+**Which column a condition is on.**
+
+- A column is named by its source table and name, `(table, name)`. So `shipping.region` and `billing.region` are different columns.
+- A rename keeps the original name.
+- If two output columns have the same `(table, name)`, the condition cannot tell them apart and stays in `definition`.
+- Values of different types are never treated as different: `1` and `1.0` might be equal.
+
+**Time.** There are two kinds:
+
+| Kind | Where it comes from | Example |
 |---|---|---|
-| value set: `In` / `NotIn` literals | `=`, `!=`, `IN`, `NOT IN`, `OR` of equalities | `LiteralGuarantee` |
-| interval: lower and upper `std::ops::Bound` (`Included`, `Excluded`, `Unbounded`) | `<`, `<=`, `>`, `>=` | `Interval` |
-| hash partition (later): `hash(columns) mod n = k` | partitioned producers | `Partitioning::Hash` |
+| **Absolute** | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
+| **Relative** to the evaluation time | a range `TimeRange(w)` over a `TimeShift(s)` | `TimeRange(1m)` over `TimeShift(2m)` → `(−3m, −2m]` |
 
-Column equalities (`a = b`) are residuals: there are no column equivalence classes.
-
-**Column identity.**
-
-- Columns are identified by lineage `(table, name)`, the identity `ColumnRef::Qualified` uses, not by `Field.name`. So `shipping.region` and `billing.region` stay different columns.
-- A direct alias keeps the identity of the column it renames.
-- A column whose `(table, name)` is not unique in the output (two items aliased `k`) cannot be named, so its conjuncts stay residual.
-- Value sets compare literals by type: `1` and `1.0` are never proven different.
-
-**Time** is a selection like any other:
-
-| Kind | How it is selected | Example |
-|---|---|---|
-| **Absolute** | an interval on the timestamp column (the schema's `time_index`) | `ts >= t0 AND ts < t1` → `(Included(t0), Excluded(t1))` on `ts` |
-| **Relative** | its own field `relative_time`, because it is not a column value: one range `TimeRange(w)` over a `TimeShift(s)` | `(Excluded(−(s+w)), Included(−s))` relative to evaluation |
-
-- PromQL ranges are left-open, matching the executor (`series_window.rs`).
-- The IR has no timestamp literal yet, so absolute SQL time filters stay residual until it does.
-- Stage 2 tumbling panes (`window_composition.rs` in #601) get their time this way, so it is derived rather than declared.
-- An instant `TimeRange` picks the latest sample per series, which is not a selection of rows, so it stays in `definition`.
-- Relative time and a timestamp-column interval are different dimensions, so they are never compared: two states restricted only by different kinds of time are treated as possibly overlapping.
-- Binding a relative pane to absolute timestamps for one evaluation (evaluation time plus the pane layout's phase) is a runtime coordinate, not coverage.
+- PromQL windows exclude their start, so relative windows are open on the left.
+- The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
+- Stage 2 builds its tumbling panes from `TimeRange` and `TimeShift`, so pane times are derived, not declared (#601).
+- An instant `TimeRange` takes the latest sample of each series. That does not pick rows by time, so it stays in `definition`.
+- Absolute and relative time are never compared. Two states that differ only in the kind of time are treated as possibly overlapping.
 
 ### 4.5 Operations
 
-| Operation | Example | Valid when |
+Coverage tells the planner which states can be combined, and what the result covers.
+
+| Operation | Example | Allowed when |
 |---|---|---|
-| merge (`SummaryMerge`, same `G`) | `[0,1m)` ⊕ `[1m,2m)`; `region='us'` ⊕ `region='eu'` | all `definition`s equal; selections related as the family requires (below) |
-| rollup (`SummaryMerge` with `group_by: G'`, later) | `by[region, job]` → `by[job]` | `G'` ⊆ `G` and the family merges. Groups of one state are disjoint because a row has one value per group column, so no selection check is needed |
-| slice | `by[region, job]` state answering `region = 'us' … by[job]` | the restricted columns are all in `G`. A sketch cannot be filtered, so a restriction on any other column is invalid |
-| reuse for a query | a stored state answers a query | Goldstein & Larson containment: same `definition`, query selection inside the state's, any compensating restriction is a slice |
-| subtract (`SummarySubtract`, reserved) | `[0,10) − [0,5)` | same `definition`; the right selection is contained in the left |
+| **merge** (`SummaryMerge`) | minute 0–1 + minute 1–2; `region='us'` + `region='eu'` | all `definition`s are equal, and the selections relate as the family requires (below) |
+| **rollup** (`SummaryMerge` with `group_by`, later) | `by[region, job]` → `by[job]` | the new grouping is a subset of the old one. Different groups never share a row, so no overlap check is needed |
+| **slice** | read `region = 'us'` from a `by[region, job]` state | the condition is on a grouping column. A sketch cannot be filtered on any other column |
+| **reuse** for a query | a stored state answers a new query | same `definition`, and the query's selection lies inside the state's (as in the paper) |
+| **subtract** (`SummarySubtract`, reserved) | `[0, 10) − [0, 5)` | same `definition`, and the right selection lies inside the left |
 
-**Merge and rollup are one operator.** `SummaryMerge { children, group_by }`: one child with a coarser `group_by` is a rollup, and `group_by` equal to the children's is a plain merge. Its coverage is the children's `definition` with `G'` and the union of their selections; adjacent intervals are joined, gaps stay as separate boxes.
+**Merge and rollup are one operator,** `SummaryMerge { children, group_by }`. With the children's own grouping it is a plain merge; with a smaller one it is a rollup. The result's `definition` is the children's, with the new grouping; its `selection` is the union of theirs. Adjacent ranges join into one (minute 0–1 + minute 1–2 = minute 0–2); gaps stay as separate pieces.
 
-**How selections must relate** is declared by the family, next to whether it merges (`FieldDataType::family_merges` and `merge_relation`, added in #592):
+**How inputs may overlap** depends on the summary family (`FieldDataType::family_merges` and `merge_relation`, #592):
 
-| Relation | Families | Why |
+| Rule | Families | Why |
 |---|---|---|
-| **disjoint** | counting families: KLL, Count-Min, exact `Sum`/`Count` | an overlapping row would be counted twice |
-| **overlap allowed** | idempotent families: HLL, exact `Min`/`Max`, distinct sets | adding a row twice does not change the state |
-| **contained** | subtraction | the right state must be part of the left |
+| **must not overlap** | counting families: KLL, Count-Min, exact `Sum`/`Count` | a row in both inputs would be counted twice |
+| **may overlap** | HLL, exact `Min`/`Max`, distinct sets | adding the same row twice does not change the result |
+| **right inside left** | subtraction | you can only remove what is there |
 
 **When two `definition`s are equal.**
 
-- They must be structurally equal, ignoring planning metadata: `timing`, `guarantee` and `coverage_cache`. So a state built at ingestion time and one built at query time can merge.
-- `SummaryUpdate.weight_domain` is compared: it is derived from `C` and `input`, so it differs only if a derivation is wrong.
-- States over different sources have different `definition`s and do not merge. To combine tables, put `UNION ALL` with a marker column below one `SummaryAgg`; the marker is then an ordinary column for `selection` or `G`.
+- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a state built at ingestion time can merge with one built at query time.
+- `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
+- States over different tables never merge. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
 ### 4.6 Interface
 
