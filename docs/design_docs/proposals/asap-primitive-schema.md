@@ -77,7 +77,7 @@ Based on our requirement, each field should contain the following information.
    | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
    | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
 
-   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.2](#62-state-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
+   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.2](#62-summary-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
    - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, PerSubpopulationInstance)`.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
@@ -846,7 +846,7 @@ pub enum DataType {
 }
 ```
 
-### 6.2 State-family parameters (`crates/types/src/post_asap/sketch.rs`)
+### 6.2 Summary-family parameters (`crates/types/src/post_asap/sketch.rs`)
 
 ```rust
 /// Which exact accumulator. None of them has parameters, so `ExactParams`
