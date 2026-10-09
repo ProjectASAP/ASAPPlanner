@@ -245,12 +245,25 @@ The planner computes the coverage of a node from the sub-DAG the node covers, no
 **Worked example.** A KLL of request latency per job, over metric `m` with columns `region`, `job`, `value`:
 
 ```text
-SummaryAgg  KLL(value) by[job]          filter: value < 100
-└─ Project  [job, region AS r, value]
-   └─ Filter  region = 'us' AND value * 2 > 10
-      └─ TimeRange  1m (range)
-         └─ TimeShift  2m
-            └─ Scan m
+                 ( next operator )
+                         ▲
+                         │
+              [[ SummaryAgg ]]     KLL(value) by job,  filter: value < 100
+                         ▲
+                         │
+                 [ Project ]       job, region AS r, value
+                         ▲
+                         │
+                  [ Filter ]       region = 'us' AND value * 2 > 10
+                         ▲
+                         │
+               [ TimeRange ]       1m (range)
+                         ▲
+                         │
+               [ TimeShift ]       2m
+                         ▲
+                         │
+                  [ Scan m ]
 ```
 
 | Condition | Found at | Rule 1: same rows at the `SummaryAgg`? | Rule 2: simple? | Result |
@@ -470,18 +483,28 @@ coverage() of the SummaryAgg
 
 ### 5.2 `SummaryEstimate`: sketch state → value
 
-Scenario: read p99 from the state in 5.1.
+Scenario: read p99 and p50 from the state in 5.1. One state feeds both readouts.
 
 ```text
-                 ( next operator )
-                         ▲
-                         │  Relation: job Utf8, quantile Float64   (planner may rename to p99)
-                         │
-              [ SummaryEstimate ]   query: Quantile q = 0.99
-                         ▲
-                         │  State: job Utf8, state Sketch(KLL k=200)
-                         │
-              [[ SummaryAgg ]]      from 5.1
+       ( next operator )                       ( next operator )
+               ▲                                       ▲
+               │  Relation: job Utf8,                  │  Relation: job Utf8,
+               │  quantile Float64                     │  quantile Float64
+               │                                       │
+   [ SummaryEstimate ]                     [ SummaryEstimate ]
+     Quantile q = 0.99                       Quantile q = 0.5
+               ▲                                       ▲
+               │                                       │
+               └───────────────────┬───────────────────┘
+                                   │  State: job Utf8, state Sketch(KLL k=200)
+                                   │
+                        [[ SummaryAgg ]]      KLL k=200, input latency, by job
+                                   ▲
+                                   │
+                            [ Filter ]        region = 'us' AND latency < 10000
+                                   ▲
+                                   │
+                            [ Scan t ]
 ```
 
 - Output schema: the input schema with the one non-plain field replaced by a non-nullable plain field. Its name and type come from the statistic: `quantile`/`frequency_l2`/`frequency_entropy` Float64, `cardinality`/`count` Int64 (Float64 if the producer is a `PerEntity` `SummaryAgg`). Keys and metadata pass through. A top-k readout is the exception: it returns the selected rows, one per ranked item, with the partition keys, the item identity columns, and a `value` Float64 score (#579). This is the same row shape as an exact Sort → Limit top-k, so the plans for one query share a root schema.
@@ -544,18 +567,26 @@ Scenario: keep the full latency population per job, so that p99 and top-10 can b
 
 ### 5.5 `EvaluatePopulation`: maintained membership → value
 
-Scenario: p99 by job from the population in 5.4.
+Scenario: p99 and the top-10 latencies by job, both from the one population in 5.4.
 
 ```text
-                 ( next operator )
-                         ▲
-                         │  Relation: job Utf8, quantile_0_99 Float64
-                         │
-           [ EvaluatePopulation ]    evaluation: Quantile q = 0.99
-                         ▲
-                         │  State: job Utf8, latency Float64
-                         │
-          [[ MaintainPopulation ]]   from 5.4
+       ( next operator )                       ( next operator )
+               ▲                                       ▲
+               │  Relation: job Utf8,                  │  Relation: job Utf8,
+               │  quantile_0_99 Float64                │  latency Float64 (the top rows)
+               │                                       │
+  [ EvaluatePopulation ]                  [ EvaluatePopulation ]
+     Quantile q = 0.99                       TopK k = 10
+               ▲                                       ▲
+               │                                       │
+               └───────────────────┬───────────────────┘
+                                   │  State: job Utf8, latency Float64
+                                   │
+                    [[ MaintainPopulation ]]     by job, max_k: 10, quantiles: true
+                                   ▲
+                                   │  Relation: job Utf8, latency Float64
+                                   │
+                            [ Scan t ]           closed schema
 ```
 
 - Output schema: the schema of `Aggregate(by grouping, measure)` over the maintained source. Quantile gives `quantile_<q>` Float64, Sum gives `sum` (value type), Count gives `count` Int64 and Average gives `avg` Float64; `unique_keys = [[0]]`, `closed`. `TopK { k }` instead returns the source schema unchanged (the selected rows).
@@ -638,18 +669,31 @@ merge      (──────────────────────�
                               [ Scan t ]
 ```
 
-**Scenario C, rollup (planned).** One `KLL(latency) by[region, job]` state merged with `group_by = by[job]`. Each job's output state is the merge of that job's per-region states. The output's `definition` is the same `SummaryAgg` with `reduction = by[job]`, and `selection` is unchanged.
+**Scenario C, rollup (planned).** One `KLL(latency) by[region, job]` state merged with `group_by = by[job]`. Each job's output state is the merge of that job's per-region states. The output's `definition` is the same `SummaryAgg` with `reduction = by[job]`, and `selection` is unchanged. The same `by[region, job]` state also answers p99 per region and job directly, so it feeds two consumers.
 
 ```text
-                 ( next operator )
-                         ▲
-                         │  State: job Utf8, state Sketch(KLL k=200)
-                         │
-             [[ SummaryMerge ]]    group_by: by job
-                         ▲
-                         │  State: region Utf8, job Utf8, state Sketch(KLL k=200)
-                         │
-              [[ SummaryAgg ]]     KLL k=200, by region, job
+       ( next operator )                       ( next operator )
+               ▲                                       ▲
+               │  Relation: job Utf8,                  │  Relation: region Utf8, job Utf8,
+               │  quantile Float64                     │  quantile Float64
+               │                                       │
+   [ SummaryEstimate ]                     [ SummaryEstimate ]
+     p99 by job                              p99 by region, job
+               ▲                                       ▲
+               │  State: job Utf8,                     │
+               │  state Sketch(KLL k=200)              │
+               │                                       │
+     [[ SummaryMerge ]]                                │
+     group_by: by job                                  │
+               ▲                                       │
+               │                                       │
+               └───────────────────┬───────────────────┘
+                                   │  State: region Utf8, job Utf8, state Sketch(KLL k=200)
+                                   │
+                        [[ SummaryAgg ]]      KLL k=200, by region, job
+                                   ▲
+                                   │
+                            [ Scan t ]
 ```
 
 ```text
