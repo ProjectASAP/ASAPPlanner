@@ -148,7 +148,7 @@ The design follows the view matching algorithm of Goldstein and Larson, which de
 
 A view can answer a query when all of these hold:
 
-1. the residuals match;
+1. every residual predicate of the view also appears in the query (§3.1.2, residual subsumption, checked by matching the predicates' text after normalization). Residuals cannot be reasoned about, so the view must not filter out any row the query needs. For example, a view with `WHERE lower(name) LIKE 'a%'` can answer a query only if the query has the same `lower(name) LIKE 'a%'`. The query may have extra residuals; they are applied to the view's output as compensating predicates;
 2. the query's ranges lie inside the view's (§3.1.2);
 3. the columns needed by compensating predicates are in the view output (§3.3, requirement 2);
 4. the query's `GROUP BY` is a subset of the view's, so the query's groups are further aggregations of the view's groups (§3.3, requirement 3).
