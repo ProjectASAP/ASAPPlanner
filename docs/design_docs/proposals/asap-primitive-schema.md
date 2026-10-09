@@ -280,29 +280,38 @@ definition: KLL(value) by[job] over Project[job, region AS r, value] over Filter
 selection:  value ∈ (−∞, 100), m.region ∈ {us}, time (−3m, −2m]
 ```
 
-**Rule 1 in detail.** The answer depends on the operators between the condition and the `SummaryAgg`. The condition must be able to pass each of them (this is the reverse of filter pushdown, DataFusion's `PushDownFilter`):
+**Rule 1 in detail.** Imagine moving the condition up, one operator at a time, until it is just below the `SummaryAgg`. Every operator it passes must leave the picked rows unchanged. Whether it can pass depends on what the operator does:
 
-| Operator in between | The condition can pass it | Example |
-|---|---|---|
-| `Filter`, `Scan.predicates`, `SummaryAgg.filter` | always | above |
-| range `TimeRange`, `TimeShift` without `@` | always | above |
-| `Project` | only for a column passed through as is (a rename is fine) | `region AS r` ✓; `value * 2 AS v2` ✗ |
-| `Aggregate` (later) | only on group columns | below `SUM(value) by[job]`: `job = 'api'` ✓, `value > 5` ✗ |
-| window function, or per-series function such as `rate` (later) | only on series labels | below `rate(...)`: `job = 'api'` ✓, `value > 5` ✗ (it would filter raw samples, which changes the rate) |
-| anything else | never | |
-
-A condition *above* `rate` is different: it filters the rate outputs, which are exactly the rows the `SummaryAgg` sees. `Filter(job = 'api', rate(...))` gives `job ∈ {api}`, and `Filter(value > 0, rate(...))` gives `value ∈ (0, ∞)` on the rate values. The `TimeRange(5m)` below `rate` stays in `definition` either way.
-
-**Rule 2 in detail.** A simple condition is one of:
-
-| Kind | Written as | Example | Becomes |
+| Operator it must pass | Can it pass? | Why | Example |
 |---|---|---|---|
-| value set | `=`, `!=`, `IN`, `NOT IN`, `OR` of `=` on one column | `region IN ('us', 'eu')` | `region ∈ {us, eu}` |
-| | | `region != 'test'` | `region ∉ {test}` |
-| interval | `<`, `<=`, `>`, `>=` | `value >= 10 AND value < 100` | `value ∈ [10, 100)` |
+| another `Filter` (also `Scan.predicates`, `SummaryAgg.filter`) | yes | filters only drop rows, so their order does not matter | `region = 'us'` below `Filter(value < 100)` ✓ |
+| `TimeRange` (range) or `TimeShift` (without `@`) | yes | they choose a time window, but do not change any row's values | `region = 'us'` below `TimeRange(1m)` ✓ |
+| `Project` | only if its column is passed through unchanged (a rename is fine) | the column must still be there, with the same values, above the `Project` | `Project [job, region AS r]`: `region = 'us'` ✓, it becomes `r = 'us'`. `Project [job, value * 2 AS v2]`: `value > 5` ✗, `value` is gone |
+| `Aggregate` (later) | only if it uses group columns | a group column has one value per group, so filtering before or after grouping keeps the same groups | below `SUM(value) by job`: `job = 'api'` ✓; `value > 5` ✗, it changes the sums |
+| `rate` or a window function (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate |
+| any other operator, e.g. `Join`, `Limit` | no | | |
+
+A condition *above* `rate` has nothing to pass. `Filter(value > 0, rate(...))` keeps the rate outputs above 0, and those are exactly the rows the `SummaryAgg` reads, so it becomes `value ∈ (0, ∞)` in `selection`. Only the `TimeRange(5m)` under `rate` stays in `definition`.
+
+(This is filter pushdown in reverse. DataFusion's `PushDownFilter` uses the same rules to move filters down.)
+
+**Rule 2 in detail.** `selection` can hold only two shapes of condition, each on a single column: a set of values, or a range. Hash partitions will be a third shape later.
+
+| Shape | Written as | Example | Stored as |
+|---|---|---|---|
+| allowed values | `=`, `IN`, or `OR` of `=` on the same column | `region IN ('us', 'eu')` | `region ∈ {us, eu}` |
+| forbidden values | `!=`, `NOT IN` | `region != 'test'` | `region ∉ {test}` |
+| range | `<`, `<=`, `>`, `>=` | `value >= 10 AND value < 100` | `value ∈ [10, 100)` |
 | hash partition (later) | `hash(columns) mod n = k` | `hash(job) mod 4 = 1` | partition 1 of 4 |
 
-Not simple, so they stay in `definition`: `value * 2 > 10` (expression), `a = b` (two columns), `region = 'us' OR job = 'api'` (two columns), `name LIKE 'web%'` (pattern).
+Any other shape stays in `definition`:
+
+| Condition | Why it is not one of the shapes |
+|---|---|
+| `value * 2 > 10` | it is on an expression, not a column |
+| `a = b` | it compares two columns |
+| `region = 'us' OR job = 'api'` | it uses two columns |
+| `name LIKE 'web%'` | it is a pattern, not a set of values or a range |
 
 **Which column a condition is on.**
 
