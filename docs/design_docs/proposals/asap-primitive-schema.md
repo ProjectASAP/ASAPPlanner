@@ -172,7 +172,7 @@ A view can answer a query when all of these hold:
 - **Summary families.** The paper allows `SUM` and `COUNT_BIG` only. Here each family declares how the selections of its inputs may relate (§4.4).
 - **Value sets and hash partitions** next to ranges, and **evaluation-relative time** (§4.3).
 
-### 4.2 Coverage = definition + selection
+### 4.2 Summary Coverage = Summary definition + selection
 
 A state built by `SummaryAgg` means
 
