@@ -743,18 +743,28 @@ result                         (────────────────
 
 ## 6. Key code interfaces
 
-`OperatorNode` and coverage are in §6.5. Bodies and serde/derive attributes are elided below.
+Every struct field and enum-variant field below has a comment saying what it holds. Function bodies and serde/derive attributes are left out.
 
 ### 6.1 Schema and field types (`crates/types/src/pre_asap/schema.rs`)
 
 ```rust
+/// Position of a column in one schema (0-based). Local to that schema:
+/// the same column can have a different `ColumnId` after a projection or join.
 pub type ColumnId = usize;
 
+/// The columns that flow along one DAG edge. Metadata only: it holds no data.
 pub struct Schema {
+    /// The columns, in order.
     pub fields: Vec<Field>,
-    pub time_index: Option<ColumnId>,     // must point at a plain Timestamp field
+    /// The column that holds each row's timestamp, if any. Must point at a
+    /// plain `Timestamp` field. PromQL inputs always have one.
+    pub time_index: Option<ColumnId>,
+    /// Sets of columns whose values together identify at most one row,
+    /// e.g. `[[0]]` when column 0 is unique (one row per `job`).
     pub unique_keys: Vec<Vec<ColumnId>>,
-    pub closed: bool,                     // true = fields enumerate every column
+    /// `true`: `fields` lists every column. `false`: more columns may exist
+    /// that are not listed (e.g. PromQL labels not yet known).
+    pub closed: bool,
 }
 impl Schema {
     pub fn new(fields: Vec<Field>) -> Self;
@@ -765,10 +775,19 @@ impl Schema {
     pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId>;
 }
 
+/// One column of a `Schema`. `T` is `FieldDataType` on DAG edges, and plain
+/// `DataType` for fields nested inside a `List` or `Struct`.
 pub struct Field<T = FieldDataType> {
+    /// Column name as the producer outputs it: a SQL column name, or a PromQL
+    /// label name, `value` or `timestamp`.
     pub name: String,
+    /// The column's type: a plain value, or summary state (`FieldDataType`).
     pub dtype: T,
+    /// Whether the column may contain NULL. PromQL value columns are never NULL.
     pub nullable: bool,
+    /// Table or alias the column comes from (`t` in `t.col`), so two columns
+    /// with the same name from a join stay apart. `None` for PromQL labels and
+    /// unqualified columns.
     pub table: Option<String>,
 }
 impl Field<FieldDataType> {
@@ -777,20 +796,39 @@ impl Field<FieldDataType> {
     pub fn is_plain(&self) -> bool;
 }
 
-/// A column's type: a plain value, or summary state of one family.
+/// A column's type: a plain value, or summary state of one family (§3).
 pub enum FieldDataType {
+    /// A readable value of this type.
     Plain(DataType),
+    /// Exact accumulator state: which accumulator, and its parameters.
     ExactAggregate(ExactKind, ExactParams),
+    /// Sketch state: the chosen sketch (category, algorithm, parameters), and
+    /// whether each group has its own sketch or all groups share one.
     Sketch(SketchKind, GroupingStrategy),
+    /// Sample state: the sampling method, and its parameters.
     Sample(SamplingKind, SamplingParams),
+    /// Wavelet state: the transform, and its parameters.
     Wavelet(WaveletKind, WaveletParams),
+    /// Statistical-model state: the model kind, and its parameters.
     StatModel(StatModelKind, StatModelParams),
 }
 
+/// Types of plain values.
 pub enum DataType {
-    Null, Int64, Float64, Utf8, Bool, Timestamp, Interval, Date,
+    Null,       // only NULL values
+    Int64,      // 64-bit integer
+    Float64,    // 64-bit float
+    Utf8,       // string
+    Bool,       // boolean
+    Timestamp,  // point in time
+    Interval,   // a duration; used for literals, never as a column type
+    Date,       // calendar date without time of day
+    /// A list. `element`: name, type and nullability of each element.
     List { element: Box<Field<DataType>> },
+    /// A record. `fields`: its named fields, in order.
     Struct { fields: Vec<Field<DataType>> },
+    /// A SQL map. `key`: key type (keys are never NULL). `value`: value type.
+    /// `value_nullable`: whether values may be NULL.
     Map { key: Box<DataType>, value: Box<DataType>, value_nullable: bool },
 }
 ```
@@ -798,10 +836,20 @@ pub enum DataType {
 ### 6.2 State-family parameters (`crates/types/src/post_asap/sketch.rs`)
 
 ```rust
+/// Which exact accumulator. None of them has parameters, so `ExactParams`
+/// mirrors `ExactKind` one to one.
 pub enum ExactKind   { Sum, Count, Min, Max, Increase, Rate, IRate }
-pub enum ExactParams { Sum, Count, Min, Max, Increase, Rate, IRate }   // no knobs; mirrors kind
+pub enum ExactParams { Sum, Count, Min, Max, Increase, Rate, IRate }
 
-pub struct SketchKind { category: SketchCategory, algorithm: SketchAlgorithm, params: SketchParams }
+/// A chosen sketch. Built only through `new`, so the three fields always agree.
+pub struct SketchKind {
+    /// What kind of question the sketch answers; derived from `algorithm`.
+    category: SketchCategory,
+    /// Which sketch algorithm.
+    algorithm: SketchAlgorithm,
+    /// That algorithm's size parameters; must match `algorithm`.
+    params: SketchParams,
+}
 impl SketchKind {
     /// The only constructor; classifies the category and panics on mismatched params.
     pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self;
@@ -813,80 +861,147 @@ pub enum SketchCategory { Universal, Quantile, Cardinality, Frequency, TopK }
 // Universal: UnivMon | Quantile: Kll, DDSketch | Cardinality: Hll, Theta, Kmv
 // Frequency: Cms, CountSketch | TopK: CmsWithHeap, CountSketchWithHeap
 pub enum SketchAlgorithm { UnivMon, Kll, Cms, Hll, DDSketch, CmsWithHeap, Kmv, Theta, CountSketch, CountSketchWithHeap }
+
+/// Size parameters of each algorithm. Larger values: more memory, less error.
 pub enum SketchParams {
+    /// `layers`: number of sampling levels. Each level has a Count Sketch of
+    /// `sketch_rows` hash rows × `sketch_cols` counters, and a heap of the
+    /// `heap_size` heaviest items.
     UnivMon { heap_size: u32, sketch_rows: u32, sketch_cols: u32, layers: u8 },
+    /// `k`: compactor capacity; error shrinks roughly as 1/k.
     Kll { k: u32 },
+    /// `width`: counters per row. `depth`: number of hash rows.
     Cms { width: u32, depth: u32 },
+    /// `precision`: log2 of the number of registers.
     Hll { precision: u8 },
+    /// `alpha`: relative error of each quantile.
     DDSketch { alpha: f64 },
+    /// Count-Min `width` × `depth`, plus a heap of the `heap_size` heaviest items.
     CmsWithHeap { width: u32, depth: u32, heap_size: u32 },
+    /// `k`: number of smallest hash values kept.
     Kmv { k: u32 },
+    /// `k`: number of hash values kept (nominal entries).
     Theta { k: u32 },
+    /// `width`: counters per row. `depth`: number of hash rows.
     CountSketch { width: u32, depth: u32 },
+    /// Count Sketch `width` × `depth`, plus a heap of the `heap_size` heaviest items.
     CountSketchWithHeap { width: u32, depth: u32, heap_size: u32 },
 }
 
-/// How grouped state is instantiated across `by` subpopulations. Orthogonal to family.
+/// How a grouped sketch is laid out across the `by` groups. Independent of the family.
 pub enum GroupingStrategy {
-    PerSubpopulationInstance,                                       // Default
+    /// One separate sketch per group. The default.
+    PerSubpopulationInstance,
+    /// One shared structure for all groups (Hydra). `kind`: which shared
+    /// structure. `params`: its sizes.
     SharedMultiSubpopulation { kind: HydraKind, params: HydraParams },
 }
 pub enum HydraKind { HydraKll /* experimental, no error bound */, HydraCms, HydraCountSketch }
+/// Sizes of the shared structure.
 pub enum HydraParams {
+    /// `k`: KLL `k` each group sees. `shared_buckets`: size of the one structure
+    /// shared by all groups.
     HydraKll { k: u32, shared_buckets: u32 },
+    /// `width` × `depth`: the sketch each group sees. `shared_rows` ×
+    /// `shared_columns`: the one physical grid all groups hash into.
     HydraCms { width: u32, depth: u32, shared_rows: u32, shared_columns: u32 },
+    /// Same fields as `HydraCms`, for Count Sketch.
     HydraCountSketch { width: u32, depth: u32, shared_rows: u32, shared_columns: u32 },
 }
 pub fn hydra_kind_for(a: &SketchAlgorithm) -> Option<HydraKind>;   // Cms, CountSketch only
 
+/// `size`: number of rows kept in the reservoir.
 pub enum SamplingKind  { Reservoir }    pub enum SamplingParams  { Reservoir { size: u32 } }
+/// `coefficients`: number of wavelet coefficients kept.
 pub enum WaveletKind   { Haar }         pub enum WaveletParams   { Haar { coefficients: u32 } }
+/// `family`: name of the parametric distribution, e.g. a normal distribution.
 pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { family: String } }
 ```
 
 ### 6.3 Update input and readouts (`post_asap/sketch.rs`, `post_asap/maintained_population.rs`)
 
 ```rust
-/// One state update: `item` keys the update for keyed families; `weight` is applied to state.
+/// What one input row adds to the state.
 pub struct SummaryUpdate {
+    /// The key the row is counted under, for keyed families (e.g. the item
+    /// in a Count-Min or HLL). `None` for unkeyed families such as KLL.
     pub item: Option<SummaryInputExpr>,
+    /// The value added to the state: the observed value for a KLL, or the
+    /// count to add for a Count-Min (often `Constant(1.0)`).
     pub weight: SummaryInputExpr,
-    pub weight_domain: WeightDomain,          // serde default: UnknownOrSigned
+    /// Whether `weight` is proven never negative. Some algorithms need that.
+    /// Missing proof is never treated as non-negative.
+    pub weight_domain: WeightDomain,
 }
 impl SummaryUpdate { pub fn column(c: ColumnRef) -> Self; }   // item None, UnknownOrSigned
 pub enum WeightDomain {
-    UnknownOrSigned,                                       // Default; never assumed non-negative
+    /// Nothing is known; the weight may be negative. The default.
+    UnknownOrSigned,
+    /// The weight is never negative. `proof`: why.
     NonNegative { proof: NonNegativeWeightProof },
 }
-pub enum NonNegativeWeightProof { UnitCount, ResetAwareCounterDerivative }
-pub enum SummaryInputExpr {
-    Constant(f64), Column(ColumnRef), Tuple(Vec<SummaryInputExpr>), EntityIdentity(EntityIdentity),
+pub enum NonNegativeWeightProof {
+    UnitCount,                     // every row adds 1
+    ResetAwareCounterDerivative,   // PromQL increase/rate over counters with reset correction
 }
-pub enum EntityIdentity { PromqlLabelSet { excluding: Vec<ColumnRef> } }
+/// An expression that computes an item or a weight from the input row.
+pub enum SummaryInputExpr {
+    Constant(f64),                    // the same number for every row
+    Column(ColumnRef),                // the value of one column
+    Tuple(Vec<SummaryInputExpr>),     // several values combined into one item
+    EntityIdentity(EntityIdentity),   // the identity of the row's series
+}
+pub enum EntityIdentity {
+    /// A PromQL series identified by its labels. `excluding`: labels left out.
+    PromqlLabelSet { excluding: Vec<ColumnRef> },
+}
 
-/// Readout of sketch state, carried by SummaryEstimate.
+/// What `SummaryEstimate` reads out of a sketch.
 pub enum SketchStatistic {
-    FrequencyL2, FrequencyEntropy,
+    FrequencyL2,        // sqrt of the sum of squared item frequencies
+    FrequencyEntropy,   // entropy of the item frequencies, in bits
+    /// `q`: the quantile rank, in (0, 1].
     Quantile { q: f64 },
+    /// An estimated count. `key`: the column being counted. `value`: the item
+    /// to look up (e.g. `"checkout"`), or `None` for the total count.
     PointCount { key: ColumnRef, value: Option<String> },
-    Cardinality,
+    Cardinality,        // number of distinct items
+    /// `k`: how many top items to return.
     TopK { k: usize },
 }
 
-/// Readout of a maintained population, carried by EvaluatePopulation.
-pub enum PopulationStatistic { Quantile { q: f64 }, TopK { k: usize }, Sum, Count, Average }
+/// What `EvaluatePopulation` computes from a maintained population.
+pub enum PopulationStatistic {
+    Quantile { q: f64 },   // `q`: the quantile rank
+    TopK { k: usize },     // `k`: how many top rows to return
+    Sum, Count, Average,
+}
+/// A population kept in full (§5.4).
 pub struct MaintainedPopulation<N = QueryExpr> {
+    /// Which rows or series the population contains.
     pub input: PopulationInput<N>,
-    pub max_k: usize,        // largest TopK it supports
-    pub quantiles: bool,     // whether Quantile is supported
+    /// The largest `k` a `TopK` read may ask for.
+    pub max_k: usize,
+    /// Whether `Quantile` reads are supported.
+    pub quantiles: bool,
 }
 pub enum PopulationInput<N = QueryExpr> {
-    CurrentSeries(CurrentSeriesInput),    // metric, matchers, grouping, without, lookback_ms
+    /// The current value of each PromQL series (see `CurrentSeriesInput`).
+    CurrentSeries(CurrentSeriesInput),
+    /// Rows of a table. `input`: the table `Scan` node. `value_column`: the
+    /// column whose values are kept. `grouping`: the `by` columns.
     Rows { input: Rc<N>, value_column: usize, grouping: GroupKeys },
+}
+pub struct CurrentSeriesInput {
+    pub metric: String,                      // metric name
+    pub matchers: Vec<CurrentSeriesMatcher>, // label matchers, e.g. job="api"
+    pub grouping: Vec<String>,               // labels to group by
+    pub without: bool,                       // true: group by all labels except `grouping`
+    pub lookback_ms: u64,                    // how long a series stays current without new samples
 }
 ```
 
-A finalized value's accuracy statement is `ResultGuarantee { metric, bound, failure_probability, provenance }` (`post_asap/guarantee.rs`). It is attached to readout and finalized nodes, never to raw state.
+A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to readout and finalized nodes, never to raw state.
 
 ### 6.4 ASAP operators (`crates/types/src/ir/asap.rs`)
 
@@ -896,24 +1011,66 @@ pub const UNIMPLEMENTED_ASAP_OP: &str =
 
 pub enum ASAPOp {
     SummaryAgg {
+        /// The input rows.
         child: Rc<OperatorNode>,
-        family: FieldDataType,             // never Plain
+        /// The summary type of the output `state` field. Never `Plain`.
+        family: FieldDataType,
+        /// What each input row adds to the state (item and weight).
         input: SummaryUpdate,
-        reduction: Reduction,              // Reduce(GroupKeys) | PerEntity
+        /// The grouping: `Reduce(by columns)`, or `PerEntity` for one state per
+        /// input series without grouping.
+        reduction: Reduction,
+        /// Whether each group gets its own sketch or all groups share one.
         grouping: GroupingStrategy,
-        filter: Option<Predicate>,         // serde default None
+        /// Rows to include, applied before updating the state. `None`: all rows.
+        filter: Option<Predicate>,
     },
-    SummaryEstimate { summary_input: Rc<OperatorNode>, query: SketchStatistic },
-    FinalizeExactAccumulator { child: Rc<OperatorNode> },
-    MaintainPopulation { child: Rc<OperatorNode>, population: MaintainedPopulation<OperatorNode> },
-    EvaluatePopulation { child: Rc<OperatorNode>, evaluation: PopulationStatistic },
+    SummaryEstimate {
+        /// The node that produces the sketch state.
+        summary_input: Rc<OperatorNode>,
+        /// What to read out of it.
+        query: SketchStatistic,
+    },
+    FinalizeExactAccumulator {
+        /// The node that produces the exact accumulator state.
+        child: Rc<OperatorNode>,
+    },
+    MaintainPopulation {
+        /// The input rows; must match `population.input`.
+        child: Rc<OperatorNode>,
+        /// What population to keep and which reads it supports.
+        population: MaintainedPopulation<OperatorNode>,
+    },
+    EvaluatePopulation {
+        /// The `MaintainPopulation` node.
+        child: Rc<OperatorNode>,
+        /// What to compute from it.
+        evaluation: PopulationStatistic,
+    },
     // Implemented since #560 (identical child schemas).
-    SummaryMerge { children: Vec<Rc<OperatorNode>> },
+    SummaryMerge {
+        /// The states to merge; all have the same schema.
+        children: Vec<Rc<OperatorNode>>,
+    },
     // Reserved: migrated but unimplemented.
-    SummarySubtract { left: Rc<OperatorNode>, right: Rc<OperatorNode> },
-    SummaryDelete { summary_input: Rc<OperatorNode>, key: ColumnId },
-    SummaryJoin { outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnId, family: FieldDataType },
-    Extension { child: Rc<OperatorNode>, name: String },
+    SummarySubtract {
+        left: Rc<OperatorNode>,    // the state to subtract from
+        right: Rc<OperatorNode>,   // the state to remove from `left`
+    },
+    SummaryDelete {
+        summary_input: Rc<OperatorNode>,   // the state
+        key: ColumnId,                     // the key column whose entries are removed
+    },
+    SummaryJoin {
+        outer: Rc<OperatorNode>,   // one input state
+        inner: Rc<OperatorNode>,   // the other input state
+        key: ColumnId,             // the join key column
+        family: FieldDataType,     // the summary type of the result
+    },
+    Extension {
+        child: Rc<OperatorNode>,   // the input
+        name: String,              // the deployment-defined operator name
+    },
 }
 
 impl ASAPOp {
@@ -935,15 +1092,24 @@ impl ASAPOp {
 The code for §4.
 
 ```rust
+/// One node of the DAG. Immutable and shared through `Rc`.
 pub struct OperatorNode {
+    /// What the node does: an ordinary operator or an ASAP operator.
     pub operator: Operator,
+    /// What kind of output it has: `Relation`, `InstantVector`,
+    /// `RangeVector`, or `State` (summary state). Derived from `operator`.
     pub result_kind: OperatorResultKind,
+    /// The output columns. Derived from `operator` and its children.
     pub schema: Schema,
+    /// The accuracy statement of the output, once known. `None` does not
+    /// mean exact.
     pub guarantee: Option<ResultGuarantee>,
+    /// When the node runs: `IngestionTime` or `QueryTime`. `None` until
+    /// planning assigns it.
     pub timing: Option<ExecutionTiming>,
-    /// Cache for `coverage()`. Lazily filled, never serialized, ignored by
-    /// equality, emptied on clone. Not a source of truth: coverage is always
-    /// re-derivable.
+    /// Cache for `coverage()`. Filled on first use, never serialized,
+    /// ignored by equality, emptied on clone. Not a source of truth:
+    /// coverage can always be derived again.
     coverage_cache: CoverageCache,
 }
 
@@ -953,25 +1119,41 @@ impl OperatorNode {
 }
 
 pub struct SummaryCoverage {
-    /// The `SummaryAgg` (or rolled-up equivalent) with the selection removed.
+    /// What the state computes: the `SummaryAgg` and its sub-DAG, with the
+    /// conditions that went into `selection` taken out (§4.2.2).
     pub definition: Rc<OperatorNode>,
-    /// Union of boxes over the output rows of the definition's computation.
+    /// Which rows went in: a union of boxes. A row is in the state if it is
+    /// in at least one box.
     pub selection: Vec<SelectionBox>,
 }
 
+/// One box: a row is in it when it meets every constraint.
 pub struct SelectionBox {
-    pub columns: BTreeMap<ColumnIdentity, Constraint>, // missing column = unrestricted
-    pub relative_time: Option<(Bound<i64>, Bound<i64>)>, // ms from evaluation; None = unrestricted
+    /// One constraint per restricted column. A column not in the map is
+    /// unrestricted.
+    pub columns: BTreeMap<ColumnIdentity, Constraint>,
+    /// The time window relative to the evaluation time, in ms, e.g.
+    /// `(Excluded(-120000), Included(-60000))` for `(−2m, −1m]`.
+    /// `None`: no time restriction.
+    pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
 }
 
+/// Names a column across nodes, independent of its position.
 pub struct ColumnIdentity {
+    /// The table or alias the column comes from; `None` if unqualified.
     pub table: Option<String>,
+    /// The column name.
     pub name: String,
 }
 
+/// A constraint on one column.
 pub enum Constraint {
-    In(Vec<ScalarValue>),    // ScalarValue has no total order (Float64)
+    /// The value is one of these.
+    In(Vec<ScalarValue>),
+    /// The value is none of these.
     NotIn(Vec<ScalarValue>),
+    /// The value lies between `lower` and `upper`. Each end is `Included`,
+    /// `Excluded` or `Unbounded`.
     Interval { lower: Bound<ScalarValue>, upper: Bound<ScalarValue> },
     // HashPartition { columns, of, index }: added with its first producer.
 }
