@@ -48,7 +48,7 @@ This section fixes the words used below. They follow relational databases and Ap
 |---|---|---|
 | **Relation / table** | A set (bag) of rows with the same columns. A base table is stored; a derived relation is the output of a query operator. | Every edge in the DAG carries a relation. A `Scan` reads a base table (SQL table or PromQL metric); every other operator outputs a derived relation. |
 | **Row / tuple** | One element of a relation: one value per column. | One output row of a node. For PromQL, one sample of one series at one time. |
-| **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; `(table, name)` identifies it across nodes (§4.3). |
+| **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; `(table, name)` identifies it across nodes (§4.2.2). |
 | **Schema** | The ordered list of columns of a relation: name, data type, nullability (Arrow `Schema` of `Field { name, data_type, nullable }`; DataFusion `DFSchema` adds the table qualifier). The schema is *metadata*: it describes rows, it contains none. | `Schema` of `Field { name, dtype, nullable, table }` in `crates/types/src/pre_asap/schema.rs`. Unlike Arrow, `dtype` can be a summary state type (§3). |
 | **Data type** | The type of a column's values (`Int64`, `Utf8`, `Timestamp`, …). | `DataType`, wrapped as `FieldDataType::Plain`. |
 | **Aggregate state** | The intermediate value of an aggregate function before its final result, e.g. `(sum, count)` for `AVG` (DataFusion `Accumulator::state`, partial/final aggregation). It is never exposed as a column type to users. | Summary state *is* a column type here (`FieldDataType::Sketch`, `ExactAggregate`, …), so state can flow along edges and be merged, stored and read by later operators. |
@@ -112,11 +112,11 @@ A node in the physical data will represent the data or summary instance, so a no
 |---|---|---|
 | Why not put it in the schema? | States worth merging cover different data but must have the same schema | below |
 | What is it based on? | Goldstein & Larson view matching (SIGMOD 2001), explained with an example | §4.1 |
-| What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2 |
-| How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.3 |
-| What uses it? | merge, rollup, slice, reuse, subtract | §4.4 |
+| What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
+| How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.2.2 |
+| What uses it? | merge, rollup, slice, reuse, subtract | §5.6 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.5 |
-| What is left out? | the deployment and runtime implementation, e.g. SDS | §4.5 |
+| What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
 
@@ -192,43 +192,39 @@ GROUP BY job;
 
 ### 4.2 Summary Coverage = Summary definition + selection
 
-A summary state is a stored aggregation, like `V` above, whose aggregate is a sketch. So we describe it the way the paper describes a view, in two parts[^gl]:
+#### 4.2.1 Why coverage has two parts
 
-| Part | Question it answers | What it is |
-|---|---|---|
-| **`definition`** | *What* is computed? | the `SummaryAgg` node with its row filters taken out: the sub-DAG below it, the summary family and parameters, its input column, and its `GROUP BY` |
-| **`selection`** | *Which rows* went in? | the row filters that were taken out, as simple conditions on columns |
+A summary state is a stored aggregation, like `V` in §4.1, whose aggregate is a sketch. Before merging or reusing a state, the planner must answer two different questions about it[^gl]:
 
-**Example:**
+| Part | Question it answers |
+|---|---|
+| **`definition`** | *What* is computed? |
+| **`selection`** | *Which rows* went in? |
 
-```text
-state = KLL(latency) by[job] over Filter(region = 'us' AND latency < 100, Scan t)
+**Example.** Three states over table `t`, all with the same schema `(job Utf8, state Sketch(KLL k=200))`:
 
-definition: KLL(latency) by[job] over Scan t
-selection:  region ∈ {us}, latency ∈ (−∞, 100)
-```
+| State | Sub-DAG | `definition` | `selection` |
+|---|---|---|---|
+| `S_us` | `KLL(latency) by[job]` over `Filter(region = 'us', Scan t)` | `KLL(latency) by[job]` over `Scan t` | `region ∈ {us}` |
+| `S_eu` | `KLL(latency) by[job]` over `Filter(region = 'eu', Scan t)` | `KLL(latency) by[job]` over `Scan t` | `region ∈ {eu}` |
+| `S_size` | `KLL(size) by[job]` over `Filter(region = 'eu', Scan t)` | `KLL(size) by[job]` over `Scan t` | `region ∈ {eu}` |
+
+- `S_us + S_eu` ✓: same computation, different rows. The result is the KLL of latency by job for US and EU, with every row counted once.
+- `S_us + S_us` ✗: same computation, same rows. Every US row would be counted twice.
+- `S_eu + S_size` ✗: same rows, different computation. One summarizes `latency`, the other `size`; the schema cannot tell them apart.
+
+If coverage were one thing, for example the whole sub-DAG compared as a unit, `S_us` and `S_eu` would look different and could never merge. With two parts, the planner checks each question on its own: the definitions must be equal, and the selections must not overlap.
 
 **Why this is enough.** Two states with the same `definition` come from the same computation. If their selections do not overlap, no row is in both, so merging them counts every row once. This holds whatever the computation contains (joins, unions, `rate`, dedup), so we need no special rule per operator.
 
-**More examples** of what goes where:
-
-| Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
-|---|---|---|
-| `Filter(region = 'us', Scan t)` | `Scan t` | `region ∈ {us}` |
-| `Filter(latency < 100, Scan t)` | `Scan t` | `latency ∈ (−∞, 100)` |
-| `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
-| `Filter(job = 'api', rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `job ∈ {api}` |
-| `Filter(value * 2 > 10, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` and the condition `value * 2 > 10` | nothing |
-
-In the last two rows `TimeRange(5m)` stays in `definition`: it is the input window of `rate` and changes the rate values, so it does not just pick rows. `value * 2 > 10` stays too, because it is a condition on an expression, not on a column (§4.3).
-
 Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` is the sub-DAG without its row filters, `σ` is the selection, and `G` the grouping.
 
-[^gl]: **What we take from Goldstein & Larson, and what we add.** The view's tables, joins and residuals become the sub-DAG `C` below the `SummaryAgg`; the aggregate and its argument become the summary family and its input; `GROUP BY` becomes the `SummaryAgg` grouping `G`. These three are in `definition`. The paper's ranges become `selection` (§4.3). A compensating filter on the view's output becomes slicing, allowed only on a column of `G`, and regrouping to a smaller `GROUP BY` becomes rollup (§4.4). We add three things: **unions of states** (the paper uses one view at a time; `SummaryMerge` combines several, so we also check that their selections do not overlap), **summary families** (the paper only re-adds `SUM` and `COUNT`; each family says how its inputs may overlap, §4.4), and **more kinds of conditions** (value sets, hash partitions, and time relative to the evaluation time, §4.3).
+[^gl]: **What we take from Goldstein & Larson, and what we add.** The view's tables, joins and residuals become the sub-DAG `C` below the `SummaryAgg`; the aggregate and its argument become the summary family and its input; `GROUP BY` becomes the `SummaryAgg` grouping `G`. These three are in `definition`. The paper's ranges become `selection` (§4.2.2). A compensating filter on the view's output becomes slicing, allowed only on a column of `G`, and regrouping to a smaller `GROUP BY` becomes rollup (§5.6). We add three things: **unions of states** (the paper uses one view at a time; `SummaryMerge` combines several, so we also check that their selections do not overlap), **summary families** (the paper only re-adds `SUM` and `COUNT`; each family says how its inputs may overlap, §5.6), and **more kinds of conditions** (value sets, hash partitions, and time relative to the evaluation time, §4.2.2).
 
-### 4.3 Deriving the definition and the selection
 
-The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration. One walk down the sub-DAG produces both parts: every filter condition either moves into `selection` or stays in `definition`. §4.3.1 describes what the definition is, and §4.3.2 decides which conditions move.
+#### 4.2.2 Deriving the definition and the selection
+
+The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration. One walk down the sub-DAG produces both parts: every filter condition either moves into `selection` or stays in `definition`. The definition is described first, then how the planner decides which conditions move into the selection.
 
 **Worked example.** A KLL of request latency per job, over metric `m` with columns `region`, `job`, `value`:
 
@@ -254,9 +250,10 @@ The planner computes the coverage of a node from the sub-DAG the node covers, no
                   [ Scan m ]
 ```
 
-#### 4.3.1 The definition
+##### The definition
 
-The `definition` is the `SummaryAgg` together with its sub-DAG, with every condition that moves into `selection` (§4.3.2) taken out. Everything else stays exactly as it is:
+
+The `definition` is the `SummaryAgg` together with its sub-DAG, with every condition that moves into `selection` (below) taken out. Everything else stays exactly as it is:
 
 | In the sub-DAG | In the `definition` |
 |---|---|
@@ -268,7 +265,7 @@ The `definition` is the `SummaryAgg` together with its sub-DAG, with every condi
 
 So the `definition` holds what the state computes: the computation `C` with its remaining conditions, the summary family and its parameters, the input column, and the grouping `G`.
 
-In the worked example, `value < 100`, `region = 'us'` and the time window move into `selection` (§4.3.2), and `value * 2 > 10` stays:
+In the worked example, `value < 100`, `region = 'us'` and the time window move into `selection` (below), and `value * 2 > 10` stays:
 
 ```text
                  ( next operator )
@@ -286,15 +283,16 @@ In the worked example, `value < 100`, `region = 'us'` and the time window move i
                   [ Scan m ]                                  ← TimeRange, TimeShift removed
 ```
 
-**When two definitions are equal.** Merging and reuse (§4.4) require equal definitions.
+**When two definitions are equal.** Merging (§5.6) requires equal definitions.
 
 - They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a pane built at ingestion time can merge with one built at query time.
 - `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
 - States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
-#### 4.3.2 The selection
+##### The selection
 
-**Goal.** Decide which filter conditions under the `SummaryAgg` move into `selection`: those that only choose *which rows* go into the state. All other conditions stay in the `definition` (§4.3.1).
+
+**Goal.** Decide which filter conditions under the `SummaryAgg` move into `selection`: those that only choose *which rows* go into the state. All other conditions stay in the `definition` (above).
 
 **Steps.**
 
@@ -370,53 +368,19 @@ Any other shape stays in `definition`:
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
 - Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
 
-### 4.4 Operations
+**More examples** of what goes where:
 
-Coverage tells the planner which states can be combined, and what the result covers. The examples below use these states. All are `KLL(value) by[job] over Scan m` unless noted:
-
-| State | Selection |
-|---|---|
-| `A` | time `(−1m, 0]` |
-| `B` | time `(−2m, −1m]` |
-| `C` | time `(−90s, −30s]` |
-| `D` | time `(−1m, 0]`, but the `definition` has the residual `value * 2 > 10` |
-| `E` | time `(−1m, 0]`, `region ∈ {us}` |
-| `F` | time `(−1m, 0]`, `region ∈ {eu}` |
-
-**Merge** (`SummaryMerge`): combine states into one. Allowed when all `definition`s are equal and the selections relate as the family requires.
-
-| Merge | Allowed? | Why | Result's selection |
-|---|---|---|---|
-| `A + B` | ✓ | same definition, no overlap | `(−2m, 0]` (adjacent ranges join) |
-| `E + F` | ✓ | same definition, `us` and `eu` do not overlap | `(−1m, 0]`, `region ∈ {us, eu}` |
-| `A + C` | ✗ | `(−60s, −30s]` is in both: those rows would be counted twice | |
-| `A + A` | ✗ | every row is in both | |
-| `A + D` | ✗ | different definitions: `D` only has rows with `value * 2 > 10` | |
-| `A + B'` where `B'` is KLL with `k = 400` | ✗ | different definitions (parameters) | |
-| `(A + B) + B''` where `B''` covers `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
-
-**How inputs may overlap** depends on the summary family (`FieldDataType::family_merges` and `merge_relation`, #592):
-
-| Rule | Families | Example |
+| Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
 |---|---|---|
-| **must not overlap** | counting families: KLL, Count-Min, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(−60s, −30s]` would be counted twice |
-| **may overlap** | HLL, exact `Min`/`Max`, distinct sets | HLL over `A`'s and `C`'s selections ✓: a value seen twice is still one distinct value; the result covers `(−90s, 0]` |
-| **right inside left** | subtraction | see subtract below |
+| `Filter(region = 'us', Scan t)` | `Scan t` | `region ∈ {us}` |
+| `Filter(latency < 100, Scan t)` | `Scan t` | `latency ∈ (−∞, 100)` |
+| `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
+| `Filter(job = 'api', rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `job ∈ {api}` |
+| `Filter(value * 2 > 10, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` and the condition `value * 2 > 10` | nothing |
 
-**Rollup** (`SummaryMerge` with `group_by`, later): make the grouping coarser. A `by[region, job]` state rolls up to `by[job]`: the state for `job = api` is the merge of `(us, api)`, `(eu, api)`, …. No overlap check is needed, because a row has one `region` and so is in only one group. The selection is unchanged.
+In the last two rows `TimeRange(5m)` stays in `definition`: it is the input window of `rate` and changes the rate values, so it does not just pick rows. `value * 2 > 10` stays too, because it is a condition on an expression, not on a column.
 
-**Slice**: read only some groups. From a `by[region, job]` state, a query for `region = 'us'` by job reads the groups with `region = us` ✓. A query for `value < 50` ✗: `value` is not a grouping column, and a sketch cannot be filtered after it is built.
-
-**Reuse** for a query: a stored state answers a query when the `definition`s are equal and the query's rows are all in the state, with any difference covered by a slice. A stored `by[region, job]` state over `(−5m, 0]`:
-
-- p99 by job over the last 5 minutes for `region = 'us'`: ✓ (slice on `region`).
-- p99 by job over the last 1 minute: ✗. The state also holds minutes 2–5, and time is not a grouping column, so they cannot be taken out.
-
-**Subtract** (`SummarySubtract`, reserved): remove one state from another, for families that allow it (e.g. exact `Sum`/`Count`, Count-Min). A sum over `(−10m, 0]` minus a sum over `(−10m, −5m]` gives `(−5m, 0]`. Allowed when the `definition`s are equal and the right selection is inside the left.
-
-Two `definition`s count as equal as described in §4.3.1.
-
-### 4.5 What coverage does not contain
+### 4.3 What coverage does not contain
 
 Coverage only says what a state means and which rows it took. The deployment and runtime implementation is not part of coverage: it belongs to ASAPQuery-backend, for example the summary data store (SDS), reading source data, and building, storing and serving summary instances.
 
@@ -468,7 +432,7 @@ coverage() of the SummaryAgg
 
 - Output schema: the `by` keys followed by one non-nullable field `state` typed `family`; `unique_keys = [[0]]`, `closed = true`, no `time_index`. With `Reduction::PerEntity` the input columns are kept and the sample-value column is replaced by `state`.
 - Checks: `family` is not `Plain`; the child is not `State`; the `weight`/`item` columns resolve against the child schema; `filter`, if present, types as `Bool`.
-- Coverage: **always derived**, never declared (§4.3). Both conditions of the `Filter` move into `selection`, so `definition` is this node over the bare `Scan`. A KLL over `latency` for `region = 'eu'` has the same `definition` and a disjoint selection, so the two can merge. A conjunct that cannot lift (say `latency * 2 > 10`) stays in `definition` as a residual; the node still has coverage.
+- Coverage: **always derived**, never declared (§4.2.2). Both conditions of the `Filter` move into `selection`, so `definition` is this node over the bare `Scan`. A KLL over `latency` for `region = 'eu'` has the same `definition` and a disjoint selection, so the two can merge. A conjunct that cannot lift (say `latency * 2 > 10`) stays in `definition` as a residual; the node still has coverage.
 - Boundary: this is where values become state. The sketch family, algorithm and parameters are committed in the field type, and `guarantee` stays `None` because state is not a caller-visible value.
 
 ### 5.2 `SummaryEstimate`: sketch state → value
@@ -590,7 +554,7 @@ Current state:
 
 - **On `main` (since #560):** `SummaryMerge { children }` is implemented. `validate_inputs()` accepts it when there is at least one child, every child is `State` with exactly one state field, and all children have identical schemas. The output schema is the children's schema.
 - **#646 (open):** adds the coverage check. `OperatorNode::new` and `validate_structure` also require equal `definition`s and disjoint selections, and `coverage()` returns the merged coverage.
-- **Planned:** `group_by`, so one operator does both merge and rollup (§4.4):
+- **Planned:** `group_by`, so one operator does both merge and rollup:
 
 ```rust
 SummaryMerge { children: Vec<C>, group_by: Reduction }
@@ -694,10 +658,41 @@ input groups                       output groups
 (eu, web) ─┴─ merge ─────────────▶ web
 ```
 
+**Which merges are allowed.** All states below are `KLL(value) by[job] over Scan m` unless noted:
+
+| State | Selection |
+|---|---|
+| `A` | time `(−1m, 0]` |
+| `B` | time `(−2m, −1m]` |
+| `C` | time `(−90s, −30s]` |
+| `D` | time `(−1m, 0]`, but the `definition` keeps `value * 2 > 10` |
+
+| Merge | Allowed? | Why | Result's selection |
+|---|---|---|---|
+| `A + B` | ✓ | same definition, no overlap | `(−2m, 0]` (adjacent ranges join) |
+| `A + C` | ✗ | `(−60s, −30s]` is in both, so those rows would be counted twice | |
+| `A + A` | ✗ | every row is in both | |
+| `A + D` | ✗ | different definitions: `D` only has rows with `value * 2 > 10` | |
+| `A` + a KLL with `k = 400` | ✗ | different definitions (parameters) | |
+| `(A + B)` + a state over `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
+
+**How inputs may overlap** depends on the summary family (`FieldDataType::family_merges` and `merge_relation`, #592):
+
+| Rule | Families | Example |
+|---|---|---|
+| **must not overlap** | counting families: KLL, Count-Min, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(−60s, −30s]` would be counted twice |
+| **may overlap** | HLL, exact `Min`/`Max`, distinct sets | HLL over `A`'s and `C`'s rows ✓: a value seen twice is still one distinct value; the result covers `(−90s, 0]` |
+| **right inside left** | subtraction | §5.7 |
+
+**Coverage outside `SummaryMerge`.** The planner also uses coverage to read or reuse a state:
+
+- **Slice:** from a `by[region, job]` state, a query for `region = 'us'` by job reads only the `us` groups ✓. A query for `value < 50` ✗: `value` is not a grouping column, and a sketch cannot be filtered after it is built.
+- **Reuse:** a stored state answers a query when the definitions are equal and the query's rows are all in the state, with any difference covered by a slice. A stored `by[region, job]` state over `(−5m, 0]` answers p99 by job over the last 5 minutes for `region = 'us'` ✓, but not over the last 1 minute ✗: time is not a grouping column, so minutes 2–5 cannot be taken out.
+
 - Output schema: the children's schema with the group key fields reduced to `group_by`.
 - Checks:
   - at least one child, every child is `State` with exactly one state field;
-  - all children have equal `definition`s (§4.4), so family, parameters, `input`, `C` and grouping match. Merging k=200 with k=300, KLL over `latency` with KLL over `size`, or states over different sources fails;
+  - all children have equal `definition`s (§4.2.2), so family, parameters, `input`, `C` and grouping match. Merging k=200 with k=300, KLL over `latency` with KLL over `size`, or states over different sources fails;
   - `group_by` ⊆ the children's `G`, and the family merges;
   - the children's selections relate as the family requires: disjoint for KLL, so pane 0 with pane 0 is rejected; overlap is allowed for HLL.
 - Coverage: **derived**: the shared `definition` with `group_by`, and the union of the children's selections. Adjacent intervals join; gaps stay as separate boxes. Nested merges work because a child merge has coverage like any other summary node.
@@ -709,7 +704,7 @@ These variants exist so that plans can name them, but `output_schema()`/`validat
 
 | Operator | Fields | Intended edge shape |
 |---|---|---|
-| `SummarySubtract` | `left, right` | State × State → State: remove one window's contribution, e.g. [0,10) − [0,5). Same `definition`; the right selection must lie inside the left (§4.4) |
+| `SummarySubtract` | `left, right` | State × State → State: remove one window's contribution, e.g. [0,10) − [0,5). Same `definition`; the right selection must lie inside the left (§4.2) |
 | `SummaryDelete` | `summary_input, key: ColumnId` | State → State with the entries for `key` removed |
 | `SummaryJoin` | `outer, inner, key, family` | State × State → State typed `family` (`produced_state()` returns it), e.g. join-size estimation |
 | `Extension` | `child, name` | deployment-named state operator |
