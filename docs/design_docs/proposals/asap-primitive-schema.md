@@ -113,7 +113,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | Why not put it in the schema? | States worth merging cover different data but must have the same schema | below |
 | What is it based on? | Goldstein & Larson view matching (SIGMOD 2001), explained with an example | §4.1 |
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2 |
-| How is it computed? | by the planner, from the sub-DAG the node covers | §4.3 |
+| How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.3 |
 | What uses it? | merge, rollup, slice, reuse, subtract | §4.4 |
 | Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §4.5 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.6 |
@@ -226,21 +226,9 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 [^gl]: **What we take from Goldstein & Larson, and what we add.** The view's tables, joins and residuals become the sub-DAG `C` below the `SummaryAgg`; the aggregate and its argument become the summary family and its input; `GROUP BY` becomes the `SummaryAgg` grouping `G`. These three are in `definition`. The paper's ranges become `selection` (§4.3). A compensating filter on the view's output becomes slicing, allowed only on a column of `G`, and regrouping to a smaller `GROUP BY` becomes rollup (§4.4). We add three things: **unions of states** (the paper uses one view at a time; `SummaryMerge` combines several, so we also check that their selections do not overlap), **summary families** (the paper only re-adds `SUM` and `COUNT`; each family says how its inputs may overlap, §4.4), and **more kinds of conditions** (value sets, hash partitions, and time relative to the evaluation time, §4.3).
 
-### 4.3 Deriving the selection
+### 4.3 Deriving the definition and the selection
 
-The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration.
-
-**Goal.** Split the filter conditions under a `SummaryAgg` into two groups: conditions that only choose *which rows* go into the state (they go into `selection`), and everything else (it stays in `definition`).
-
-**Steps.**
-
-1. **Collect the conditions.** Go down the sub-DAG from the `SummaryAgg` and collect every filter condition: from `Filter` nodes, from `Scan.predicates`, and from the `SummaryAgg`'s own `filter`. A condition `A AND B` counts as two conditions, `A` and `B`.
-2. **Ask two questions about each condition:**
-   - **Rule 1: would it pick the same rows if it were moved to just below the `SummaryAgg`?** `region = 'us'` below a `Project` that only renames columns: yes. `value > 5` below `rate`: no, because it filters the raw samples that `rate` reads, which changes the rate values.
-   - **Rule 2: is it a simple condition on one column?** That is, a value set such as `region IN ('us', 'eu')`, or a range such as `latency < 100`. `value * 2 > 10` is not: it is on an expression.
-3. **Putting the two rules together.**
-   - If both answers are yes: take the condition out of the sub-DAG and put it into `selection`.
-   - If either answer is no: leave it in the sub-DAG, so it is part of `definition`. The paper calls such conditions *residuals*.
+The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration. One walk down the sub-DAG produces both parts: every filter condition either moves into `selection` or stays in `definition`. §4.3.1 describes what the definition is, and §4.3.2 decides which conditions move.
 
 **Worked example.** A KLL of request latency per job, over metric `m` with columns `region`, `job`, `value`:
 
@@ -266,6 +254,60 @@ The planner computes the coverage of a node from the sub-DAG the node covers, no
                   [ Scan m ]
 ```
 
+#### 4.3.1 The definition
+
+The `definition` is the `SummaryAgg` together with its sub-DAG, with every condition that moves into `selection` (§4.3.2) taken out. Everything else stays exactly as it is:
+
+| In the sub-DAG | In the `definition` |
+|---|---|
+| a `Filter` whose conditions all move into `selection` | removed |
+| a `Filter` with some conditions that stay | kept, with only the conditions that stay |
+| `Scan.predicates` and `SummaryAgg.filter` | trimmed the same way |
+| a range `TimeRange` over a `TimeShift` that becomes relative time | removed |
+| any other operator | unchanged |
+
+So the `definition` holds what the state computes: the computation `C` with its remaining conditions, the summary family and its parameters, the input column, and the grouping `G`.
+
+In the worked example, `value < 100`, `region = 'us'` and the time window move into `selection` (§4.3.2), and `value * 2 > 10` stays:
+
+```text
+                 ( next operator )
+                         ▲
+                         │
+              [[ SummaryAgg ]]     KLL(value) by job          ← filter removed
+                         ▲
+                         │
+                 [ Project ]       job, region AS r, value    ← unchanged
+                         ▲
+                         │
+                  [ Filter ]       value * 2 > 10             ← region = 'us' removed
+                         ▲
+                         │
+                  [ Scan m ]                                  ← TimeRange, TimeShift removed
+```
+
+**When two definitions are equal.** Merging and reuse (§4.4) require equal definitions.
+
+- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a pane built at ingestion time can merge with one built at query time.
+- `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
+- States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
+
+#### 4.3.2 The selection
+
+**Goal.** Decide which filter conditions under the `SummaryAgg` move into `selection`: those that only choose *which rows* go into the state. All other conditions stay in the `definition` (§4.3.1).
+
+**Steps.**
+
+1. **Collect the conditions.** Go down the sub-DAG from the `SummaryAgg` and collect every filter condition: from `Filter` nodes, from `Scan.predicates`, and from the `SummaryAgg`'s own `filter`. A condition `A AND B` counts as two conditions, `A` and `B`.
+2. **Ask two questions about each condition:**
+   - **Rule 1: would it pick the same rows if it were moved to just below the `SummaryAgg`?** `region = 'us'` below a `Project` that only renames columns: yes. `value > 5` below `rate`: no, because it filters the raw samples that `rate` reads, which changes the rate values.
+   - **Rule 2: is it a simple condition on one column?** That is, a value set such as `region IN ('us', 'eu')`, or a range such as `latency < 100`. `value * 2 > 10` is not: it is on an expression.
+3. **Putting the two rules together.**
+   - If both answers are yes: take the condition out of the sub-DAG and put it into `selection`.
+   - If either answer is no: leave it in the sub-DAG, so it is part of `definition`. The paper calls such conditions *residuals*.
+
+In the worked example:
+
 | Condition | Found at | Rule 1: same rows at the `SummaryAgg`? | Rule 2: simple? | Result |
 |---|---|---|---|---|
 | `value < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `value ∈ (−∞, 100)` |
@@ -273,12 +315,7 @@ The planner computes the coverage of a node from the sub-DAG the node covers, no
 | `value * 2 > 10` | `Filter` | yes | **no**: it is on an expression, not a column | stays in `definition` |
 | 1 minute, shifted by 2 | `TimeRange` + `TimeShift` | yes | yes, relative time | `selection`: `(−3m, −2m]` |
 
-Result:
-
-```text
-definition: KLL(value) by[job] over Project[job, region AS r, value] over Filter(value * 2 > 10) over Scan m
-selection:  value ∈ (−∞, 100), m.region ∈ {us}, time (−3m, −2m]
-```
+So the `selection` is `value ∈ (−∞, 100)`, `m.region ∈ {us}`, time `(−3m, −2m]`.
 
 **Rule 1 in detail.** Imagine moving the condition up, one operator at a time, until it is just below the `SummaryAgg`. Every operator it passes must leave the picked rows unchanged. Whether it can pass depends on what the operator does:
 
@@ -377,11 +414,7 @@ Coverage tells the planner which states can be combined, and what the result cov
 
 **Subtract** (`SummarySubtract`, reserved): remove one state from another, for families that allow it (e.g. exact `Sum`/`Count`, Count-Min). A sum over `(−10m, 0]` minus a sum over `(−10m, −5m]` gives `(−5m, 0]`. Allowed when the `definition`s are equal and the right selection is inside the left.
 
-**When two `definition`s are equal.**
-
-- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a pane built at ingestion time can merge with one built at query time.
-- `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
-- States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
+Two `definition`s count as equal as described in §4.3.1.
 
 ### 4.5 Interface
 
