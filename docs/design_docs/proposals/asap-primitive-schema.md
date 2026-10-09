@@ -856,7 +856,10 @@ pub enum ExactParams { Sum, Count, Min, Max, Increase, Rate, IRate }
 
 /// A chosen sketch. Built only through `new`, so the three fields always agree.
 pub struct SketchKind {
-    /// What kind of question the sketch answers; derived from `algorithm`.
+    /// Which aggregation intents the sketch answers: `Quantile` (quantiles),
+    /// `Cardinality` (distinct counts), `Frequency` (item counts), `TopK`
+    /// (heavy hitters), or `Universal` (frequency moments such as L2 and
+    /// entropy, plus counts and distinct counts). Derived from `algorithm`.
     category: SketchCategory,
     /// Which sketch algorithm.
     algorithm: SketchAlgorithm,
@@ -867,7 +870,7 @@ impl SketchKind {
     /// The only constructor. Derives the category from the algorithm, and
     /// panics if `params` belong to a different algorithm.
     pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self;
-    /// What kind of question the sketch answers.
+    /// Which aggregation intents the sketch answers (see the `category` field).
     pub fn category(&self) -> SketchCategory;
     /// The sketch algorithm.
     pub fn algorithm(&self) -> &SketchAlgorithm;
