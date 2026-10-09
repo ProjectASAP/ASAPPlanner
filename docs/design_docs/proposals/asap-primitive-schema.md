@@ -426,13 +426,14 @@ Coverage only says what a state means and which rows it took. The deployment and
 
 Given that these information requirements are introduced by summary operators to work correctly semantically, we show the examples of how the defined OperatorNode, schema, and physical data information work with each kind of summary operators. 
 
-How to read the diagrams: data flows from top to bottom. Each edge is labelled with the schema it carries, written `Kind: field Type, …`.
+How to read the diagrams: data flows from bottom to top, along the `▲` arrows. Each edge is labelled with the schema it carries, written `Kind: field Type, …`.
 
-| Color | Meaning |
+| Notation | Meaning |
 |---|---|
-| blue box | operator whose output is a value (`Relation`) |
-| yellow box | operator whose output is summary state (`State`) |
-| gray dashed box | the node's `coverage()` |
+| `[ Op ]` | operator whose output is a value (`Relation`) |
+| `[[ Op ]]` | operator whose output is summary state (`State`) |
+| `( next operator )` | whatever consumes the result |
+| `selection: …` next to a node | the `selection` part of that node's `coverage()` |
 
 Schemas are the ones `output_schema()` derives. Planning may rename fields through `OperatorNode::with_schema`, but types, nullability, `time_index`, `unique_keys` and `closed` must match the derivation. All examples use a table source, so values are `Relation`; with a `TimeSeries` source the value side is `InstantVector`.
 
@@ -440,20 +441,26 @@ Schemas are the ones `output_schema()` derives. Planning may rename fields throu
 
 Scenario: p99 latency by job, from KLL(k=200), over table `t`, US rows with latency under 10 s only.
 
-```mermaid
-flowchart TB
-  scan["Scan t"]:::value
-  filter["Filter<br/>region = 'us' AND latency #lt; 10000"]:::value
-  agg["SummaryAgg<br/>family: Sketch KLL k=200<br/>input: column latency<br/>reduction: by job"]:::state
-  out(["next operator"])
-  cov["coverage()<br/>definition: this SummaryAgg over Scan t (Filter removed)<br/>selection: t.region ∈ {us}, t.latency ∈ (−∞, 10000)"]:::cov
-  scan -->|"Relation: job Utf8, region Utf8, ts Timestamp, latency Float64"| filter
-  filter -->|"Relation: same as above"| agg
-  agg -->|"State: job Utf8, state Sketch(KLL k=200)"| out
-  agg -.- cov
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                 ( next operator )
+                         ▲
+                         │  State: job Utf8, state Sketch(KLL k=200)
+                         │
+              [[ SummaryAgg ]]   KLL k=200, input latency, by job
+                         ▲
+                         │  Relation: job Utf8, region Utf8, ts Timestamp, latency Float64
+                         │
+                  [ Filter ]     region = 'us' AND latency < 10000
+                         ▲
+                         │  Relation: job Utf8, region Utf8, ts Timestamp, latency Float64
+                         │
+                  [ Scan t ]
+
+coverage() of the SummaryAgg
+┌──────────────────────────────────────────────────────────────────┐
+│ definition: this SummaryAgg over Scan t   (the Filter removed)   │
+│ selection:  t.region ∈ {us},  t.latency ∈ (−∞, 10000)            │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 - Output schema: the `by` keys followed by one non-nullable field `state` typed `family`; `unique_keys = [[0]]`, `closed = true`, no `time_index`. With `Reduction::PerEntity` the input columns are kept and the sample-value column is replaced by `state`.
@@ -465,16 +472,16 @@ flowchart TB
 
 Scenario: read p99 from the state in 5.1.
 
-```mermaid
-flowchart TB
-  agg["SummaryAgg from 5.1"]:::state
-  est["SummaryEstimate<br/>query: Quantile q = 0.99"]:::value
-  out(["next operator"])
-  agg -->|"State: job Utf8, state Sketch(KLL k=200)"| est
-  est -->|"Relation: job Utf8, quantile Float64 (planner may rename to p99)"| out
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                 ( next operator )
+                         ▲
+                         │  Relation: job Utf8, quantile Float64   (planner may rename to p99)
+                         │
+              [ SummaryEstimate ]   query: Quantile q = 0.99
+                         ▲
+                         │  State: job Utf8, state Sketch(KLL k=200)
+                         │
+              [[ SummaryAgg ]]      from 5.1
 ```
 
 - Output schema: the input schema with the one non-plain field replaced by a non-nullable plain field. Its name and type come from the statistic: `quantile`/`frequency_l2`/`frequency_entropy` Float64, `cardinality`/`count` Int64 (Float64 if the producer is a `PerEntity` `SummaryAgg`). Keys and metadata pass through. A top-k readout is the exception: it returns the selected rows, one per ranked item, with the partition keys, the item identity columns, and a `value` Float64 score (#579). This is the same row shape as an exact Sort → Limit top-k, so the plans for one query share a root schema.
@@ -487,20 +494,26 @@ flowchart TB
 
 Scenario: total bytes by host with an exact Sum accumulator.
 
-```mermaid
-flowchart TB
-  scan["Scan t"]:::value
-  agg["SummaryAgg<br/>family: ExactAggregate Sum<br/>input: column bytes<br/>reduction: by host"]:::state
-  fin["FinalizeExactAccumulator"]:::value
-  out(["next operator"])
-  cov["coverage()<br/>definition: this SummaryAgg over Scan t<br/>selection: everything"]:::cov
-  scan -->|"Relation: host Utf8, bytes Float64"| agg
-  agg -->|"State: host Utf8, state ExactAggregate(Sum)"| fin
-  fin -->|"Relation: host Utf8, state Float64"| out
-  agg -.- cov
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                 ( next operator )
+                         ▲
+                         │  Relation: host Utf8, state Float64
+                         │
+         [ FinalizeExactAccumulator ]
+                         ▲
+                         │  State: host Utf8, state ExactAggregate(Sum)
+                         │
+              [[ SummaryAgg ]]   ExactAggregate Sum, input bytes, by host
+                         ▲
+                         │  Relation: host Utf8, bytes Float64
+                         │
+                  [ Scan t ]
+
+coverage() of the SummaryAgg
+┌──────────────────────────────────────────────────┐
+│ definition: this SummaryAgg over Scan t          │
+│ selection:  everything (no filter)               │
+└──────────────────────────────────────────────────┘
 ```
 
 - Output schema: each `ExactAggregate` field keeps its name (`state`) and takes the type and nullability the equivalent `NonASAPOp::Aggregate` would give: Sum/Min/Max follow the input column, Count is Int64, and Rate/IRate/Increase are Float64. If the child is not a `SummaryAgg` directly, Count falls back to Int64 and the others to Float64. `unique_keys`, `closed` and `time_index` are preserved (`schema_rebuilding.rs`).
@@ -512,16 +525,16 @@ flowchart TB
 
 Scenario: keep the full latency population per job, so that p99 and top-10 can be evaluated later.
 
-```mermaid
-flowchart TB
-  scan["Scan t (closed schema)"]:::value
-  mp["MaintainPopulation<br/>input: Rows of that Scan, value column latency, by job<br/>max_k: 10, quantiles: true"]:::state
-  out(["next operator"])
-  scan -->|"Relation: job Utf8, latency Float64"| mp
-  mp -->|"State: job Utf8, latency Float64 (all plain)"| out
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                 ( next operator )
+                         ▲
+                         │  State: job Utf8, latency Float64   (all fields plain)
+                         │
+          [[ MaintainPopulation ]]   input: rows of that Scan, value latency, by job
+                         ▲                  max_k: 10, quantiles: true
+                         │  Relation: job Utf8, latency Float64
+                         │
+                  [ Scan t ]         closed schema
 ```
 
 - Output schema: identical to the child's, all plain. Only `result_kind = State` marks it as maintained state.
@@ -533,16 +546,16 @@ flowchart TB
 
 Scenario: p99 by job from the population in 5.4.
 
-```mermaid
-flowchart TB
-  mp["MaintainPopulation from 5.4"]:::state
-  ev["EvaluatePopulation<br/>evaluation: Quantile q = 0.99"]:::value
-  out(["next operator"])
-  mp -->|"State: job Utf8, latency Float64"| ev
-  ev -->|"Relation: job Utf8, quantile_0_99 Float64"| out
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                 ( next operator )
+                         ▲
+                         │  Relation: job Utf8, quantile_0_99 Float64
+                         │
+           [ EvaluatePopulation ]    evaluation: Quantile q = 0.99
+                         ▲
+                         │  State: job Utf8, latency Float64
+                         │
+          [[ MaintainPopulation ]]   from 5.4
 ```
 
 - Output schema: the schema of `Aggregate(by grouping, measure)` over the maintained source. Quantile gives `quantile_<q>` Float64, Sum gives `sum` (value type), Count gives `count` Int64 and Average gives `avg` Float64; `unique_keys = [[0]]`, `closed`. `TopK { k }` instead returns the source schema unchanged (the selected rows).
@@ -564,31 +577,31 @@ SummaryMerge { children: Vec<C>, group_by: Reduction }
 
 **Scenario A, time panes.** Two one-minute KLL panes of PromQL `quantile_over_time(0.99, m[2m])` merge into the two-minute state. Each pane reads `TimeRange(1m)` over `TimeShift(s)` over the scan, as Stage 2 builds them. Both panes share one `Scan`.
 
-```mermaid
-flowchart TB
-  scan["Scan m"]:::value
-  s0["TimeShift 0"]:::value
-  s1["TimeShift 1m"]:::value
-  r0["TimeRange 1m"]:::value
-  r1["TimeRange 1m"]:::value
-  p0["pane 0: SummaryAgg<br/>KLL k=200, by nothing"]:::state
-  p1["pane 1: SummaryAgg<br/>KLL k=200, by nothing"]:::state
-  m["SummaryMerge<br/>group_by: nothing"]:::state
-  out(["next operator"])
-  c0["selection: time (−1m, 0]"]:::cov
-  c1["selection: time (−2m, −1m]"]:::cov
-  cm["selection: time (−2m, 0]<br/>definition: same as both panes"]:::cov
-  scan --> s0 --> r0 --> p0
-  scan --> s1 --> r1 --> p1
-  p0 -->|"State: state Sketch(KLL k=200)"| m
-  p1 -->|"State: state Sketch(KLL k=200)"| m
-  m -->|"State: state Sketch(KLL k=200)"| out
-  p0 -.- c0
-  p1 -.- c1
-  m -.- cm
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                           ( next operator )
+                                   ▲
+                                   │  State: state Sketch(KLL k=200)
+                                   │
+                          [[ SummaryMerge ]]     group_by: nothing
+                                   ▲             selection: time (−2m, 0]
+                                   │
+                 ┌─────────────────┴─────────────────┐
+                 │  State: state Sketch(KLL k=200)   │  State: state Sketch(KLL k=200)
+                 │                                   │
+     [[ SummaryAgg ]]  pane 0             [[ SummaryAgg ]]  pane 1
+     KLL k=200, by nothing                KLL k=200, by nothing
+     selection: time (−1m, 0]             selection: time (−2m, −1m]
+                 ▲                                   ▲
+                 │                                   │
+         [ TimeRange 1m ]                    [ TimeRange 1m ]
+                 ▲                                   ▲
+                 │                                   │
+         [ TimeShift 0 ]                     [ TimeShift 1m ]
+                 ▲                                   ▲
+                 │                                   │
+                 └─────────────────┬─────────────────┘
+                                   │
+                              [ Scan m ]
 ```
 
 Both panes have the same `definition` (`SummaryAgg` over `Scan m`), and their selections are adjacent, so they merge into one range:
@@ -602,43 +615,41 @@ merge      (──────────────────────�
 
 **Scenario B, populations.** `KLL(latency) by[job]` for `region = 'us'` and for `region = 'eu'` (as in 5.1) merge:
 
-```mermaid
-flowchart TB
-  scan["Scan t"]:::value
-  fu["Filter region = 'us'"]:::value
-  fe["Filter region = 'eu'"]:::value
-  au["SummaryAgg KLL k=200, by job"]:::state
-  ae["SummaryAgg KLL k=200, by job"]:::state
-  m["SummaryMerge<br/>group_by: by job"]:::state
-  out(["next operator"])
-  cu["selection: region ∈ {us}"]:::cov
-  ce["selection: region ∈ {eu}"]:::cov
-  cm["selection: region ∈ {us, eu}"]:::cov
-  scan --> fu --> au
-  scan --> fe --> ae
-  au --> m
-  ae --> m
-  m -->|"State: job Utf8, state Sketch(KLL k=200)"| out
-  au -.- cu
-  ae -.- ce
-  m -.- cm
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                           ( next operator )
+                                   ▲
+                                   │  State: job Utf8, state Sketch(KLL k=200)
+                                   │
+                          [[ SummaryMerge ]]     group_by: by job
+                                   ▲             selection: region ∈ {us, eu}
+                                   │
+                 ┌─────────────────┴─────────────────┐
+                 │                                   │
+     [[ SummaryAgg ]]                     [[ SummaryAgg ]]
+     KLL k=200, by job                    KLL k=200, by job
+     selection: region ∈ {us}             selection: region ∈ {eu}
+                 ▲                                   ▲
+                 │                                   │
+     [ Filter region = 'us' ]             [ Filter region = 'eu' ]
+                 ▲                                   ▲
+                 │                                   │
+                 └─────────────────┬─────────────────┘
+                                   │
+                              [ Scan t ]
 ```
 
 **Scenario C, rollup (planned).** One `KLL(latency) by[region, job]` state merged with `group_by = by[job]`. Each job's output state is the merge of that job's per-region states. The output's `definition` is the same `SummaryAgg` with `reduction = by[job]`, and `selection` is unchanged.
 
-```mermaid
-flowchart TB
-  a["SummaryAgg KLL k=200<br/>by region, job"]:::state
-  m["SummaryMerge<br/>group_by: by job"]:::state
-  out(["next operator"])
-  a -->|"State: region Utf8, job Utf8, state Sketch(KLL k=200)"| m
-  m -->|"State: job Utf8, state Sketch(KLL k=200)"| out
-  classDef value fill:#dbeafe,stroke:#2563eb,color:#111
-  classDef state fill:#fef3c7,stroke:#d97706,color:#111
-  classDef cov fill:#f3f4f6,stroke:#6b7280,stroke-dasharray:4 3,color:#111
+```text
+                 ( next operator )
+                         ▲
+                         │  State: job Utf8, state Sketch(KLL k=200)
+                         │
+             [[ SummaryMerge ]]    group_by: by job
+                         ▲
+                         │  State: region Utf8, job Utf8, state Sketch(KLL k=200)
+                         │
+              [[ SummaryAgg ]]     KLL k=200, by region, job
 ```
 
 ```text
