@@ -65,7 +65,7 @@ Schema represents the **metadata** of information flow along an **edge** between
 
 Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
 Based on our requirement, each field should contain the following information.
-1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#61-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
+1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
    - **Summary state**: described from coarse to fine by four levels:
@@ -77,7 +77,7 @@ Based on our requirement, each field should contain the following information.
    | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
    | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
 
-   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.2](#62-summary-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
+   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
    - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, PerSubpopulationInstance)`.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
@@ -93,7 +93,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; the readouts are `SketchStatistic` ([§6.3](#63-update-input-and-readouts-post_asapsketchrs-post_asapmaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; the readouts are `SketchStatistic` ([§6.5](#65-update-input-and-readouts-post_asapsketchrs-post_asapmaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint panes combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -115,7 +115,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
 | How is it computed? | by the planner, from the sub-DAG the node covers: first the definition, then the selection | §4.2.2 |
 | What uses it? | merge, rollup, slice, reuse, subtract | §5.6 |
-| Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.5 |
+| Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.1, §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
@@ -745,37 +745,168 @@ result                         (────────────────
 
 Every struct field and enum-variant field below has a comment saying what it holds. Function bodies and serde/derive attributes are left out.
 
-**How the subsections connect.** Everything hangs off one DAG node, `OperatorNode` (§6.5):
+**How the subsections connect.** The subsections follow one DAG node from the outside in:
 
 ```text
-OperatorNode                                         §6.5
-├── operator: Operator::ASAP(ASAPOp)                 §6.4
+OperatorNode                                         §6.1
+├── operator: Operator::ASAP(ASAPOp)                 §6.2
 │     ├── SummaryAgg
-│     │     ├── family: FieldDataType ───────────┐   §6.1 → §6.2
-│     │     └── input:  SummaryUpdate            │   §6.3  (what each row adds)
-│     ├── SummaryEstimate.query:  SketchStatistic│   §6.3  (what is read out)
-│     ├── MaintainPopulation.population          │   §6.3
-│     └── EvaluatePopulation.evaluation          │   §6.3
-├── schema: Schema                               │   §6.1
-│     └── fields[i].dtype: FieldDataType ◀───────┘   §6.1  (the same type: the output
+│     │     ├── family: FieldDataType ───────────┐   §6.3 → §6.4
+│     │     └── input:  SummaryUpdate            │   §6.5  (what each row adds)
+│     ├── SummaryEstimate.query:  SketchStatistic│   §6.5  (what is read out)
+│     ├── MaintainPopulation.population          │   §6.5
+│     └── EvaluatePopulation.evaluation          │   §6.5
+├── schema: Schema                               │   §6.3
+│     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
 │           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
-│                 └── category, algorithm, params    §6.2
-├── guarantee: ResultGuarantee                       §6.3  (accuracy of a readout)
-└── coverage() → SummaryCoverage                     §6.5
+│                 └── category, algorithm, params    §6.4
+├── guarantee: ResultGuarantee                       §6.5  (accuracy of a readout)
+└── coverage() → SummaryCoverage                     §6.6
       └── definition: OperatorNode   (again a node, so the same structure)
 ```
 
 | Subsection | Defines | Used by |
 |---|---|---|
-| §6.1 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
-| §6.2 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
-| §6.3 Update input and readouts | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.4 |
-| §6.4 ASAP operators | `ASAPOp` | `OperatorNode.operator` |
-| §6.5 Summary coverage | `OperatorNode`, `SummaryCoverage` | the DAG itself; `coverage()` on summary nodes |
+| §6.1 DAG node | `OperatorNode` | the DAG itself |
+| §6.2 ASAP operators | `ASAPOp` | `OperatorNode.operator` |
+| §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
+| §6.4 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
+| §6.5 Update input and readouts | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
+| §6.6 Summary coverage | `SummaryCoverage`, `SelectionBox`, `Constraint` | `OperatorNode::coverage()` on summary nodes |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.5) holds `ASAPOp::SummaryAgg` (§6.4) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.1, §6.2) and `input = SummaryUpdate::column(latency)` (§6.3). Its `schema` (§6.1) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.3), and its node carries the `guarantee` of the readout. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.5).
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the readout. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
 
-### 6.1 Schema and field types (`crates/types/src/pre_asap/schema.rs`)
+### 6.1 DAG node (`crates/types/src/ir/node.rs`)
+
+Every operator in a DAG is wrapped in an `OperatorNode`. `coverage()` is explained in §6.6.
+
+```rust
+/// One node of the DAG. Immutable and shared through `Rc`.
+pub struct OperatorNode {
+    /// What the node does: an ordinary operator or an ASAP operator.
+    pub operator: Operator,
+    /// What kind of output it has: `Relation`, `InstantVector`,
+    /// `RangeVector`, or `State` (summary state). Derived from `operator`.
+    pub result_kind: OperatorResultKind,
+    /// The output columns. Derived from `operator` and its children.
+    pub schema: Schema,
+    /// The accuracy statement of the output, once known. `None` does not
+    /// mean exact.
+    pub guarantee: Option<ResultGuarantee>,
+    /// When the node runs: `IngestionTime` or `QueryTime`. `None` until
+    /// planning assigns it.
+    pub timing: Option<ExecutionTiming>,
+    /// Cache for `coverage()`. Filled on first use, never serialized,
+    /// ignored by equality, emptied on clone. Not a source of truth:
+    /// coverage can always be derived again.
+    coverage_cache: CoverageCache,
+}
+
+impl OperatorNode {
+    /// The node's coverage (§4.2), derived on first use and then cached.
+    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`; `None` for every
+    /// other node.
+    pub fn coverage(&self) -> Option<&SummaryCoverage>;
+}
+```
+
+### 6.2 ASAP operators (`crates/types/src/ir/asap.rs`)
+
+```rust
+pub const UNIMPLEMENTED_ASAP_OP: &str =
+    "this ASAP operator is reserved: schema, accuracy, timing and export are not implemented";
+
+pub enum ASAPOp {
+    SummaryAgg {
+        /// The input rows.
+        child: Rc<OperatorNode>,
+        /// The summary type of the output `state` field. Never `Plain`.
+        family: FieldDataType,
+        /// What each input row adds to the state (item and weight).
+        input: SummaryUpdate,
+        /// The grouping: `Reduce(by columns)`, or `PerEntity` for one state per
+        /// input series without grouping.
+        reduction: Reduction,
+        /// Whether each group gets its own sketch or all groups share one.
+        grouping: GroupingStrategy,
+        /// Rows to include, applied before updating the state. `None`: all rows.
+        filter: Option<Predicate>,
+    },
+    SummaryEstimate {
+        /// The node that produces the sketch state.
+        summary_input: Rc<OperatorNode>,
+        /// What to read out of it.
+        query: SketchStatistic,
+    },
+    FinalizeExactAccumulator {
+        /// The node that produces the exact accumulator state.
+        child: Rc<OperatorNode>,
+    },
+    MaintainPopulation {
+        /// The input rows; must match `population.input`.
+        child: Rc<OperatorNode>,
+        /// What population to keep and which reads it supports.
+        population: MaintainedPopulation<OperatorNode>,
+    },
+    EvaluatePopulation {
+        /// The `MaintainPopulation` node.
+        child: Rc<OperatorNode>,
+        /// What to compute from it.
+        evaluation: PopulationStatistic,
+    },
+    // Implemented since #560 (identical child schemas).
+    SummaryMerge {
+        /// The states to merge; all have the same schema.
+        children: Vec<Rc<OperatorNode>>,
+    },
+    // Reserved: migrated but unimplemented.
+    SummarySubtract {
+        left: Rc<OperatorNode>,    // the state to subtract from
+        right: Rc<OperatorNode>,   // the state to remove from `left`
+    },
+    SummaryDelete {
+        summary_input: Rc<OperatorNode>,   // the state
+        key: ColumnId,                     // the key column whose entries are removed
+    },
+    SummaryJoin {
+        outer: Rc<OperatorNode>,   // one input state
+        inner: Rc<OperatorNode>,   // the other input state
+        key: ColumnId,             // the join key column
+        family: FieldDataType,     // the summary type of the result
+    },
+    Extension {
+        child: Rc<OperatorNode>,   // the input
+        name: String,              // the deployment-defined operator name
+    },
+}
+
+impl ASAPOp {
+    /// The input nodes. For `SummaryAgg` this also includes nodes used by
+    /// subqueries inside its `filter`.
+    pub fn children(&self) -> Vec<&Rc<OperatorNode>>;
+    /// The same operator with each input replaced by `f(input)`.
+    pub fn map_children(&self, f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self;
+    /// The operator's name, e.g. `"SummaryAgg"`, for messages and display.
+    pub fn kind_name(&self) -> &'static str;
+    /// Whether the operator is reserved and cannot be built yet: Subtract,
+    /// Delete, Join, Extension.
+    pub fn is_unimplemented(&self) -> bool;
+    /// The summary type this operator outputs: `family` for SummaryAgg and
+    /// SummaryJoin, the inputs' state type for SummaryMerge, `None` otherwise.
+    pub fn produced_state(&self) -> Option<&FieldDataType>;
+    /// The output schema, derived from the operator and its inputs. An error
+    /// for a reserved operator or an invalid input.
+    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
+    /// The output kind: `State` for operators that output state, otherwise
+    /// the value kind of the input.
+    pub fn output_kind(&self) -> OperatorResultKind;
+    /// Checks the inputs (§5, "When is it rejected?"). An error if they do
+    /// not fit the operator.
+    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
+}
+```
+
+### 6.3 Schema and field types (`crates/types/src/pre_asap/schema.rs`)
 
 ```rust
 /// Position of a column in one schema (0-based). Local to that schema:
@@ -876,7 +1007,7 @@ pub enum DataType {
 }
 ```
 
-### 6.2 Summary-family parameters (`crates/types/src/post_asap/sketch.rs`)
+### 6.4 Summary-family parameters (`crates/types/src/post_asap/sketch.rs`)
 
 ```rust
 /// Which exact accumulator. None of them has parameters, so `ExactParams`
@@ -971,7 +1102,7 @@ pub enum WaveletKind   { Haar }         pub enum WaveletParams   { Haar { coeffi
 pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { family: String } }
 ```
 
-### 6.3 Update input and readouts (`post_asap/sketch.rs`, `post_asap/maintained_population.rs`)
+### 6.5 Update input and readouts (`post_asap/sketch.rs`, `post_asap/maintained_population.rs`)
 
 This part of the code answers two questions about summary state:
 
@@ -1077,135 +1208,11 @@ pub struct CurrentSeriesInput {
 
 A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to readout and finalized nodes, never to raw state.
 
-### 6.4 ASAP operators (`crates/types/src/ir/asap.rs`)
-
-```rust
-pub const UNIMPLEMENTED_ASAP_OP: &str =
-    "this ASAP operator is reserved: schema, accuracy, timing and export are not implemented";
-
-pub enum ASAPOp {
-    SummaryAgg {
-        /// The input rows.
-        child: Rc<OperatorNode>,
-        /// The summary type of the output `state` field. Never `Plain`.
-        family: FieldDataType,
-        /// What each input row adds to the state (item and weight).
-        input: SummaryUpdate,
-        /// The grouping: `Reduce(by columns)`, or `PerEntity` for one state per
-        /// input series without grouping.
-        reduction: Reduction,
-        /// Whether each group gets its own sketch or all groups share one.
-        grouping: GroupingStrategy,
-        /// Rows to include, applied before updating the state. `None`: all rows.
-        filter: Option<Predicate>,
-    },
-    SummaryEstimate {
-        /// The node that produces the sketch state.
-        summary_input: Rc<OperatorNode>,
-        /// What to read out of it.
-        query: SketchStatistic,
-    },
-    FinalizeExactAccumulator {
-        /// The node that produces the exact accumulator state.
-        child: Rc<OperatorNode>,
-    },
-    MaintainPopulation {
-        /// The input rows; must match `population.input`.
-        child: Rc<OperatorNode>,
-        /// What population to keep and which reads it supports.
-        population: MaintainedPopulation<OperatorNode>,
-    },
-    EvaluatePopulation {
-        /// The `MaintainPopulation` node.
-        child: Rc<OperatorNode>,
-        /// What to compute from it.
-        evaluation: PopulationStatistic,
-    },
-    // Implemented since #560 (identical child schemas).
-    SummaryMerge {
-        /// The states to merge; all have the same schema.
-        children: Vec<Rc<OperatorNode>>,
-    },
-    // Reserved: migrated but unimplemented.
-    SummarySubtract {
-        left: Rc<OperatorNode>,    // the state to subtract from
-        right: Rc<OperatorNode>,   // the state to remove from `left`
-    },
-    SummaryDelete {
-        summary_input: Rc<OperatorNode>,   // the state
-        key: ColumnId,                     // the key column whose entries are removed
-    },
-    SummaryJoin {
-        outer: Rc<OperatorNode>,   // one input state
-        inner: Rc<OperatorNode>,   // the other input state
-        key: ColumnId,             // the join key column
-        family: FieldDataType,     // the summary type of the result
-    },
-    Extension {
-        child: Rc<OperatorNode>,   // the input
-        name: String,              // the deployment-defined operator name
-    },
-}
-
-impl ASAPOp {
-    /// The input nodes. For `SummaryAgg` this also includes nodes used by
-    /// subqueries inside its `filter`.
-    pub fn children(&self) -> Vec<&Rc<OperatorNode>>;
-    /// The same operator with each input replaced by `f(input)`.
-    pub fn map_children(&self, f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self;
-    /// The operator's name, e.g. `"SummaryAgg"`, for messages and display.
-    pub fn kind_name(&self) -> &'static str;
-    /// Whether the operator is reserved and cannot be built yet: Subtract,
-    /// Delete, Join, Extension.
-    pub fn is_unimplemented(&self) -> bool;
-    /// The summary type this operator outputs: `family` for SummaryAgg and
-    /// SummaryJoin, the inputs' state type for SummaryMerge, `None` otherwise.
-    pub fn produced_state(&self) -> Option<&FieldDataType>;
-    /// The output schema, derived from the operator and its inputs. An error
-    /// for a reserved operator or an invalid input.
-    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
-    /// The output kind: `State` for operators that output state, otherwise
-    /// the value kind of the input.
-    pub fn output_kind(&self) -> OperatorResultKind;
-    /// Checks the inputs (§5, "When is it rejected?"). An error if they do
-    /// not fit the operator.
-    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
-}
-```
-
-### 6.5 Summary coverage (`crates/types/src/ir/node.rs`, `crates/types/src/ir/summary_coverage.rs`)
+### 6.6 Summary coverage (`crates/types/src/ir/summary_coverage.rs`)
 
 The code for §4.
 
 ```rust
-/// One node of the DAG. Immutable and shared through `Rc`.
-pub struct OperatorNode {
-    /// What the node does: an ordinary operator or an ASAP operator.
-    pub operator: Operator,
-    /// What kind of output it has: `Relation`, `InstantVector`,
-    /// `RangeVector`, or `State` (summary state). Derived from `operator`.
-    pub result_kind: OperatorResultKind,
-    /// The output columns. Derived from `operator` and its children.
-    pub schema: Schema,
-    /// The accuracy statement of the output, once known. `None` does not
-    /// mean exact.
-    pub guarantee: Option<ResultGuarantee>,
-    /// When the node runs: `IngestionTime` or `QueryTime`. `None` until
-    /// planning assigns it.
-    pub timing: Option<ExecutionTiming>,
-    /// Cache for `coverage()`. Filled on first use, never serialized,
-    /// ignored by equality, emptied on clone. Not a source of truth:
-    /// coverage can always be derived again.
-    coverage_cache: CoverageCache,
-}
-
-impl OperatorNode {
-    /// The node's coverage (§4.2), derived on first use and then cached.
-    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`; `None` for every
-    /// other node.
-    pub fn coverage(&self) -> Option<&SummaryCoverage>;
-}
-
 pub struct SummaryCoverage {
     /// What the state computes: the `SummaryAgg` and its sub-DAG, with the
     /// conditions that went into `selection` taken out (§4.2.2).
