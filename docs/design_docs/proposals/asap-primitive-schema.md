@@ -244,12 +244,19 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 ### 4.4 Deriving the selection
 
-The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration. It starts at the `SummaryAgg`, walks down, and looks at each filter condition on the way (split at `AND`). A condition moves into `selection` only when both rules hold:
+The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration.
 
-- **Rule 1: it can move up to the `SummaryAgg` without changing its meaning.**
-- **Rule 2: it is a simple condition on one column.**
+**Goal.** Split the filter conditions under a `SummaryAgg` into two groups: conditions that only choose *which rows* go into the state (they go into `selection`), and everything else (it stays in `definition`).
 
-Otherwise it stays in `definition`, like a residual in the paper.
+**Steps.**
+
+1. **Collect the conditions.** Go down the sub-DAG from the `SummaryAgg` and collect every filter condition: from `Filter` nodes, from `Scan.predicates`, and from the `SummaryAgg`'s own `filter`. A condition `A AND B` counts as two conditions, `A` and `B`.
+2. **Ask two questions about each condition:**
+   - **Rule 1: would it pick the same rows if it sat directly under the `SummaryAgg`?** `region = 'us'` below a `Project` that only renames columns: yes. `value > 5` below `rate`: no, because it filters the raw samples that `rate` reads, which changes the rate values.
+   - **Rule 2: is it a simple condition on one column?** That is, a value set such as `region IN ('us', 'eu')`, or a range such as `latency < 100`. `value * 2 > 10` is not: it is on an expression.
+3. **Sort it.**
+   - Both answers yes: take the condition out of the sub-DAG and put it into `selection`.
+   - Otherwise: leave it in the sub-DAG, so it is part of `definition`. The paper calls such conditions *residuals*.
 
 **Worked example.** A KLL of request latency per job, over metric `m` with columns `region`, `job`, `value`:
 
@@ -262,7 +269,7 @@ SummaryAgg  KLL(value) by[job]          filter: value < 100
             └─ Scan m
 ```
 
-| Condition | Found at | Rule 1: moves up? | Rule 2: simple? | Result |
+| Condition | Found at | Rule 1: same rows at the `SummaryAgg`? | Rule 2: simple? | Result |
 |---|---|---|---|---|
 | `value < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `value ∈ (−∞, 100)` |
 | `region = 'us'` | `Filter` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `m.region ∈ {us}` |
@@ -276,9 +283,9 @@ definition: KLL(value) by[job] over Project[job, region AS r, value] over Filter
 selection:  value ∈ (−∞, 100), m.region ∈ {us}, time (−3m, −2m]
 ```
 
-**Rule 1 in detail.** This is the reverse of filter pushdown (DataFusion's `PushDownFilter`). A condition can move up past:
+**Rule 1 in detail.** The answer depends on the operators between the condition and the `SummaryAgg`. The condition must be able to pass each of them (this is the reverse of filter pushdown, DataFusion's `PushDownFilter`):
 
-| Operator | Moves up? | Example |
+| Operator in between | The condition can pass it | Example |
 |---|---|---|
 | `Filter`, `Scan.predicates`, `SummaryAgg.filter` | always | above |
 | range `TimeRange`, `TimeShift` without `@` | always | above |
