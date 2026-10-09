@@ -767,11 +767,21 @@ pub struct Schema {
     pub closed: bool,
 }
 impl Schema {
+    /// A schema with only these fields: no time column, no unique key, not
+    /// closed. Used for a table `Scan` without key metadata.
     pub fn new(fields: Vec<Field>) -> Self;
+    /// A schema with a time column and unique keys, not closed. Used for
+    /// PromQL inputs, whose rows are unique per (time, label set).
     pub fn with_time_index(fields: Vec<Field>, time_index: ColumnId, unique_keys: Vec<Vec<ColumnId>>) -> Self;
-    pub fn lifted(fields: Vec<Field>, time_index: Option<ColumnId>) -> Self;   // closed = true
+    /// A closed schema with an optional time column and no unique key: the
+    /// shape of a summary operator's output.
+    pub fn lifted(fields: Vec<Field>, time_index: Option<ColumnId>) -> Self;
+    /// Whether every field holds a plain value (no summary state).
     pub fn is_all_plain(&self) -> bool;
+    /// Position of the first field with this name, or `None`.
     pub fn column_id(&self, name: &str) -> Option<ColumnId>;
+    /// Position of the field with this table and name, or `None`. Tells apart
+    /// `a.k` and `b.k` after a join.
     pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId>;
 }
 
@@ -791,8 +801,11 @@ pub struct Field<T = FieldDataType> {
     pub table: Option<String>,
 }
 impl Field<FieldDataType> {
+    /// An unqualified field holding a plain value of type `dtype`.
     pub fn plain(name: impl Into<String>, dtype: DataType, nullable: bool) -> Self;
+    /// The value type if the field is plain; `None` for summary state.
     pub fn plain_dtype(&self) -> Option<&DataType>;
+    /// Whether the field holds a plain value (not summary state).
     pub fn is_plain(&self) -> bool;
 }
 
@@ -851,10 +864,14 @@ pub struct SketchKind {
     params: SketchParams,
 }
 impl SketchKind {
-    /// The only constructor; classifies the category and panics on mismatched params.
+    /// The only constructor. Derives the category from the algorithm, and
+    /// panics if `params` belong to a different algorithm.
     pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self;
+    /// What kind of question the sketch answers.
     pub fn category(&self) -> SketchCategory;
+    /// The sketch algorithm.
     pub fn algorithm(&self) -> &SketchAlgorithm;
+    /// The algorithm's size parameters.
     pub fn params(&self) -> &SketchParams;
 }
 pub enum SketchCategory { Universal, Quantile, Cardinality, Frequency, TopK }
@@ -908,7 +925,10 @@ pub enum HydraParams {
     /// Same fields as `HydraCms`, for Count Sketch.
     HydraCountSketch { width: u32, depth: u32, shared_rows: u32, shared_columns: u32 },
 }
-pub fn hydra_kind_for(a: &SketchAlgorithm) -> Option<HydraKind>;   // Cms, CountSketch only
+/// The shared (Hydra) version of an algorithm, if one with a known error
+/// bound exists: `Cms` → `HydraCms`, `CountSketch` → `HydraCountSketch`;
+/// `None` for all others.
+pub fn hydra_kind_for(a: &SketchAlgorithm) -> Option<HydraKind>;
 
 /// `size`: number of rows kept in the reservoir.
 pub enum SamplingKind  { Reservoir }    pub enum SamplingParams  { Reservoir { size: u32 } }
@@ -933,7 +953,11 @@ pub struct SummaryUpdate {
     /// Missing proof is never treated as non-negative.
     pub weight_domain: WeightDomain,
 }
-impl SummaryUpdate { pub fn column(c: ColumnRef) -> Self; }   // item None, UnknownOrSigned
+impl SummaryUpdate {
+    /// Add the value of column `c` for each row: no item, and the weight is
+    /// not known to be non-negative.
+    pub fn column(c: ColumnRef) -> Self;
+}
 pub enum WeightDomain {
     /// Nothing is known; the weight may be negative. The default.
     UnknownOrSigned,
@@ -1074,15 +1098,27 @@ pub enum ASAPOp {
 }
 
 impl ASAPOp {
-    pub fn children(&self) -> Vec<&Rc<OperatorNode>>;     // SummaryAgg includes its filter's subquery nodes
+    /// The input nodes. For `SummaryAgg` this also includes nodes used by
+    /// subqueries inside its `filter`.
+    pub fn children(&self) -> Vec<&Rc<OperatorNode>>;
+    /// The same operator with each input replaced by `f(input)`.
     pub fn map_children(&self, f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self;
+    /// The operator's name, e.g. `"SummaryAgg"`, for messages and display.
     pub fn kind_name(&self) -> &'static str;
-    /// Subtract, Delete, Join, Extension.
+    /// Whether the operator is reserved and cannot be built yet: Subtract,
+    /// Delete, Join, Extension.
     pub fn is_unimplemented(&self) -> bool;
-    /// SummaryAgg/SummaryJoin `family`; SummaryMerge: its inputs' state type.
+    /// The summary type this operator outputs: `family` for SummaryAgg and
+    /// SummaryJoin, the inputs' state type for SummaryMerge, `None` otherwise.
     pub fn produced_state(&self) -> Option<&FieldDataType>;
+    /// The output schema, derived from the operator and its inputs. An error
+    /// for a reserved operator or an invalid input.
     pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
+    /// The output kind: `State` for operators that output state, otherwise
+    /// the value kind of the input.
     pub fn output_kind(&self) -> OperatorResultKind;
+    /// Checks the inputs (§5, "When is it rejected?"). An error if they do
+    /// not fit the operator.
     pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
 }
 ```
@@ -1114,7 +1150,9 @@ pub struct OperatorNode {
 }
 
 impl OperatorNode {
-    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`.
+    /// The node's coverage (§4.2), derived on first use and then cached.
+    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`; `None` for every
+    /// other node.
     pub fn coverage(&self) -> Option<&SummaryCoverage>;
 }
 
@@ -1159,6 +1197,11 @@ pub enum Constraint {
 }
 
 impl SummaryCoverage {
+    /// Computes the coverage of a summary node from its sub-DAG (§4.2.2).
+    /// Errors: `NotSummary` for a node that is not a `SummaryAgg` or
+    /// `SummaryMerge`; for a merge, `EmptyMerge` (no inputs),
+    /// `DefinitionMismatch` (inputs compute different things) or
+    /// `PossibleOverlap` (inputs may share rows).
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
 }
 ```
