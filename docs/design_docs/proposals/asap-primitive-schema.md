@@ -65,7 +65,21 @@ Schema represents the **metadata** of information flow along an **edge** between
 
 Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
 Based on our requirement, each field should contain the following information.
-1. **What type of the ASAP Primitive is** A state column can be a raw data type (e.g., numerical number, string). It can also be a [summary type](#61-schema-and-field-types-cratestypessrcpre_asapschemars) (`FieldDataType` in `crates/types/src/pre_asap/schema.rs`), e.g., the summary family is sketch, and the sketch type is quantile KLL sketch algorithm, and KLL sketch has K  as parameter as the schema. In the code these are: **family** = the `FieldDataType` variant (`ExactAggregate`, `Sketch`, `Sample`, `Wavelet`, `StatModel`; `Plain` is a raw value); for sketches, **category** = `SketchCategory` (`Quantile`, `Frequency`, `Cardinality`, `TopK`, `Universal`), **algorithm** = `SketchAlgorithm` (`Kll`, `Cms`, `Hll`, …) and **parameters** = `SketchParams` (`Kll { k }`), bundled as `SketchKind` ([§6.2](#62-state-family-parameters-cratestypessrcpost_asapsketchrs)); a sketch also carries its `GroupingStrategy`. So the example is `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, …)`. It has a family, an algorithm and parameters. 
+1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#61-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
+
+   - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
+   - **Summary state**: described from coarse to fine by four levels:
+
+   | Level | Code | Values | KLL example |
+   |---|---|---|---|
+   | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `Sample`, `Wavelet`, `StatModel` | `Sketch` |
+   | Category (sketches only) | `SketchCategory` | `Quantile`, `Frequency`, `Cardinality`, `TopK`, `Universal` | `Quantile` |
+   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
+   | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
+
+   - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.2](#62-state-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
+   - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, PerSubpopulationInstance)`.
+
 2. **What query intent the summarized ASAP Primitive can support, e.g., statistical aggregation intents, time window aggregation intents** This information is being mapped based on the primitive type. 
 
 
