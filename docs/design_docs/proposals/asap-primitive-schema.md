@@ -244,7 +244,7 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 ### 4.4 Deriving the selection
 
-Nobody declares coverage: the planner computes it from the sub-DAG. It starts at the `SummaryAgg`, walks down, and looks at each filter condition on the way (split at `AND`). A condition moves into `selection` only when both rules hold:
+The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration. It starts at the `SummaryAgg`, walks down, and looks at each filter condition on the way (split at `AND`). A condition moves into `selection` only when both rules hold:
 
 - **Rule 1: it can move up to the `SummaryAgg` without changing its meaning.**
 - **Rule 2: it is a simple condition on one column.**
