@@ -410,7 +410,7 @@ All examples read a table, so values are `Relation`. For PromQL series they woul
 
 ### 5.1 `SummaryAgg`: values → state
 
-**What it does.** Turns rows into summary state: one state per group.
+**Operator definition.** Turns rows into summary state: one state per group.
 
 **Example.** p99 latency by job, from a KLL sketch with `k = 200`, over table `t`, using only US rows with latency under 10 s.
 
@@ -445,7 +445,7 @@ coverage() of the SummaryAgg
 
 ### 5.2 `SummaryEstimate`: sketch state → value
 
-**What it does.** Reads a number out of a sketch, for example a quantile or a count.
+**Operator definition.** Reads a number out of a sketch, for example a quantile or a count.
 
 **Example.** Read p99 and p50 from the state in 5.1. One state feeds both readouts.
 
@@ -480,7 +480,7 @@ coverage() of the SummaryAgg
 
 ### 5.3 `FinalizeExactAccumulator`: exact state → value
 
-**What it does.** Turns an exact accumulator (sum, count, min, max, rate, …) into its final value.
+**Operator definition.** Turns an exact accumulator (sum, count, min, max, rate, …) into its final value.
 
 **Example.** Total bytes by host, with an exact `Sum` accumulator.
 
@@ -515,7 +515,7 @@ coverage() of the SummaryAgg
 
 ### 5.4 `MaintainPopulation`: values → maintained membership (state)
 
-**What it does.** Keeps every value of a population (not a sketch), so that exact quantiles and top-k can be computed later, and tracks rows entering and leaving.
+**Operator definition.** Keeps every value of a population (not a sketch), so that exact quantiles and top-k can be computed later, and tracks rows entering and leaving.
 
 **Example.** Keep all latencies per job, so that p99 and top-10 can be computed later (5.5).
 
@@ -540,7 +540,7 @@ coverage() of the SummaryAgg
 
 ### 5.5 `EvaluatePopulation`: maintained membership → value
 
-**What it does.** Computes an exact statistic from a maintained population.
+**Operator definition.** Computes an exact statistic from a maintained population.
 
 **Example.** p99 and the top-10 latencies by job, both from the one population in 5.4.
 
@@ -573,7 +573,7 @@ coverage() of the SummaryAgg
 
 ### 5.6 `SummaryMerge`: state × N → state (merge and rollup)
 
-**What it does.** Combines several states of the same kind into one. With `group_by` (planned) it can also make the grouping coarser (rollup).
+**Operator definition.** Combines several states of the same kind into one. With `group_by` (planned) it can also make the grouping coarser (rollup).
 
 **Status.**
 
