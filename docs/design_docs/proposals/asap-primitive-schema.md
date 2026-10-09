@@ -384,10 +384,7 @@ In the last two rows `TimeRange(5m)` stays in `definition`: it is the input wind
 
 Coverage only says what a state means and which rows it took. The deployment and runtime implementation is not part of coverage: it belongs to the downstream deployment runtime, for example the summary data store (SDS), reading source data, and building, storing and serving summary instances.
 
-**SDS mapping.** The SDS split matches coverage:
-
-- `SummaryDefinition` stores the serialized `definition`. Planner provides its serde; the downstream deployment runtime owns the format version, definition id and hash.
-- A `StoredSummary`'s coordinates are the `selection` bound to one evaluation, plus the group value.
+TODO: the SDS definition, including how it stores a summary's `definition` and `selection`, will be specified in a separate doc.
 
 ## 5. Examples on how OperatorNode, schema, and physical data information are being used with Summary operators
 
