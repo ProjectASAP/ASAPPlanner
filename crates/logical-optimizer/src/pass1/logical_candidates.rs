@@ -658,6 +658,11 @@ fn summary_update(
         FieldDataType::Sketch(kind, _) => Some(kind.algorithm()),
         _ => None,
     };
+    if let AggIntent::Count { .. } = intent {
+        if child.closed && !child.has_promql_series_identity() {
+            return sql_row_count_update(algorithm.is_some(), reduction, child);
+        }
+    }
     let weight = crate::pass1::replacement::summarised_input(intent, child)
         .map_err(|_| LogicalCandidateError::Unsupported("input column outside child schema"))?;
     Ok(match (intent, algorithm) {
@@ -711,6 +716,43 @@ fn summary_update(
             item: None,
             weight,
             weight_domain: WeightDomain::UnknownOrSigned,
+        },
+    })
+}
+
+/// SQL `COUNT(*)`: rows have no sample value, and every row counts, so each
+/// adds a unit weight. A sketch hashes an item per row; its bare count
+/// ignores the item's value, so any non-null column serves, a grouping
+/// column first.
+fn sql_row_count_update(
+    sketch: bool,
+    reduction: &Reduction,
+    child: &Schema,
+) -> Result<SummaryUpdate, LogicalCandidateError> {
+    let item = if sketch {
+        let keys = reduction
+            .group_keys()
+            .filter(|keys| !keys.is_without())
+            .into_iter()
+            .flat_map(|keys| keys.iter().copied());
+        let column = keys
+            .chain(0..child.fields.len())
+            .filter_map(|index| child.fields.get(index))
+            .find(|field| field.is_plain() && !field.nullable)
+            .ok_or(LogicalCandidateError::Unsupported(
+                "a COUNT(*) sketch needs a non-null item column",
+            ))?;
+        Some(SummaryInputExpr::Column(
+            crate::pass1::replacement::column_ref(column),
+        ))
+    } else {
+        None
+    };
+    Ok(SummaryUpdate {
+        item,
+        weight: SummaryInputExpr::Constant(1.0),
+        weight_domain: WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::UnitCount,
         },
     })
 }
