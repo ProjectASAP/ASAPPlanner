@@ -530,7 +530,15 @@
                 "dtype": {
                   "Plain": "utf8"
                 },
-                "name": "topk_10",
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
                 "nullable": false,
                 "table": null
               }
@@ -538,7 +546,8 @@
             "time_index": null,
             "unique_keys": [
               [
-                0
+                0,
+                1
               ]
             ]
           },
@@ -1087,7 +1096,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -1095,7 +1112,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -1704,7 +1722,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -1712,7 +1738,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -4998,7 +5025,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -5006,7 +5041,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -5676,7 +5712,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -5684,7 +5728,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -9201,7 +9246,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -9209,7 +9262,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -9866,7 +9920,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -9874,7 +9936,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -13400,7 +13463,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -13408,7 +13479,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -14126,7 +14198,15 @@
                     "dtype": {
                       "Plain": "utf8"
                     },
-                    "name": "topk_10",
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
                     "nullable": false,
                     "table": null
                   }
@@ -14134,7 +14214,8 @@
                 "time_index": null,
                 "unique_keys": [
                   [
-                    0
+                    0,
+                    1
                   ]
                 ]
               },
@@ -45458,7 +45539,7 @@
           },
           "9": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           }
         },
         "source": "analytical-cost-v1 (illustrative statistics)",
@@ -45477,7 +45558,7 @@
           },
           "10": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           },
           "2": {
             "cost": 4.0,
@@ -45654,7 +45735,7 @@
           },
           "9": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           }
         },
         "source": "analytical-cost-v1 (illustrative statistics)",
@@ -45673,7 +45754,7 @@
           },
           "10": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           },
           "2": {
             "cost": 8.0,
@@ -45877,7 +45958,7 @@
           },
           "10": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           },
           "2": {
             "cost": 4.0,
@@ -45932,7 +46013,7 @@
           },
           "11": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           },
           "2": {
             "cost": 4.0,
@@ -46007,7 +46088,7 @@
           },
           "8": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           }
         },
         "source": "analytical-cost-v1 (illustrative statistics)",
@@ -46054,7 +46135,7 @@
           },
           "9": {
             "cost": 0.001,
-            "detail": "estimate 100 groups x 10"
+            "detail": "estimate 1000 rows from 100 states"
           }
         },
         "source": "analytical-cost-v1 (illustrative statistics)",

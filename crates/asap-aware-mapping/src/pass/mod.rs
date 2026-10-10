@@ -6,13 +6,13 @@
 //! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
-//! one implementation, [`MajorPass`].
+//! one implementation, [`StagePipeline`].
 //!
 //! Call [`optimize`] rather than [`OptimizationPass::optimize`] directly: it
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
-mod major;
+mod stage_pipeline;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -24,69 +24,13 @@ use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, T
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
-use crate::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
-};
-use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::replacement::RealizationError;
+use crate::logical_candidates::LogicalCandidateError;
+use crate::plan_selection::{Selection, SelectionError};
 
-pub use major::MajorPass;
-
-static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
-static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
-static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
+pub use crate::plan_selection::PlanningModels;
+pub use stage_pipeline::StagePipeline;
 
 // ── Input ────────────────────────────────────────────────────────────────
-
-/// Planning logic, as opposed to the scoped facts it consumes: a model can have
-/// a built-in default, evidence about a particular deployment cannot.
-#[derive(Clone, Copy)]
-#[non_exhaustive]
-pub struct PlanningModels<'a> {
-    pub cost: &'a dyn CostModel,
-    pub accuracy: &'a dyn AccuracyModel,
-    pub evidence: &'a dyn AccuracyEvidenceProvider,
-}
-
-impl<'a> PlanningModels<'a> {
-    pub fn new(
-        cost: &'a dyn CostModel,
-        accuracy: &'a dyn AccuracyModel,
-        evidence: &'a dyn AccuracyEvidenceProvider,
-    ) -> Self {
-        Self {
-            cost,
-            accuracy,
-            evidence,
-        }
-    }
-
-    /// The built-in models. `DefaultCostModel` does not override
-    /// `estimate_cost`, so this configuration ranks structurally and is not a
-    /// measured deployment cost.
-    pub fn builtin() -> PlanningModels<'static> {
-        PlanningModels {
-            cost: &DEFAULT_COST_MODEL,
-            accuracy: &DEFAULT_ACCURACY_MODEL,
-            evidence: &NO_ACCURACY_EVIDENCE,
-        }
-    }
-
-    pub fn with_cost(mut self, cost: &'a dyn CostModel) -> Self {
-        self.cost = cost;
-        self
-    }
-
-    pub fn with_accuracy(mut self, accuracy: &'a dyn AccuracyModel) -> Self {
-        self.accuracy = accuracy;
-        self
-    }
-
-    pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidenceProvider) -> Self {
-        self.evidence = evidence;
-        self
-    }
-}
 
 #[derive(Clone, Copy)]
 #[non_exhaustive]
@@ -136,6 +80,8 @@ pub struct PlanOutput {
     pub plans: Vec<QueryPlan>,
     /// Exact scalar expressions, keyed by workload entry; embedded plan reads remain visible.
     pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
+    /// How the plan was chosen, when the pass selects among priced candidates.
+    pub selection: Option<Selection>,
 }
 
 impl PlanOutput {
@@ -143,6 +89,7 @@ impl PlanOutput {
         Self {
             plans,
             scalar_roots: Vec::new(),
+            selection: None,
         }
     }
 
@@ -240,11 +187,10 @@ impl PlanOutput {
 pub enum OptimizeError {
     #[error("optimization input: {0}")]
     Input(#[from] OptimizationInputError),
-    #[error("entry {entry_index}: {source}")]
-    Realization {
-        entry_index: usize,
-        source: RealizationError,
-    },
+    #[error("Stage 1: {0}")]
+    LogicalCandidates(#[from] LogicalCandidateError),
+    #[error("plan selection: {0}")]
+    Selection(#[from] SelectionError),
     /// The pass returned something the downstream contract forbids. This is a
     /// defect in the pass, not in its input.
     #[error("pass `{pass}` violated the output contract: {detail}")]
@@ -328,11 +274,11 @@ impl PassRegistry {
         Self::default()
     }
 
-    /// Only [`MajorPass`], under the name `major`.
+    /// Only [`StagePipeline`], under the name `stage-pipeline`.
     pub fn with_builtin() -> Self {
         let mut registry = Self::new();
         registry
-            .register(Box::new(MajorPass))
+            .register(Box::new(StagePipeline))
             .expect("empty registry cannot conflict");
         registry
     }
@@ -411,14 +357,17 @@ mod tests {
         assert_eq!(err.0, "greedy");
     }
 
-    /// The builtin registry resolves `major`, and names come back sorted so a
+    /// The builtin registry resolves `stage-pipeline`, and names come back sorted so a
     /// sweep over every registered pass is reproducible.
     #[test]
     fn registry_resolves_builtin_and_lists_names_in_order() {
         let mut registry = PassRegistry::with_builtin();
         registry.register(Box::new(Stub("alpha"))).unwrap();
-        assert!(registry.get("major").is_some());
+        assert!(registry.get("stage-pipeline").is_some());
         assert!(registry.get("absent").is_none());
-        assert_eq!(registry.names().collect::<Vec<_>>(), vec!["alpha", "major"]);
+        assert_eq!(
+            registry.names().collect::<Vec<_>>(),
+            vec!["alpha", "stage-pipeline"]
+        );
     }
 }

@@ -25,8 +25,8 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_aware_mapping::pass::{
-    optimize, MajorPass, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry,
-    PlanOutput, PlanningModels, QueryPlan,
+    optimize, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry, PlanOutput,
+    PlanningModels, QueryPlan, StagePipeline,
 };
 
 // ── Input ────────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ pub struct UserInput<'a> {
     pub workload: &'a PlanningWorkload,
     pub frontend_specific: FrontendInput<'a>,
     pub models: PlanningModels<'a>,
-    /// `None` uses [`MajorPass`]. A black-box caller never sets this.
+    /// `None` uses [`StagePipeline`]. A black-box caller never sets this.
     pub pass: Option<&'a dyn OptimizationPass>,
 }
 
@@ -167,7 +167,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     let exprs = lower(&input).await?;
     let parsed = ParsedWorkload::from_roots(input.workload.clone(), exprs)?;
 
-    let fallback = MajorPass;
+    let fallback = StagePipeline;
     let pass: &dyn OptimizationPass = input.pass.unwrap_or(&fallback);
 
     let optimization = OptimizationInput::new(&parsed, input.models);
