@@ -15,8 +15,10 @@ use asap_physical_operators::{
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::schema::DataType;
+use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
-use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
+use planner_types::{types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, sync::Arc};
 
 fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {

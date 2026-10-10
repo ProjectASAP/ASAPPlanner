@@ -1,9 +1,8 @@
 //! Runtime values preserve Planner schemas; summary states are typed values too.
 use crate::AggregateCore;
 use crate::Error;
-use planner_types::{
-    post_asap::{Field as SummaryField, FieldDataType as SummaryFamilyType, Schema},
-    pre_asap::DataType,
+use planner_types::ir::schema::{
+    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
 };
 use std::{cmp::Ordering, sync::Arc};
 /// Shared ownership of schema metadata; the field model is identical at planning
@@ -267,7 +266,7 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
         count_min_sketch::CountMinSketchAccumulator, datasketches_kll::DatasketchesKLLAccumulator,
         dd_sketch::DDSketchAccumulator, exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
     };
-    use planner_types::post_asap::SketchParams;
+    use planner_types::ir::schema::SketchParams;
     validate_family(family)?;
     let valid = match family {
         SummaryFamilyType::Sketch(kind, _)
@@ -364,7 +363,7 @@ pub(crate) fn plain(schema: &SchemaRef, column: usize) -> Result<(&DataType, boo
 mod weighted_state_tests {
     use super::*;
     use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
-    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
 
     // A state cannot acquire a different family or shape merely by relabeling its batch.
     #[test]

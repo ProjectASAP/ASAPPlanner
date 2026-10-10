@@ -1,7 +1,9 @@
+use asap_types::ir::operator::Source;
+use asap_types::ir::scalar::ScalarValue;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{
     ExprSemantics, NonASAPOp, OperatorNode, OperatorResultKind, Predicate, ScalarExpr,
 };
-use asap_types::pre_asap::{DataType, Field, ScalarValue, Schema, Source};
 use std::rc::Rc;
 fn scan() -> Rc<OperatorNode> {
     OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
@@ -84,12 +86,13 @@ fn scalar_type_rules_fail_closed() {
 /// A state family is not interchangeable with another sketch or a scalar field.
 #[test]
 fn state_evaluations_and_passthrough_keep_their_contracts() {
-    use asap_types::ir::{ASAPOp, Operator, ProjectItem};
-    use asap_types::post_asap::{
+    use asap_types::ir::operator::Reduction;
+    use asap_types::ir::scalar::ColumnRef;
+    use asap_types::ir::schema::{
         FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
         SketchStatistic, SummaryUpdate,
     };
-    use asap_types::pre_asap::{ColumnRef, Reduction};
+    use asap_types::ir::{ASAPOp, Operator, ProjectItem};
     let family = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 100 }),
         GroupingStrategy::default(),
@@ -138,8 +141,8 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
 /// Phase validation checks dependencies, without declaring a computation query-only.
 #[test]
 fn execution_timing_checks_edges_not_function_names() {
+    use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
     use asap_types::ir::ProjectItem;
-    use asap_types::post_asap::ExecutionTiming::{IngestionTime, QueryTime};
     let input = Rc::new((*scan()).clone().with_timing(Some(IngestionTime)));
     let mut project = OperatorNode::new(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
         child: input,
@@ -168,9 +171,11 @@ fn execution_timing_checks_edges_not_function_names() {
 /// Both operator categories use the same fallible schema-deriving constructor.
 #[test]
 fn shared_construction_derives_both_operator_categories() {
+    use asap_types::ir::operator::Reduction;
+    use asap_types::ir::scalar::ColumnRef;
+    use asap_types::ir::schema::FieldDataType;
+    use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
-    use asap_types::post_asap::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
-    use asap_types::pre_asap::{ColumnRef, FieldDataType, Reduction};
 
     let input = scan();
     let state = Rc::new(

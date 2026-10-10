@@ -87,9 +87,8 @@ mod tests {
         runtime::{Limits, Scope},
         values::Value,
     };
-    use planner_types::{
-        post_asap::{Field as SummaryField, FieldDataType as SummaryFamilyType, Schema},
-        pre_asap::DataType,
+    use planner_types::ir::schema::{
+        DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
     };
     use std::sync::Arc;
 

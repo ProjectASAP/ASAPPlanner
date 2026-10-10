@@ -43,8 +43,8 @@ mod tests {
     #[test]
     fn local_guarantee_inverts_rank_sizing() {
         use crate::replacement::default_size_params;
-        use asap_types::post_asap::{GroupingStrategy, SketchKind};
-        use asap_types::pre_asap::agg_intent::default_quantile;
+        use asap_types::ir::operator::agg_intent::default_quantile;
+        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let q = default_quantile(0.99);
         let params = default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
         let g = DefaultAccuracyModel

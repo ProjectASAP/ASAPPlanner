@@ -6,16 +6,16 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::node::{OperatorNode, OperatorResultKind};
-use super::scalar::{Predicate, ProjectItem, ScalarExpr, SortKey};
-use crate::ir::aggregate_schema::aggregate_output_schema;
-use crate::ir::operator_properties::{
+use crate::ir::operator::agg_intent::AggIntent;
+use crate::ir::operator::node::{OperatorNode, OperatorResultKind};
+use crate::ir::operator::operator_properties::{
     BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction,
     RelationalSetOpKind, SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFuncKind,
 };
+use crate::ir::scalar::{Predicate, ProjectItem, ScalarExpr, SortKey};
+use crate::ir::schema::aggregate_schema::aggregate_output_schema;
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
-use crate::pre_asap::agg_intent::AggIntent;
-use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
 /// All semantics owned by a binary operator.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -750,8 +750,8 @@ impl NonASAPOp {
                     .and_then(|m| m.grouping.as_ref());
                 let right_rows = matches!(
                     operator.kind,
-                    BinaryOpKind::Set(crate::pre_asap::PromQLVectorSetOpKind::Or)
-                ) || matches!(grouping, Some(g) if g.side == crate::pre_asap::GroupSide::Right);
+                    BinaryOpKind::Set(crate::ir::operator::PromQLVectorSetOpKind::Or)
+                ) || matches!(grouping, Some(g) if g.side == crate::ir::operator::GroupSide::Right);
                 let mut additions = Vec::new();
                 if right_rows {
                     additions.extend(
@@ -1076,11 +1076,11 @@ pub fn any_measure_filtered(filters: &[Option<Predicate>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator_properties::{
+    use crate::ir::operator::operator_properties::{
         AtModifier, VectorMatchKind, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
     };
     use crate::ir::scalar::ExprSemantics;
-    use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+    use crate::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field::plain(name, dtype, nullable)

@@ -16,7 +16,8 @@ use asap_physical_operators::physical_planner::promql_rows::{
     compile_current_series_evaluation, SERIES_IDENTITY_COLUMN,
 };
 use planner_types::{
-    post_asap::*,
+    ir::properties::*,
+    ir::schema::*,
     types::AccuracyTarget,
     workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence,

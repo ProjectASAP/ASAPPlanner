@@ -1,7 +1,7 @@
 //! Query-time PromQL value computation over logical row schemas.
 use super::*;
-use planner_types::post_asap::maintained_population::PopulationStatistic;
-use planner_types::pre_asap::DataType;
+use planner_types::ir::operator::maintained_population::PopulationStatistic;
+use planner_types::ir::schema::DataType;
 
 /// Aggregate evaluations of a maintained current-series population, as a chain.
 pub(super) fn population_aggregate(
