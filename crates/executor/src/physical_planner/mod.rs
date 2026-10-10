@@ -933,6 +933,27 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                     "filtered summary update has no native implementation",
                 ));
             }
+            if grouping != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance {
+                crate::capability::validate_summary_kernel(family, update, grouping)
+                    .map_err(Error::Invalid)?;
+                let PlannerReduction::Reduce(keys) = reduction else {
+                    return Err(invalid("shared summary requires explicit groups"));
+                };
+                let Some(SummaryInputExpr::Column(item)) = &update.item else {
+                    unreachable!("validated HydraCms item column")
+                };
+                let weight = match &update.weight {
+                    SummaryInputExpr::Column(weight) => Some(named_column(input, weight)?),
+                    _ => None,
+                };
+                return Operator::shared_summary_build(
+                    input.clone(),
+                    family.clone(),
+                    named_column(input, item)?,
+                    weight,
+                    groups(input, keys)?,
+                );
+            }
             if let Some(item) = &update.item {
                 let PlannerReduction::Reduce(keys) = reduction else {
                     return Err(invalid("keyed summary requires explicit partitions"));
