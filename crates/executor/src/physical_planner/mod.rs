@@ -997,6 +997,29 @@ fn summary_build(
             groups(input, keys)?,
         );
     }
+    // UnivMon counts one occurrence of each row's item (SQL `COUNT(*) GROUP
+    // BY item`): its value-frequency build over the item column.
+    if let (
+        FieldDataType::Sketch(kind, _),
+        Some(SummaryInputExpr::Column(item)),
+        SummaryInputExpr::Constant(weight),
+    ) = (family, &update.item, &update.weight)
+    {
+        if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::UnivMon
+            && *weight == 1.0
+        {
+            let PlannerReduction::Reduce(keys) = reduction else {
+                return Err(invalid("UnivMon requires explicit grouping columns"));
+            };
+            return Operator::summary_build(
+                input.clone(),
+                family.clone(),
+                named_column(input, item)?,
+                None,
+                groups(input, keys)?,
+            );
+        }
+    }
     if let Some(item) = &update.item {
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));

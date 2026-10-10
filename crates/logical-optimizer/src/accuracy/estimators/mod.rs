@@ -29,7 +29,7 @@ pub(super) fn sketch_guarantee(
         SketchParams::Kmv { .. } | SketchParams::Theta { .. } => {
             cardinality::guarantee(algorithm, params, query)
         }
-        SketchParams::UnivMon { .. } => univmon::guarantee(query),
+        SketchParams::UnivMon { .. } => univmon::guarantee(params, query),
     }
 }
 
@@ -108,9 +108,8 @@ pub(crate) fn size_params(
     delta: f64,
 ) -> SketchParams {
     match kind {
-        // Baseline dimensions are candidates, not an inverted error bound.
-        // Empirical models may size these; no theoretical guarantee is claimed.
-        SketchAlgorithm::UnivMon => univmon::size_params(),
+        // Sized for the L2 readout whatever the intent (see `univmon`).
+        SketchAlgorithm::UnivMon => univmon::size_params(eps, delta),
         SketchAlgorithm::Kll => SketchParams::Kll { k: kll::kll_k(eps) },
         SketchAlgorithm::Cms => SketchParams::Cms {
             width: cms::cms_width(eps),
