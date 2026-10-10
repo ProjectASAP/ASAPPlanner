@@ -9,6 +9,7 @@ use asap_types::ir::schema::{
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
+mod executor_models;
 mod physical_common;
 
 fn catalog() -> SqlCatalog {
@@ -262,12 +263,12 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// constructed by the test.
 #[tokio::test]
 async fn batch_planning_selects_and_executes_each_plan() {
+    use crate::executor_models::executor_models;
     use asap_executor::{
         physical_planner::{compile, InputContract},
         runtime::Scope,
         values::{Batch, Value},
     };
-    use asap_plan_selection::PlanningModels;
     use asap_planner::{e2e_plan, FrontendInput, UserInput};
     use asap_types::workload::*;
     use std::{collections::BTreeMap, sync::Arc};
@@ -308,7 +309,7 @@ async fn batch_planning_selects_and_executes_each_plan() {
     let output = e2e_plan(UserInput::new(
         &workload,
         FrontendInput::Sql { catalog: &catalog },
-        PlanningModels::builtin(),
+        executor_models(),
     ))
     .await
     .unwrap();

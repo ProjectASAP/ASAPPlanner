@@ -25,8 +25,11 @@
 //! count, weighted by [`Stage3Calibration`]; summary build and estimation are
 //! priced as rows × sketch depth and rows read out. These numbers are
 //! illustrative, not calibrated. A query's latency bound is checked against
-//! the query-time work it waits for in one evaluation; deployment
-//! capabilities are not checked yet.
+//! the query-time work it waits for in one evaluation. A candidate needing
+//! a capability the deployment lacks ([`DeploymentCapabilities`]) is
+//! rejected, and so is one retaining more than the deployment's memory
+//! budget. When the deployment does not keep raw data anyway, a plan reading
+//! raw data at query time pays for retaining it (Q48).
 //!
 //! A logical candidate has several physical candidates, one per Stage 2
 //! materialization choice; selection takes the cheapest valid one.
@@ -40,6 +43,7 @@ pub mod cost;
 #[cfg(test)]
 mod test_support;
 
+pub use asap_types::deployment::DeploymentCapabilities;
 pub use candidate_selection::{
     CompositionDecision, CostedGlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap,
 };
@@ -111,6 +115,7 @@ pub const MAX_ENUMERATED_CANDIDATES: usize = 64;
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
+static UNRESTRICTED: DeploymentCapabilities = DeploymentCapabilities::UNRESTRICTED;
 
 /// Stage 3's price coefficients and amortization horizon. Values are
 /// illustrative until calibrated from measurements.
@@ -167,7 +172,8 @@ impl Stage3Calibration {
 }
 
 /// Planning logic, as opposed to the scoped facts it consumes: a model can have
-/// a built-in default, evidence about a particular deployment cannot.
+/// a built-in default, evidence about a particular deployment cannot. With
+/// the deployment's capabilities, these are #509's deployment inputs.
 ///
 /// Stage 3 prices plans analytically, so the stage pipeline does not read
 /// `cost`; only the legacy replacement search does (#580).
@@ -178,6 +184,9 @@ pub struct PlanningModels<'a> {
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
     pub calibration: Stage3Calibration,
+    /// What the deployment can build, read out and keep; unrestricted by
+    /// default.
+    pub capabilities: &'a DeploymentCapabilities,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -191,6 +200,7 @@ impl<'a> PlanningModels<'a> {
             accuracy,
             evidence,
             calibration: Stage3Calibration::ILLUSTRATIVE,
+            capabilities: &UNRESTRICTED,
         }
     }
 
@@ -203,6 +213,7 @@ impl<'a> PlanningModels<'a> {
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
             calibration: Stage3Calibration::ILLUSTRATIVE,
+            capabilities: &UNRESTRICTED,
         }
     }
 
@@ -223,6 +234,11 @@ impl<'a> PlanningModels<'a> {
 
     pub fn with_calibration(mut self, calibration: Stage3Calibration) -> Self {
         self.calibration = calibration;
+        self
+    }
+
+    pub fn with_capabilities(mut self, capabilities: &'a DeploymentCapabilities) -> Self {
+        self.capabilities = capabilities;
         self
     }
 }
@@ -363,11 +379,36 @@ fn assess(
             demand.len()
         ));
     }
+    if let Some(reason) = capability_violation(candidate, models.capabilities) {
+        return Err(reason);
+    }
     if let Some(reason) = accuracy_violation(candidate, demand, models) {
         return Err(reason);
     }
-    let (cost, per_evaluation) = price_nodes(&candidate.dag, demand, data, &models.calibration)
-        .map_err(|(node, error)| format!("node {node:?}: {error}"))?;
+    let capabilities = models.capabilities;
+    let raw_bytes_per_sample =
+        (!capabilities.raw_data_retained).then_some(capabilities.raw_bytes_per_sample);
+    let priced = price_nodes(
+        &candidate.dag,
+        demand,
+        data,
+        &models.calibration,
+        raw_bytes_per_sample,
+    )
+    .map_err(|(node, error)| format!("node {node:?}: {error}"))?;
+    let Priced {
+        cost,
+        per_evaluation,
+        retained_bytes,
+    } = priced;
+    if let Some(budget) = capabilities.memory_budget_bytes {
+        if retained_bytes > budget {
+            return Err(format!(
+                "retains {retained_bytes} bytes across evaluations, over the deployment's \
+                 memory budget of {budget} bytes"
+            ));
+        }
+    }
     if let Some(reason) =
         latency_violation(&candidate.dag, &per_evaluation, demand, &models.calibration)
     {
@@ -1110,6 +1151,55 @@ pub fn plan_stages<Id: Clone>(
     })
 }
 
+/// The first capability `candidate` needs that the deployment lacks, as a
+/// reason: maintaining state at ingestion time, building a summary, or
+/// reading a statistic out of one.
+fn capability_violation(
+    candidate: &PhysicalCandidate,
+    capabilities: &DeploymentCapabilities,
+) -> Option<String> {
+    if !capabilities.ingestion_time
+        && candidate
+            .dag
+            .nodes
+            .iter()
+            .any(|n| !n.output_state.timing.is_query_time())
+    {
+        return Some("deployment cannot maintain state at ingestion time".into());
+    }
+    // Summaries first: a readout of a summary that cannot be built is moot.
+    let reasons = |node: &Rc<OperatorNode>, readouts: bool| match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) if !readouts => {
+            capabilities.missing_summary(family)
+        }
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query: statistic,
+        }) if readouts => summary_builds(summary_input)
+            .into_iter()
+            .flatten()
+            .find_map(|build| match &build.operator {
+                Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => {
+                    capabilities.missing_readout(family, statistic)
+                }
+                _ => None,
+            }),
+        _ => None,
+    };
+    [false, true].into_iter().find_map(|readouts| {
+        candidate
+            .roots
+            .iter()
+            .enumerate()
+            .find_map(|(query, root)| {
+                OperatorNode::reachable(root)
+                    .iter()
+                    .find_map(|node| reasons(node, readouts))
+                    .map(|reason| format!("q{}: {reason}", query + 1))
+            })
+    })
+}
+
 /// The first summary estimate that misses its query's target, as a reason.
 fn accuracy_violation(
     candidate: &PhysicalCandidate,
@@ -1195,7 +1285,11 @@ fn build_violation(
 }
 
 fn family_name(family: &FieldDataType) -> String {
+    use asap_types::ir::schema::GroupingStrategy;
     match family {
+        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
+            format!("{kind:?}")
+        }
         FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
         FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
         other => format!("{other:?}"),
@@ -1422,19 +1516,29 @@ fn price(
     data: &DataWorkload,
     calibration: &Stage3Calibration,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    price_nodes(dag, demand, data, calibration).map(|(cost, _)| cost)
+    price_nodes(dag, demand, data, calibration, None).map(|priced| priced.cost)
 }
 
-/// [`price`], and the cost of one evaluation of each query-time node.
+/// A candidate's price, and what Stage 3's checks read from pricing.
+struct Priced {
+    cost: CandidateCost,
+    /// The cost of one evaluation of each query-time node.
+    per_evaluation: HashMap<PhysicalASAPNodeId, f64>,
+    /// Bytes retained across evaluations: ingestion-time state that query
+    /// time reads, and raw data retained for query-time scans.
+    retained_bytes: u64,
+}
+
+/// [`price`], and what the checks read. `raw_bytes_per_sample` is `Some`
+/// when the deployment does not keep raw data anyway: each query-time scan
+/// then retains its raw samples, priced as memory (Q48).
 fn price_nodes(
     dag: &PhysicalASAPDAG,
     demand: &[RootDemand],
     data: &DataWorkload,
     calibration: &Stage3Calibration,
-) -> Result<
-    (CandidateCost, HashMap<PhysicalASAPNodeId, f64>),
-    (PhysicalASAPNodeId, AnalyticalCostError),
-> {
+    raw_bytes_per_sample: Option<u64>,
+) -> Result<Priced, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.roots.first().copied().unwrap_or(0);
     calibration.validate().map_err(|error| (first, error))?;
     let series = data
@@ -1457,6 +1561,8 @@ fn price_nodes(
     let reached = reaching_roots(dag);
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
     let roles = pane_roles(dag);
+    let raw_retention = raw_retention(dag, rows_per_ms, raw_bytes_per_sample);
+    let mut retained_bytes = 0u64;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     let mut per_evaluation = HashMap::new();
@@ -1508,7 +1614,7 @@ fn price_nodes(
                             true => 1_000,
                             false => scan_extent_ms(dag, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS),
                         };
-                        let out = edge(((rows_per_ms * span_ms as f64).round() as u64).max(1));
+                        let out = edge(scan_rows(rows_per_ms, span_ms));
                         let estimate = estimate_operator(
                             PhysicalOperator::Scan,
                             OperatorStatistics::Scan {
@@ -1709,8 +1815,9 @@ fn price_nodes(
             let read_at_query_time = dag.edges.iter().any(|e| {
                 e.producer == node.id && nodes[&e.consumer].output_state.timing.is_query_time()
             });
-            let retain = |windows: u64, cost: f64, what: &str| {
+            let mut retain = |windows: u64, cost: f64, what: &str| {
                 let retained = windows * out.rows * state_bytes(node);
+                retained_bytes = retained_bytes.saturating_add(retained);
                 (
                     cost + calibration.cost_per_retained_byte_second * retained as f64,
                     format!("{detail}; ingestion time, {what}, retains {retained} bytes"),
@@ -1743,7 +1850,17 @@ fn price_nodes(
             let rate = evaluation_rate(roots.filter_map(|&r| demand.get(r)), calibration.horizon_s)
                 .map_err(|error| (node.id, error))?;
             per_evaluation.insert(node.id, cost);
-            (cost * rate, format!("{detail}; x {rate:.4} evaluations/s"))
+            let detail = format!("{detail}; x {rate:.4} evaluations/s");
+            match raw_retention.get(&node.id) {
+                Some(&bytes) => {
+                    retained_bytes = retained_bytes.saturating_add(bytes);
+                    (
+                        cost * rate + calibration.cost_per_retained_byte_second * bytes as f64,
+                        format!("{detail}; retains {bytes} bytes of raw data"),
+                    )
+                }
+                None => (cost * rate, detail),
+            }
         };
         output.insert(node.id, out);
         per_node.insert(
@@ -1755,8 +1872,8 @@ fn price_nodes(
             },
         );
     }
-    Ok((
-        CandidateCost {
+    Ok(Priced {
+        cost: CandidateCost {
             total: per_node.values().map(|n| n.cost).sum(),
             unit: COST_PER_SECOND,
             source: format!(
@@ -1766,7 +1883,41 @@ fn price_nodes(
             per_node,
         },
         per_evaluation,
-    ))
+        retained_bytes,
+    })
+}
+
+/// Rows a scan over `span_ms` reads at `rows_per_ms`.
+fn scan_rows(rows_per_ms: f64, span_ms: u64) -> u64 {
+    ((rows_per_ms * span_ms as f64).round() as u64).max(1)
+}
+
+/// The raw bytes each query-time scan makes the deployment retain:
+/// lookback × λ × bytes per sample. Empty when raw data is kept anyway
+/// (`None`). A scan at ingestion time reads samples as they arrive and
+/// retains none. Like its work, a scan's retention is charged once per
+/// scan node, so it stays a sum over nodes; a scan shared by several
+/// queries is one node.
+fn raw_retention(
+    dag: &PhysicalASAPDAG,
+    rows_per_ms: f64,
+    raw_bytes_per_sample: Option<u64>,
+) -> HashMap<PhysicalASAPNodeId, u64> {
+    let Some(bytes_per_sample) = raw_bytes_per_sample else {
+        return HashMap::new();
+    };
+    dag.nodes
+        .iter()
+        .filter(|n| {
+            n.output_state.timing.is_query_time()
+                && matches!(n.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+        })
+        .map(|n| {
+            let span_ms = scan_extent_ms(dag, n.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS);
+            let rows = scan_rows(rows_per_ms, span_ms);
+            (n.id, rows.saturating_mul(bytes_per_sample))
+        })
+        .collect()
 }
 
 /// Partitions a per-group ranking assumes, absent group-count evidence.
@@ -2833,5 +2984,187 @@ mod tests {
         years.sort();
         assert_eq!(years, [1, 2, 3, 5, 5]);
         assert!(shared <= separate, "shared {shared} vs separate {separate}");
+    }
+
+    // ── Deployment capabilities (C3, Q48) ────────────────────────────────
+
+    fn reasons(selection: &Selection) -> BTreeMap<&str, &str> {
+        selection
+            .rejected
+            .iter()
+            .filter(|r| !r.valid)
+            .map(|r| (r.id.as_str(), r.reason.as_str()))
+            .collect()
+    }
+
+    /// A summary the deployment cannot build, or a readout it cannot
+    /// compute, rejects the candidate as invalid, naming what is missing.
+    #[test]
+    fn missing_summary_or_readout_is_rejected_with_its_reason() {
+        use asap_types::deployment::{InstanceLayout, SummaryFamily, SummarySupport};
+        let counter = [("m".to_string(), asap_types::workload::MetricType::Counter)].into();
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        // Both heap sketches can be built; only Count-Min's top-k is read.
+        let support = |algorithm, readouts: &[_]| SummarySupport {
+            family: SummaryFamily::Sketch(algorithm),
+            layout: InstanceLayout::PerGroup,
+            readouts: readouts.iter().copied().collect(),
+        };
+        use asap_types::deployment::Readout::TopK;
+        let caps = DeploymentCapabilities {
+            summaries: Some(vec![
+                support(SketchAlgorithm::CmsWithHeap, &[TopK]),
+                support(SketchAlgorithm::CountSketchWithHeap, &[]),
+                SummarySupport {
+                    family: SummaryFamily::Exact(asap_types::ir::schema::ExactKind::Sum),
+                    ..support(SketchAlgorithm::Kll, &[])
+                },
+            ]),
+            ..DeploymentCapabilities::UNRESTRICTED
+        };
+        let select = |caps| {
+            stage3_select(
+                &candidates_with(&counter),
+                &[every_10s(Some(target.clone()))],
+                &data(),
+                PlanningModels::builtin().with_capabilities(caps),
+            )
+            .unwrap()
+        };
+        let selection = select(&caps);
+        assert_eq!(
+            reasons(&selection),
+            BTreeMap::from([(
+                "P3",
+                "q1: deployment lacks a CountSketchWithHeap TopK readout"
+            )])
+        );
+        assert!(selection.costs.contains_key("P2"));
+        // Without the Count-Min + heap summary, P2 cannot be built either.
+        let without_cms = DeploymentCapabilities {
+            summaries: caps.summaries.clone().map(|mut s| {
+                s.remove(0);
+                s
+            }),
+            ..caps
+        };
+        let selection = select(&without_cms);
+        assert_eq!(
+            reasons(&selection)["P2"],
+            "q1: deployment lacks a CmsWithHeap summary"
+        );
+    }
+
+    /// A deployment that cannot maintain state at ingestion time rejects
+    /// every candidate running a node then, and only those.
+    #[test]
+    fn ingestion_time_is_rejected_when_unsupported() {
+        let (run, demand, data) = pattern_b(data(), None);
+        let all: Vec<_> = run
+            .enumeration
+            .unwrap()
+            .candidates
+            .into_iter()
+            .flat_map(|c| c.physical)
+            .collect();
+        let caps = DeploymentCapabilities {
+            ingestion_time: false,
+            ..DeploymentCapabilities::UNRESTRICTED
+        };
+        let selection = stage3_select(
+            &all,
+            &demand,
+            &data,
+            PlanningModels::builtin().with_capabilities(&caps),
+        )
+        .unwrap();
+        let invalid = reasons(&selection);
+        for p in &all {
+            let maintained = !p.materialization.is_empty();
+            assert_eq!(invalid.contains_key(p.id.as_str()), maintained, "{}", p.id);
+            if maintained {
+                assert_eq!(
+                    invalid[p.id.as_str()],
+                    "deployment cannot maintain state at ingestion time"
+                );
+            }
+        }
+    }
+
+    /// A candidate retaining more state than the deployment's memory budget
+    /// is rejected; at the budget it is priced.
+    #[test]
+    fn memory_budget_is_enforced_on_retained_state() {
+        let (run, demand, data) = pattern_b(data(), None);
+        let (p, _) = maintained_panes(&run);
+        let p = p.clone();
+        // data(): 10 000 series; the newest pane keeps itself and 5 others.
+        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &node_of(&p.dag, is_build).payload
+        else {
+            unreachable!()
+        };
+        let retained = 6 * 10_000 * summary_shape(family).1;
+        let select = |budget| {
+            let caps = DeploymentCapabilities {
+                memory_budget_bytes: Some(budget),
+                ..DeploymentCapabilities::UNRESTRICTED
+            };
+            stage3_select(
+                std::slice::from_ref(&p),
+                &demand,
+                &data,
+                PlanningModels::builtin().with_capabilities(&caps),
+            )
+        };
+        assert!(select(retained).is_ok());
+        let Err(SelectionError::NoValidCandidate(rejected)) = select(retained - 1) else {
+            panic!("over the budget")
+        };
+        assert_eq!(
+            rejected[0].reason,
+            format!(
+                "retains {retained} bytes across evaluations, over the deployment's memory \
+                 budget of {} bytes",
+                retained - 1
+            )
+        );
+    }
+
+    /// When the deployment does not keep raw data anyway, a query-time scan
+    /// pays w × lookback × λ × bytes per sample; an ingestion-time scan, and
+    /// any scan when raw data is kept, pays nothing for retention.
+    #[test]
+    fn raw_retention_is_charged_only_without_raw_data_and_not_for_maintained_inputs() {
+        let query = "quantile_over_time(0.99, m[1m])";
+        let priced = |ingestion, raw| {
+            price_nodes(
+                &kll_dag(query, ingestion),
+                &[every_10s(None)],
+                &data(),
+                &Stage3Calibration::ILLUSTRATIVE,
+                raw,
+            )
+            .unwrap()
+        };
+        // data(): λ = 10 000 rows/s over 1 min, 16 bytes per sample.
+        let raw_bytes = 60 * 10_000 * 16;
+        let (kept, not_kept) = (priced(false, None), priced(false, Some(16)));
+        let scan = node_of(&kll_dag(query, false), is_scan).id;
+        let charge = not_kept.cost.per_node[&scan].cost - kept.cost.per_node[&scan].cost;
+        assert!(
+            (charge - 1.25e-7 * raw_bytes as f64).abs() < 1e-12,
+            "{charge}"
+        );
+        assert!((not_kept.cost.total - kept.cost.total - charge).abs() < 1e-12);
+        assert_eq!(not_kept.retained_bytes - kept.retained_bytes, raw_bytes);
+        assert!(not_kept.cost.per_node[&scan]
+            .detail
+            .ends_with(&format!("retains {raw_bytes} bytes of raw data")));
+        let (kept, not_kept) = (priced(true, None), priced(true, Some(16)));
+        assert_eq!(kept.cost, not_kept.cost);
+        assert_eq!(kept.retained_bytes, not_kept.retained_bytes);
     }
 }

@@ -1,6 +1,7 @@
 //! Filtered aggregates (`FILTER (WHERE …)`, a per-measure filter, or a
 //! filtered `SummaryAgg`) execute with SQL semantics: a row that fails the
 //! filter contributes nothing, but its group is kept.
+mod executor_models;
 mod physical_common;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -10,7 +11,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_optimizer::pass1::logical_candidates::{
     compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
 };
-use asap_plan_selection::{plan_stages, PlanningModels};
+use asap_plan_selection::plan_stages;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
@@ -18,6 +19,7 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Evidence, EvidenceSource, Predictability, QueryRecurrence, Rate,
     RootDemand,
 };
+use executor_models::executor_models;
 
 fn catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
@@ -112,7 +114,7 @@ async fn selected(sql: &str) -> Rc<OperatorNode> {
         vec![(0, QueryRoot::Operator(root))],
         &demand,
         &data,
-        PlanningModels::builtin(),
+        executor_models(),
         4096,
     )
     .unwrap();
