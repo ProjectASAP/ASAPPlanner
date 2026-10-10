@@ -7,9 +7,10 @@ use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
 
 use crate::cost::cost_model::{CostModel, DefaultCostModel};
-use asap_logical_optimizer::pass1::replacement::{
-    accuracy_budget, accuracy_target, default_size_params, ReplacementSubDAG, TargetSubDAG,
+use asap_logical_optimizer::pass1::realization::{
+    accuracy_budget, accuracy_target, default_size_params,
 };
+use asap_logical_optimizer::pass1::replacement::{ReplacementSubDAG, TargetSubDAG};
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const EVIDENCE_MODEL_VERSION: &str = "empirical-update-cpu-v1";

@@ -6,8 +6,7 @@
 //! The rule is all-or-nothing per key (#580 decision W5): every approximate
 //! target of a key is re-sized for the key's strictest requirement, so their
 //! summary producers are identical and the shared variant's merge after
-//! composition reaches one state. Sizing reuses the legacy reconciliation's
-//! argument ([`super::reconciliation`]): requirements resolve through
+//! composition reaches one state. Requirements resolve through
 //! [`accuracy_budget`] and every shipped sizing formula is monotonic in
 //! `(ε, δ)`, so a summary sized for a requirement that dominates every
 //! consumer's meets each of them. Stage 3 still checks each query against its
@@ -23,11 +22,10 @@ use asap_types::ir::schema::ColumnId;
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::types::AccuracyTarget;
 
-use super::reconciliation::dominates;
 use crate::pass1::logical_candidates::{
     local_realizations_for_intent, LocalLogicalCandidates, LogicalCandidateError,
 };
-use crate::pass1::replacement::{accuracy_budget, accuracy_target};
+use crate::pass1::realization::{accuracy_budget, accuracy_target, dominates};
 
 /// The estimates one summary serves over one column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +204,7 @@ fn single_intent<Id>(inventory: &LocalLogicalCandidates<Id>, t: usize) -> &AggIn
 mod tests {
     use super::*;
     use crate::pass1::logical_candidates::enumerate_local_logical_candidates;
-    use crate::pass1::replacement::Realization;
+    use crate::pass1::realization::Realization;
     use crate::test_support::lower_promql;
     use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
     use asap_types::ir::QueryRoot;

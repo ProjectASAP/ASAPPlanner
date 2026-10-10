@@ -39,7 +39,7 @@ use super::summary_capability::{strictest, with_accuracy};
 use crate::pass1::logical_candidates::{
     local_realizations_for_intent, LocalLogicalCandidates, LogicalCandidateError,
 };
-use crate::pass1::replacement::{accuracy_target, Realization};
+use crate::pass1::realization::{accuracy_target, Realization};
 
 /// How a summary alternative covers its query's window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
