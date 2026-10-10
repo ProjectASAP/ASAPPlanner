@@ -1,5 +1,11 @@
 # Candidate Plan Search
 
+> **Historical:** this document describes the legacy replacement search
+> (`ReplacementStrategy`, `CandidateLogicalASAPDAGs`, `global_selection`), which
+> was removed (#630, #635). The #509 stage pipeline replaced it; see
+> [planner layering](../proposals/planner-layering.md) and the
+> [library API](../../develop_docs/library-api.md).
+
 ASAP-aware mapping should consider all alternatives holistically rather than optimize prematurely.
 
 Suppose a plan contains several independent-looking decision points:
@@ -91,6 +97,6 @@ order.
 
 The [code architecture](../../develop_docs/asap-aware-mapping-architecture.md)
 describes current discovery and registry behavior; the
-[library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
+[library guide](../../develop_docs/library-api.md)
 shows selection and its evidence boundaries. Broader optimization dimensions are
 tracked in the [proposal](../proposals/asap-aware-mapping/optimizations.md).

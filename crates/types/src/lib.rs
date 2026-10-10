@@ -3,8 +3,8 @@
 //! - [`ir`] — the unified operator IR (#511): one operator DAG before and
 //!   after ASAP optimization ([`ir::OperatorNode`]), arranged by #511 section
 //!   ([`ir::operator`], [`ir::scalar`], [`ir::schema`], [`ir::properties`]),
-//!   plus its passes (canonicalize, CSE, timing) and the wire export
-//!   ([`ir::export`]). No execution logic lives in this crate (issue #190).
+//!   plus its passes (canonicalize, CSE, timing), the flat DAG
+//!   ([`ir::flat`]) and the physical export ([`ir::physical_export`]). No execution logic lives in this crate (issue #190).
 //! - [`workload`] — planner inputs (#509): query and data workloads, the
 //!   lowered [`workload::parsed_workload`], and [`workload::resources`].
 //! - [`deployment`] — the deployment's capabilities, a planner input (#509)

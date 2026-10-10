@@ -1,268 +1,70 @@
 # ASAP-Aware Mapping architecture
 
-This document explains the architecture of ASAP-aware mapping: the planning
-layer that turns logical query operations into alternative `Realization`
-values built from ASAP primitives, such as exact summaries and approximate
-sketches. Here, a **realization** is one candidate physical form of
-one logical operation—not a selected workload plan or a deployed executable.
-Read it to understand how strategies, realizations, and costing interact.
+This document explains how the planner turns logical query operations into
+alternative realizations built from ASAP primitives, such as exact accumulators
+and approximate sketches, and selects among them. A **realization** is one
+candidate form of one logical operation, not a selected workload plan or a
+deployed executable.
 
-For procedural work—adding a `ReplacementStrategy`, changing a `CostModel`, or
-writing the expected tests—use [Extend ASAP-aware mapping](extend-asap-aware-mapping.md).
+The design is the #509 stage pipeline
+([planner layering](../design_docs/proposals/planner-layering.md)); the
+[library API](library-api.md) shows how to call it. The legacy replacement
+search (`ReplacementStrategy`, `search_workload`, `CostModel`) that this
+document used to describe was removed; the
+[contracts](asap-aware-mapping-contracts.md) and
+[extension guide](extend-asap-aware-mapping.md) are kept as a historical
+record of it.
 
-For the higher-level motivation and replacement-plan-search design, see the
-[ASAP-aware mapping overview](../design_docs/architecture/asap-aware-mapping.md). Current interfaces are
-defined in [mapping contracts](asap-aware-mapping-contracts.md).
-
-Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are
-illustrative; they do not ship with this crate. Samples that use real public
-types and functions follow the APIs exported by `asap-logical-optimizer`
-(Stage 1 candidate search) and `asap-plan-selection` (cost models and selection).
-
-If you only need to find the right extension point, start with the [extension map](extend-asap-aware-mapping.md#7-current-extension-map). If you are implementing a strategy, read this mental model, the [mapping contracts](asap-aware-mapping-contracts.md), and the [extension guide](extend-asap-aware-mapping.md).
-
----
-
-## Code architecture
-
-## 1. Mental model
-
-ASAP-aware mapping has two different jobs that should remain separate:
-
-1. **Generate valid alternatives.**
-2. **Rank alternatives and optionally coordinate compatible selections.**
-
-`ReplacementStrategy` is responsible for the first job.
-
-`CostModel` supplies preferences and cost evidence for the second; search and
-selection APIs apply those decisions while preserving legality.
-
-A strategy should answer:
-
-> Does this transformation apply here, and if so, what are all semantically valid replacements?
-
-A cost model should answer:
-
-> Given valid choices, which choices are preferable?
-
-It is consulted only at selection time; sketch parameters come from the analytical estimators.
-
-Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enumerate every valid alternative, even when the default cost model clearly prefers one. See [Rule 2](extend-asap-aware-mapping.md#rule-2-enumerate-do-not-rank).
-
----
-
-## 2. Architecture overview
-
-The diagram below follows a workload of one or more query roots through target discovery, candidate generation, ranking, reporting, and downstream visualization. Section 3 focuses on the replacement-strategy path.
-
-Terminology used in the diagram:
+## Terms
 
 - A **workload** is the set of named queries planned together. A **query root**
-  is the top-level `Rc<OperatorNode>` (the unified operator IR) for one of
-  those queries. **Pre-ASAP** means a DAG that contains only ordinary
-  `NonASAPOp` operators, before the planner realizes an operation with ASAP
-  primitives; **post-ASAP** means the same IR after some nodes became `ASAPOp`
-  summary operators.
-- A **DAG** (directed acyclic graph) represents query operators whose sub-DAGs
-  may be shared. See [sub-DAG sharing and ASAP-aware CSE](../design_docs/proposals/planner-layering.md#pass-2-asap-aware-common-subexpression-elimination)
-  for the sharing rules. Rust's `Rc<T>` (reference-counted pointer) records
-  shared node identity.
-- A **target** is one replaceable site. A **candidate** is one valid alternative
-  for it. `Replacement::SubDAG` is a replacement sub-DAG: either a constructed
-  post-ASAP summary (it contains an `ASAPOp`, e.g. an exact accumulator or an
-  approximate sketch) or a logical rewrite with no ASAP operator
-  (`is_logical_rewrite` tells them apart).
-  `Replacement::ExactComposition` refers to a child target whose realization
-  must remain undecided until compatible selection. A **sketch**
-  is a compact data structure that trades exactness for bounded error. A
-  query's **accuracy target** states the allowed error and failure probability.
-  A candidate's **rationale** is its human-readable explanation.
-- `CandidateLogicalASAPDAGs` is a compact candidate space with one
-  `TargetSubDAGCandidates` per target instead of one full plan per combination of choices.
-  A `node_hash` is a structural fingerprint used to narrow explanation lookup;
-  exact structural equality is still checked afterward.
+  is the top-level `QueryRoot` (an `Rc<OperatorNode>` operator DAG or a scalar
+  expression over them) of one query. **Pre-ASAP** means a DAG of ordinary
+  `NonASAPOp` operators; **post-ASAP** means the same IR after some nodes became
+  `ASAPOp` summary operators.
+- A **target** is one single-measure aggregate a summary can realize. An
+  **alternative** is one `Realization` of it: `PassThrough` (exact execution of
+  the original sub-DAG), `ExactAggregate` (a mergeable exact accumulator) or
+  `Sketch` (an approximate summary sized to the query's accuracy target).
+- An **accuracy target** states the allowed error and failure probability.
 
-```mermaid
-flowchart TB
-  classDef input fill:#e8f1ff,stroke:#4b78b8,color:#172b4d
-  classDef generate fill:#e7f7ef,stroke:#31835e,color:#173f2d
-  classDef store fill:#fff6dd,stroke:#b78922,color:#513d0c
-  classDef choose fill:#fcebdc,stroke:#c46a25,color:#572d0c
-  classDef report fill:#f2eafe,stroke:#7950b3,color:#34204f
+## The stages
 
-  subgraph DISCOVERY[1. Discover every replaceable site]
-    WL["Input workload<br/>one or more named pre-ASAP OperatorNode roots"]:::input
-    SEARCH["search_workload_with<br/>run CSE once, then visit every node in every root DAG"]:::generate
-    TARGET["TargetSubDAG<br/>one candidate site plus the number of workload locations<br/>that reference the same Rc&lt;OperatorNode&gt;"]:::generate
-    WL -->|"roots"| SEARCH -->|"one target per distinct node"| TARGET
-  end
-
-  subgraph GENERATION[2. Generate all legal alternatives at each site]
-    STRATEGY["ReplacementStrategy<br/>when a target matches, enumerate every legal replacement;<br/>implementations generate but do not choose"]:::generate
-    CAND["ReplacementSubDAG candidates<br/>each contains a Subtree (summary or logical rewrite) or ExactComposition<br/>plus typed provenance and rationale;<br/>no alternative is removed solely on cost"]:::store
-    TARGET -->|"try every registered strategy"| STRATEGY --> CAND
-  end
-
-  subgraph SEARCHSPACE[3. Store the workload-wide search space]
-    SPACE["CandidateLogicalASAPDAGs<br/>one TargetSubDAGCandidates per target; each candidate set keeps<br/>all candidates, including dependent compositions"]:::store
-    CAND -->|"deduplicate by target and candidate identity"| SPACE
-  end
-
-  subgraph RANKING[Optional ranked view]
-    CM(["CostModel<br/>selection-time preferences and costs"]):::choose
-    SORT["candidate_selection::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
-    CM -.-> SORT
-    RANKED["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
-    SPACE --> SORT -->|"reorder only; preserve every candidate"| RANKED
-  end
-
-  subgraph REPORTING[Optional reporting view]
-    EXPLAIN["explain_replacements<br/>select reportable candidates, copy their rationale,<br/>and add kind, location, target, and node_hash"]:::report
-    EXPORT["dag_export<br/>narrow by node_hash, then confirm structural equality"]:::report
-    VIEWER["dag-viewer<br/>show a badge and explanation beside that node"]:::report
-    SPACE -->|"reporting view; no new planner decision"| EXPLAIN --> EXPORT --> VIEWER
-  end
+```text
+pre-ASAP roots
+  -> Stage 1, Pass 1: one LocalLogicalTarget per target aggregate, with its
+     alternatives (pass1::logical_candidates, pass1::realization)
+  -> Stage 1, Pass 2: sharing variants across queries — independent,
+     identical expressions merged, one summary sized for the strictest
+     consumer — plus tumbling-window forms for repeating queries (pass2)
+  -> Stage 2: physical candidates of each composed logical candidate, one per
+     materialization choice (asap-physical-optimizer)
+  -> Stage 3: reject candidates that miss an accuracy target, need a capability
+     the deployment lacks or exceed its memory budget; price the rest and
+     select the cheapest (asap-plan-selection)
 ```
 
-The generic `ReplacementStrategy` box is the extension point. The default
-registry supplies summary realization, Hydra grouping, shared-sub-DAG,
-average-rewrite and exact-composition strategies. Section 3.3 describes the
-registries and the workload-derived roll-up rule.
+| Concern | Location |
+| --- | --- |
+| Which realizations an intent has, sizing, summary input rules | `asap_logical_optimizer::pass1::realization` |
+| Pass 1 inventory and composition of one choice per target | `asap_logical_optimizer::pass1::logical_candidates` |
+| Pass 2 sharing rules | `asap_logical_optimizer::pass2` |
+| Analytical error bounds of each summary family | `asap_logical_optimizer::accuracy` |
+| Materialization | `asap_physical_optimizer` |
+| Accuracy model, capabilities, pricing and selection | `asap_plan_selection` (`plan_stages`, `select_plan`) |
+| Facade | `asap_planner::e2e_plan` |
 
----
+Stage 1 never prices: candidate generation is independent of cost (#572,
+decision Q36(a)). It does not rank alternatives either; the catalog order of
+`summary_candidates` has no preference meaning. Stage 3 is the only stage that
+computes cost, and it checks accuracy per summary estimate with the
+`AccuracyModel` in `PlanningModels`.
 
-## 3. How the current pieces fit together
+## Adding a realization
 
-The planner repeats one operation throughout the workload: find a target, ask
-each registered strategy for every valid replacement, and store those
-replacements as alternatives for that target. Ranking happens only after the
-complete alternative set has been built.
-
-### 3.1 Discover targets across the workload
-
-Use `search_workload` or `search_workload_with` for normal planner search. The
-search performs these steps:
-
-1. Run CSE once to merge structurally identical sub-DAGs that may legally be
-   shared.
-2. Walk the complete DAG beneath every query root, including nodes below
-   unshared parents.
-3. Construct one `TargetSubDAG` per distinct node, with the node's measured
-   `consumer_count`.
-4. Run every registered `ReplacementStrategy` against each target to a
-   **fixpoint**: repeat until no new candidates are discovered, subject to
-   `MAX_SEARCH_ITERATIONS`. Search also prepares compatible compositions.
-   `search_workload_with_targets` applies explicit per-root accuracy targets
-   before ranking.
-
-The discovery and strategy-invocation path is:
-
-```mermaid
-flowchart LR
-  classDef workload fill:#e7f7ef,stroke:#31835e,color:#173f2d
-  classDef common fill:#fff6dd,stroke:#b78922,color:#513d0c
-
-  ROOTS["Input<br/>one or more named OperatorNode roots"]:::workload
-  ROOTS --> CSE["Canonicalize sharing<br/>merge structurally identical, legally shareable sub-DAGs"]:::workload
-  CSE --> WALK["Discover sites<br/>walk the complete DAG, including nodes below unshared parents"]:::workload
-  WALK --> T["Build TargetSubDAG<br/>retain the sub-DAG's Rc identity and measured consumer_count"]:::workload
-  T --> MATCH
-  MATCH["matches(target)<br/>cheaply decide whether this strategy has alternatives"]:::common
-  MATCH -->|"true"| REPLACE["propose(target)<br/>construct supported legal alternatives;<br/>retain structured accuracy rejections"]:::common
-  MATCH -->|"false"| NONE["No candidates<br/>continue with the next strategy"]:::common
-  REPLACE --> OUT["Candidate list for this strategy and target<br/>each ReplacementSubDAG carries the replacement and rationale"]:::common
-```
-
-`consumer_count` is workload information, not an estimate of runtime
-executions. It matters to strategies such as `SharedSubDAGStrategy`, which
-only has a share-versus-recompute choice when a target has multiple consumers.
-
-### 3.2 Generate candidates through `ReplacementStrategy`
-
-For each target, the planner first calls `matches(target)`. A matching strategy
-then supplies accepted candidates and structured rejections through
-`propose(target)`. Its default wraps `replacements(target)`; strategies with
-accuracy checks can override it.
-
-Each returned `ReplacementSubDAG` contains:
-
-- a `Replacement`: a constructed summary, logical rewrite or dependent exact
-  composition;
-- the proposing strategy name and typed provenance; and
-- the rationale for offering that replacement.
-
-The containing `TargetSubDAGCandidates` records the target. Legality includes required schema,
-capability and accuracy checks; supported algorithm applicability alone is not
-a result certificate.
-
-The complete `replacements()` result is the candidate set produced by one
-strategy for one target. Strategies take no `CostModel` and must not remove a
-valid candidate because of cost; ranking happens at selection time.
-
-### 3.3 Current concrete strategies
-
-The default context-free registry contains five `ReplacementStrategy` implementations:
-
-- `ASAPStrategies` matches supported aggregate and binary shapes. Its
-  `replacements(target)` method constructs every legal post-ASAP summary sub-DAG,
-  including applicable sketch, exact-accumulator, and pass-through
-  realizations. Candidates are sized analytically for the target's accuracy
-  requirement and listed in `summary_candidates` order; candidates without a
-  sufficient guarantee are rejected before costing.
-- `SharedSubDAGStrategy` uses `consumer_count` to identify shared targets. It
-  emits both build-once-and-share and recompute-independently rewrites when a
-  target has multiple consumers.
-- `HydraGroupingStrategy` proposes eligible shared multi-subpopulation layouts.
-- `AvgToSumOverCountStrategy` proposes supported average rewrites.
-- `ExactCompositionStrategy` preserves child-target references for compatible
-  composition selection.
-
-`default_strategies` uses `SemanticEquivalentRewriteStrategy` (via its
-`AvgToSumOverCountStrategy` alias) in its rewrite slot. The evidence-aware registry supplies the accuracy evidence provider to
-summary and Hydra construction. Search derives `RollupStrategy` after CSE from
-the actual sibling set. See the
-[registry definitions](../../crates/logical-optimizer/src/pass1/replacement.rs).
-
-The important rule is:
-
-> Strategies should reuse existing decision and implementation logic where possible instead of reimplementing it.
-
-These strategies expose their alternatives through the same
-`ReplacementSubDAG` interface, so search and reporting do not need
-strategy-specific discovery logic.
-
-### 3.4 Store and rank the complete search space
-
-Workload search deduplicates candidates into a `CandidateLogicalASAPDAGs`. Each distinct
-target has one `TargetSubDAGCandidates` containing retained alternatives and
-rejection reasons. This
-compact representation preserves independent choices without enumerating a flat
-list of `2^N` complete plans for `N` replaceable targets.
-
-`candidate_selection::cost_sorted` ranks each target's existing candidates with the
-supplied `CostModel`. It returns the same candidates in preferred order, with
-costs aligned by index; ranking does not select or remove a candidate.
-
-### 3.5 Single-target use and final selection
-
-`TargetSubDAG::new(&root)` creates a target for one isolated node and sets
-`consumer_count` to `1`. It is useful for tests and focused tooling, but it does
-not discover targets or provide workload-level sharing information. Use
-`search_workload` or `search_workload_with` whenever accurate consumer counts
-matter.
-
-A single-target inspection caller may take the first
-candidate with `.into_iter().next()` and handle the empty case according to its
-execution policy; the first candidate is in `summary_candidates` order, not cost
-order. Constructing all candidates before taking the first costs more than
-constructing only one, but it keeps the strategy
-contract consistent and preserves the full choice set for other callers.
-
-`candidate_selection::global_selection` optionally coordinates cross-target sharing and
-composition choices. `GlobalSelection::assemble_selected_dag` constructs the selected
-semantic DAG. These APIs do not decide materialization or establish physical
-deployment feasibility. Recurrence-aware variants require the corresponding
-workload and evidence inputs; downstream owns physical commitment and execution.
-See the [library workflow](library-api.md#optional-whole-plan-selection-and-dag-assembly).
-
----
+A new summary algorithm for an intent is added to `summary_candidates` and
+sized in `accuracy::estimators::size_params`; its local guarantee goes in
+`accuracy::estimators::local_guarantee`, and Stage 3 rejects it for an
+accuracy-targeted query until one exists. How each input row updates the
+summary is decided in `logical_candidates::summary_update`. The executor must
+also be able to build and read it (`DeploymentCapabilities`).
