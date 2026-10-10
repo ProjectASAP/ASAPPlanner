@@ -336,9 +336,15 @@ So the `selection` is `latency ∈ (−∞, 100)`, `r ∈ {us}`. A PromQL exampl
 | `Project` | only if its column is passed through unchanged (a rename is fine) | the column must still be there, with the same values, above the `Project` | `Project [job, region AS r]`: `region = 'us'` ✓, it becomes `r = 'us'`. `Project [job, value * 2 AS v2]`: `value > 5` ✗, `value` is gone |
 | `Aggregate` (later) | only if it uses group columns | a group column has one value per group, so filtering before or after grouping keeps the same groups | below `SUM(value) by job`: `job = 'api'` ✓; `value > 5` ✗, it changes the sums |
 | `rate`, a window function, or an instant `TimeRange` (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate. Below an instant selector: `job = 'api'` ✓; `value > 5` ✗, the latest sample with value > 5 is not the latest sample |
-| any other operator, e.g. `Join`, `Limit`, a `TimeShift` with `@` | no | | |
+| any other operator, e.g. `Join`, a vector/vector `BinaryOp`, `Limit`, a `TimeShift` with `@` | no | | |
 
-A `Filter` *above* `rate` has nothing to pass: it keeps some rate outputs, and those are exactly the rows the `SummaryAgg` reads. A PromQL comparison such as `rate(m[5m]) > 0` is not lowered to a `Filter`, though, but to a comparison operator (`BinaryOp`), which the walk does not enter. So today it stays in `definition` (last row of **More examples** below).
+A `Filter` *above* `rate` has nothing to pass: it keeps some rate outputs, and those are exactly the rows the `SummaryAgg` reads. How a PromQL comparison is lowered decides whether it is such a `Filter`:
+
+| PromQL | Lowered to | Coverage |
+|---|---|---|
+| `rate(m[5m]) > 0` (vector and scalar) | `Filter` | `selection`: `value ∈ (0, ∞)` |
+| `rate(m[5m]) > bool 0` | `Project` (values become 0 or 1, no row is dropped) | stays in `definition`: it does not pick rows |
+| `rate(a[5m]) > rate(b[5m])` (vector and vector) | `BinaryOp` (matches the two sides by labels, like a join) | stays in `definition`: the walk does not enter a `BinaryOp` |
 
 (This is filter pushdown in reverse. DataFusion's `PushDownFilter` uses the same rules to move filters down.)
 
@@ -367,6 +373,7 @@ Any other shape stays in `definition`:
 - If two columns the `SummaryAgg` reads have the same `(table, name)` (for example `Project [a AS k, b AS k]`), a condition on `k` cannot tell them apart and stays in `definition`.
 - PromQL labels have no table, so a label is named by its name alone.
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
+- A constant may come from a cast: type coercion turns `latency < 100` on a `DOUBLE` column into `latency < CAST(100 AS DOUBLE)`, and the SQL front end folds a numeric cast of a literal as DataFusion's constant folding does, so the condition reads `latency < 100.0`.
 
 **Time.** Example: `quantile_over_time(0.99, m[1m] offset 2m)` lowers to `TimeRange(1m)` over `TimeShift(2m)` over `Scan m`. Its KLL state (one per series) has `definition` = the `SummaryAgg` over `Scan m`, and `selection` = time `(−3m, −2m]`, the minute that ended 2 minutes before evaluation. There are two kinds of time:
 
@@ -389,9 +396,10 @@ Any other shape stays in `definition`:
 | SQL `… FROM t WHERE latency < 100` | `Scan t {latency < 100}` | `Scan t` | `latency ∈ (−∞, 100)` |
 | PromQL `quantile_over_time(0.99, m[1m] offset 2m)` | `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
 | PromQL `quantile(0.99, rate(m{job="api"}[5m]))` | `rate(TimeRange(5m, Scan m {job = 'api'}))` | all of it | nothing: `job = 'api'` is under `rate`, which the walk cannot pass yet (Rule 1, later) |
-| PromQL `quantile(0.99, rate(m[5m]) > 0)` | `BinaryOp(>, rate(TimeRange(5m, Scan m)), 0)` | all of it | nothing: a PromQL comparison is a `BinaryOp`, not a `Filter` |
+| PromQL `quantile(0.99, rate(m[5m]) > 0)` | `Filter(value > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `value ∈ (0, ∞)`: the `Filter` is above `rate` |
+| PromQL `quantile(0.99, rate(a[5m]) > rate(b[5m]))` | `BinaryOp(>, rate(TimeRange(5m, Scan a)), rate(TimeRange(5m, Scan b)))` | all of it | nothing: a vector/vector comparison is a `BinaryOp`, not a `Filter` |
 
-`Scan t {…}` is a `Scan` with those predicates. In the last two rows `TimeRange(5m)` stays in `definition` in any case: it is the input window of `rate` and changes the rate values, so it does not just pick rows.
+`Scan t {…}` is a `Scan` with those predicates. In the last three rows `TimeRange(5m)` stays in `definition` in any case: it is the input window of `rate` and changes the rate values, so it does not just pick rows.
 
 #### 4.2.3 Cost of deriving coverage
 
