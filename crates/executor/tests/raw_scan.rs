@@ -74,6 +74,7 @@ fn plan(
         id,
         payload,
         output_state: state,
+        kept: false,
         output_schema: (**schema).clone(),
         guarantee: None,
     };

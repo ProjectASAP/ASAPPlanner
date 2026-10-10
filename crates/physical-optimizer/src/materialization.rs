@@ -1,6 +1,7 @@
 //! #509 Stage 2 materialization: for each summary state of one logical
 //! candidate, whether it is computed at query time (not materialized, the
-//! default) or maintained at ingestion time.
+//! default), maintained at ingestion time, or, for tumbling panes, computed
+//! at query time and kept across evaluations.
 //!
 //! **Eligibility (S4).** A `SummaryAgg` may run at ingestion time when
 //!
@@ -16,6 +17,14 @@
 //! A summary over a merge of panes reads a window that slides with the
 //! evaluation; it is not maintainable and stays at query time.
 //!
+//! **Query time, kept (Example 4, B3).** A tumbling pane whose roots all
+//! repeat at a fixed interval equal to the pane width may instead be built
+//! at query time and kept: each evaluation builds the newest pane from its
+//! width of raw data, merges it with the panes kept from earlier
+//! evaluations, then keeps it and drops the oldest. This needs neither
+//! arriving data nor predictability; the deployment must be able to keep
+//! query-time state (Stage 3 checks it).
+//!
 //! **Units.** The panes merged by one `SummaryMerge` are decided together:
 //! a pane chain is maintained as one stream of panes, and a mixed chain is
 //! never cheaper. Panes shared by two merges join both chains into one unit.
@@ -23,13 +32,14 @@
 //! **Down-closed sets.** Everything upstream of an ingestion-time node also
 //! runs at ingestion time (#509), so a unit is at ingestion time only if
 //! every unit below it is. [`MaterializationSpace::down_closed_sets`]
-//! enumerates exactly those sets, the empty set (all query time) first.
+//! enumerates exactly those choices, each unit not materialized, at
+//! ingestion time or kept, the empty choice (all query time) first.
 //!
 //! **Not materialized for several consumers (Q44, Example 4 A3)** would
 //! duplicate a shared sub-DAG per consuming query. It is not generated yet:
 //! a shared query-time node is computed once per evaluation for all its
 //! consumers.
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::properties::ExecutionTiming;
@@ -50,7 +60,23 @@ pub struct Unit {
     pub summaries: Vec<Rc<OperatorNode>>,
     /// E.g. "Kll ×5 panes" or "exact Sum".
     pub label: String,
+    /// The unit may run at ingestion time.
+    pub ingestion: bool,
+    /// The unit may be kept at query time (tumbling panes only).
+    pub kept: bool,
 }
+
+/// How a unit is materialized; a unit absent from a [`Choices`] is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Choice {
+    /// Maintained at ingestion time.
+    IngestionTime,
+    /// Built at query time and kept across evaluations (B3).
+    Kept,
+}
+
+/// One materialization choice per unit index.
+pub type Choices = BTreeMap<usize, Choice>;
 
 /// The materialization choices of one logical candidate.
 #[derive(Debug, Clone)]
@@ -68,12 +94,10 @@ impl MaterializationSpace {
             units: Vec::new(),
             below: Vec::new(),
         };
-        if !matches!(
+        let arriving = matches!(
             data.arrival,
             DataArrival::ContinuouslyIngesting | DataArrival::Mixed
-        ) {
-            return empty;
-        }
+        );
         // Every summary, with the roots reaching it, in discovery order.
         let mut summaries: Vec<Rc<OperatorNode>> = Vec::new();
         let mut reaching: HashMap<*const OperatorNode, BTreeSet<usize>> = HashMap::new();
@@ -103,25 +127,35 @@ impl MaterializationSpace {
             .flat_map(|merge| merge.children())
             .map(Rc::as_ptr)
             .collect();
-        let eligible: Vec<bool> = summaries
+        // Per summary: (may run at ingestion time, may be kept).
+        let options: Vec<(bool, bool)> = summaries
             .iter()
             .map(|summary| {
                 let roots: Vec<&RootDemand> = reaching[&Rc::as_ptr(summary)]
                     .iter()
                     .filter_map(|&r| demand.get(r))
                     .collect();
-                roots.len() == reaching[&Rc::as_ptr(summary)].len()
+                let all_roots = roots.len() == reaching[&Rc::as_ptr(summary)].len();
+                let pane = panes.contains(&Rc::as_ptr(summary));
+                let window = window_of(summary);
+                let ingestion = arriving
+                    && all_roots
                     && roots.iter().all(|d| repeats_predictably(d))
                     && !forces_query_time(summary)
-                    && match window_of(summary) {
+                    && match window {
                         Window::Fixed { length_ms } => {
-                            panes.contains(&Rc::as_ptr(summary))
-                                || roots.iter().all(|d| fixed_window_fits(d, length_ms))
+                            pane || roots.iter().all(|d| fixed_window_fits(d, length_ms))
                         }
                         Window::None | Window::Sliding => false,
-                    }
+                    };
+                let kept = pane
+                    && all_roots
+                    && matches!(window, Window::Fixed { length_ms }
+                        if roots.iter().all(|d| evaluates_every(d, length_ms)));
+                (ingestion, kept)
             })
             .collect();
+        let eligible: Vec<bool> = options.iter().map(|&(i, k)| i || k).collect();
         let index: HashMap<*const OperatorNode, usize> = summaries
             .iter()
             .enumerate()
@@ -173,13 +207,23 @@ impl MaterializationSpace {
                 units.push(Unit {
                     summaries: Vec::new(),
                     label: String::new(),
+                    ingestion: true,
+                    kept: true,
                 });
                 members.push(Vec::new());
                 units.len() - 1
             });
             units[u].summaries.push(Rc::clone(&summaries[i]));
+            units[u].ingestion &= options[i].0;
+            units[u].kept &= options[i].1;
             members[u].push(i);
         }
+        // A chain whose members allow different options has none in common.
+        let (mut units, members): (Vec<Unit>, Vec<Vec<usize>>) = units
+            .into_iter()
+            .zip(members)
+            .filter(|(unit, _)| unit.ingestion || unit.kept)
+            .unzip();
         for (unit, members) in units.iter_mut().zip(&members) {
             let name = family_name(&summaries[members[0]]);
             unit.label = if members
@@ -214,14 +258,25 @@ impl MaterializationSpace {
         Self { units, below }
     }
 
-    /// Whether `unit` may join `set` with the set staying down-closed.
-    pub fn can_add(&self, set: &BTreeSet<usize>, unit: usize) -> bool {
-        !set.contains(&unit) && self.below[unit].is_subset(set)
+    /// Whether `unit`, not yet materialized in `choices`, may take
+    /// `choice` with the ingestion-time units staying down-closed.
+    pub fn can_choose(&self, choices: &Choices, unit: usize, choice: Choice) -> bool {
+        !choices.contains_key(&unit)
+            && match choice {
+                Choice::IngestionTime => {
+                    self.units[unit].ingestion
+                        && self.below[unit]
+                            .iter()
+                            .all(|v| choices.get(v) == Some(&Choice::IngestionTime))
+                }
+                Choice::Kept => self.units[unit].kept,
+            }
     }
 
-    /// Every down-closed set of units, smallest first (the empty set, all
-    /// query time, is first); `None` when there are more than `max`.
-    pub fn down_closed_sets(&self, max: usize) -> Option<Vec<BTreeSet<usize>>> {
+    /// Every choice of materialization per unit whose ingestion-time units
+    /// are down-closed, fewest materialized units first (the empty choice,
+    /// all query time, is first); `None` when there are more than `max`.
+    pub fn down_closed_sets(&self, max: usize) -> Option<Vec<Choices>> {
         // Units bottom-up, so a unit is decided after every unit below it.
         let mut order: Vec<usize> = Vec::new();
         while order.len() < self.units.len() {
@@ -236,15 +291,19 @@ impl MaterializationSpace {
                 "units below one another form no cycle"
             );
         }
-        let mut sets = vec![BTreeSet::new()];
+        let mut sets = vec![Choices::new()];
         for u in order {
             let additions: Vec<_> = sets
                 .iter()
-                .filter(|set| self.below[u].is_subset(set))
-                .map(|set| {
-                    let mut next = set.clone();
-                    next.insert(u);
-                    next
+                .flat_map(|set| {
+                    [Choice::IngestionTime, Choice::Kept]
+                        .into_iter()
+                        .filter(|&choice| self.can_choose(set, u, choice))
+                        .map(move |choice| {
+                            let mut next = set.clone();
+                            next.insert(u, choice);
+                            next
+                        })
                 })
                 .collect();
             sets.extend(additions);
@@ -256,30 +315,59 @@ impl MaterializationSpace {
         Some(sets)
     }
 
-    /// The assignment putting the summaries of `set` at ingestion time.
-    pub fn assignment(&self, set: &BTreeSet<usize>) -> asap_types::ir::MaterializationAssignment {
+    /// The assignment putting the summaries of `choices` at ingestion time,
+    /// or keeping them at query time.
+    pub fn assignment(&self, choices: &Choices) -> asap_types::ir::MaterializationAssignment {
         let mut assignment = asap_types::ir::MaterializationAssignment::all_query_time();
-        for &u in set {
+        for (&u, choice) in choices {
             for summary in &self.units[u].summaries {
-                assignment.set(summary, ExecutionTiming::IngestionTime);
+                match choice {
+                    Choice::IngestionTime => {
+                        assignment.set(summary, ExecutionTiming::IngestionTime)
+                    }
+                    Choice::Kept => assignment.set_kept(summary),
+                }
             }
         }
         assignment
     }
 
-    /// E.g. "ingestion time: Kll ×5 panes"; empty for the empty set.
-    pub fn label(&self, set: &BTreeSet<usize>) -> String {
-        if set.is_empty() {
-            return String::new();
-        }
-        let units: Vec<_> = set.iter().map(|&u| self.units[u].label.as_str()).collect();
-        format!("ingestion time: {}", units.join(", "))
+    /// E.g. "ingestion time: Kll ×5 panes" or "query time, kept: Kll ×5
+    /// panes"; empty for the empty choice.
+    pub fn label(&self, choices: &Choices) -> String {
+        [
+            (Choice::IngestionTime, "ingestion time"),
+            (Choice::Kept, "query time, kept"),
+        ]
+        .into_iter()
+        .filter_map(|(want, name)| {
+            let units: Vec<_> = choices
+                .iter()
+                .filter(|(_, choice)| **choice == want)
+                .map(|(&u, _)| self.units[u].label.as_str())
+                .collect();
+            (!units.is_empty()).then(|| format!("{name}: {}", units.join(", ")))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
     }
 }
 
 fn repeats_predictably(demand: &RootDemand) -> bool {
     matches!(demand.recurrence, QueryRecurrence::Repeated(_))
         && matches!(demand.predictability, Predictability::Predictable { .. })
+}
+
+/// Evaluations come every `width_ms`, so each builds one new pane of that
+/// width.
+fn evaluates_every(demand: &RootDemand, width_ms: u64) -> bool {
+    matches!(
+        demand.recurrence,
+        QueryRecurrence::Repeated(
+            RepeatedDemand::FixedInterval(interval)
+                | RepeatedDemand::FixedIntervalAt { interval, .. }
+        ) if u64::from(interval.0) == width_ms
+    )
 }
 
 /// One window per evaluation, phase known, and no overlap between
@@ -528,9 +616,10 @@ mod tests {
 
     /// Panes of a query repeating every minute over arriving data give a
     /// second candidate that builds all five panes at ingestion time and
-    /// merges them at query time (Example 4, B1).
+    /// merges them at query time (Example 4, B1), and a third that builds
+    /// them at query time and keeps them (B3).
     #[test]
-    fn tumbling_panes_can_run_at_ingestion_time() {
+    fn tumbling_panes_can_run_at_ingestion_time_or_be_kept() {
         let demand = [every(60_000)];
         let roots = roots(
             &[(P99_5M, P99)],
@@ -539,9 +628,18 @@ mod tests {
         );
         let out = stage2(&roots, &demand, &ingesting());
         assert!(out.exhaustive);
-        let [all_query, maintained] = &out.candidates[..] else {
-            panic!("two candidates: {:?}", out.candidates.len())
+        let [all_query, maintained, kept] = &out.candidates[..] else {
+            panic!("three candidates: {:?}", out.candidates.len())
         };
+        assert!(all_query.dag.nodes.iter().all(|n| !n.kept));
+        assert!(maintained.dag.nodes.iter().all(|n| !n.kept));
+        assert_eq!(kept.materialization, "query time, kept: DDSketch ×5 panes");
+        assert!(timings(kept, |_| true)
+            .iter()
+            .all(|t| *t == ExecutionTiming::QueryTime));
+        let kept_nodes: Vec<_> = kept.dag.nodes.iter().filter(|n| n.kept).collect();
+        assert_eq!(kept_nodes.len(), 5);
+        assert!(kept_nodes.iter().all(|n| is_build(&n.payload)));
         assert!(timings(all_query, |_| true)
             .iter()
             .all(|t| *t == ExecutionTiming::QueryTime));
@@ -561,7 +659,8 @@ mod tests {
     }
 
     /// Ingestion time needs arriving data (`Unknown` counts as not
-    /// ingesting) and repeated, predictable roots.
+    /// ingesting) and repeated, predictable roots; keeping panes at query
+    /// time needs only repetition.
     #[test]
     fn ingestion_time_needs_arrival_and_predictable_repetition() {
         let demand = [every(60_000)];
@@ -570,22 +669,26 @@ mod tests {
             &demand,
             WindowForm::Tumbling { pane_ms: 60_000 },
         );
+        let labels = |demand: &[RootDemand], data: &DataWorkload| -> Vec<String> {
+            stage2(&roots, demand, data)
+                .candidates
+                .into_iter()
+                .map(|c| c.materialization)
+                .collect()
+        };
+        let kept_only = ["", "query time, kept: DDSketch ×5 panes"];
         for arrival in [DataArrival::AtRest, DataArrival::Unknown] {
             let data = DataWorkload {
                 arrival,
                 ..Default::default()
             };
-            assert_eq!(
-                stage2(&roots, &demand, &data).candidates.len(),
-                1,
-                "{arrival:?}"
-            );
+            assert_eq!(labels(&demand, &data), kept_only, "{arrival:?}");
         }
         let mixed = DataWorkload {
             arrival: DataArrival::Mixed,
             ..Default::default()
         };
-        assert_eq!(stage2(&roots, &demand, &mixed).candidates.len(), 2);
+        assert_eq!(labels(&demand, &mixed).len(), 3);
         let ad_hoc = RootDemand {
             predictability: Predictability::AdHoc,
             ..every(60_000)
@@ -597,14 +700,26 @@ mod tests {
             },
             ..every(60_000)
         };
-        for demand in [ad_hoc, once] {
-            assert_eq!(
-                stage2(&roots, std::slice::from_ref(&demand), &ingesting())
-                    .candidates
-                    .len(),
-                1
-            );
-        }
+        assert_eq!(labels(&[ad_hoc], &ingesting()), kept_only);
+        assert_eq!(labels(&[once], &ingesting()), [""]);
+    }
+
+    /// Keeping panes needs one new pane per evaluation: a 5-min window
+    /// every 2 min has 1-min panes, so it gets no kept option.
+    #[test]
+    fn kept_panes_need_one_new_pane_per_evaluation() {
+        let demand = [every(120_000)];
+        let roots = roots(
+            &[(P99_5M, P99)],
+            &demand,
+            WindowForm::Tumbling { pane_ms: 60_000 },
+        );
+        let labels: Vec<_> = stage2(&roots, &demand, &ingesting())
+            .candidates
+            .into_iter()
+            .map(|c| c.materialization)
+            .collect();
+        assert_eq!(labels, ["", "ingestion time: DDSketch ×5 panes"]);
     }
 
     /// A whole window is maintainable only when each evaluation reads one
@@ -647,8 +762,11 @@ mod tests {
         let sets = space.down_closed_sets(MAX_PHYSICAL_PER_LOGICAL).unwrap();
         assert_eq!(sets.len(), 3, "{labels:?}");
         for set in &sets {
-            for &u in set {
-                assert!(space.below[u].is_subset(set));
+            for (&u, choice) in set {
+                assert_eq!(*choice, Choice::IngestionTime);
+                assert!(space.below[u]
+                    .iter()
+                    .all(|v| set.get(v) == Some(&Choice::IngestionTime)));
             }
         }
         // Over panes, the top-k sketch reads a sliding window: only the

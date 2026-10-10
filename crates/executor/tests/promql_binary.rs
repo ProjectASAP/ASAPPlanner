@@ -78,6 +78,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhys
             rhs: 1,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
+        kept: false,
         output_schema: (*schema).clone(),
         guarantee: None,
     };
@@ -393,6 +394,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                                 },
                             ),
                         },
+                        kept: false,
                         output_state: if id < 2 {
                             ExecutionDataState::INGESTION_SUMMARY
                         } else {
