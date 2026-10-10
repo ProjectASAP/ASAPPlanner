@@ -146,6 +146,25 @@ impl SqlLowerer<'_> {
 
             Expr::IsNotNull(inner) => Ok(Unresolved::IsNotNull(bx(inner)?)),
 
+            // Fold a numeric cast of a literal, as DataFusion's constant folding
+            // does: type coercion turns `latency < 100` on a DOUBLE column into
+            // `latency < CAST(100 AS DOUBLE)`, which lowers as `latency < 100.0`.
+            Expr::Cast(c)
+                if matches!(c.expr.as_ref(), Expr::Literal(..))
+                    && (c.field.data_type().is_integer() || c.field.data_type().is_floating()) =>
+            {
+                let Expr::Literal(sv, _) = c.expr.as_ref() else {
+                    unreachable!()
+                };
+                match sv.cast_to(c.field.data_type()) {
+                    Ok(folded) => scalar_value_to_asap(&folded).map(Unresolved::Literal),
+                    Err(_) => Ok(Unresolved::Cast {
+                        expr: bx(&c.expr)?,
+                        to: arrow_to_dtype(c.field.data_type())?,
+                        try_cast: false,
+                    }),
+                }
+            }
             Expr::Cast(c) => Ok(Unresolved::Cast {
                 expr: bx(&c.expr)?,
                 to: arrow_to_dtype(c.field.data_type())?,

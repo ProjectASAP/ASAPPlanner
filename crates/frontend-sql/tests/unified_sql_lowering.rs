@@ -2217,6 +2217,24 @@ async fn now_in_predicate_lowers_to_current_timestamp() {
     );
 }
 
+/// The cast that type coercion puts on `100` against a `DOUBLE` column is
+/// folded into the literal, as DataFusion's constant folding does.
+#[tokio::test]
+async fn coerced_literal_is_folded() {
+    let qe = lower("SELECT * FROM metrics WHERE latency < 100").await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    let NonASAPOp::Scan { predicates, .. } = op(child) else {
+        panic!("expected Scan under the projection, got {child:?}");
+    };
+    assert!(
+        matches!(&predicates[..], [Predicate(ScalarExpr::Compare { right, .. })]
+            if matches!(right.as_ref(), ScalarExpr::Literal(ScalarValue::Float64(v)) if *v == 100.0)),
+        "{predicates:?}"
+    );
+}
+
 /// Same for ClickHouse's `now()`, since #184 was raised specifically against
 /// the ClickHouse dialect.
 #[tokio::test]
