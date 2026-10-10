@@ -2,536 +2,211 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>ASAP query DAG viewer</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<script src="dagre.min.js"></script>
-<script src="cytoscape.min.js"></script>
-<script src="cytoscape-dagre.js"></script>
-<script src="node-style.js"></script>
+<title>ASAPPlanner Stage Viewer</title>
 <style>
-  :root {
-    color-scheme: light dark;
-    --bg: #ffffff;
-    --fg: #1b1f24;
-    --muted: #6b7280;
-    --panel: #f6f7f9;
-    --panel2: #f0f2f5;
-    --border: #d9dce1;
-    --accent: #2563eb;
+:root {
+  --bg: #f3f4f7;
+  --panel: #ffffff;
+  --panel-2: #eceef3;
+  --line: #d5d9e2;
+  --fg: #161b26;
+  --muted: #5b6375;
+  --accent: #2b4fb8;
+  --accent-soft: #e3e9fb;
+  --ok: #1f7a4d;
+  --ok-soft: #e1f2e9;
+  --bad: #b3261e;
+  --bad-soft: #fbe5e3;
+  --warn: #8a5a00;
+  --warn-soft: #f7ecd6;
+  --cat-source: #dfe7f5;
+  --cat-source-line: #6f86b4;
+  --cat-rel: #f0f1f4;
+  --cat-rel-line: #8a91a3;
+  --cat-summary: #ece4f8;
+  --cat-summary-line: #7a5ab5;
+  --edge: #9aa1b2;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11141b; --panel: #181c25; --panel-2: #1f2430; --line: #2e3443; --fg: #e6e9f0; --muted: #9aa2b4;
+    --accent: #8ea8ff; --accent-soft: #232c49; --ok: #6fd3a0; --ok-soft: #173326; --bad: #ff8f86; --bad-soft: #3a1d1b;
+    --warn: #e8bd6a; --warn-soft: #3a2e14; --cat-source: #1f2a40; --cat-source-line: #6f8cc8; --cat-rel: #232833;
+    --cat-rel-line: #7c849a; --cat-summary: #2c2340; --cat-summary-line: #a88be0; --edge: #5f6780; color-scheme: dark;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #14161a;
-      --fg: #e6e8eb;
-      --muted: #9aa1ab;
-      --panel: #1d2025;
-      --panel2: #23262c;
-      --border: #333740;
-      --accent: #5b8def;
-    }
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
-  body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--fg);
-    display: flex;
-    flex-direction: column;
-  }
-  header {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    padding: 0.6rem 1rem;
-    border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
-  }
-  header h1 {
-    font-size: 0.95rem;
-    font-weight: 600;
-    margin: 0;
-    white-space: nowrap;
-  }
-  #dropzone {
-    border: 1px dashed var(--border);
-    border-radius: 999px;
-    padding: 0.35rem 0.9rem;
-    font-size: 0.8rem;
-    color: var(--muted);
-    cursor: pointer;
-    transition: border-color 0.15s ease-in-out, color 0.15s ease-in-out;
-  }
-  #dropzone.dragover { border-color: var(--accent); color: var(--accent); }
-  #fileInput { display: none; }
-  .btn {
-    font-size: 0.78rem;
-    font-weight: 650;
-    padding: 0.35rem 0.7rem;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--panel2);
-    color: var(--fg);
-    cursor: pointer;
-    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background 0.15s ease-in-out;
-  }
-  .btn:hover, .btn.active {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
-  }
-  label.toggle {
-    font-size: 0.8rem;
-    color: var(--muted);
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    white-space: nowrap;
-  }
-  /* The bulk-selection chip sits outside the scrolling strip: with fifty
-     queries, a control inside #tabs would be scrolled off exactly when it is
-     most needed. */
-  #tabsRow {
-    display: flex;
-    align-items: flex-end;
-    gap: 0.25rem;
-    padding: 0.4rem 0.75rem 0;
-    border-bottom: 1px solid var(--border);
-  }
-  #tabs {
-    display: flex;
-    gap: 0.25rem;
-    overflow-x: auto;
-    flex: 1;
-    /* Without this the flex child refuses to shrink and the strip never
-       scrolls -- it pushes the row wider instead. */
-    min-width: 0;
-  }
-  .tab {
-    padding: 0.4rem 0.8rem;
-    font-size: 0.82rem;
-    border: 1px solid var(--border);
-    border-bottom: none;
-    border-radius: 6px 6px 0 0;
-    background: var(--panel);
-    color: var(--muted);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .tab.active { color: var(--fg); background: var(--bg); font-weight: 600; }
-  .tab.checkTab { display: flex; align-items: center; gap: 0.35rem; cursor: default; }
-  .tab.checkTab input { cursor: pointer; }
-  .tab.allTab { font-weight: 600; }
-  .tab.allTab[hidden] { display: none; }
-  .modeToggle { display: flex; gap: 0.3rem; }
-  #plannerPanel {
-    display: none;
-    padding: 0.65rem 0.75rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel);
-  }
-  #plannerPanel.visible { display: block; }
-  #plannerRows { display: flex; flex-direction: column; gap: 0.45rem; }
-  .plannerRow { display: grid; grid-template-columns: auto 130px 80px 150px minmax(280px, 1fr) auto; gap: 0.45rem; align-items: center; }
-  .plannerRow input, .plannerRow select, .plannerRow textarea, #plannerEpsilon,
-  .schemaRow input, .schemaRow textarea {
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--fg);
-    padding: 0.35rem 0.45rem;
-    font: inherit;
-  }
-  .plannerRow textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.75rem; }
-  .plannerSchemas { display:flex; flex-wrap:wrap; gap:.2rem .45rem; font-size:.68rem; color:var(--muted); }
-  .plannerSchemas label { display:flex; align-items:center; gap:.15rem; }
-  .schemaEditor { margin-bottom: 0.75rem; padding-bottom: 0.7rem; border-bottom: 1px solid var(--border); }
-  .schemaEditorHead { display:flex; align-items:center; gap:.6rem; margin-bottom:.45rem; }
-  .schemaEditorHead h2 { margin:0; font-size:.8rem; }
-  #schemaRows { display:flex; flex-direction:column; gap:.4rem; }
-  .schemaRow { display:grid; grid-template-columns:auto 150px minmax(360px,1fr) 105px auto; gap:.45rem; align-items:center; }
-  .schemaRow textarea { resize:vertical; font: .72rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .schemaHint { color:var(--muted); font-size:.7rem; }
-  .plannerActions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.55rem; }
-  #plannerStatus { color: var(--muted); font-size: 0.75rem; }
-  #scopePicker {
-    display: none;
-    flex-wrap: wrap;
-    gap: 0.6rem 1.2rem;
-    padding: 0.55rem 0.75rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel);
-  }
-  #scopePicker.visible { display: flex; }
-  .scopeGroup { display: flex; flex-direction: column; gap: 0.3rem; min-width: 220px; }
-  .scopeGroupLabel {
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: .03em;
-    color: var(--muted);
-  }
-  .scopeRow {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.35rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--panel2);
-    color: var(--fg);
-    font: inherit;
-    font-size: 0.78rem;
-    text-align: left;
-  }
-  .scopeRow.active {
-    border-color: var(--accent);
-    background: var(--bg);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
-  }
-  .scopeRow .scopeMeta { color: var(--muted); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
-  .costComparisonGroup { min-width: min(760px, 100%); }
-  .costComparison { display: flex; align-items: stretch; gap: 0.45rem; flex-wrap: wrap; }
-  .costStage, .costSaving {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 0.15rem;
-    min-width: 180px;
-    padding: 0.45rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg);
-  }
-  .costStage span, .costSaving span { color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: .03em; }
-  .costStage strong, .costSaving strong { font-size: 0.86rem; font-variant-numeric: tabular-nums; }
-  .costStage--pre { border-left: 4px solid #b45309; }
-  .costStage--post { border-left: 4px solid var(--accent); }
-  .costArrow { display: flex; align-items: center; color: var(--muted); font-size: 1.25rem; font-weight: 700; }
-  .costSaving { border-left: 4px solid #15803d; color: #15803d; }
-  .costSaving--regression { border-left-color: #b91c1c; color: #b91c1c; }
-  .costComparisonHint { color: var(--muted); font-size: 0.68rem; }
-  .proxyNote {
-    font-size: 0.72rem;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  .modeHint {
-    position: absolute;
-    inset: 0;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    color: var(--muted);
-    font-size: 0.9rem;
-    text-align: center;
-    padding: 2rem;
-    background: var(--bg);
-  }
-  #main {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-  }
-  #cyOuter {
-    flex: 1;
-    min-width: 0;
-    position: relative;
-  }
-  #cy { position: absolute; inset: 0; }
-  #empty {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--muted);
-    font-size: 0.9rem;
-    text-align: center;
-    padding: 2rem;
-  }
-  .toolbar {
-    position: absolute;
-    top: 10px;
-    left: 10px;
-    right: 10px;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    justify-content: space-between;
-    z-index: 4;
-    pointer-events: none;
-  }
-  .toolbar > * { pointer-events: auto; }
-  .pill, .zoomControls {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
-  }
-  .pill {
-    border-radius: 999px;
-    padding: 0.4rem 0.7rem;
-    font-size: 0.78rem;
-    color: var(--muted);
-  }
-  .zoomControls {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    border-radius: 999px;
-    padding: 0.3rem 0.5rem;
-  }
-  .zoomControls input { width: 100px; }
-  .zoomLabel {
-    font-size: 0.75rem;
-    color: var(--muted);
-    min-width: 36px;
-    text-align: right;
-  }
-  #sidepanel {
-    width: 340px;
-    min-width: 260px;
-    max-width: 70vw;
-    flex-shrink: 0;
-    border-left: 1px solid var(--border);
-    background: var(--panel);
-    overflow-y: auto;
-    font-size: 0.8rem;
-  }
-  #sideResizeHandle {
-    width: 6px;
-    flex: 0 0 6px;
-    cursor: col-resize;
-    background: transparent;
-    border-left: 1px solid var(--border);
-    touch-action: none;
-  }
-  #sideResizeHandle:hover, #sideResizeHandle.dragging {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-    border-left-color: var(--accent);
-  }
-  #sidepanel .section {
-    padding: 0.8rem;
-    border-bottom: 1px solid var(--border);
-  }
-  #sidepanel h2 {
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: .04em;
-    margin: 0 0 0.5rem;
-    color: var(--muted);
-  }
-  .chip {
-    display: inline-block;
-    font-size: 0.7rem;
-    font-weight: 650;
-    border-radius: 999px;
-    padding: 0.1rem 0.55rem;
-    margin-bottom: 0.5rem;
-    border: 1px solid currentColor;
-  }
-  .rootNote, .shared-note {
-    font-size: 0.75rem;
-    margin-bottom: 0.5rem;
-  }
-  .rootNote { color: var(--cat-output-border, #b42318); }
-  .shared-note { color: var(--accent); }
-  .notesBlock { margin-bottom: 0.5rem; }
-  .notesBlock h3 {
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: .03em;
-    margin: 0 0 0.3rem;
-    color: var(--muted);
-  }
-  .noteItem {
-    border-left: 3px solid var(--border);
-    padding: 0.15rem 0 0.15rem 0.5rem;
-    margin-bottom: 0.4rem;
-  }
-  .noteKind { font-size: 0.72rem; font-weight: 700; }
-  .noteReason { font-size: 0.75rem; color: var(--fg); margin-top: 0.15rem; }
-  .translationBlock {
-    margin: 0.65rem 0;
-    padding: 0.55rem;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-    border-radius: 8px;
-    background: var(--bg);
-  }
-  .translationBlock h3, .detailSubhead {
-    margin: 0 0 0.4rem;
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: .03em;
-    color: var(--muted);
-  }
-  .translationCard + .translationCard { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.5rem; }
-  .translationStrategy { color: var(--accent); font-weight: 750; }
-  .translationMeta, .translationTarget { color: var(--muted); font-size: 0.7rem; margin-top: 0.2rem; }
-  .translationReason { margin-top: 0.35rem; line-height: 1.35; }
-  .translationBlock.unchanged { border-style: dashed; color: var(--muted); }
-  .detailSubhead { margin-top: 0.65rem; }
-  #detailSection pre {
-    white-space: pre-wrap;
-    word-break: break-word;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.55rem;
-    margin: 0;
-    font-size: 0.72rem;
-  }
-  #detailSection .placeholder { color: var(--muted); }
-  .code {
-    white-space: pre-wrap;
-    word-break: break-word;
-    background: var(--bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.55rem;
-    margin: 0;
-    font: 0.7rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    max-height: 260px;
-    overflow: auto;
-  }
-  .code.placeholder { color: var(--muted); font-family: inherit; }
-  .legend { display: flex; flex-direction: column; gap: 7px; }
-  .leg { display: flex; align-items: flex-start; gap: 8px; font-size: 0.75rem; color: var(--fg); }
-  .leg .swatch {
-    width: 16px;
-    height: 16px;
-    border-radius: 5px;
-    flex-shrink: 0;
-    margin-top: 1px;
-    border: 1.5px solid;
-  }
-  .leg .swatchLabel { font-weight: 650; }
-  .leg .swatchDesc { color: var(--muted); display: block; }
-  .leg .swatch.ring { background: transparent; border-radius: 999px; border-width: 2px; }
-
-  /* Issue #286: structured cost/benefit annotations. */
-  .costBlock {
-    margin: 0.5rem 0;
-    padding: 0.5rem 0.55rem;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--panel2);
-  }
-  .costBlock h4 {
-    margin: 0 0 0.35rem;
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: .03em;
-    color: var(--muted);
-  }
-  .costRow { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; margin: 0.15rem 0; }
-  .costRow .costLabel { color: var(--muted); font-size: 0.72rem; min-width: 72px; }
-  .costRow .costValue { font-weight: 650; font-variant-numeric: tabular-nums; }
-  .costBadge {
-    display: inline-block;
-    font-size: 0.64rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: .02em;
-    border-radius: 4px;
-    padding: 0.05rem 0.35rem;
-  }
-  .costBadge--modeled { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
-  .costBadge--measured { color: #15803d; background: color-mix(in srgb, #15803d 16%, transparent); }
-  .costBadge--unavailable { color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, transparent); }
-  .costMeta { color: var(--muted); font-size: 0.68rem; margin-top: 0.15rem; }
-  .costInputs { margin: 0.3rem 0 0; padding: 0; list-style: none; font-size: 0.68rem; color: var(--muted); }
-  .costInputs li { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.05rem 0; }
+}
+:root[data-theme="dark"] {
+  --bg: #11141b; --panel: #181c25; --panel-2: #1f2430; --line: #2e3443; --fg: #e6e9f0; --muted: #9aa2b4;
+  --accent: #8ea8ff; --accent-soft: #232c49; --ok: #6fd3a0; --ok-soft: #173326; --bad: #ff8f86; --bad-soft: #3a1d1b;
+  --warn: #e8bd6a; --warn-soft: #3a2e14; --cat-source: #1f2a40; --cat-source-line: #6f8cc8; --cat-rel: #232833;
+  --cat-rel-line: #7c849a; --cat-summary: #2c2340; --cat-summary-line: #a88be0; --edge: #5f6780; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
+.wrap { padding-inline: 16px; padding-block: 18px 32px; max-width: 1680px; margin-inline: auto; display: grid; gap: 16px; }
+header { display: grid; gap: 10px; }
+h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter-spacing: 0.01em; margin: 0; text-wrap: balance; }
+.lede { margin: 0; color: var(--muted); max-width: 78ch; }
+.queries { display: flex; flex-wrap: wrap; gap: 8px; }
+.query { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 4px; min-width: 0; max-width: 100%; }
+.query code { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.qid { font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 12px; color: var(--accent); }
+.req { color: var(--muted); font-size: 12px; }
+.stages { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.stages b { color: var(--fg); font-family: var(--font-mono); font-weight: 500; }
+.main { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.eyebrow { font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; font-size: 12px; color: var(--muted); }
+.panel-head h2 { font-family: var(--font-display); font-weight: 600; font-size: 16px; margin: 0; }
+.rank { list-style: none; margin: 0; padding: 6px; max-height: 760px; overflow-y: auto; display: grid; gap: 4px; }
+.rank button { width: 100%; text-align: left; font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; cursor: pointer; display: grid; grid-template-columns: 34px minmax(0,1fr) auto; gap: 2px 8px; align-items: baseline; }
+.rank button:hover { background: var(--panel-2); }
+.rank button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.rank button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pid { font-family: var(--font-mono); font-weight: 500; }
+.plabel { min-width: 0; overflow-wrap: anywhere; }
+.ptotal { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.pstatus { grid-column: 2 / 4; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.chip { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.chip.selected { color: var(--ok); background: var(--ok-soft); }
+.chip.invalid { color: var(--bad); background: var(--bad-soft); }
+.chip.costlier { color: var(--warn); background: var(--warn-soft); }
+.lanes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; min-width: 0; }
+.lane .panel-head { min-height: 64px; }
+.lane select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; min-width: 0; }
+.lane-meta { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); min-height: 30px; overflow-wrap: anywhere; }
+.lane-meta b { color: var(--fg); font-family: var(--font-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
+.cy { height: 640px; width: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); padding: 2px 2px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; border: 1.5px solid; }
+.details { padding: 12px; display: grid; gap: 10px; }
+.details h3 { margin: 0; font-family: var(--font-display); font-size: 15px; font-weight: 600; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.schema { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 4px 12px 4px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; }
+td { font-family: var(--font-mono); }
+details summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+pre { font-family: var(--font-mono); font-size: 12px; background: var(--panel-2); border-radius: 8px; padding: 10px; overflow-x: auto; margin: 8px 0 0; }
+.hint { color: var(--muted); margin: 0; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tabs button { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
+.tabs button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.story { margin: 0; max-width: 100ch; }
+.deploy { padding: 10px 12px; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 13px; }
+.deploy dt { color: var(--muted); }
+.deploy dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .deploy { grid-template-columns: minmax(0, 1fr); } .deploy dd { margin-bottom: 6px; } }
+.status { color: var(--muted); }
+.error { color: var(--bad); }
+footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
+@media (max-width: 1280px) { .lanes { grid-template-columns: minmax(0, 1fr); } .cy { height: 520px; } }
+@media (max-width: 820px) { .main { grid-template-columns: minmax(0, 1fr); } .rank { max-height: 340px; } .cy { height: 460px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
+.btn:hover { background: var(--panel-2); }
+.btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.drop-active { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.editor { padding: 12px; display: grid; gap: 10px; }
+.editor textarea { font-family: var(--font-mono); font-size: 12.5px; width: 100%; min-height: 84px; resize: vertical; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.editor .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.editor input { font: inherit; width: 8em; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+.editor label { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
 </style>
 </head>
 <body>
-
-<header>
-  <h1>ASAP query DAG viewer</h1>
-  <div id="dropzone">Drop WorkloadDAG JSON here, or click to choose file(s)</div>
-  <input id="fileInput" type="file" accept="application/json" multiple />
-  <div class="modeToggle" id="modeToggle">
-    <button class="btn active" type="button" disabled>Pre/Post-ASAP</button>
-  </div>
-  <button class="btn" id="plannerToggle">Query editor</button>
-  <button class="btn" id="clearBtn">Clear all</button>
-  <label class="toggle">
-    <input id="highlightToggle" type="checkbox" checked />
-    Highlight shared sub-DAGs
-  </label>
-  <span class="proxyNote">Click an edge to inspect its schema</span>
-</header>
-
-<div id="plannerPanel">
-  <div class="schemaEditor">
-    <div class="schemaEditorHead">
-      <h2>Input table schemas</h2>
-      <button class="btn" id="schemaAdd" type="button">Add table schema</button>
-      <span class="schemaHint">One column per line: name TYPE [NOT NULL]. PromQL schemas are inferred from metric usage.</span>
-    </div>
-    <div id="schemaRows"></div>
-  </div>
-  <div id="plannerRows"></div>
-  <div class="plannerActions">
-    <button class="btn" id="plannerAdd" type="button">Add query</button>
-    <label class="toggle">epsilon <input id="plannerEpsilon" type="number" min="0.000001" max="0.999999" step="0.001" value="0.01" /></label>
-    <button class="btn" id="plannerRun" type="button">Plan selected workload</button>
-    <span id="plannerStatus">Requires the local interactive server.</span>
-  </div>
-</div>
-
-<div id="tabsRow">
-  <label class="tab checkTab allTab" id="selectAllTab"
-         title="Select or deselect every query. Unlike Clear all, this keeps the loaded workload.">
-    <input id="selectAllToggle" type="checkbox" />
-    All
-  </label>
-  <div id="tabs"></div>
-</div>
-<div id="scopePicker"></div>
-
-<div id="main">
-  <div id="empty">
-    Load one or more JSON files produced by
-    <code>cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 &gt; dag.json</code>
-    to get started.
-  </div>
-  <div id="cyOuter" style="display:none">
+<div class="wrap">
+  <header>
+    <h1>ASAPPlanner Stage Viewer</h1>
+    <p class="lede">The planner's four stages for one workload: the frontends lower the queries into one logical DAG (Stage 0), Pass 1 and Pass 2 propose logical ASAP candidates (Stage 1), each becomes physical plans that differ in what runs at ingestion time (Stage 2), and Stage 3 checks accuracy, latency and deployment capabilities, prices every valid plan and selects the cheapest.</p>
+    <nav class="tabs" id="tabs" aria-label="Example"></nav>
     <div class="toolbar">
-      <div class="pill" id="viewTitle">Query DAG</div>
-      <div class="zoomControls">
-        <button class="btn" id="zoomOutBtn" title="Zoom out">−</button>
-        <input id="zoomSlider" type="range" min="25" max="250" value="100" />
-        <button class="btn" id="zoomInBtn" title="Zoom in">+</button>
-        <span class="zoomLabel" id="zoomLabel">100%</span>
-        <button class="btn" id="fitBtn">Fit</button>
-        <button class="btn" id="resetBtn">100%</button>
+      <button class="btn" id="openFile" type="button">Open stage document…</button>
+      <input id="fileInput" type="file" accept="application/json" hidden />
+      <button class="btn" id="editorToggle" type="button" aria-pressed="false">Query editor</button>
+      <span class="status" id="docName"></span>
+    </div>
+    <section class="panel" id="editor" aria-labelledby="editor-title" hidden>
+      <div class="panel-head"><h2 id="editor-title">Plan PromQL queries</h2><span class="eyebrow">needs the local server (server.py)</span></div>
+      <form class="editor" id="editorForm">
+        <textarea id="editorQueries" aria-label="PromQL queries, one per line" spellcheck="false">sum by (job) (rate(http_requests_total[1m]))
+topk by (job) (10, sum_over_time(http_requests_total[1m]))</textarea>
+        <div class="row">
+          <label>ε <input id="editorEpsilon" type="number" min="0.000001" max="0.999999" step="any" placeholder="exact" /></label>
+          <label>δ <input id="editorDelta" type="number" min="0.000001" max="0.999999" step="any" placeholder="none" /></label>
+          <label>sample interval (ms) <input id="editorInterval" type="number" min="1" step="1" value="15000" /></label>
+          <button class="btn" type="submit">Plan</button>
+          <span class="status" id="editorStatus">One query per line. Without ε the queries are exact.</span>
+        </div>
+      </form>
+    </section>
+    <p class="story" id="story"></p>
+    <div class="queries" id="queries"><span class="status">Pick an example, open a stage document, or plan queries in the editor.</span></div>
+    <div class="stages" id="counts"></div>
+    <section class="panel" id="deployment-panel" aria-labelledby="deployment-title" hidden>
+      <div class="panel-head"><h2 id="deployment-title">Deployment inputs</h2><span class="eyebrow">what the deployment gives the planner</span></div>
+      <dl class="deploy" id="deployment"></dl>
+    </section>
+  </header>
+
+  <div class="main">
+    <section class="panel" aria-labelledby="rank-title">
+      <div class="panel-head"><h2 id="rank-title">Stage 3 · plans by cost</h2><span class="eyebrow" id="cost-unit"></span></div>
+      <div class="lane-meta" id="shown-of" hidden></div>
+      <ol class="rank" id="rank"></ol>
+    </section>
+
+    <div style="display:grid; gap:12px; min-width:0">
+      <div class="lanes">
+        <section class="panel lane" aria-labelledby="lane0-title">
+          <div class="panel-head"><div><div class="eyebrow">Stage 0</div><h2 id="lane0-title">Logical DAG</h2></div></div>
+          <div class="lane-meta" id="lane0-meta"></div>
+          <div class="cy" id="cy0"></div>
+        </section>
+        <section class="panel lane" aria-labelledby="lane1-title">
+          <div class="panel-head"><div><div class="eyebrow">Stage 1</div><h2 id="lane1-title">Logical ASAP DAG</h2></div>
+            <label><span class="eyebrow" style="display:block">candidate</span><select id="pick1" aria-label="Logical ASAP candidate"></select></label></div>
+          <div class="lane-meta" id="lane1-meta"></div>
+          <div class="cy" id="cy1"></div>
+        </section>
+        <section class="panel lane" aria-labelledby="lane2-title">
+          <div class="panel-head"><div><div class="eyebrow">Stage 2 · costs from Stage 3</div><h2 id="lane2-title">Physical ASAP DAG</h2></div>
+            <label><span class="eyebrow" style="display:block">candidate</span><select id="pick2" aria-label="Physical ASAP candidate"></select></label></div>
+          <div class="lane-meta" id="lane2-meta"></div>
+          <div class="cy" id="cy2"></div>
+        </section>
       </div>
-    </div>
-    <div id="cy"></div>
-    <div id="modeHint" class="modeHint"></div>
-  </div>
-  <div id="sideResizeHandle" style="display:none" title="Drag to resize details panel"></div>
-  <div id="sidepanel" style="display:none">
-    <div class="section" id="detailSection">
-      <h2>Selected node</h2>
-      <div class="placeholder">Click a node to inspect it.</div>
-    </div>
-    <div class="section">
-      <h2>Query source</h2>
-      <pre class="code" id="sourceBox"></pre>
-    </div>
-    <div class="section">
-      <h2>Input table / metric schemas</h2>
-      <pre class="code" id="tableSchemaBox"></pre>
-    </div>
-    <div class="section">
-      <h2>Legend</h2>
-      <div class="legend" id="legendList"></div>
+      <div class="legend" aria-label="Legend">
+        <span><span class="swatch" style="background:var(--cat-source); border-color:var(--cat-source-line)"></span>data source</span>
+        <span><span class="swatch" style="background:var(--cat-rel); border-color:var(--cat-rel-line)"></span>relational operator</span>
+        <span><span class="swatch" style="background:var(--cat-summary); border-color:var(--cat-summary-line)"></span>summary operator (build, merge, estimate, finalize)</span>
+        <span><span class="swatch" style="background:transparent; border-color:var(--accent); border-width:3px"></span>query root</span>
+      </div>
+      <section class="panel" aria-labelledby="details-title">
+        <div class="panel-head"><h2 id="details-title">Details</h2><span class="eyebrow">click a node or edge</span></div>
+        <div class="details" id="details"></div>
+      </section>
     </div>
   </div>
+
+  <footer>Documents are written by the <code>stage_pipeline</code> devtool (<code>asap-stage-pipeline/v1</code>). Statistics in the built-in examples are illustrative, so only each example's ranking is meaningful.</footer>
 </div>
 
-<script src="viewer.js"></script>
-<script src="planner-ui.js"></script>
+<script src="cytoscape.min.js"></script>
+<script src="dagre.min.js"></script>
+<script src="cytoscape-dagre.js"></script>
+<script src="node-style.js"></script>
+<script src="stages.js"></script>
+<script src="app.js"></script>
+<script src="editor.js"></script>
 </body>
 </html>
