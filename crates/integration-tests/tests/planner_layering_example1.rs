@@ -6,13 +6,14 @@
 //! stages. Tests that still fail because the implementation differs from the
 //! spec stay `#[ignore]`d with the difference as the reason.
 //!
-//! MVP scope: Stage 1 = Pass 1 + the identical-expression rule only (no
-//! window-composition variants); Stage 2 = physical operator implementation
-//! only (no materialization). Counts follow the planner's output (user
-//! decision): 1 → 64 → 64 → 1, because Pass 1 also offers exact accumulators
-//! and whole-expression top-k sketches (32 combinations) and Pass 2 adds a
-//! shared-input variant of each. The doc's 1 → 54 → 156 → 1 needs window
-//! composition and materialization.
+//! MVP scope: Stage 1 = Pass 1 + the identical-expression rule + the
+//! window-composition rule's tumbling windows; Stage 2 = physical operator
+//! implementation only (no materialization). Counts follow the planner's
+//! output (user decision): 1 → 88 → 88 → 1, because Pass 1 also offers exact
+//! accumulators and whole-expression top-k sketches, Q2's exact sum also
+//! comes in 10-s tumbling panes (44 combinations; rates and top-k heaps do
+//! not merge, #580), and Pass 2 adds a shared-input variant of each. The
+//! doc's 1 → 54 → 156 → 1 needs sliding windows, Hydra and materialization.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -38,9 +39,12 @@ mod stages {
     use std::rc::Rc;
 
     use super::*;
-
-    use asap_plan_selection::{plan_stages, MAX_ENUMERATED_CANDIDATES};
+    use asap_plan_selection::plan_stages;
     use asap_types::ir::{OperatorNode, QueryRoot};
+
+    /// Every Example 1 candidate is built (88 with Q2's tumbling sums),
+    /// above the selection fallback's 64.
+    const DISPLAYED: usize = 128;
 
     /// One whole-workload candidate. `query_roots` holds one root per
     /// workload entry, in `QueryWorkload::entries()` order (`[q1, q2]`).
@@ -160,7 +164,7 @@ mod stages {
             &demand,
             workload.data_workload.as_ref().expect("data workload"),
             PlanningModels::builtin(),
-            MAX_ENUMERATED_CANDIDATES,
+            DISPLAYED,
         )
         .expect("plans");
         let enumeration = run.enumeration.expect("enumerated");
@@ -475,19 +479,30 @@ fn sketch_options(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> BTreeSet<Q
         .collect()
 }
 
-/// Exact accumulator kinds built in `nodes` (e.g. `["Rate", "Sum"]`).
+/// Exact accumulator kinds built in `nodes` (e.g. `["Rate", "Sum"]`); one
+/// built in panes merged by a `SummaryMerge` is `"Sum panes"`.
 fn exact_accumulators(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> Vec<String> {
+    let merged = |id| {
+        nodes.iter().any(|&m| {
+            matches!(payload(dag, m), Operator::ASAP(ASAPOp::SummaryMerge { .. }))
+                && dag.producers(m).contains(&id)
+        })
+    };
     let mut kinds: Vec<_> = nodes
         .iter()
         .filter_map(|&id| match payload(dag, id) {
             Operator::ASAP(ASAPOp::SummaryAgg {
                 family: FieldDataType::ExactAggregate(kind, _),
                 ..
-            }) => Some(format!("{kind:?}")),
+            }) => Some(match merged(id) {
+                true => format!("{kind:?} panes"),
+                false => format!("{kind:?}"),
+            }),
             _ => None,
         })
         .collect();
     kinds.sort();
+    kinds.dedup();
     kinds
 }
 
@@ -570,11 +585,11 @@ fn choices(dag: &impl ExportedDag, query_roots: &[NodeId]) -> Choices {
     )
 }
 
-/// The 32 Pass 1 combinations: Q1's rate and sum each raw or an exact
+/// The 44 Stage 1 combinations: Q1's rate and sum each raw or an exact
 /// accumulator (4) × (Q2's top-k exact, Count-Min + heap or CountSketch +
-/// heap (3) × Q2's sum_over_time raw or an exact accumulator (2), or a
-/// whole-expression Count-Min + heap or CountSketch + heap that absorbs
-/// sum_over_time (2)).
+/// heap (3) × Q2's sum_over_time raw, an exact accumulator or exact
+/// accumulators over 10-s tumbling panes (3), or a whole-expression
+/// Count-Min + heap or CountSketch + heap that absorbs sum_over_time (2)).
 fn expected_choices() -> BTreeSet<Choices> {
     let q1 = [vec![], vec!["Rate"], vec!["Sum"], vec!["Rate", "Sum"]];
     let q2 = [
@@ -586,7 +601,7 @@ fn expected_choices() -> BTreeSet<Choices> {
     let mut all = BTreeSet::new();
     for a in &q1 {
         for &option in &q2 {
-            for b in [vec![], vec!["Sum"]] {
+            for b in [vec![], vec!["Sum"], vec!["Sum panes"]] {
                 all.insert((owned(a), option, owned(&b)));
             }
         }
@@ -666,13 +681,13 @@ fn stage0_queries_do_not_share_nodes() {
 
 // ── Stage 1 ──────────────────────────────────────────────────────────────
 
-/// Stage 1 outputs the 32 Pass 1 combinations twice: L1–L32 with separate
-/// inputs, then L33–L64 with the shared input (Pass 2).
+/// Stage 1 outputs the 44 combinations twice: L1–L44 with separate inputs,
+/// then L45–L88 with the shared input (Pass 2).
 #[test]
-fn stage1_has_64_candidates_covering_every_combination_twice() {
+fn stage1_has_88_candidates_covering_every_combination_twice() {
     let (_, logical, _) = pipeline();
-    assert_eq!(logical.len(), 64);
-    for (half, shared) in [(&logical[..32], false), (&logical[32..], true)] {
+    assert_eq!(logical.len(), 88);
+    for (half, shared) in [(&logical[..44], false), (&logical[44..], true)] {
         let found: BTreeSet<_> = half
             .iter()
             .map(|c| choices(&c.dag, &c.query_roots))
@@ -782,11 +797,11 @@ fn stage1_candidates_are_valid_and_uniquely_named() {
 
 // ── Stage 2 ──────────────────────────────────────────────────────────────
 
-/// No candidate is discarded before Stage 3: Stage 2 maps the 64 logical candidates one-to-one.
+/// No candidate is discarded before Stage 3: Stage 2 maps the 88 logical candidates one-to-one.
 #[test]
 fn stage2_keeps_every_logical_candidate() {
     let (_, logical, physical) = pipeline();
-    assert_eq!(physical.len(), 64);
+    assert_eq!(physical.len(), 88);
     let sources: BTreeSet<_> = physical.iter().map(|p| p.from_logical.as_str()).collect();
     let logical_ids: BTreeSet<_> = logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(sources, logical_ids);
@@ -818,7 +833,7 @@ fn stage2_exact_topk_is_sort_then_limit() {
         .iter()
         .filter(|p| classify(&p.dag, &p.query_roots).0 == Q2Option::Exact)
         .collect();
-    assert_eq!(exact.len(), 16);
+    assert_eq!(exact.len(), 24);
     for p in exact {
         let sort_then_limit = p.dag.edges.iter().any(|e| {
             relational(payload(&p.dag, e.producer)).as_deref() == Some("sort")
@@ -828,22 +843,35 @@ fn stage2_exact_topk_is_sort_then_limit() {
     }
 }
 
-/// A summary Q2 is a build node feeding a top-10 estimation node, with no merge.
+/// A summary Q2 is a build node feeding a top-10 estimation node; only
+/// exact sums are merged from panes (top-k heaps do not merge).
 #[test]
 fn stage2_summary_topk_is_build_then_estimate() {
     let (_, _, physical) = pipeline();
     for p in &physical {
+        for merge in p
+            .dag
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.payload, Operator::ASAP(ASAPOp::SummaryMerge { .. })))
+        {
+            for pane in p.dag.producers(merge.id) {
+                assert!(
+                    matches!(
+                        payload(&p.dag, pane),
+                        Operator::ASAP(ASAPOp::SummaryAgg {
+                            family: FieldDataType::ExactAggregate(..),
+                            ..
+                        })
+                    ),
+                    "{}: merges only exact panes",
+                    p.id
+                );
+            }
+        }
         if classify(&p.dag, &p.query_roots).0 == Q2Option::Exact {
             continue;
         }
-        let kinds: Vec<_> = p.dag.nodes.iter().map(|n| &n.payload).collect();
-        assert!(
-            !kinds
-                .iter()
-                .any(|k| matches!(k, Operator::ASAP(ASAPOp::SummaryMerge { .. }))),
-            "{}: no window summaries in the MVP, so no merge",
-            p.id
-        );
         let build_to_estimate = p.dag.edges.iter().any(|e| {
             matches!(
                 payload(&p.dag, e.producer),
@@ -975,7 +1003,7 @@ fn stage2_count_min_needs_a_counter_declaration() {
     for metric_type in [None, Some(MetricType::Gauge)] {
         assert_eq!(
             assert_runtime_agrees_with_stage3(example1_workload_with(metric_type)),
-            24,
+            32,
             "{metric_type:?}: the Count-Min + heap candidates"
         );
     }
@@ -1056,7 +1084,8 @@ fn stage3_selects_cheapest_valid() {
 
 /// Per-second cost keeps Example 1's ranking: both panels repeat every
 /// 10 s and everything runs at query time, so every candidate costs 0.1 ×
-/// its per-evaluation cost, and P60 still wins at 46.201 × 0.1 per second.
+/// its per-evaluation cost, and P82 (P60 before Q2's tumbling sums
+/// renumbered the candidates) still wins at 46.201 × 0.1 per second.
 #[test]
 fn stage3_per_second_cost_keeps_the_ranking() {
     let (workload, _, physical) = pipeline();
@@ -1072,13 +1101,13 @@ fn stage3_per_second_cost_keeps_the_ranking() {
         entry.demand = RepeatedDemand::FixedInterval(RepetitionInterval(1_000));
     }
     let per_evaluation = stage3_select(&every_second, &physical, PlanningModels::builtin());
-    assert_eq!(per_second.selected, "P60");
-    assert_eq!(per_evaluation.selected, "P60");
+    assert_eq!(per_second.selected, "P82");
+    assert_eq!(per_evaluation.selected, "P82");
     for (id, cost) in &per_second.costs {
         let expected = 0.1 * per_evaluation.costs[id].total;
         assert!((cost.total - expected).abs() <= 1e-9 * expected, "{id}");
     }
-    let best = per_second.costs["P60"].total;
+    let best = per_second.costs["P82"].total;
     assert!((best - 4.6201).abs() < 1e-3, "{best}");
 }
 

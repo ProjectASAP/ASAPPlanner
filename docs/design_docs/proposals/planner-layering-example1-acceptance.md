@@ -14,8 +14,8 @@ decision, see [Candidate counts](#candidate-counts)).
 | Stage | Doc (#509) | MVP (this spec) |
 |---|---|---|
 | 0. Frontends | 1 workload `LogicalDAG` | same |
-| 1. Logical ASAP | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 (32) × identical-expression rule (2) = **64**. Window composition (blocked on #511: #518, #522) is not implemented. |
-| 2. Physical ASAP | Materialization options per window form = **156** | Physical operator implementation only, no materialization = **64** (the doc's Raw/Raw plans, separate or with a shared input) |
+| 1. Logical ASAP | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 with tumbling windows (44) × identical-expression rule (2) = **88**. Of the window-composition rule, only tumbling windows exist (#580), and only Q2's exact sum merges; sliding windows are not implemented. |
+| 2. Physical ASAP | Materialization options per window form = **156** | Physical operator implementation only, no materialization = **88** (the doc's Raw plans, separate or with a shared input) |
 | 3. Selection | 1 plan | 1 plan |
 
 Every MVP candidate is one of the doc's candidates: in Stage 1, the one with no
@@ -60,23 +60,26 @@ range, keyed by series identity and weighted by the sample value, which
 realizes `topk by (job) (10, sum_over_time(…))` as a whole and absorbs the
 `sum_over_time` (no exact per-series sum is computed, so it has no choice of
 its own). Pass 1 therefore yields 2 × 2 (Q1) × (3 × 2 + 2) (Q2) = **32**
-combinations, and Pass 2's identical-expression rule adds a shared-input
-variant of each: **64** candidates. Hydra is not produced yet; its test stays ignored, naming the
+combinations. Pass 2's window-composition rule adds Q2's exact `sum_over_time`
+accumulator in 10-s tumbling panes (gcd of the 1-min window and the 10-s
+refresh), merged 6 at a time: 2 × 2 × (3 × 3 + 2) = **44**. Rates and heap
+sketches do not merge, so they get no tumbling form. The identical-expression
+rule adds a shared-input variant of each: **88** candidates. Hydra is not produced yet; its test stays ignored, naming the
 missing feature.
 
-## Stage 1: 64 candidates
+## Stage 1: 88 candidates
 
 Every combination of Q1 `rate` {raw, Rate acc} × Q1 `sum` {raw, Sum acc} × Q2
 (top-k {exact, Count-Min + heap, CountSketch + heap} × `sum_over_time` {raw,
-Sum acc}, or whole-expression {Count-Min + heap, CountSketch + heap}), twice:
-L1–L32 with each query reading its own `http_requests_total[1m]` input, and
-L33–L64 (labelled "· shared input") with
+Sum acc, Sum acc in 10-s tumbling panes}, or whole-expression {Count-Min +
+heap, CountSketch + heap}), twice: L1–L44 with each query reading its own
+`http_requests_total[1m]` input, and L45–L88 (labelled "· shared input") with
 one scan → range 1m read by both queries. Pass 2 adds the shared variant only
 because sharing merges nodes; Stage 3 chooses between the variants by cost.
 
 Invariants:
 
-* Exactly 64 candidates: each combination once with separate inputs and once
+* Exactly 88 candidates: each combination once with separate inputs and once
   with the shared input. No duplicates.
 * Every candidate covers both queries.
 * Q1 never reaches a sketch node.
@@ -88,7 +91,7 @@ Invariants:
   `CountSketchWithHeap`} per subpopulation, over the per-series sums or whole
   expression, and Hydra `HydraCms` (no Hydra alternative yet).
 
-## Stage 2: 64 candidates
+## Stage 2: 88 candidates
 
 `Pn` implements `Ln`. Exact Q2 top-k becomes sort (partition by job) → limit
 10; a sketch Q2 is a heap-sketch build → top-10 estimate, which returns the
@@ -101,19 +104,23 @@ Invariants:
   bijection onto the Stage 1 ids, so no valid candidate is dropped before
   Stage 3.
 * Each physical candidate keeps its logical Q2 option and input sharing.
-* Exact TopK is implemented as a sort followed by a limit (16 candidates).
-* A summary Q2 is a sketch build node feeding an estimation node. There is no
-  merge node, because the MVP has no window summaries.
+* Exact TopK is implemented as a sort followed by a limit (24 candidates).
+* A summary Q2 is a sketch build node feeding an estimation node. The only
+  merge nodes merge exact `sum_over_time` panes.
 * No node runs at ingestion time, because the MVP has no materialization.
 * The runtime's physical planner compiles every candidate Stage 3 finds
-  valid. With the counter declaration that is all 64. Without it, or with
-  `http_requests_total` declared a gauge, the runtime rejects the 24
+  valid. With the counter declaration that is all 88. Without it, or with
+  `http_requests_total` declared a gauge, the runtime rejects the 32
   Count-Min + heap candidates for the reason Stage 3 gives: their update
   weights are not proven non-negative.
 
 ### Candidates for manual review
 
-Generated from `tools/dag-viewer/examples/planner-layering-example1.json`.
+Generated from `tools/dag-viewer/examples/planner-layering-example1.json`
+before tumbling panes existed (64 candidates); the ids are that numbering.
+The same plans are now numbered among 88 (P60 is P82) with unchanged costs;
+the 24 added tumbling candidates cost 9.820 cost/s or more, since every pane
+is rebuilt at each refresh until Stage 2 keeps them.
 "acc" is an exact accumulator; "raw" keeps the relational aggregate.
 
 | Id | Label | Q1 choice | Q2 choice | Input | Stage 3 outcome | Reason |

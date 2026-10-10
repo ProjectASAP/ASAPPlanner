@@ -84,6 +84,7 @@ use asap_logical_optimizer::pass2::identical_expressions::{
     share_identical_expressions, stage1_logical_candidates,
 };
 pub use asap_logical_optimizer::pass2::identical_expressions::{Sharing, SharingVariant};
+use asap_logical_optimizer::pass2::window_composition::{pane_source, WindowForm};
 use asap_physical_optimizer::implementation::physical_candidates::{
     stage2_physical, PhysicalCandidate,
 };
@@ -773,7 +774,8 @@ fn select_variant<Id: Clone>(
 }
 
 /// Pairs of targets, neither beneath the other, that read a common input
-/// node, or equal ones: in a sharing variant their producers may be merged.
+/// node, or equal ones, or whose tumbling forms read one scan: in a sharing
+/// variant their producers (or panes) may be merged.
 fn common_input_pairs<Id>(
     inventory: &LocalLogicalCandidates<Id>,
     beneath: &[Vec<usize>],
@@ -784,14 +786,26 @@ fn common_input_pairs<Id>(
         .map(|t| t.target.children())
         .collect();
     let same = |a: &Rc<OperatorNode>, b: &Rc<OperatorNode>| Rc::ptr_eq(a, b) || a == b;
+    let panes: Vec<Option<&Rc<OperatorNode>>> = inventory
+        .targets
+        .iter()
+        .map(|t| {
+            t.windows
+                .iter()
+                .any(|w| *w != WindowForm::Whole)
+                .then(|| pane_source(&t.target))
+                .flatten()
+        })
+        .collect();
     let mut pairs = Vec::new();
     for t in 0..inputs.len() {
         for u in t + 1..inputs.len() {
             let nested = beneath[t].contains(&u) || beneath[u].contains(&t);
             if !nested
-                && inputs[t]
+                && (inputs[t]
                     .iter()
                     .any(|a| inputs[u].iter().any(|b| same(a, b)))
+                    || panes[t].zip(panes[u]).is_some_and(|(a, b)| same(a, b)))
             {
                 pairs.push((t, u));
             }
@@ -926,7 +940,9 @@ pub struct StagePipelineRun<Id> {
 }
 
 /// The #509 stage pipeline over `roots`: Stage 1 (Pass 1 and Pass 2's
-/// identical-expression and summary-capability rules), Stage 2 and Stage 3. The facade and the
+/// identical-expression and summary-capability rules and the
+/// window-composition rule's tumbling panes, from each root's `demand`),
+/// Stage 2 and Stage 3. The facade and the
 /// `stage_pipeline` devtool both run this. `display` builds and prices up to
 /// that many candidates for display as well (0: none).
 pub fn plan_stages<Id: Clone>(
@@ -936,7 +952,7 @@ pub fn plan_stages<Id: Clone>(
     models: PlanningModels<'_>,
     display: usize,
 ) -> Result<StagePipelineRun<Id>, SelectionError> {
-    let stage1 = stage1_logical_candidates(roots, &data.metric_types)?;
+    let stage1 = stage1_logical_candidates(roots, &data.metric_types, demand)?;
     let plan = select_plan(&stage1, demand, data, models)?;
     let enumeration = match display {
         0 => None,
@@ -967,38 +983,68 @@ fn accuracy_violation(
             else {
                 continue;
             };
-            let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &summary_input.operator
-            else {
+            let Some(builds) = summary_builds(summary_input) else {
                 return Some(format!("q{}: estimate over a non-summary input", query + 1));
             };
-            let name = family_name(family);
-            // Count-Min's one-sided error bound assumes no negative updates.
-            if matches!(family, FieldDataType::Sketch(kind, _)
-                    if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
-                && !matches!(input.weight_domain, WeightDomain::NonNegative { .. })
+            if let Some(reason) = builds
+                .iter()
+                .find_map(|build| build_violation(build, statistic, target, models))
             {
-                return Some(format!(
-                    "q{}: {name} needs non-negative update weights, and these are not proven \
-                     non-negative",
-                    query + 1
-                ));
-            }
-            let Some(guarantee) = models.accuracy.local_guarantee(family, statistic) else {
-                return Some(format!(
-                    "q{}: no accuracy model for {name}; target {target:?}",
-                    query + 1
-                ));
-            };
-            if !models.accuracy.satisfies(&guarantee, target) {
-                return Some(format!(
-                    "q{}: {name} guarantees bound {:?}, failure probability {:?}, which misses \
-                     target {target:?} (analytical guarantee; no accuracy evidence)",
-                    query + 1,
-                    guarantee.bound.evaluate(),
-                    guarantee.failure_probability.evaluate(),
-                ));
+                return Some(format!("q{}: {reason}", query + 1));
             }
         }
+    }
+    None
+}
+
+/// The `SummaryAgg`s whose states `state` holds: itself, or the inputs of
+/// a `SummaryMerge` (tumbling panes), recursively. `None` when another
+/// operator produces it.
+fn summary_builds(state: &Rc<OperatorNode>) -> Option<Vec<&Rc<OperatorNode>>> {
+    match &state.operator {
+        Operator::ASAP(ASAPOp::SummaryAgg { .. }) => Some(vec![state]),
+        Operator::ASAP(ASAPOp::SummaryMerge { children }) => children
+            .iter()
+            .map(summary_builds)
+            .collect::<Option<Vec<_>>>()
+            .map(|builds| builds.concat()),
+        _ => None,
+    }
+}
+
+/// Why one summary build cannot answer `statistic` within `target`. A
+/// merge of mergeable states keeps the family's guarantee
+/// ([`FieldDataType::family_merges`], which `SummaryMerge` requires), so
+/// each build is checked against the family's analytical guarantee.
+fn build_violation(
+    build: &OperatorNode,
+    statistic: &SketchStatistic,
+    target: &asap_types::types::AccuracyTarget,
+    models: &PlanningModels<'_>,
+) -> Option<String> {
+    let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &build.operator else {
+        unreachable!("summary_builds returns builds");
+    };
+    let name = family_name(family);
+    // Count-Min's one-sided error bound assumes no negative updates.
+    if matches!(family, FieldDataType::Sketch(kind, _)
+            if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
+        && !matches!(input.weight_domain, WeightDomain::NonNegative { .. })
+    {
+        return Some(format!(
+            "{name} needs non-negative update weights, and these are not proven non-negative"
+        ));
+    }
+    let Some(guarantee) = models.accuracy.local_guarantee(family, statistic) else {
+        return Some(format!("no accuracy model for {name}; target {target:?}"));
+    };
+    if !models.accuracy.satisfies(&guarantee, target) {
+        return Some(format!(
+            "{name} guarantees bound {:?}, failure probability {:?}, which misses target \
+             {target:?} (analytical guarantee; no accuracy evidence)",
+            guarantee.bound.evaluate(),
+            guarantee.failure_probability.evaluate(),
+        ));
     }
     None
 }
@@ -1180,7 +1226,9 @@ fn price(
             output,
             promql: None,
         };
-        let groups = |reduction: &Reduction| {
+        // The groups a state keeps, bounded at query time by the rows (or,
+        // for a merge, the input states) it is built from.
+        let bounded_groups = |reduction: &Reduction, rows: u64| {
             let groups = match reduction {
                 Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
                 Reduction::Reduce(keys) if !keys.is_without() => DEFAULT_GROUP_COUNT,
@@ -1190,187 +1238,214 @@ fn price(
             // maintained state holds.
             match ingestion {
                 true => groups,
-                false => groups.min(input.rows.max(1)),
+                false => groups.min(rows.max(1)),
             }
         };
-        let (out, estimate, detail) = match &node.payload {
-            Payload::NonASAP(operator) => match operator {
-                NonASAPOp::Scan { .. } => {
-                    // At ingestion time, one second of arriving rows; at
-                    // query time, as far back as the ranges reading it reach.
-                    let span_ms = match ingestion {
-                        true => 1_000,
-                        false => scan_extent_ms(dag, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS),
-                    };
-                    let out = edge(((rows_per_ms * span_ms as f64).round() as u64).max(1));
-                    let estimate = estimate_operator(
-                        PhysicalOperator::Scan,
-                        OperatorStatistics::Scan {
-                            edges: UnaryEdgeStatistics {
-                                input: out,
-                                output: out,
-                                promql: None,
+        let groups = |reduction: &Reduction| bounded_groups(reduction, input.rows);
+        let (out, estimate, detail) =
+            match &node.payload {
+                Payload::NonASAP(operator) => match operator {
+                    NonASAPOp::Scan { .. } => {
+                        // At ingestion time, one second of arriving rows; at
+                        // query time, as far back as the ranges reading it reach.
+                        let span_ms = match ingestion {
+                            true => 1_000,
+                            false => scan_extent_ms(dag, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS),
+                        };
+                        let out = edge(((rows_per_ms * span_ms as f64).round() as u64).max(1));
+                        let estimate = estimate_operator(
+                            PhysicalOperator::Scan,
+                            OperatorStatistics::Scan {
+                                edges: UnaryEdgeStatistics {
+                                    input: out,
+                                    output: out,
+                                    promql: None,
+                                },
+                                source_read_bytes: out.bytes,
                             },
-                            source_read_bytes: out.bytes,
-                        },
-                    );
-                    (out, estimate, format!("scan {} samples", out.rows))
-                }
-                NonASAPOp::Aggregate {
-                    reduction,
-                    measures,
-                    ..
-                } => {
+                        );
+                        (out, estimate, format!("scan {} samples", out.rows))
+                    }
+                    NonASAPOp::Aggregate {
+                        reduction,
+                        measures,
+                        ..
+                    } => {
+                        let group_count = groups(reduction);
+                        let keys = match reduction {
+                            Reduction::Reduce(keys) => keys.keys().len() as u64,
+                            _ => 1,
+                        };
+                        let out = edge(group_count);
+                        let estimate = estimate_operator(
+                            PhysicalOperator::HashAggregate {
+                                grouping_key_count: keys,
+                                accumulator_count: measures.len().max(1) as u64,
+                            },
+                            OperatorStatistics::HashAggregate {
+                                edges: unary(out),
+                                group_count,
+                                key_bytes: 16 * keys,
+                                accumulator_bytes_per_group: 8,
+                            },
+                        );
+                        (
+                            out,
+                            estimate,
+                            format!(
+                                "hash aggregate {} rows into {group_count} groups",
+                                input.rows
+                            ),
+                        )
+                    }
+                    NonASAPOp::Sort {
+                        keys, partition_by, ..
+                    } => {
+                        let partitions = if partition_by.keys().is_empty() {
+                            1
+                        } else {
+                            DEFAULT_GROUP_COUNT.min(input.rows.max(1))
+                        };
+                        let estimate = estimate_operator(
+                            PhysicalOperator::InMemoryComparisonSort {
+                                ordering_key_count: keys.len() as u64,
+                                partitioned: partitions > 1,
+                            },
+                            OperatorStatistics::InMemoryComparisonSort {
+                                edges: unary(input),
+                                input_partitioning: split(input, partitions),
+                            },
+                        );
+                        (
+                            input,
+                            estimate,
+                            format!("sort {} rows in {partitions} partitions", input.rows),
+                        )
+                    }
+                    NonASAPOp::Limit {
+                        n,
+                        offset,
+                        partition_by,
+                        ..
+                    } => {
+                        let partitions = partition_count(!partition_by.keys().is_empty());
+                        let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
+                        let offset = (*offset as u64).saturating_mul(partitions);
+                        let out = edge(selected_rows(input.rows.saturating_sub(offset), limit));
+                        let estimate = estimate_operator(
+                            PhysicalOperator::Limit { limit, offset },
+                            OperatorStatistics::Limit { edges: unary(out) },
+                        );
+                        (out, estimate, format!("limit to {} rows", out.rows))
+                    }
+                    // At query time a range keeps only its own span of a longer
+                    // scan: a filter on the timestamp.
+                    NonASAPOp::TimeRange { range, .. } if !ingestion => {
+                        let rows = (rows_per_ms * range.as_millis() as f64).round() as u64;
+                        let out = edge(input.rows.min(rows.max(1)));
+                        let estimate = estimate_operator(
+                            PhysicalOperator::Filter {
+                                predicate_operations_per_row: 1,
+                            },
+                            OperatorStatistics::Filter { edges: unary(out) },
+                        );
+                        (
+                            out,
+                            estimate,
+                            format!("time range {range:?}: pass {} rows", out.rows),
+                        )
+                    }
+                    other => {
+                        let estimate = estimate_operator(
+                            PhysicalOperator::PassThrough,
+                            OperatorStatistics::PassThrough {
+                                edges: unary(input),
+                            },
+                        );
+                        let name = match other {
+                            NonASAPOp::TimeRange { range, .. } => format!("time range {range:?}"),
+                            _ => "operator".into(),
+                        };
+                        (input, estimate, format!("{name}: pass {} rows", input.rows))
+                    }
+                },
+                Payload::ASAP(ASAPOp::SummaryAgg {
+                    family, reduction, ..
+                }) => {
                     let group_count = groups(reduction);
-                    let keys = match reduction {
-                        Reduction::Reduce(keys) => keys.keys().len() as u64,
-                        _ => 1,
+                    let (depth, state_bytes) = summary_shape(family);
+                    let out = EdgeStatistics {
+                        rows: group_count,
+                        bytes: group_count * state_bytes,
                     };
-                    let out = edge(group_count);
-                    let estimate = estimate_operator(
-                        PhysicalOperator::HashAggregate {
-                            grouping_key_count: keys,
-                            accumulator_count: measures.len().max(1) as u64,
-                        },
-                        OperatorStatistics::HashAggregate {
-                            edges: unary(out),
-                            group_count,
-                            key_bytes: 16 * keys,
-                            accumulator_bytes_per_group: 8,
-                        },
-                    );
+                    let ops = input.rows as f64 * depth as f64;
                     (
                         out,
-                        estimate,
+                        Ok(ResourceEstimate::new(ops, out.bytes, 0)),
                         format!(
-                            "hash aggregate {} rows into {group_count} groups",
+                            "build {} into {group_count} states: {} rows x depth {depth}",
+                            family_name(family),
                             input.rows
                         ),
                     )
                 }
-                NonASAPOp::Sort {
-                    keys, partition_by, ..
-                } => {
-                    let partitions = if partition_by.keys().is_empty() {
-                        1
-                    } else {
-                        DEFAULT_GROUP_COUNT.min(input.rows.max(1))
+                Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
+                    let rows = match query {
+                        // The logical result, as an exact Sort → Limit sizes it.
+                        // Items are at most the series: a whole-expression
+                        // sketch reads several samples per ranked item.
+                        SketchStatistic::TopK { k } => {
+                            let (summarized, grouped) = summarized_rows(dag, &output, node.id);
+                            selected_rows(
+                                summarized.min(shape.series),
+                                (*k as u64).saturating_mul(partition_count(grouped)),
+                            )
+                        }
+                        _ => input.rows,
                     };
-                    let estimate = estimate_operator(
-                        PhysicalOperator::InMemoryComparisonSort {
-                            ordering_key_count: keys.len() as u64,
-                            partitioned: partitions > 1,
-                        },
-                        OperatorStatistics::InMemoryComparisonSort {
-                            edges: unary(input),
-                            input_partitioning: split(input, partitions),
-                        },
-                    );
-                    (
-                        input,
-                        estimate,
-                        format!("sort {} rows in {partitions} partitions", input.rows),
-                    )
-                }
-                NonASAPOp::Limit {
-                    n,
-                    offset,
-                    partition_by,
-                    ..
-                } => {
-                    let partitions = partition_count(!partition_by.keys().is_empty());
-                    let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
-                    let offset = (*offset as u64).saturating_mul(partitions);
-                    let out = edge(selected_rows(input.rows.saturating_sub(offset), limit));
-                    let estimate = estimate_operator(
-                        PhysicalOperator::Limit { limit, offset },
-                        OperatorStatistics::Limit { edges: unary(out) },
-                    );
-                    (out, estimate, format!("limit to {} rows", out.rows))
-                }
-                // At query time a range keeps only its own span of a longer
-                // scan: a filter on the timestamp.
-                NonASAPOp::TimeRange { range, .. } if !ingestion => {
-                    let rows = (rows_per_ms * range.as_millis() as f64).round() as u64;
-                    let out = edge(input.rows.min(rows.max(1)));
-                    let estimate = estimate_operator(
-                        PhysicalOperator::Filter {
-                            predicate_operations_per_row: 1,
-                        },
-                        OperatorStatistics::Filter { edges: unary(out) },
-                    );
+                    let out = edge(rows);
                     (
                         out,
-                        estimate,
-                        format!("time range {range:?}: pass {} rows", out.rows),
+                        Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
+                        format!("estimate {} rows from {} states", out.rows, input.rows),
                     )
                 }
-                other => {
-                    let estimate = estimate_operator(
-                        PhysicalOperator::PassThrough,
-                        OperatorStatistics::PassThrough {
-                            edges: unary(input),
+                // One merge per input state. The output holds the union of the
+                // inputs' groups, bounded as one build over all their rows is,
+                // so readers see what they would see over the whole window.
+                Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
+                    let merged: u64 = inputs.iter().map(|edge| edge.rows).sum();
+                    let reduction = dag.edges.iter().filter(|e| e.consumer == node.id).find_map(
+                        |e| match &nodes[&e.producer].payload {
+                            Payload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => Some(reduction),
+                            _ => None,
                         },
                     );
-                    let name = match other {
-                        NonASAPOp::TimeRange { range, .. } => format!("time range {range:?}"),
-                        _ => "operator".into(),
+                    let rows = reduction.map_or(merged, |r| bounded_groups(r, merged));
+                    let out = EdgeStatistics {
+                        rows,
+                        bytes: rows * (input.bytes / input.rows.max(1)),
                     };
-                    (input, estimate, format!("{name}: pass {} rows", input.rows))
+                    (
+                        out,
+                        Ok(ResourceEstimate::new(merged as f64, 0, 0)),
+                        format!(
+                            "merge {merged} states from {} inputs into {rows}",
+                            inputs.len()
+                        ),
+                    )
                 }
-            },
-            Payload::ASAP(ASAPOp::SummaryAgg {
-                family, reduction, ..
-            }) => {
-                let group_count = groups(reduction);
-                let (depth, state_bytes) = summary_shape(family);
-                let out = EdgeStatistics {
-                    rows: group_count,
-                    bytes: group_count * state_bytes,
-                };
-                let ops = input.rows as f64 * depth as f64;
-                (
-                    out,
-                    Ok(ResourceEstimate::new(ops, out.bytes, 0)),
-                    format!(
-                        "build {} into {group_count} states: {} rows x depth {depth}",
-                        family_name(family),
-                        input.rows
-                    ),
-                )
-            }
-            Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
-                let rows = match query {
-                    // The logical result, as an exact Sort → Limit sizes it.
-                    // Items are at most the series: a whole-expression
-                    // sketch reads several samples per ranked item.
-                    SketchStatistic::TopK { k } => {
-                        let (summarized, grouped) = summarized_rows(dag, &output, node.id);
-                        selected_rows(
-                            summarized.min(shape.series),
-                            (*k as u64).saturating_mul(partition_count(grouped)),
-                        )
-                    }
-                    _ => input.rows,
-                };
-                let out = edge(rows);
-                (
-                    out,
-                    Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
-                    format!("estimate {} rows from {} states", out.rows, input.rows),
-                )
-            }
-            Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
-                edge(input.rows),
-                Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
-                format!("finalize {} accumulators", input.rows),
-            ),
-            _ => (
-                edge(input.rows),
-                Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
-                format!("{} rows", input.rows),
-            ),
-        };
+                Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
+                    edge(input.rows),
+                    Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
+                    format!("finalize {} accumulators", input.rows),
+                ),
+                _ => (
+                    edge(input.rows),
+                    Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
+                    format!("{} rows", input.rows),
+                ),
+            };
         let cost = estimate
             .and_then(|estimate| estimate.calibrated_cost(&resources))
             .map_err(|error| (node.id, error))?;
@@ -2232,7 +2307,7 @@ mod tests {
                 (i, QueryRoot::Operator(root))
             })
             .collect();
-        let stage1 = stage1_logical_candidates(roots, &Default::default()).unwrap();
+        let stage1 = stage1_logical_candidates(roots, &Default::default(), &[]).unwrap();
         let data = DataWorkload {
             ingestion_rate: Evidence {
                 value: Some(Rate(1_000_000.0 / 15.0)),
