@@ -339,6 +339,32 @@ class ServerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     server.plan_args(payload, "o.json")
 
+    FLOWS = {"name": "flows", "columns": [{"name": "ts", "type": "timestamp", "nullable": False},
+                                          {"name": "src_ip", "type": "utf8"}], "time_index": 0}
+
+    def test_sql_queries_and_tables_become_arguments(self):
+        args = server.plan_args({"language": "sql", "queries": ["SELECT COUNT(*) FROM flows"],
+                                 "tables": [self.FLOWS], "epsilon": 0.02}, "o.json")
+        self.assertEqual(args[1:5], ["--table", json.dumps(self.FLOWS), "--sql", "SELECT COUNT(*) FROM flows"])
+        self.assertEqual(args[5:7], ["--epsilon", "0.02"])
+        self.assertNotIn("--promql", args)
+
+    def test_bad_sql_requests_are_rejected(self):
+        column = {"name": "x", "type": "int64"}
+        sql = lambda tables: {"language": "sql", "queries": ["SELECT 1"], "tables": tables}
+        for payload in ({"language": "cypher", "queries": ["x"]},
+                        {"queries": ["up"], "tables": [self.FLOWS]},
+                        sql({"name": "t"}), sql([{"name": "", "columns": [column]}]),
+                        sql([{"name": "t", "columns": []}]), sql([{"name": "t", "columns": [column] * 501}]),
+                        sql([{"name": "t", "columns": [{"name": "x", "type": "decimal"}]}]),
+                        sql([{"name": "t", "columns": [{"name": "", "type": "utf8"}]}]),
+                        sql([{"name": "t", "columns": [column], "time_index": 1}]),
+                        sql([self.FLOWS, self.FLOWS]),
+                        sql([{"name": f"t{i}", "columns": [column]} for i in range(51)])):
+            with self.subTest(payload):
+                with self.assertRaises(ValueError):
+                    server.plan_args(payload, "o.json")
+
 
 STUB_DOM = r"""
 var __els = {}; var __files = {};

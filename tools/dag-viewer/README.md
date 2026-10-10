@@ -44,10 +44,20 @@ the page, or with `?doc=<path>` for a file served next to `index.html`.
 
 ## Query editor
 
-With the local server running, **Query editor** plans PromQL queries (one
-per line) with an optional ε and δ for every query and the sample interval.
-The server runs `stage_pipeline --promql … --out …` and the page shows the
-result. SQL needs a catalog and is not in the editor yet.
+With the local server running, **Query editor** plans PromQL or SQL queries
+(one per line, one language per run) with an optional ε and δ for every query.
+PromQL also takes the sample interval. SQL queries read the tables declared
+in the tables box, one JSON object per line:
+
+```json
+{"name": "flows", "columns": [{"name": "ts", "type": "timestamp", "nullable": false},
+  {"name": "src_ip", "type": "utf8", "nullable": false}], "time_index": 0}
+```
+
+Column types are `timestamp`, `utf8`/`string`, `float64`/`double` and
+`int64`/`bigint`; `nullable` defaults to true and `time_index` (the time
+column's position) is optional. The server runs `stage_pipeline --promql …`
+or `stage_pipeline --table <json> … --sql …` and the page shows the result.
 
 ## Document format
 
