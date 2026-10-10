@@ -4,12 +4,15 @@
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
-// first two planner stages only:
+// four planner stages (#509 MVP):
 //   - stage0_logical: the frontends' workload DAG, one root per query;
 //   - stage1_logical_asap: Pass 1 workload candidates, one per choice of a
 //     local alternative for every target (the Cartesian product), in
-//     enumeration order and capped by `--max-candidates` (default 64).
-// Stages 2 and 3, and therefore cost, are absent.
+//     enumeration order and capped by `--max-candidates` (default 64);
+//   - stage2_physical_asap: one physical candidate per logical candidate
+//     (operator implementation only, everything at query time), no cost;
+//   - stage3_selection: per-candidate costs, the selected candidate, and
+//     every other candidate as rejected (`valid: false`) or costlier.
 //
 // `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
 // query; without them the queries are exact. `--interval-ms` is the source
@@ -20,8 +23,11 @@ use std::rc::Rc;
 use asap_aware_mapping::logical_candidates::{
     compose_logical_candidate, enumerate_local_logical_candidates, LocalLogicalCandidates,
 };
-use asap_aware_mapping::Realization;
+use asap_aware_mapping::physical_candidates::stage2_physical;
+use asap_aware_mapping::plan_selection::{stage3_select, Selection};
+use asap_aware_mapping::{PlanningModels, Realization};
 use asap_types::ir::flat::{flatten, FlatDag};
+use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::post_asap::SketchAlgorithm;
 use asap_types::types::AccuracyTarget;
@@ -85,8 +91,18 @@ fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<Value, String> {
+    // PromQL rows carry each series' full identity as a column: the row
+    // representation per-series state needs at runtime.
     let roots = asap_frontend_promql::lower_promql_query_workload(workload, 0)
-        .map_err(|e| format!("lowering: {e}"))?;
+        .map_err(|e| format!("lowering: {e}"))?
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => with_promql_series_identity(&node)
+                .map(QueryRoot::Operator)
+                .map_err(|e| format!("series identity: {e}")),
+            scalar => Ok(scalar),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let stage0 = export(&roots)?;
     let inventory = enumerate_local_logical_candidates(roots.into_iter().enumerate().collect())
         .map_err(|e| format!("Pass 1: {e}"))?;
@@ -97,16 +113,29 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         .product::<usize>();
     let owners = target_owners(&inventory);
     let mut candidates = Vec::new();
+    let mut physical = Vec::new();
     let mut choice = vec![0; inventory.targets.len()];
     for index in 0..combinations.min(max_candidates) {
         let roots = compose_logical_candidate(&inventory, &choice)
             .map_err(|e| format!("candidate {choice:?}: {e}"))?;
         let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
-        candidates.push(json!({
-            "id": format!("L{}", index + 1),
-            "label": label(&inventory, &owners, &choice),
-            "dag": export(&roots)?,
-        }));
+        let (id, label) = (
+            format!("L{}", index + 1),
+            label(&inventory, &owners, &choice),
+        );
+        candidates.push(json!({ "id": id, "label": label, "dag": export(&roots)? }));
+        let operators = roots
+            .into_iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => Ok(node),
+                QueryRoot::Scalar(_) => Err("Stage 2: scalar query roots are not physical yet"),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut candidate =
+            stage2_physical(&id, &operators).map_err(|e| format!("Stage 2 {id}: {e}"))?;
+        candidate.id = format!("P{}", index + 1);
+        candidate.label = label;
+        physical.push(candidate);
         // Mixed-radix increment: the last target varies fastest.
         for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
             *digit += 1;
@@ -116,6 +145,18 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             *digit = 0;
         }
     }
+    let targets: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| Some(entry.requirements.accuracy.target()))
+        .collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    let selection = stage3_select(&physical, &targets, &data, PlanningModels::builtin())
+        .map_err(|e| format!("Stage 3: {e}"))?;
+    let stage2: Vec<_> = physical
+        .iter()
+        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
+        .collect();
     Ok(json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": workload_queries(workload) },
@@ -125,7 +166,38 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             "capped": combinations > max_candidates,
             "candidates": candidates,
         },
+        "stage2_physical_asap": { "candidates": stage2 },
+        "stage3_selection": stage3_json(&selection),
     }))
+}
+
+fn stage3_json(selection: &Selection) -> Value {
+    let costs: serde_json::Map<_, _> = selection
+        .costs
+        .iter()
+        .map(|(id, cost)| {
+            let per_node: serde_json::Map<_, _> = cost
+                .per_node
+                .iter()
+                .map(|(node, c)| {
+                    (
+                        node.to_string(),
+                        json!({ "cost": c.cost, "detail": c.detail }),
+                    )
+                })
+                .collect();
+            (
+                id.clone(),
+                json!({ "total": cost.total, "unit": cost.unit, "source": cost.source, "per_node": per_node }),
+            )
+        })
+        .collect();
+    let rejected: Vec<_> = selection
+        .rejected
+        .iter()
+        .map(|r| json!({ "id": r.id, "valid": r.valid, "reason": r.reason }))
+        .collect();
+    json!({ "costs": costs, "selected": selection.selected, "rejected": rejected })
 }
 
 /// A logical DAG as a flat node list: node `i` is `nodes[i]`, and children are
