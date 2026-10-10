@@ -3,8 +3,7 @@
 mod executor_models;
 mod physical_common;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
-use asap_types::ir::ASAPOp;
-use asap_types::ir::OperatorNode;
+use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use physical_common::compile_maintained_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
@@ -18,14 +17,14 @@ use asap_executor::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_integration_tests::fixtures::lower_promql;
-use asap_logical_optimizer::{
-    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+use asap_logical_optimizer::pass1::logical_candidates::{
+    compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
 };
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
-    SummaryUpdate,
+    SummaryUpdate, WeightDomain,
 };
 use asap_types::types::AccuracyTarget;
 use futures::{executor::block_on, StreamExt};
@@ -54,18 +53,36 @@ fn canonical(labels: &Series) -> Series {
 }
 
 /// Every Planner candidate for `query`: the stage pipeline's selection plus
-/// each summary replacement of the root.
+/// each candidate Stage 1 composes that Stage 3 could admit (Count-Min only
+/// over weights proven non-negative).
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
     let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
-    let mut result = ASAPStrategies::default()
-        .replacements(&TargetSubDAG::new(&root))
-        .into_iter()
-        .filter_map(|candidate| match candidate {
-            ReplacementSubDAG {
-                replacement: Replacement::SubDAG(node),
-                ..
-            } => Some(node),
-            _ => None,
+    let inventory = enumerate_local_logical_candidates(
+        vec![(0, QueryRoot::Operator(Rc::clone(&root)))],
+        &Default::default(),
+    )
+    .unwrap();
+    let mut result = enumerate_choices(&inventory, 4096)
+        .iter()
+        .filter_map(|choice| {
+            match compose_logical_candidate(&inventory, choice)
+                .ok()?
+                .remove(0)
+                .1
+            {
+                QueryRoot::Operator(node) => Some(node),
+                QueryRoot::Scalar(_) => None,
+            }
+        })
+        .filter(|node| {
+            OperatorNode::reachable(node).iter().all(|node| {
+                !matches!(&node.operator, asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    input,
+                    ..
+                }) if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap)
+                    && !matches!(input.weight_domain, WeightDomain::NonNegative { .. }))
+            })
         })
         .collect::<Vec<_>>();
     result.push(executor_models::selected_dag(root, accuracy));

@@ -4,18 +4,11 @@
 //! Prometheus rule YAML. The preprocessing script produces the line-oriented
 //! fixtures consumed here.
 
-use std::rc::Rc;
-
 use asap_frontend_promql::PromqlError;
-use asap_logical_optimizer::pass1::replacement::{retain_exact, RealizationError};
-use asap_logical_optimizer::{
-    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
-};
 #[path = "../support.rs"]
 mod support;
-use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
-use support::lower_promql;
+use support::{lower_promql, stage1_plan};
 
 const CORPORA: &[(&str, &str)] = &[
     (
@@ -63,21 +56,6 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }
 
-fn post_asap_candidate(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
-    let target = TargetSubDAG::new(root);
-    match ASAPStrategies::default()
-        .replacements(&target)
-        .into_iter()
-        .next()
-    {
-        Some(ReplacementSubDAG {
-            replacement: Replacement::SubDAG(node),
-            ..
-        }) => Ok(node),
-        _ => retain_exact(root),
-    }
-}
-
 #[test]
 fn benchmark_corpora_are_total_and_report_coverage() {
     for (name, corpus) in CORPORA {
@@ -91,12 +69,12 @@ fn benchmark_corpora_are_total_and_report_coverage() {
 
         for query in queries(corpus) {
             total += 1;
-            // Approximate accuracy exercises the sketch-replacement boundary
-            // used by the existing post-ASAP corpus binding test.
+            // Approximate accuracy makes Stage 1 offer sketch alternatives,
+            // as in the PromQL corpus test.
             match lower_promql(query, AccuracyTarget::Epsilon(0.01)) {
                 Ok(expr) => {
                     lowered += 1;
-                    match post_asap_candidate(&expr) {
+                    match stage1_plan(&expr) {
                         // An ASAP operator bound somewhere below the root.
                         Ok(node) if node.contains_asap() => post_asap_candidates += 1,
                         Ok(_) => {
