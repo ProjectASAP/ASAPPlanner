@@ -123,6 +123,19 @@ impl From<Field<DataType>> for Field<FieldDataType> {
     }
 }
 
+/// How the selections of a summary operation's inputs must relate for the
+/// result to keep the family's guarantee (#573 §5.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionRelation {
+    /// No row in two inputs: a shared row would be counted twice.
+    Disjoint,
+    /// Inputs may share rows: the merge is idempotent.
+    OverlapAllowed,
+    /// The right input's selection lies inside the left's, as subtraction
+    /// (`SummarySubtract`, reserved) needs.
+    Contained,
+}
+
 /// What a schema field carries: an ordinary readable value, or the summary /
 /// exact-accumulator state produced by a `SummaryAgg`.
 ///
@@ -157,6 +170,43 @@ pub enum FieldDataType {
 impl FieldDataType {
     pub fn is_plain(&self) -> bool {
         matches!(self, FieldDataType::Plain(_))
+    }
+
+    /// Whether two states of this family over disjoint coverage merge into the
+    /// state of their union with the family's guarantee intact. Rate/Increase
+    /// accumulators depend on window edges, and merged heap top-k states have
+    /// no accuracy model yet; families not listed fail closed.
+    pub fn family_merges(&self) -> bool {
+        use state_type::{ExactKind as E, SketchAlgorithm as S};
+        match self {
+            FieldDataType::ExactAggregate(kind, _) => {
+                matches!(kind, E::Sum | E::Count | E::Min | E::Max)
+            }
+            FieldDataType::Sketch(kind, _) => matches!(
+                kind.algorithm(),
+                S::Kll | S::DDSketch | S::Hll | S::Cms | S::CountSketch | S::UnivMon
+            ),
+            _ => false,
+        }
+    }
+
+    /// How the selections of merged states of this family must relate
+    /// (#573 §5.6); `None` when the family does not merge.
+    pub fn merge_relation(&self) -> Option<SelectionRelation> {
+        use state_type::{ExactKind as E, SketchAlgorithm as S};
+        if !self.family_merges() {
+            return None;
+        }
+        let idempotent = match self {
+            FieldDataType::ExactAggregate(kind, _) => matches!(kind, E::Min | E::Max),
+            FieldDataType::Sketch(kind, _) => *kind.algorithm() == S::Hll,
+            _ => false,
+        };
+        Some(if idempotent {
+            SelectionRelation::OverlapAllowed
+        } else {
+            SelectionRelation::Disjoint
+        })
     }
 
     pub fn plain(&self) -> Option<&DataType> {
