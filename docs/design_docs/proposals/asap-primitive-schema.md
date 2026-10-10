@@ -915,16 +915,16 @@ impl OperatorNode {
 
 ### 6.2 ASAP operators (`crates/types/src/ir/asap.rs`)
 
-In the code `ASAPOp<C = Rc<OperatorNode>>` is generic over how it refers to its inputs (`C` can also be a node id). It is shown here with `C = Rc<OperatorNode>`.
+`ASAPOp<C>` is generic over how it refers to its inputs: `C` is `Rc<OperatorNode>` by default, and can also be a node id (e.g. in a flat DAG).
 
 ```rust
 pub const UNIMPLEMENTED_ASAP_OP: &str =
     "this ASAP operator is reserved: schema, accuracy, timing and export are not implemented";
 
-pub enum ASAPOp {
+pub enum ASAPOp<C = Rc<OperatorNode>> {
     SummaryAgg {
         /// The input rows.
-        child: Rc<OperatorNode>,
+        child: C,
         /// The summary type of the output `state` field. Never `Plain`.
         family: FieldDataType,
         /// What each input row adds to the state (item and weight).
@@ -935,65 +935,68 @@ pub enum ASAPOp {
         /// Whether each group gets its own sketch or all groups share one.
         grouping: GroupingStrategy,
         /// Rows to include, applied before updating the state. `None`: all rows.
-        filter: Option<Predicate>,
+        filter: Option<Predicate<C>>,
     },
     SummaryEstimate {
         /// The node that produces the sketch state.
-        summary_input: Rc<OperatorNode>,
+        summary_input: C,
         /// What to read out of it.
         query: SketchStatistic,
     },
     FinalizeExactAccumulator {
         /// The node that produces the exact accumulator state.
-        child: Rc<OperatorNode>,
+        child: C,
     },
     MaintainPopulation {
         /// The input rows; must match `population.input`.
-        child: Rc<OperatorNode>,
+        child: C,
         /// What population to keep and which reads it supports.
         population: MaintainedPopulation<OperatorNode>,
     },
     EvaluatePopulation {
         /// The `MaintainPopulation` node.
-        child: Rc<OperatorNode>,
+        child: C,
         /// What to compute from it.
         evaluation: PopulationStatistic,
     },
     // Implemented since #560 (identical child schemas).
     SummaryMerge {
         /// The states to merge; all have the same schema.
-        children: Vec<Rc<OperatorNode>>,
+        children: Vec<C>,
     },
     // Reserved: migrated but unimplemented.
     SummarySubtract {
-        left: Rc<OperatorNode>,    // the state to subtract from
-        right: Rc<OperatorNode>,   // the state to remove from `left`
+        left: C,                // the state to subtract from
+        right: C,               // the state to remove from `left`
     },
     SummaryDelete {
-        summary_input: Rc<OperatorNode>,   // the state
-        key: ColumnId,                     // the key column whose entries are removed
+        summary_input: C,       // the state
+        key: ColumnId,          // the key column whose entries are removed
     },
     SummaryJoin {
-        outer: Rc<OperatorNode>,   // one input state
-        inner: Rc<OperatorNode>,   // the other input state
-        key: ColumnId,             // the join key column
-        family: FieldDataType,     // the summary type of the result
+        outer: C,               // one input state
+        inner: C,               // the other input state
+        key: ColumnId,          // the join key column
+        family: FieldDataType,  // the summary type of the result
     },
     Extension {
-        child: Rc<OperatorNode>,   // the input
-        name: String,              // the deployment-defined operator name
+        child: C,               // the input
+        name: String,           // the deployment-defined operator name
     },
 }
 
-impl ASAPOp {
+impl<C> ASAPOp<C> {
     /// The input nodes. For `SummaryAgg` this also includes nodes used by
     /// subqueries inside its `filter`.
-    pub fn children(&self) -> Vec<&Rc<OperatorNode>>;
+    pub fn children(&self) -> Vec<&C>;
     /// The same operator with each input replaced by `f(input)`; `f` may
-    /// change how inputs are referred to (e.g. `Rc<OperatorNode>` to a node id).
-    pub fn map_children<D>(&self, f: impl FnMut(&Rc<OperatorNode>) -> D) -> ASAPOp<D>;
+    /// change the reference type, e.g. from `Rc<OperatorNode>` to a node id.
+    pub fn map_children<D>(&self, f: impl FnMut(&C) -> D) -> ASAPOp<D>;
     /// The operator's name, e.g. `"SummaryAgg"`, for messages and display.
     pub fn kind_name(&self) -> &'static str;
+}
+
+impl ASAPOp {
     /// Whether the operator is reserved and cannot be built yet: Subtract,
     /// Delete, Join, Extension.
     pub fn is_unimplemented(&self) -> bool;
