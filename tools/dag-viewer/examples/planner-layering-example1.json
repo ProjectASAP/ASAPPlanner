@@ -1,4 +1,104 @@
 {
+  "deployment": {
+    "accuracy_model": {
+      "evidence": "none",
+      "name": "DefaultAccuracyModel"
+    },
+    "capabilities": {
+      "ingestion_time": true,
+      "memory_budget_bytes": null,
+      "query_time_retention": false,
+      "raw_bytes_per_sample": 16,
+      "raw_data_retained": true,
+      "source": "asap_executor::capabilities",
+      "summaries": [
+        {
+          "readouts": [],
+          "summary": "exact Sum"
+        },
+        {
+          "readouts": [],
+          "summary": "exact Count"
+        },
+        {
+          "readouts": [],
+          "summary": "exact Min"
+        },
+        {
+          "readouts": [],
+          "summary": "exact Max"
+        },
+        {
+          "readouts": [],
+          "summary": "exact Increase"
+        },
+        {
+          "readouts": [],
+          "summary": "exact Rate"
+        },
+        {
+          "readouts": [
+            "Quantile"
+          ],
+          "summary": "Kll"
+        },
+        {
+          "readouts": [
+            "Quantile",
+            "TotalCount"
+          ],
+          "summary": "DDSketch"
+        },
+        {
+          "readouts": [
+            "TotalCount",
+            "Cardinality"
+          ],
+          "summary": "Hll"
+        },
+        {
+          "readouts": [
+            "TotalCount",
+            "ItemCount"
+          ],
+          "summary": "HydraCms"
+        },
+        {
+          "readouts": [
+            "TopK"
+          ],
+          "summary": "CmsWithHeap"
+        },
+        {
+          "readouts": [
+            "TopK"
+          ],
+          "summary": "CountSketchWithHeap"
+        },
+        {
+          "readouts": [
+            "TotalCount",
+            "Cardinality",
+            "FrequencyL2",
+            "FrequencyEntropy"
+          ],
+          "summary": "UnivMon"
+        }
+      ]
+    },
+    "cost_model": {
+      "calibration": {
+        "cost_per_cpu_op": 1e-6,
+        "cost_per_retained_byte_second": 1.25e-7,
+        "cost_per_scan_byte": 1e-7,
+        "horizon_s": 3600.0,
+        "latency_ms_per_cost_unit": 1.0,
+        "version": "illustrative-v2"
+      },
+      "name": "analytical-cost-v2",
+      "unit": "cost_per_second"
+    }
+  },
   "format": "asap-stage-pipeline/v1",
   "stage0_logical": {
     "dag": {

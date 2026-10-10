@@ -14,9 +14,12 @@ const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-exampl
 const EXAMPLE1: [&str; 4] = ["--example", "planner-layering-1", "--max-candidates", "128"];
 
 fn generate(args: &[&str]) -> Value {
+    // Tests run in parallel and may generate the same document.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let out = std::env::temp_dir().join(format!(
-        "stage_pipeline_{}_{}.json",
+        "stage_pipeline_{}_{}_{}.json",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         args.join("_")
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
@@ -203,4 +206,34 @@ fn example4a_repeats_monthly_with_nothing_maintainable() {
             .unwrap()
     };
     assert!(cost(&monthly) < cost(&once));
+}
+
+/// The document records the deployment inputs Stage 3 used: the executor's
+/// capabilities (Hydra summaries named by their kind), the cost model with
+/// its calibration, including the memory weight and raw-retention settings,
+/// and the accuracy model's name.
+#[test]
+fn document_records_the_deployment_inputs() {
+    let document = generate(&EXAMPLE1);
+    let deployment = &document["deployment"];
+    let capabilities = &deployment["capabilities"];
+    assert_eq!(capabilities["source"], "asap_executor::capabilities");
+    assert_eq!(capabilities["ingestion_time"], true);
+    assert_eq!(capabilities["raw_data_retained"], true);
+    assert_eq!(capabilities["raw_bytes_per_sample"], 16);
+    assert!(capabilities["memory_budget_bytes"].is_null());
+    let summaries = capabilities["summaries"].as_array().unwrap();
+    let hydra = summaries
+        .iter()
+        .find(|s| s["summary"] == "HydraCms")
+        .expect("HydraCms is listed");
+    assert_eq!(
+        hydra["readouts"],
+        serde_json::json!(["TotalCount", "ItemCount"])
+    );
+    let calibration = &deployment["cost_model"]["calibration"];
+    assert_eq!(deployment["cost_model"]["name"], "analytical-cost-v2");
+    assert_eq!(calibration["cost_per_retained_byte_second"], 1.25e-7);
+    assert_eq!(calibration["version"], "illustrative-v2");
+    assert_eq!(deployment["accuracy_model"]["name"], "DefaultAccuracyModel");
 }
