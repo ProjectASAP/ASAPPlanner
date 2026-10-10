@@ -303,6 +303,38 @@ fn value_ranges_merge_when_disjoint() {
     );
 }
 
+/// Touching value ranges join like touching time windows; the joined range
+/// stays explicit, since neither input took NULL rows. A gap stays apart.
+#[test]
+fn touching_value_ranges_join() {
+    let latency = |op, v| latency_where(compare(LATENCY, op, ScalarValue::Float64(v)));
+    let joined = merge(vec![
+        latency(CompareOpKind::Lt, 100.0),
+        latency(CompareOpKind::Ge, 100.0),
+    ])
+    .unwrap();
+    assert_eq!(
+        joined.coverage().unwrap().selection,
+        vec![SelectionBox {
+            columns: [(
+                column("latency"),
+                Constraint::Interval {
+                    lower: Bound::Unbounded,
+                    upper: Bound::Unbounded,
+                },
+            )]
+            .into(),
+            relative_time: None,
+        }]
+    );
+    let gap = merge(vec![
+        latency(CompareOpKind::Lt, 100.0),
+        latency(CompareOpKind::Gt, 100.0),
+    ])
+    .unwrap();
+    assert_eq!(gap.coverage().unwrap().selection.len(), 2);
+}
+
 /// A predicate that is not a value set or interval on one column stays in
 /// the definition, so states with different residuals do not merge.
 #[test]

@@ -645,8 +645,9 @@ impl SelectionBox {
     }
 }
 
-/// Join boxes that differ only in adjacent time windows or only in the
-/// values of one `In` column; gaps stay separate boxes.
+/// Join boxes that differ only in one dimension whose union is again one
+/// constraint: touching time windows or value ranges, or the values of one
+/// `In` column. Gaps stay separate boxes.
 fn union(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
     let mut i = 0;
     while i < boxes.len() {
@@ -666,20 +667,7 @@ fn union(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
 fn join(a: &SelectionBox, b: &SelectionBox) -> Option<SelectionBox> {
     if a.columns == b.columns {
         let ((al, au), (bl, bu)) = (a.relative_time.as_ref()?, b.relative_time.as_ref()?);
-        let meets = |upper: &Bound<i64>, lower: &Bound<i64>| {
-            matches!(
-                (upper, lower),
-                (Bound::Included(u), Bound::Excluded(l)) | (Bound::Excluded(u), Bound::Included(l))
-                    if u == l
-            )
-        };
-        let time = if meets(au, bl) {
-            (*al, *bu)
-        } else if meets(bu, al) {
-            (*bl, *au)
-        } else {
-            return None;
-        };
+        let time = touching((al, au), (bl, bu), |x: &i64, y: &i64| Some(x.cmp(y)))?;
         return Some(SelectionBox {
             columns: a.columns.clone(),
             relative_time: Some(time),
@@ -692,22 +680,55 @@ fn join(a: &SelectionBox, b: &SelectionBox) -> Option<SelectionBox> {
         .columns
         .iter()
         .filter(|(column, constraint)| b.columns.get(*column) != Some(*constraint));
-    let (column, Constraint::In(values)) = differing.next()? else {
-        return None;
-    };
+    let (column, constraint) = differing.next()?;
     if differing.next().is_some() {
         return None;
     }
-    let Some(Constraint::In(more)) = b.columns.get(column) else {
-        return None;
+    let joined = match (constraint, b.columns.get(column)?) {
+        (Constraint::In(values), Constraint::In(more)) => {
+            Constraint::In(dedup(values.iter().chain(more).cloned().collect()))
+        }
+        (
+            Constraint::Interval {
+                lower: al,
+                upper: au,
+            },
+            Constraint::Interval {
+                lower: bl,
+                upper: bu,
+            },
+        ) => {
+            let (lower, upper) = touching((al, au), (bl, bu), compare)?;
+            Constraint::Interval { lower, upper }
+        }
+        _ => return None,
     };
     let mut columns = a.columns.clone();
-    columns.insert(
-        column.clone(),
-        Constraint::In(dedup(values.iter().chain(more).cloned().collect())),
-    );
+    columns.insert(column.clone(), joined);
     Some(SelectionBox {
         columns,
         relative_time: a.relative_time,
     })
+}
+
+/// The union of two intervals when one ends exactly where the other starts,
+/// with the shared end point in exactly one of them.
+fn touching<T: Clone>(
+    (al, au): (&Bound<T>, &Bound<T>),
+    (bl, bu): (&Bound<T>, &Bound<T>),
+    cmp: impl Fn(&T, &T) -> Option<Ordering>,
+) -> Option<(Bound<T>, Bound<T>)> {
+    let meets = |upper: &Bound<T>, lower: &Bound<T>| match (upper, lower) {
+        (Bound::Included(u), Bound::Excluded(l)) | (Bound::Excluded(u), Bound::Included(l)) => {
+            cmp(u, l) == Some(Ordering::Equal)
+        }
+        _ => false,
+    };
+    if meets(au, bl) {
+        Some((al.clone(), bu.clone()))
+    } else if meets(bu, al) {
+        Some((bl.clone(), au.clone()))
+    } else {
+        None
+    }
 }
