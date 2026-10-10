@@ -61,6 +61,12 @@ pub fn with_promql_series_identity(
                     false,
                 ));
                 schema.closed = true;
+                // A series has at most one sample per timestamp, so the full
+                // identity and the timestamp key each row. CSE's sharing
+                // legality reads this key.
+                if let Some(time) = schema.time_index {
+                    schema.add_unique_key(vec![schema.fields.len() - 1, time]);
+                }
             }
             Operator::NonASAP(NonASAPOp::Sort { partition_by, .. })
                 if partition_by.is_without() =>

@@ -1,18 +1,17 @@
 //! The stage pipeline's dynamic program selects the exhaustive minimum
-//! (#572): on #509 Example 1 and on small nested, top-k and SQL workloads,
-//! the combination it picks is the one that building and pricing every
-//! combination picks.
+//! (#572): on #509 Example 1 and on small nested, top-k, shared-input and SQL
+//! workloads, the sharing variant and combination it picks are the ones that
+//! building and pricing every combination of every variant picks.
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_logical_optimizer::pass1::logical_candidates::{
-    enumerate_local_logical_candidates, LocalLogicalCandidates,
+use asap_logical_optimizer::pass2::identical_expressions::{
+    stage1_logical_candidates, SharingVariant,
 };
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{
     select_exhaustive, select_plan, SelectionMethod, MAX_ENUMERATED_CANDIDATES,
 };
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
-use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
@@ -24,7 +23,7 @@ use asap_types::workload::{
     RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection,
 };
 
-type Inventory = LocalLogicalCandidates<usize>;
+type Inventory = Vec<SharingVariant<usize>>;
 
 fn declared<T>(value: T) -> Evidence<T> {
     Evidence {
@@ -115,23 +114,22 @@ fn promql(queries: &[&str], series: u64) -> PlanningWorkload {
     }
 }
 
-/// Stage 1's inventory as the stage pipeline builds it: series identity,
-/// then identical sub-DAGs merged.
+/// Stage 1 as the stage pipeline builds it: series identity, then Pass 1
+/// with and without identical sub-DAGs merged.
 fn promql_inventory(workload: &PlanningWorkload) -> Inventory {
     let roots = asap_frontend_promql::lower_promql_query_workload(workload, 0)
         .expect("lowers")
         .into_iter()
         .enumerate()
         .map(|(index, root)| match root {
-            QueryRoot::Operator(node) => (index, with_promql_series_identity(&node).unwrap()),
+            QueryRoot::Operator(node) => (
+                index,
+                QueryRoot::Operator(with_promql_series_identity(&node).unwrap()),
+            ),
             QueryRoot::Scalar(_) => panic!("operator roots"),
         })
         .collect();
-    let roots = share_common_sub_dags(roots)
-        .into_iter()
-        .map(|(index, node)| (index, QueryRoot::Operator(node)))
-        .collect();
-    enumerate_local_logical_candidates(roots).expect("Stage 1")
+    stage1_logical_candidates(roots).expect("Stage 1")
 }
 
 fn targets(workload: &PlanningWorkload) -> Vec<Option<AccuracyTarget>> {
@@ -174,17 +172,38 @@ fn assert_dp_matches_exhaustive(
 
     let plan = select_plan(inventory, &targets, &data, models).expect("selects");
     assert_eq!(plan.selection.method, SelectionMethod::TreeDp);
-    assert_eq!(plan.choice, winner.choice);
+    assert_eq!((plan.shared, &plan.choice), (winner.shared, &winner.choice));
     assert_eq!(plan.selection.selected, exhaustive.selection.selected);
     exhaustive.selection.selected
 }
 
-/// #509 Example 1: the dynamic program picks the cheapest of its 24 combinations.
+/// #509 Example 1: the dynamic program picks the cheapest of its 48
+/// combinations (24 per sharing variant): P44, P20's choices with the range
+/// selector shared.
 #[test]
 fn example1_dp_equals_exhaustive() {
     let workload = example1();
-    let selected = assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 24);
-    assert_eq!(selected, "P20");
+    let selected = assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 48);
+    assert_eq!(selected, "P44");
+}
+
+/// When sharing merges a whole target (`rate(x[1m])` read by both queries),
+/// the shared variant has one target for it, and the dynamic program still
+/// selects the exhaustive minimum over both variants (16 + 8 combinations).
+#[test]
+fn shared_target_dp_equals_exhaustive() {
+    let workload = promql(
+        &["sum by (job) (rate(x[1m]))", "max by (job) (rate(x[1m]))"],
+        1_000,
+    );
+    let stage1 = promql_inventory(&workload);
+    let targets: Vec<_> = stage1.iter().map(|v| v.inventory.targets.len()).collect();
+    assert_eq!(targets, [4, 3]);
+    let selected = assert_dp_matches_exhaustive(&stage1, &workload, 24);
+    assert!(
+        selected.trim_start_matches('P').parse::<usize>().unwrap() > 16,
+        "a shared candidate wins: {selected}"
+    );
 }
 
 /// Nested targets (`sum` over `rate`) select the exhaustive minimum.
@@ -214,7 +233,7 @@ fn two_query_promql_dp_equals_exhaustive() {
         ],
         1_000,
     );
-    assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 24);
+    assert_dp_matches_exhaustive(&promql_inventory(&workload), &workload, 48);
 }
 
 /// A SQL workload (distinct count and percentile) selects the exhaustive minimum.
@@ -250,12 +269,13 @@ async fn sql_dp_equals_exhaustive() {
             .expect("lowers");
         roots.push((index, QueryRoot::Operator(root)));
     }
-    let inventory = enumerate_local_logical_candidates(roots).expect("Stage 1");
+    let inventory = stage1_logical_candidates(roots).expect("Stage 1");
     assert_dp_matches_exhaustive(&inventory, &workload, 15);
 }
 
-/// Through the facade, Example 1 selects the exhaustive winner, P20: both
-/// queries exact, Q1's rate and sum and Q2's sum as exact accumulators.
+/// Through the facade, Example 1 selects the exhaustive winner, P44: both
+/// queries exact, Q1's rate and sum and Q2's sum as exact accumulators, over
+/// one shared range selector.
 #[tokio::test]
 async fn facade_selects_the_example1_exhaustive_winner() {
     let workload = example1();
@@ -270,7 +290,16 @@ async fn facade_selects_the_example1_exhaustive_winner() {
     .await
     .expect("plans");
     let selection = output.selection.as_ref().expect("selection");
-    assert_eq!(selection.selected, "P20");
+    assert_eq!(selection.selected, "P44");
+    assert_eq!(output.plans.len(), 2);
+    let scans = |root: &std::rc::Rc<asap_types::ir::OperatorNode>| {
+        asap_types::ir::OperatorNode::reachable(root)
+            .into_iter()
+            .filter(|n| matches!(n.non_asap(), Some(asap_types::ir::NonASAPOp::Scan { .. })))
+            .map(|n| std::rc::Rc::as_ptr(&n))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(scans(&output.plans[0].root), scans(&output.plans[1].root));
     assert_eq!(selection.method, SelectionMethod::TreeDp);
     assert_eq!(output.entry_indices(), vec![0, 1]);
     // The plans are already timed at query time; exporting them again
