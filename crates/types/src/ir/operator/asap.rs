@@ -258,7 +258,7 @@ impl ASAPOp {
                     SketchStatistic::PointCount { .. } => ("count", DataType::Int64),
                     SketchStatistic::FrequencyL2 => ("frequency_l2", DataType::Float64),
                     SketchStatistic::FrequencyEntropy => ("frequency_entropy", DataType::Float64),
-                    SketchStatistic::TopK { .. } => ("topk", DataType::Utf8),
+                    SketchStatistic::TopK { .. } => return ranked_rows_schema(summary_input),
                 };
                 if matches!(
                     summary_input.asap(),
@@ -615,6 +615,79 @@ impl ASAPOp {
             _ => Err(Self::unimplemented()),
         }
     }
+}
+
+/// A top-k readout returns the selected rows, as every executable top-k does
+/// (exact Sort → Limit, `EvaluatePopulation`): the state's partition keys, the
+/// ranked item's identity columns, and the item's estimated `value`.
+fn ranked_rows_schema(state: &OperatorNode) -> Result<Schema, SchemaDerivationError> {
+    use crate::ir::schema::state_type::{EntityIdentity, SummaryInputExpr};
+    fn source(state: &OperatorNode) -> Option<(&Schema, &SummaryUpdate)> {
+        match state.asap()? {
+            ASAPOp::SummaryAgg { child, input, .. } => Some((&child.schema, input)),
+            ASAPOp::SummaryMerge { children } => source(children.first()?),
+            _ => None,
+        }
+    }
+    fn items(
+        item: &SummaryInputExpr,
+        source: &Schema,
+        fields: &mut Vec<Field>,
+    ) -> Result<(), SchemaDerivationError> {
+        match item {
+            SummaryInputExpr::Column(column) => {
+                let index = crate::ir::scalar::resolve_column_ref(column, source)
+                    .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?;
+                fields.push(source.fields[index].clone());
+            }
+            SummaryInputExpr::Tuple(parts) => {
+                for part in parts {
+                    items(part, source, fields)?;
+                }
+            }
+            // A label set without its columns is read back as its encoded identity.
+            SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { .. }) => {
+                fields.push(Field::plain(
+                    crate::ir::schema::PROMQL_SERIES_IDENTITY,
+                    DataType::Utf8,
+                    false,
+                ))
+            }
+            SummaryInputExpr::Constant(_) => {
+                return Err(SchemaDerivationError::InvalidScalarSignature(
+                    "top-k item identity cannot be a constant".into(),
+                ))
+            }
+        }
+        Ok(())
+    }
+    let Some((
+        source,
+        SummaryUpdate {
+            item: Some(item), ..
+        },
+    )) = source(state)
+    else {
+        return Err(SchemaDerivationError::InvalidScalarSignature(
+            "top-k readout requires state keyed by an item identity".into(),
+        ));
+    };
+    let mut fields: Vec<_> = state
+        .schema
+        .fields
+        .iter()
+        .filter(|f| f.is_plain())
+        .cloned()
+        .collect();
+    items(item, source, &mut fields)?;
+    let key = (0..fields.len()).collect();
+    fields.push(Field::plain("value", DataType::Float64, false));
+    Ok(Schema {
+        fields,
+        time_index: None,
+        unique_keys: vec![key],
+        closed: true,
+    })
 }
 
 /// The plain value an exact accumulator finalizes to.

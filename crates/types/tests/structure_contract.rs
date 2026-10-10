@@ -212,3 +212,74 @@ fn shared_construction_derives_both_operator_categories() {
     }))
     .is_err());
 }
+
+/// A top-k readout derives the selected rows (partition keys, item identity,
+/// Float64 `value`), the shape every executable top-k returns.
+#[test]
+fn topk_readout_derives_selected_rows() {
+    use asap_types::ir::operator::Reduction;
+    use asap_types::ir::scalar::ColumnRef;
+    use asap_types::ir::schema::{
+        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
+        SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    };
+    use asap_types::ir::{ASAPOp, Operator};
+    let rows = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
+        predicates: vec![],
+        schema: Schema::new(vec![
+            Field::plain("job", DataType::Utf8, false),
+            Field::plain("series", DataType::Utf8, false),
+            Field::plain("x", DataType::Float64, false),
+        ]),
+    }))
+    .unwrap();
+    let state = Rc::new(
+        OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: rows,
+            family: FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::CountSketchWithHeap,
+                    SketchParams::CountSketchWithHeap {
+                        width: 64,
+                        depth: 3,
+                        heap_size: 10,
+                    },
+                ),
+                GroupingStrategy::default(),
+            ),
+            input: SummaryUpdate {
+                item: Some(SummaryInputExpr::Column(ColumnRef::Named("series".into()))),
+                weight: SummaryInputExpr::Column(ColumnRef::Named("x".into())),
+                weight_domain: WeightDomain::UnknownOrSigned,
+            },
+            reduction: Reduction::by(vec![0]),
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        }))
+        .unwrap(),
+    );
+    let topk = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: state,
+        query: SketchStatistic::TopK { k: 5 },
+    }))
+    .unwrap();
+    topk.validate_structure().unwrap();
+    let fields: Vec<_> = topk
+        .schema
+        .fields
+        .iter()
+        .map(|f| (f.name.as_str(), f.plain_dtype().cloned()))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("job", Some(DataType::Utf8)),
+            ("series", Some(DataType::Utf8)),
+            ("value", Some(DataType::Float64)),
+        ]
+    );
+    assert_eq!(topk.schema.unique_keys, vec![vec![0, 1]]);
+}
