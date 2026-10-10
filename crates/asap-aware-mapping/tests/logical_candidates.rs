@@ -235,3 +235,40 @@ fn topk_keeps_both_specialized_heap_choices() {
         ]
     );
 }
+
+/// A workload candidate replaces only chosen targets, declares whole-source
+/// coverage on the summary, and keeps unchosen plans identical.
+#[test]
+fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
+    use asap_aware_mapping::logical_candidates::compose_logical_candidate;
+    use asap_types::ir::ASAPOp;
+    let producer = aggregate(AggIntent::Cardinality {
+        cols: vec![0],
+        accuracy: approximate(),
+    });
+    let inventory =
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(producer.clone()))])
+            .unwrap();
+    let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
+    assert!(matches!(&exact[0].1, QueryRoot::Operator(node) if Rc::ptr_eq(node, &producer)));
+
+    let hll = compose_logical_candidate(&inventory, &[1]).unwrap();
+    let QueryRoot::Operator(estimate) = &hll[0].1 else {
+        panic!("operator root expected")
+    };
+    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
+        panic!("summary evaluation expected")
+    };
+    // The state takes every row of its source: one unrestricted selection box.
+    let coverage = summary_input.coverage().unwrap();
+    assert!(OperatorNode::reachable(&coverage.definition).iter().any(|node| matches!(
+        node.non_asap(),
+        Some(NonASAPOp::Scan { source: Source::Table { table_ref }, .. }) if table_ref == "flows"
+    )));
+    assert_eq!(coverage.selection.len(), 1);
+    assert!(
+        coverage.selection[0].columns.is_empty() && coverage.selection[0].relative_time.is_none()
+    );
+    hll[0].1.validate_structure().unwrap();
+    assert!(compose_logical_candidate(&inventory, &[99]).is_err());
+}
