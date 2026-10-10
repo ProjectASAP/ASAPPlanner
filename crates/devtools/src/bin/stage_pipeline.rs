@@ -42,8 +42,8 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
-    Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
+    Evidence, EvidenceSource, LatencyRequirement, MetricType, PlanningWorkload, Predictability,
+    Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
     RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection,
 };
 use serde_json::{json, Value};
@@ -406,6 +406,8 @@ fn planner_layering_example1() -> PlanningWorkload {
             ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
             input_cardinality: declared(1_000_000),
             distribution: declared(DataDistribution::Zipf),
+            // `http_requests_total` is a counter: its samples are never negative.
+            metric_types: [("http_requests_total".into(), MetricType::Counter)].into(),
         }),
     }
 }

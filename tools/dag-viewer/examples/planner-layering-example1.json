@@ -2442,7 +2442,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -3186,7 +3187,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -3865,7 +3867,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -4609,7 +4612,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -5220,7 +5224,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -5831,7 +5836,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -7985,7 +7991,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -8795,7 +8802,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -9540,7 +9548,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -10350,7 +10359,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -11027,7 +11037,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -11704,7 +11715,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -13804,7 +13816,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -14596,7 +14609,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -15323,7 +15337,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -16115,7 +16130,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -16774,7 +16790,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -17433,7 +17450,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -19731,7 +19749,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -20589,7 +20608,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -21382,7 +21402,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -22240,7 +22261,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -22965,7 +22987,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -23690,7 +23713,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -25148,7 +25172,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -25726,7 +25751,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -26239,7 +26265,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -26817,7 +26844,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -27262,7 +27290,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -27707,7 +27736,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -29363,7 +29393,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -30007,7 +30038,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -30586,7 +30618,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -31230,7 +31263,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -31741,7 +31775,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -32252,7 +32287,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -33854,7 +33890,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -34480,7 +34517,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -35041,7 +35079,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -35667,7 +35706,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -36160,7 +36200,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -36653,7 +36694,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -38453,7 +38495,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -39145,7 +39188,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -39772,7 +39816,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -40464,7 +40509,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -41023,7 +41069,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -41582,7 +41629,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -44998,7 +45046,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -46210,7 +46259,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -47296,7 +47346,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -48508,7 +48559,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -49468,7 +49520,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -50428,7 +50481,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -54177,7 +54231,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -55516,7 +55571,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -56729,7 +56785,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -58068,7 +58125,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -59155,7 +59213,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -60242,7 +60301,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -63886,7 +63946,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -65190,7 +65251,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -66368,7 +66430,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -67672,7 +67735,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -68724,7 +68788,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -69776,7 +69841,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -73801,7 +73867,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -75232,7 +75299,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -76537,7 +76605,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -77968,7 +78037,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -79147,7 +79217,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -80326,7 +80397,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -83013,7 +83085,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -83998,7 +84071,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -84857,7 +84931,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -85842,7 +85917,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -86575,7 +86651,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -87308,7 +87385,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -90376,7 +90454,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -91488,7 +91567,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -92474,7 +92554,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -93586,7 +93667,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -94446,7 +94528,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -95306,7 +95389,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -98269,7 +98353,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -99346,7 +99431,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -100297,7 +100383,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -101374,7 +101461,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -102199,7 +102287,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -103024,7 +103113,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -106368,7 +106458,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -107572,7 +107663,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -108650,7 +108742,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -109854,7 +109947,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -110806,7 +110900,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -111758,7 +111853,8 @@
                         "Column": "SampleValue"
                       },
                       "weight_domain": {
-                        "kind": "unknown_or_signed"
+                        "kind": "non_negative",
+                        "proof": "counter_samples"
                       }
                     },
                     "reduction": {
@@ -111934,6 +112030,104 @@
         "total": 8.0401,
         "unit": "cost_per_second"
       },
+      "P11": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.7401,
+        "unit": "cost_per_second"
+      },
+      "P12": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "10": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.4401,
+        "unit": "cost_per_second"
+      },
       "P13": {
         "per_node": {
           "0": {
@@ -112030,6 +112224,49 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 19.2401,
+        "unit": "cost_per_second"
+      },
+      "P15": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 9.3401,
         "unit": "cost_per_second"
       },
       "P16": {
@@ -112173,6 +112410,53 @@
         "total": 8.24011,
         "unit": "cost_per_second"
       },
+      "P19": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.940109999999999,
+        "unit": "cost_per_second"
+      },
       "P2": {
         "per_node": {
           "0": {
@@ -112218,6 +112502,57 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 8.3401,
+        "unit": "cost_per_second"
+      },
+      "P20": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "10": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.640109999999999,
         "unit": "cost_per_second"
       },
       "P21": {
@@ -112316,6 +112651,49 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 19.44011,
+        "unit": "cost_per_second"
+      },
+      "P23": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 9.540109999999999,
         "unit": "cost_per_second"
       },
       "P24": {
@@ -112467,6 +112845,112 @@
         "total": 7.940110000000001,
         "unit": "cost_per_second"
       },
+      "P27": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "10": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.64011,
+        "unit": "cost_per_second"
+      },
+      "P28": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "10": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "11": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.34011,
+        "unit": "cost_per_second"
+      },
       "P29": {
         "per_node": {
           "0": {
@@ -112516,6 +113000,49 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 19.44011,
+        "unit": "cost_per_second"
+      },
+      "P3": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.040099999999999,
         "unit": "cost_per_second"
       },
       "P30": {
@@ -112571,6 +113098,53 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 19.140110000000004,
+        "unit": "cost_per_second"
+      },
+      "P31": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 9.240110000000001,
         "unit": "cost_per_second"
       },
       "P32": {
@@ -112694,6 +113268,80 @@
         "total": 5.6201,
         "unit": "cost_per_second"
       },
+      "P35": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.320099999999999,
+        "unit": "cost_per_second"
+      },
+      "P36": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.020099999999999,
+        "unit": "cost_per_second"
+      },
       "P37": {
         "per_node": {
           "0": {
@@ -112766,6 +113414,84 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 16.8201,
+        "unit": "cost_per_second"
+      },
+      "P39": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 6.9201,
+        "unit": "cost_per_second"
+      },
+      "P4": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.740099999999999,
         "unit": "cost_per_second"
       },
       "P40": {
@@ -112881,6 +113607,88 @@
         "total": 5.3201,
         "unit": "cost_per_second"
       },
+      "P43": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.020099999999999,
+        "unit": "cost_per_second"
+      },
+      "P44": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 4.7200999999999995,
+        "unit": "cost_per_second"
+      },
       "P45": {
         "per_node": {
           "0": {
@@ -112961,6 +113769,41 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 16.520100000000003,
+        "unit": "cost_per_second"
+      },
+      "P47": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 6.6201,
         "unit": "cost_per_second"
       },
       "P48": {
@@ -113123,6 +113966,88 @@
         "total": 5.52011,
         "unit": "cost_per_second"
       },
+      "P51": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.220109999999999,
+        "unit": "cost_per_second"
+      },
+      "P52": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 4.920109999999999,
+        "unit": "cost_per_second"
+      },
       "P53": {
         "per_node": {
           "0": {
@@ -113203,6 +114128,41 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 16.720110000000002,
+        "unit": "cost_per_second"
+      },
+      "P55": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 6.82011,
         "unit": "cost_per_second"
       },
       "P56": {
@@ -113330,6 +114290,49 @@
         "total": 5.22011,
         "unit": "cost_per_second"
       },
+      "P59": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 4.920109999999999,
+        "unit": "cost_per_second"
+      },
       "P6": {
         "per_node": {
           "0": {
@@ -113375,6 +114378,53 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 19.5401,
+        "unit": "cost_per_second"
+      },
+      "P60": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "8": {
+            "cost": 0.8,
+            "detail": "build CmsWithHeap into 100 states: 1000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "9": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 4.6201099999999995,
         "unit": "cost_per_second"
       },
       "P61": {
@@ -113467,6 +114517,45 @@
         "total": 16.42011,
         "unit": "cost_per_second"
       },
+      "P63": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 6.52011,
+        "unit": "cost_per_second"
+      },
       "P64": {
         "per_node": {
           "0": {
@@ -113504,6 +114593,45 @@
         },
         "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
         "total": 53.720110000000005,
+        "unit": "cost_per_second"
+      },
+      "P7": {
+        "per_node": {
+          "0": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "1": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "2": {
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
+          },
+          "3": {
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
+          },
+          "4": {
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
+          },
+          "5": {
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
+          },
+          "6": {
+            "cost": 3.2,
+            "detail": "build CmsWithHeap into 100 states: 4000000 rows x depth 8; x 0.1000 evaluations/s"
+          },
+          "7": {
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
+          }
+        },
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 9.6401,
         "unit": "cost_per_second"
       },
       "P8": {
@@ -113595,322 +114723,322 @@
     },
     "rejected": [
       {
-        "id": "P3",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P4",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P7",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P11",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P12",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P15",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P19",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P20",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P23",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P27",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P28",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P31",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P35",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P36",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P39",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P43",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P44",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P47",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P51",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P52",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P55",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P59",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P60",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
-        "id": "P63",
-        "reason": "q2: CmsWithHeap needs non-negative update weights, and these are not proven non-negative",
-        "valid": false
-      },
-      {
         "id": "P1",
-        "reason": "costlier: 8.640 vs 5.220 cost_per_second",
+        "reason": "costlier: 8.640 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P2",
-        "reason": "costlier: 8.340 vs 5.220 cost_per_second",
+        "reason": "costlier: 8.340 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P3",
+        "reason": "costlier: 8.040 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P4",
+        "reason": "costlier: 7.740 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P5",
-        "reason": "costlier: 19.840 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.840 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P6",
-        "reason": "costlier: 19.540 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.540 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P7",
+        "reason": "costlier: 9.640 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P8",
-        "reason": "costlier: 56.840 vs 5.220 cost_per_second",
+        "reason": "costlier: 56.840 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P9",
-        "reason": "costlier: 8.340 vs 5.220 cost_per_second",
+        "reason": "costlier: 8.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P10",
-        "reason": "costlier: 8.040 vs 5.220 cost_per_second",
+        "reason": "costlier: 8.040 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P11",
+        "reason": "costlier: 7.740 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P12",
+        "reason": "costlier: 7.440 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P13",
-        "reason": "costlier: 19.540 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.540 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P14",
-        "reason": "costlier: 19.240 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.240 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P15",
+        "reason": "costlier: 9.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P16",
-        "reason": "costlier: 56.540 vs 5.220 cost_per_second",
+        "reason": "costlier: 56.540 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P17",
-        "reason": "costlier: 8.540 vs 5.220 cost_per_second",
+        "reason": "costlier: 8.540 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P18",
-        "reason": "costlier: 8.240 vs 5.220 cost_per_second",
+        "reason": "costlier: 8.240 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P19",
+        "reason": "costlier: 7.940 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P20",
+        "reason": "costlier: 7.640 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P21",
-        "reason": "costlier: 19.740 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.740 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P22",
-        "reason": "costlier: 19.440 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.440 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P23",
+        "reason": "costlier: 9.540 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P24",
-        "reason": "costlier: 56.740 vs 5.220 cost_per_second",
+        "reason": "costlier: 56.740 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P25",
-        "reason": "costlier: 8.240 vs 5.220 cost_per_second",
+        "reason": "costlier: 8.240 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P26",
-        "reason": "costlier: 7.940 vs 5.220 cost_per_second",
+        "reason": "costlier: 7.940 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P27",
+        "reason": "costlier: 7.640 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P28",
+        "reason": "costlier: 7.340 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P29",
-        "reason": "costlier: 19.440 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.440 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P30",
-        "reason": "costlier: 19.140 vs 5.220 cost_per_second",
+        "reason": "costlier: 19.140 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P31",
+        "reason": "costlier: 9.240 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P32",
-        "reason": "costlier: 56.440 vs 5.220 cost_per_second",
+        "reason": "costlier: 56.440 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P33",
-        "reason": "costlier: 5.920 vs 5.220 cost_per_second",
+        "reason": "costlier: 5.920 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P34",
-        "reason": "costlier: 5.620 vs 5.220 cost_per_second",
+        "reason": "costlier: 5.620 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P35",
+        "reason": "costlier: 5.320 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P36",
+        "reason": "costlier: 5.020 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P37",
-        "reason": "costlier: 17.120 vs 5.220 cost_per_second",
+        "reason": "costlier: 17.120 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P38",
-        "reason": "costlier: 16.820 vs 5.220 cost_per_second",
+        "reason": "costlier: 16.820 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P39",
+        "reason": "costlier: 6.920 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P40",
-        "reason": "costlier: 54.120 vs 5.220 cost_per_second",
+        "reason": "costlier: 54.120 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P41",
-        "reason": "costlier: 5.620 vs 5.220 cost_per_second",
+        "reason": "costlier: 5.620 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P42",
-        "reason": "costlier: 5.320 vs 5.220 cost_per_second",
+        "reason": "costlier: 5.320 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P43",
+        "reason": "costlier: 5.020 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P44",
+        "reason": "costlier: 4.720 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P45",
-        "reason": "costlier: 16.820 vs 5.220 cost_per_second",
+        "reason": "costlier: 16.820 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P46",
-        "reason": "costlier: 16.520 vs 5.220 cost_per_second",
+        "reason": "costlier: 16.520 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P47",
+        "reason": "costlier: 6.620 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P48",
-        "reason": "costlier: 53.820 vs 5.220 cost_per_second",
+        "reason": "costlier: 53.820 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P49",
-        "reason": "costlier: 5.820 vs 5.220 cost_per_second",
+        "reason": "costlier: 5.820 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P50",
-        "reason": "costlier: 5.520 vs 5.220 cost_per_second",
+        "reason": "costlier: 5.520 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P51",
+        "reason": "costlier: 5.220 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P52",
+        "reason": "costlier: 4.920 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P53",
-        "reason": "costlier: 17.020 vs 5.220 cost_per_second",
+        "reason": "costlier: 17.020 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P54",
-        "reason": "costlier: 16.720 vs 5.220 cost_per_second",
+        "reason": "costlier: 16.720 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P55",
+        "reason": "costlier: 6.820 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P56",
-        "reason": "costlier: 54.020 vs 5.220 cost_per_second",
+        "reason": "costlier: 54.020 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P57",
-        "reason": "costlier: 5.520 vs 5.220 cost_per_second",
+        "reason": "costlier: 5.520 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P58",
+        "reason": "costlier: 5.220 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P59",
+        "reason": "costlier: 4.920 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P61",
-        "reason": "costlier: 16.720 vs 5.220 cost_per_second",
+        "reason": "costlier: 16.720 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P62",
-        "reason": "costlier: 16.420 vs 5.220 cost_per_second",
+        "reason": "costlier: 16.420 vs 4.620 cost_per_second",
+        "valid": true
+      },
+      {
+        "id": "P63",
+        "reason": "costlier: 6.520 vs 4.620 cost_per_second",
         "valid": true
       },
       {
         "id": "P64",
-        "reason": "costlier: 53.720 vs 5.220 cost_per_second",
+        "reason": "costlier: 53.720 vs 4.620 cost_per_second",
         "valid": true
       }
     ],
-    "selected": "P58"
+    "selected": "P60"
   },
   "workload": {
     "queries": [
