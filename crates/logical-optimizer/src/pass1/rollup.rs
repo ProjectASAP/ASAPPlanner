@@ -87,7 +87,7 @@
 //!   own set through [`RollupStrategy::new`].
 //! - **No materialized roll-up operator.** Actually building a pre-aggregated
 //!   summary/scan leaf at execution time is separate, larger work outside
-//!   `asap-aware-mapping`'s scope (see issue #254's own "Non-goal" section)
+//!   `asap-logical-optimizer`'s scope (see issue #254's own "Non-goal" section)
 //!   — this module only constructs the pre-ASAP `NonASAPOp::Aggregate`
 //!   rewrite; a `CostModel`/search engine decides whether to prefer it.
 //! - **No cross-schema reconciliation** (see "`ColumnId` comparability"

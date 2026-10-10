@@ -29,7 +29,7 @@ use asap_types::types::AccuracyTarget;
 
 use crate::pass1::exact_composition::ExactOperation;
 
-/// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
+/// The deployment-extensible accuracy algebra. `asap-logical-optimizer` ships
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
 /// default rejects (a registered cross-metric conversion, say) implements
 /// this trait and passes it to
