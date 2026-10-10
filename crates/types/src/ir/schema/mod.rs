@@ -124,7 +124,7 @@ impl From<Field<DataType>> for Field<FieldDataType> {
 }
 
 /// How the selections of a summary operation's inputs must relate for the
-/// result to keep the family's guarantee (#573 §4.4).
+/// result to keep the family's guarantee (#573 §5.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionRelation {
     /// No row in two inputs: a shared row would be counted twice.
@@ -191,7 +191,7 @@ impl FieldDataType {
     }
 
     /// How the selections of merged states of this family must relate
-    /// (#573 §4.4); `None` when the family does not merge.
+    /// (#573 §5.6); `None` when the family does not merge.
     pub fn merge_relation(&self) -> Option<SelectionRelation> {
         use state_type::{ExactKind as E, SketchAlgorithm as S};
         if !self.family_merges() {
