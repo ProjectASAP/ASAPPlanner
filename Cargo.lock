@@ -397,6 +397,7 @@ name = "asap-integration-tests"
 version = "0.1.0"
 dependencies = [
  "asap-executor",
+ "asap-frontend-common",
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-logical-optimizer",
