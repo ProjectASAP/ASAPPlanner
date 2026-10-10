@@ -3,6 +3,7 @@
 //! every traversal needs (output category and schema, accuracy guarantee,
 //! execution timing).
 
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
-use super::summary_coverage::{CoverageError, SummaryCoverage};
+use super::summary_coverage::SummaryCoverage;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
@@ -100,8 +101,33 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
-    #[serde(default)]
-    pub coverage: Option<SummaryCoverage>,
+    /// Cache for [`Self::coverage`], derived from `operator`.
+    #[serde(skip)]
+    coverage_cache: CoverageCache,
+}
+
+/// A lazily filled [`SummaryCoverage`]. It is not part of a node's value:
+/// equality ignores it, serialization skips it, and a clone starts empty so
+/// a clone whose operator is then edited cannot read a stale entry.
+#[derive(Default)]
+struct CoverageCache(OnceCell<Option<SummaryCoverage>>);
+
+impl Clone for CoverageCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for CoverageCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for CoverageCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CoverageCache")
+    }
 }
 
 impl OperatorNode {
@@ -110,7 +136,9 @@ impl OperatorNode {
     /// ASAP operator, ...).
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
-        Ok(Self::with_schema(operator, schema))
+        let node = Self::with_schema(operator, schema);
+        node.check_merge()?;
+        Ok(node)
     }
 
     /// Build a node with caller-supplied output names and qualifiers. For
@@ -124,7 +152,7 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
-            coverage: None,
+            coverage_cache: CoverageCache::default(),
         }
     }
 
@@ -145,23 +173,28 @@ impl OperatorNode {
         self
     }
 
-    /// Attach caller-established coverage. Required on summary nodes; see
-    /// [`Self::requires_coverage`].
-    pub fn with_coverage(
-        mut self,
-        coverage: SummaryCoverage,
-    ) -> Result<Self, SchemaDerivationError> {
-        coverage.validate()?;
-        if self.result_kind != OperatorResultKind::State {
-            return Err(CoverageError::NotState.into());
-        }
-        self.coverage = Some(coverage);
-        Ok(self)
+    /// What this summary state covers; `None` for a node that is not a
+    /// `SummaryAgg` or a valid `SummaryMerge`. Derived on first use.
+    pub fn coverage(&self) -> Option<&SummaryCoverage> {
+        self.coverage_cache
+            .0
+            .get_or_init(|| SummaryCoverage::derive(self).ok())
+            .as_ref()
     }
 
-    /// Summary nodes whose state can be composed must declare coverage.
-    pub fn requires_coverage(&self) -> bool {
-        matches!(self.asap(), Some(ASAPOp::SummaryAgg { .. }))
+    /// A `SummaryMerge` is valid only over inputs with the same definition
+    /// and disjoint selections.
+    /// The derived coverage is cached, so a merge built by `new` is not
+    /// derived again by `coverage()` or `validate_structure`.
+    fn check_merge(&self) -> Result<(), SchemaDerivationError> {
+        if !matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. }))
+            || matches!(self.coverage_cache.0.get(), Some(Some(_)))
+        {
+            return Ok(());
+        }
+        let coverage = SummaryCoverage::derive(self)?;
+        let _ = self.coverage_cache.0.set(Some(coverage));
+        Ok(())
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -315,14 +348,8 @@ impl OperatorNode {
                     "invalid time or identity column in schema".into(),
                 ));
             }
-            match &node.coverage {
-                Some(coverage) => {
-                    (*node.as_ref()).clone().with_coverage(coverage.clone())?;
-                }
-                None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
-                None => {}
-            }
             node.operator.validate_inputs()?;
+            node.check_merge()?;
             if node.result_kind != node.operator.output_kind() {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
                     "retained result kind disagrees with operation".into(),
