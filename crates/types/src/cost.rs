@@ -420,8 +420,7 @@ where
 /// Whole-selected-workload cost/benefit — one query's (or one workload
 /// batch's) aggregate baseline, selected, and benefit, built from
 /// [`sum_workload_costs`] over that scope's own per-decision node
-/// annotations. See [`crate::dag_export::NamedDAG::workload_cost`] /
-/// [`crate::dag_export::WorkloadDAG::workload_cost`].
+/// annotations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkloadCostSummary {
     pub baseline_cost: CostAnnotation,

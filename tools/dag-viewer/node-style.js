@@ -1,5 +1,4 @@
-// Operator kinds (`Operator::kind_name`) exported by
-// crates/types/src/dag_export.rs. Categories describe the visible logical DAG
+// Operator kinds (`Operator::kind_name`) of the IR's operators. Categories describe the visible logical DAG
 // shape. They do not model hidden physical inputs: for example,
 // PromqlInfoEnrich is a one-child enrichment here even if physical costing
 // later accounts for an auxiliary source scan.
