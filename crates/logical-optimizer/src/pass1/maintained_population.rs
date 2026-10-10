@@ -1,7 +1,4 @@
 //! Shared maintained-population candidates over canonical relational IR.
-use crate::pass1::replacement::{
-    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
-};
 use asap_types::ir::operator::maintained_population::*;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
@@ -224,8 +221,8 @@ fn recognize(
 }
 
 /// Workload-aware rule: compatible evaluations share one retractable population.
-/// Deployments opt in by registering this strategy when they can maintain complete
-/// population updates and price the maintenance/evaluation boundary.
+/// The stage pipeline does not offer it; a deployment that can maintain
+/// complete population updates calls [`Self::candidate`] itself.
 /// The population is exact; max_k bounds the shared evaluation cache, not its members.
 pub struct MaintainedPopulationStrategy {
     roots: Vec<Rc<OperatorNode>>,
@@ -309,24 +306,6 @@ impl MaintainedPopulationStrategy {
         ))
     }
 }
-impl ReplacementStrategy for MaintainedPopulationStrategy {
-    fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-        recognize(target.root).is_some()
-    }
-    fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
-        self.candidate(target.root)
-            .map(|node| ReplacementSubDAG {
-                strategy: "MaintainedPopulationStrategy",
-                replacement: Replacement::SubDAG(node),
-                provenance: ReplacementProvenance::SummaryRealization,
-                rationale:
-                    "share an exact maintained population across compatible aggregate evaluations"
-                        .into(),
-            })
-            .into_iter()
-            .collect()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -388,18 +367,6 @@ mod tests {
         .map(lower)
         .into();
         let strategy = MaintainedPopulationStrategy::new(&roots);
-        let space = crate::search_workload_with(
-            roots
-                .iter()
-                .enumerate()
-                .map(|(i, r)| (i, Rc::clone(r)))
-                .collect(),
-            &[Box::new(MaintainedPopulationStrategy::new(&roots))],
-        );
-        assert!(space
-            .target_subdag_candidates()
-            .flat_map(|g| &g.candidates)
-            .any(|c| c.strategy == "MaintainedPopulationStrategy"));
         let plans = share_common_sub_dags(
             roots
                 .iter()

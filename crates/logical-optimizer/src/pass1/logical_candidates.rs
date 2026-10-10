@@ -3,7 +3,7 @@
 //! Alternatives are nominal realization descriptors attached to their original
 //! target, not ranked plans or accuracy certificates. Workload composition and
 //! physical planning consume this inventory later; empirical models belong to
-//! selection. The legacy search API remains until planner cutover.
+//! selection.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -22,8 +22,7 @@ use thiserror::Error;
 
 use crate::pass1::realization::{
     accuracy_budget, accuracy_target, column_ref, default_size_params, has_subpopulations,
-    realize_keyed_additive_summary_input, summarised_input, summary_candidates,
-    PhysicalSummaryInputRuleResult, Realization,
+    realize_keyed_additive_summary_input, summarised_input, summary_candidates, Realization,
 };
 use crate::pass2::window_composition::{tumbling_state, WindowForm};
 
@@ -181,7 +180,7 @@ pub fn enumerate_local_logical_candidates<Id>(
 /// or count is realized as one heap sketch over the inner aggregate's input,
 /// keyed by the ranked item and weighted by the summed value, instead of a
 /// sketch over the inner aggregate's exact result. The decision is the
-/// legacy keyed-additive rule's. Offered only when the inner target has no
+/// keyed-additive rule's ([`realize_keyed_additive_summary_input`]). Offered only when the inner target has no
 /// other consumer, so absorbing it removes its work.
 fn add_whole_expression_alternatives(
     targets: &mut [LocalLogicalTarget],
@@ -312,7 +311,7 @@ fn count_item<'a>(
 }
 
 /// The input and update of a whole-expression top-k over `target`'s inner
-/// aggregate, by the legacy keyed-additive rule, or `None` when it does not
+/// aggregate, by the keyed-additive rule, or `None` when it does not
 /// apply. Rows that carry the full series identity rank it as a column, as
 /// [`summary_update`] does.
 fn whole_expression_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, SummaryUpdate)> {
@@ -346,11 +345,7 @@ fn whole_expression_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, Su
         ),
         GroupingStrategy::default(),
     );
-    let PhysicalSummaryInputRuleResult::Realized(realized) =
-        realize_keyed_additive_summary_input(intent, &family, reduction, child)
-    else {
-        return None;
-    };
+    let realized = realize_keyed_additive_summary_input(intent, &family, reduction, child)?;
     let mut input = realized.input;
     let per_series = matches!(
         child.non_asap(),
@@ -759,7 +754,7 @@ fn counter_samples(node: &OperatorNode, metric_types: &BTreeMap<String, MetricTy
     }
 }
 
-/// What each input row contributes, following the legacy realization rules:
+/// What each input row contributes:
 /// heap sketches rank series identities, frequency sketches count values, and
 /// every other family reads the measure's input column.
 fn summary_update(

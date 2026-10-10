@@ -2,8 +2,8 @@
 //! that computes cost. Cargo enforces the stage order: this crate depends on
 //! `asap-types`, Stage 1 and Stage 2, never on the facade or the executor.
 //!
-//! - [`cost`] — the [`CostModel`] trait, analytical and evidence-based
-//!   pricing, recurrence, and the physical lowering and storage I/O they price.
+//! - [`cost`] — analytical pricing, evaluation rates from recurrence, and the
+//!   physical lowering and storage I/O profiles a deployment can price.
 //!
 //! Each Stage 2 candidate is checked against every query's accuracy target
 //! with the accuracy model, and Count-Min is admitted only over weights proven
@@ -42,16 +42,7 @@ pub mod cost;
 mod test_support;
 
 pub use asap_types::deployment::DeploymentCapabilities;
-pub use cost::cost_model::{
-    maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
-    CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
-    ExactCompositionCostRequest, ValueOperationCapabilities,
-};
-pub use cost::recurrence::{
-    evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
-    Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
-    UpdateRate,
-};
+pub use cost::recurrence::{evaluation_rate_of, EvaluationRate, RecurrenceError};
 
 use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
@@ -110,7 +101,6 @@ const DEFAULT_LOOKBACK_MS: u64 = 60_000;
 /// program's assumptions do not hold.
 pub const MAX_ENUMERATED_CANDIDATES: usize = 64;
 
-static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 static UNRESTRICTED: DeploymentCapabilities = DeploymentCapabilities::UNRESTRICTED;
@@ -172,13 +162,10 @@ impl Stage3Calibration {
 /// Planning logic, as opposed to the scoped facts it consumes: a model can have
 /// a built-in default, evidence about a particular deployment cannot. With
 /// the deployment's capabilities, these are #509's deployment inputs.
-///
-/// Stage 3 prices plans analytically, so the stage pipeline does not read
-/// `cost`; only the legacy replacement search does (#580).
+/// Stage 3 prices plans analytically ([`Stage3Calibration`]).
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
-    pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
     pub calibration: Stage3Calibration,
@@ -189,12 +176,10 @@ pub struct PlanningModels<'a> {
 
 impl<'a> PlanningModels<'a> {
     pub fn new(
-        cost: &'a dyn CostModel,
         accuracy: &'a dyn AccuracyModel,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
-            cost,
             accuracy,
             evidence,
             calibration: Stage3Calibration::ILLUSTRATIVE,
@@ -202,22 +187,15 @@ impl<'a> PlanningModels<'a> {
         }
     }
 
-    /// The built-in models. `DefaultCostModel` does not override
-    /// `estimate_cost`, so this configuration ranks structurally and is not a
+    /// The built-in models. Stage 3's calibration is illustrative, not a
     /// measured deployment cost.
     pub fn builtin() -> PlanningModels<'static> {
         PlanningModels {
-            cost: &DEFAULT_COST_MODEL,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
             calibration: Stage3Calibration::ILLUSTRATIVE,
             capabilities: &UNRESTRICTED,
         }
-    }
-
-    pub fn with_cost(mut self, cost: &'a dyn CostModel) -> Self {
-        self.cost = cost;
-        self
     }
 
     pub fn with_accuracy(mut self, accuracy: &'a dyn AccuracyModel) -> Self {
@@ -2094,9 +2072,20 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
             ),
             // An insert reaches about two layers; each updates `d` rows'
             // counters and sign-checks, then its heap.
-            params @ SketchParams::UnivMon { sketch_rows, .. } => (
+            // Each layer holds `rows x cols` eight-byte counters plus a
+            // conservative 64 bytes per heap entry.
+            SketchParams::UnivMon {
+                heap_size,
+                sketch_rows,
+                sketch_cols,
+                layers,
+            } => (
                 2 * (2 * u64::from(*sketch_rows) + 4),
-                asap_logical_optimizer::pass1::replacement::sketch_state_bytes(params)
+                u64::from(*sketch_rows)
+                    .checked_mul(u64::from(*sketch_cols))
+                    .and_then(|counters| counters.checked_mul(8))
+                    .and_then(|bytes| bytes.checked_add(u64::from(*heap_size).checked_mul(64)?))
+                    .and_then(|bytes| bytes.checked_mul(u64::from(*layers)))
                     .unwrap_or(u64::MAX),
             ),
             _ => (1, 1_024),
