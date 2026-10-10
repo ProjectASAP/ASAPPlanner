@@ -1,6 +1,6 @@
 //! Spatial heap weights come from a fresh instant vector, never sample history.
 mod common;
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     physical_planner::{
         promql_rows::{decode_series_identity, series_row, SERIES_IDENTITY_COLUMN},
@@ -234,7 +234,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
 // Blocking membership selection shares the run's cancellation and byte budget.
 #[test]
 fn current_series_observes_resource_limits() {
-    use asap_physical_operators::Error;
+    use asap_executor::Error;
     let plan = snapshot_plan();
     for cancelled in [false, true] {
         let data = input(&[("one", 50_000, 1.)]);
@@ -273,7 +273,7 @@ fn current_series_observes_resource_limits() {
 
 #[test]
 fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
-    use asap_physical_operators::physical_planner::promql_rows::encode_series_identity;
+    use asap_executor::physical_planner::promql_rows::encode_series_identity;
     let labels = BTreeMap::from([
         ("a".into(), "quote\"slash\\".into()),
         ("other".into(), "".into()),
@@ -296,7 +296,7 @@ fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
 // test does not manually assemble the computation or its dependency edges.
 #[test]
 fn planner_current_series_candidate_compiles_with_dynamic_identity() {
-    use asap_physical_operators::physical_planner::{compile, promql_rows::with_series_identity};
+    use asap_executor::physical_planner::{compile, promql_rows::with_series_identity};
     use planner_types::{types::AccuracyTarget, workload::*};
     use std::rc::Rc;
     let workload = PlanningWorkload {
@@ -334,7 +334,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .candidate(&open_root)
         .unwrap();
     let snapshot_program =
-        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
+        asap_executor::physical_planner::promql_rows::compile_current_series_evaluation(
             &open_selected,
         )
         .unwrap();

@@ -141,7 +141,7 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
 /// Execute the SQL SUM example for nonempty, empty and all-NULL populations.
 #[tokio::test]
 async fn sql_sum_example_executes_with_sql_null_semantics() {
-    use asap_physical_operators::{
+    use asap_executor::{
         physical_planner::{compile, InputContract, Source},
         runtime::{Limits, RunContext, Scope},
         sources::{DataSources, MemorySource},
@@ -262,7 +262,7 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// constructed by the test.
 #[tokio::test]
 async fn batch_planning_selects_and_executes_each_plan() {
-    use asap_physical_operators::{
+    use asap_executor::{
         physical_planner::{compile, InputContract},
         runtime::Scope,
         values::{Batch, Value},

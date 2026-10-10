@@ -1,7 +1,7 @@
 //! Compile, persist and rebind dynamic-label computation without deployment lowering.
-use asap_physical_operators::expressions::binary::{BinaryOpKind, BinaryOperator};
+use asap_executor::expressions::binary::{BinaryOpKind, BinaryOperator};
 
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     physical_planner::{promql_values::*, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
@@ -31,7 +31,7 @@ fn run(dag: CompiledPhysicalDAG, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
 fn run_inputs(
     dag: CompiledPhysicalDAG,
     batches: Vec<Batch>,
-) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
+) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
     let dag =
         serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap()).unwrap();
     let sources = batches
@@ -211,7 +211,7 @@ fn histogram_quantile_keeps_each_label_group() {
 // Linking an ensemble preserves its shared producer and every selected operator.
 #[test]
 fn composed_ensemble_shares_a_producer_across_roots() {
-    use asap_physical_operators::{
+    use asap_executor::{
         physical_planner::InputContract,
         plan::{PhysicalOperator, PlanProperties},
         runtime::{Input, OutputStream},
@@ -242,7 +242,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
             &'a self,
             inputs: Vec<Input<'a, Batch>>,
             context: RunContext,
-        ) -> Result<OutputStream<'a, Batch>, asap_physical_operators::Error> {
+        ) -> Result<OutputStream<'a, Batch>, asap_executor::Error> {
             self.starts.set(self.starts.get() + 1);
             self.source.start(inputs, context)
         }
@@ -400,7 +400,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
 // finalize each population, and preserve the requested metric-name semantics.
 #[test]
 fn exact_state_evaluations_recover_and_finalize_panes() {
-    use asap_physical_operators::factory::create_planner_accumulator;
+    use asap_executor::factory::create_planner_accumulator;
     use planner_types::ir::schema::*;
     use std::sync::Arc;
     for (kind, params, expected) in [
@@ -450,7 +450,7 @@ fn exact_state_evaluations_recover_and_finalize_panes() {
 
 #[test]
 fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
-    use asap_physical_operators::factory::create_planner_accumulator;
+    use asap_executor::factory::create_planner_accumulator;
     use planner_types::ir::schema::*;
     use std::sync::Arc;
     for (kind, params, expected) in [
