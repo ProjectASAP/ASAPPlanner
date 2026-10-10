@@ -404,7 +404,13 @@ fn compile_internal(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                let Some(NonASAPOp::Scan { schema, .. }) = child.non_asap() else {
+                // A tumbling pane reads its window through a TimeShift (#580);
+                // the deployment supplies the shifted raw rows.
+                let source = match child.non_asap() {
+                    Some(NonASAPOp::TimeShift { child, .. }) => child,
+                    _ => child,
+                };
+                let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
                 if !schema.closed || update.item.is_some() {
@@ -548,6 +554,24 @@ fn compile_internal(
                     auxiliary -= 1;
                     continue;
                 }
+            }
+            if matches!(node.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
+                && output.time_index.is_some()
+            {
+                // Pane timestamps describe their individual builds. A merged
+                // per-series state represents this evaluation's entire window,
+                // so merge by series identity and attach the execution scope's
+                // timestamp after merging, as per-series SummaryAgg does.
+                let merged = bind_operation(node, &schemas)?;
+                let compact = merged.schema();
+                let merge_id = helper_id(id, 1);
+                physical_dag.add(merge_id, inputs, merged)?;
+                physical_dag.add(
+                    id,
+                    vec![merge_id],
+                    Operator::scope_timestamp(compact, output)?,
+                )?;
+                continue;
             }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
