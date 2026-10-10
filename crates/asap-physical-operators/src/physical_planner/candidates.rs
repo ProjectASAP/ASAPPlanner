@@ -5,8 +5,8 @@ use super::*;
 /// it during optimization and deployment. Stored outputs have no storage identity.
 /// Deserialization validates the producer/reader boundary.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(try_from = "UncheckedPhysicalASAPDAG")]
-pub struct PhysicalASAPDAG {
+#[serde(try_from = "UncheckedCompiledPhysicalPlan")]
+pub struct CompiledPhysicalPlan {
     pub precompute: Option<CompiledPhysicalDAG>,
     pub query: CompiledPhysicalDAG,
     pub materialized_outputs: BTreeMap<NodeId, InputContract>,
@@ -14,18 +14,18 @@ pub struct PhysicalASAPDAG {
 
 /// Compile an explicit materialization frontier selected by Planner maintenance
 /// search. Operators upstream of that frontier run in precompute, including
-/// readouts/reductions; query execution receives their typed output values.
+/// evaluations/reductions; query execution receives their typed output values.
 /// Empty frontiers retain the full computation in the query DAG.
 ///
 /// Repeated windows must be instantiated with the same evaluation/population
 /// contract used to build each output. This API never treats a result from a
 /// different window or revision as interchangeable merely because types match.
 pub fn compile_candidate(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontier: &[NodeId],
-) -> Result<PhysicalASAPDAG, Error> {
+) -> Result<CompiledPhysicalPlan, Error> {
     cut_candidate(&compile(dag, inputs, roots)?, frontier)
 }
 
@@ -36,9 +36,9 @@ pub fn compile_candidate(
 pub fn cut_candidate(
     compiled: &CompiledPhysicalDAG,
     frontier: &[NodeId],
-) -> Result<PhysicalASAPDAG, Error> {
+) -> Result<CompiledPhysicalPlan, Error> {
     if frontier.is_empty() {
-        return Ok(PhysicalASAPDAG {
+        return Ok(CompiledPhysicalPlan {
             precompute: None,
             query: compiled.clone(),
             materialized_outputs: BTreeMap::new(),
@@ -79,7 +79,7 @@ pub fn cut_candidate(
             "frontier contains an output shadowed by another boundary",
         ));
     }
-    Ok(PhysicalASAPDAG {
+    Ok(CompiledPhysicalPlan {
         precompute: Some(precompute),
         query,
         materialized_outputs,
@@ -93,7 +93,7 @@ pub fn cut_candidate(
 /// That holds while timing-dependent lowering (an ingestion-time `Binary`
 /// aligns by value column) has the same timing at compile time as here.
 /// A query-time node feeding an ingestion-time node has no valid placement.
-pub fn frontier_from_timing(dag: &PostAsapDAG) -> Result<Vec<NodeId>, Error> {
+pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error> {
     use planner_types::post_asap::ExecutionTiming::IngestionTime;
     let timing = dag
         .nodes
@@ -101,8 +101,10 @@ pub fn frontier_from_timing(dag: &PostAsapDAG) -> Result<Vec<NodeId>, Error> {
         .map(|node| (node.id, node.output_state.timing))
         .collect::<BTreeMap<_, _>>();
     let mut frontier = BTreeSet::new();
-    if timing.get(&dag.root) == Some(&IngestionTime) {
-        frontier.insert(u64::from(dag.root.0));
+    for root in &dag.roots {
+        if timing.get(root) == Some(&IngestionTime) {
+            frontier.insert(*root as u64);
+        }
     }
     for edge in &dag.edges {
         let (Some(&producer), Some(&consumer)) =
@@ -112,7 +114,7 @@ pub fn frontier_from_timing(dag: &PostAsapDAG) -> Result<Vec<NodeId>, Error> {
         };
         match (producer == IngestionTime, consumer == IngestionTime) {
             (true, false) => {
-                frontier.insert(u64::from(edge.producer.0));
+                frontier.insert(edge.producer as u64);
             }
             (false, true) => return Err(invalid("query-time node feeds an ingestion-time node")),
             _ => {}
@@ -127,7 +129,7 @@ pub fn frontier_from_timing(dag: &PostAsapDAG) -> Result<Vec<NodeId>, Error> {
 /// and deployment feasibility are evaluated separately before cost selection.
 /// Exceeding the search budget returns an error, never a partial inventory.
 pub fn enumerate_frontiers(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     inputs: &BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     max_candidates: usize,
@@ -192,11 +194,11 @@ fn enumerate_compiled_frontiers(
 /// individual failures visible; do not substitute another computation on error.
 /// The DAG is lowered once; each frontier is a [`cut_candidate`] of it.
 pub fn compile_candidates(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontiers: &[Vec<NodeId>],
-) -> Vec<Result<PhysicalASAPDAG, Error>> {
+) -> Vec<Result<CompiledPhysicalPlan, Error>> {
     match compile(dag, inputs, roots) {
         Ok(compiled) => frontiers
             .iter()
@@ -216,7 +218,7 @@ pub struct CandidateCost {
     pub total_cost: f64,
 }
 
-pub struct CandidateSelection<T = PhysicalASAPDAG> {
+pub struct CandidateSelection<T = CompiledPhysicalPlan> {
     pub candidate: T,
     pub candidate_index: usize,
     pub cost: CandidateCost,
@@ -271,14 +273,14 @@ pub fn select_candidate<T>(
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UncheckedPhysicalASAPDAG {
+struct UncheckedCompiledPhysicalPlan {
     precompute: Option<CompiledPhysicalDAG>,
     query: CompiledPhysicalDAG,
     materialized_outputs: BTreeMap<NodeId, InputContract>,
 }
-impl TryFrom<UncheckedPhysicalASAPDAG> for PhysicalASAPDAG {
+impl TryFrom<UncheckedCompiledPhysicalPlan> for CompiledPhysicalPlan {
     type Error = Error;
-    fn try_from(candidate: UncheckedPhysicalASAPDAG) -> Result<Self, Error> {
+    fn try_from(candidate: UncheckedCompiledPhysicalPlan) -> Result<Self, Error> {
         let result = Self {
             precompute: candidate.precompute,
             query: candidate.query,
@@ -289,7 +291,7 @@ impl TryFrom<UncheckedPhysicalASAPDAG> for PhysicalASAPDAG {
     }
 }
 
-impl PhysicalASAPDAG {
+impl CompiledPhysicalPlan {
     /// Validate the physical handoff, including the producer/reader boundary.
     pub fn validate(&self) -> Result<(), Error> {
         self.query.validate()?;
@@ -331,7 +333,7 @@ mod tests {
     use super::*;
     use planner_types::workload::*;
 
-    fn grouped_rate() -> (PostAsapDAG, BTreeMap<NodeId, InputContract>, NodeId) {
+    fn grouped_rate() -> (PhysicalASAPDAG, BTreeMap<NodeId, InputContract>, NodeId) {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
@@ -361,24 +363,30 @@ mod tests {
         let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
             .unwrap()
             .remove(0);
-        let root = std::rc::Rc::new(promql_rows::with_series_identity(&root).unwrap());
+        let root = promql_rows::with_series_identity(&root).unwrap();
         let space = asap_aware_mapping::search_workload(vec![("q", root)]);
         let selected = space
             .global_selection(&asap_aware_mapping::cost_model::DefaultCostModel)
             .assemble_selected_dag(&space.roots[0].1)
             .unwrap()
             .unwrap();
-        let dag = planner_types::post_asap::compile_post_asap_dag(&selected).unwrap();
+        let selected = planner_types::ir::apply_lifecycle_timings(
+            &selected,
+            &Default::default(),
+            &mut Default::default(),
+        )
+        .unwrap();
+        let dag = planner_types::ir::physical_export::compile_physical_asap_dag(&selected).unwrap();
         let state = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, Payload::SummaryAgg { .. }))
+            .find(|node| matches!(node.payload, Payload::ASAP(ASAPOp::SummaryAgg { .. })))
             .unwrap();
         let inputs = BTreeMap::from([(
-            u64::from(state.id.0),
+            state.id as u64,
             InputContract::bounded(Arc::new(state.output_schema.clone())),
         )]);
-        (dag.clone(), inputs, u64::from(dag.root.0))
+        (dag.clone(), inputs, dag.roots[0] as u64)
     }
 
     /// Enumerating and cutting every frontier lowers each Planner node once.
@@ -399,9 +407,9 @@ mod tests {
     }
 
     fn with_timing(
-        dag: &PostAsapDAG,
-        timing: impl Fn(&PostAsapDAGNode) -> planner_types::post_asap::ExecutionTiming,
-    ) -> PostAsapDAG {
+        dag: &PhysicalASAPDAG,
+        timing: impl Fn(&PhysicalASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
+    ) -> PhysicalASAPDAG {
         let mut timed = dag.clone();
         for node in &mut timed.nodes {
             node.output_state.timing = timing(node);
@@ -413,14 +421,19 @@ mod tests {
         timed
     }
 
-    fn raw_input(dag: &PostAsapDAG) -> BTreeMap<NodeId, InputContract> {
+    fn raw_input(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, InputContract> {
         let raw = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, Payload::Fallback { .. }))
+            .find(|node| {
+                matches!(
+                    node.payload,
+                    Payload::NonASAP(planner_types::ir::NonASAPOp::TimeRange { .. })
+                )
+            })
             .unwrap();
         BTreeMap::from([(
-            u64::from(raw.id.0),
+            raw.id as u64,
             InputContract::bounded(Arc::new(raw.output_schema.clone())),
         )])
     }
@@ -472,7 +485,7 @@ mod tests {
         use planner_types::post_asap::ExecutionTiming::{IngestionTime, QueryTime};
         let (dag, _, _) = grouped_rate();
         let timed = with_timing(&dag, |node| {
-            if node.id == dag.root {
+            if node.id == dag.roots[0] {
                 IngestionTime
             } else {
                 QueryTime

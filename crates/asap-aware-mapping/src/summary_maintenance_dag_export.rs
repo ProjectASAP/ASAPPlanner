@@ -8,12 +8,14 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use asap_types::ir::OperatorNode;
 use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDAG};
+use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::post_asap::{
-    PostAsapNodeId, ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
+    ResultGuarantee, SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee,
+    SummaryWindowFramework,
 };
 
 use crate::summary_maintenance_lifecycle::{
@@ -42,7 +44,7 @@ pub struct SummaryMaintenanceDAGExport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryMaintenanceDeploymentExport {
-    pub post_asap_node_id: PostAsapNodeId,
+    pub post_asap_node_id: PhysicalASAPNodeId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_window_framework: Option<SummaryWindowFramework>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,13 +95,7 @@ pub fn export_summary_maintenance_plan(
         .zip(&deployments)
         .map(|(deployment, export)| (Rc::as_ptr(&deployment.summary), export))
         .collect();
-    let mut next_node_id = 0;
-    annotate_lifecycle_deployments(
-        &plan.root,
-        &mut dag,
-        &deployment_by_summary,
-        &mut next_node_id,
-    );
+    annotate_lifecycle_deployments(&mut dag, &deployment_by_summary);
 
     SummaryMaintenanceDAGExport {
         dag,
@@ -116,47 +112,21 @@ pub fn export_summary_maintenance_plan(
     }
 }
 
-/// Walk in the same post-order as `dag_export::export_summary` and attach a
-/// deployment directly to every flattened occurrence of its state node.
-/// This makes the decision visible to DAG consumers without asking them to
-/// reconstruct pointer identity from DAG position.
+/// Attach a deployment directly to the exported node of its `SummaryAgg`,
+/// matched by the `Rc` identity every exported node carries. This makes the
+/// decision visible to dag consumers without asking them to reconstruct
+/// pointer identity from dag position.
 fn annotate_lifecycle_deployments(
-    node: &SummaryNode,
     dag: &mut SummaryDAG,
-    deployments: &HashMap<*const SummaryNode, &SummaryMaintenanceDeploymentExport>,
-    next_node_id: &mut usize,
+    deployments: &HashMap<*const OperatorNode, &SummaryMaintenanceDeploymentExport>,
 ) {
-    if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) {
-        for child in summary_children(&node.expr) {
-            annotate_lifecycle_deployments(child, dag, deployments, next_node_id);
+    for dag_node in &mut dag.nodes {
+        let Some(source) = &dag_node.source_node else {
+            continue;
+        };
+        if let Some(deployment) = deployments.get(&Rc::as_ptr(source)) {
+            dag_node.detail["summary_maintenance"] =
+                serde_json::to_value(deployment).expect("lifecycle export is serializable");
         }
-    }
-    let dag_node = &mut dag.nodes[*next_node_id];
-    if let Some(deployment) = deployments.get(&(node as *const SummaryNode)) {
-        dag_node.detail["summary_maintenance"] =
-            serde_json::to_value(deployment).expect("lifecycle export is serializable");
-    }
-    *next_node_id += 1;
-}
-
-fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
-    match expr {
-        SummaryExpr::KeepPreAsap(_) => vec![],
-        SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
-        SummaryExpr::SummaryAgg { child, .. } => vec![child],
-        SummaryExpr::ValueOperation { child, .. } => vec![child],
-        SummaryExpr::SummaryJoin { outer, inner, .. }
-        | SummaryExpr::RelationalJoin {
-            left: outer,
-            right: inner,
-            ..
-        }
-        | SummaryExpr::SummarySubtract {
-            left: outer,
-            right: inner,
-        } => vec![outer, inner],
-        SummaryExpr::SummaryDelete { summary_input, .. }
-        | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        SummaryExpr::SummaryMerge { children, .. } => children.iter().collect(),
     }
 }

@@ -33,7 +33,7 @@ pub enum ValueOperation {
     /// Maintain the full declared population, including membership changes,
     /// so removing a TopK member can promote another.
     MaintainPopulation {
-        population: super::maintained_population::MaintainedPopulation,
+        population: super::maintained_population::MaintainedPopulation<crate::pre_asap::QueryExpr>,
     },
     /// Read an aggregate or TopK prefix from the maintained population.
     ReadPopulation {

@@ -1,14 +1,17 @@
+use std::rc::Rc;
+
 use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, HistogramCatalog, PromqlError,
 };
-use asap_types::pre_asap::QueryExpr;
+use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
+use asap_types::pre_asap::ScalarValue;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
-fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
+pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
     PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -35,7 +38,11 @@ fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
     }
 }
 
-pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
+#[allow(dead_code)]
+pub fn lower_promql(
+    query: &str,
+    accuracy: AccuracyTarget,
+) -> Result<Rc<OperatorNode>, PromqlError> {
     let mut lowered = lower_promql_workload(&workload(query, accuracy), 0)?;
     Ok(lowered.remove(0))
 }
@@ -45,8 +52,60 @@ pub fn lower_promql_with_histograms(
     query: &str,
     accuracy: AccuracyTarget,
     histograms: HistogramCatalog,
-) -> Result<QueryExpr, PromqlError> {
+) -> Result<Rc<OperatorNode>, PromqlError> {
     let mut lowered =
         lower_promql_workload_with_histograms(&workload(query, accuracy), histograms, 0)?;
     Ok(lowered.remove(0))
+}
+
+/// The value of a bare PromQL numeric literal / folded constant at an
+/// scalar position (`Literal(Float64(v))`); `None` for any
+/// other shape.
+#[allow(dead_code)]
+pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
+    match node {
+        ScalarExpr::Literal(ScalarValue::Float64(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+/// Time `root` under the default (every summary maintained) lifecycle
+/// assignment and export the post-ASAP DAG — the wire-6 export needs every
+/// node timed first.
+#[allow(dead_code)]
+pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export::PhysicalASAPDAG {
+    use asap_types::ir::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+    let timed = apply_lifecycle_timings(
+        root,
+        &LifecycleAssignment::default_maintained(),
+        &mut TimingMemo::new(),
+    )
+    .expect("default lifecycle timings");
+    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
+        .expect("post-ASAP DAG export")
+}
+
+#[allow(dead_code)]
+pub fn scalar_root(query: &str) -> ScalarExpr {
+    match asap_frontend_promql::lower_promql_query_workload(
+        &workload(query, AccuracyTarget::Exact),
+        0,
+    )
+    .unwrap()
+    .remove(0)
+    {
+        asap_types::ir::QueryRoot::Scalar(expr) => expr,
+        _ => panic!("expected scalar root: {query}"),
+    }
+}
+
+#[allow(dead_code)]
+pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
+    match node.expect_non_asap() {
+        NonASAPOp::Project { cols, .. } => {
+            &cols[node.schema.column_id("value").unwrap_or(cols.len() - 1)].expr
+        }
+        NonASAPOp::Filter { pred, .. } => &pred.0,
+        other => panic!("expected sample expression, got {other:?}"),
+    }
 }

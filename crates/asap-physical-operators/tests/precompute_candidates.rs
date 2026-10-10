@@ -1,19 +1,23 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
+mod common;
 use asap_aware_mapping::{cost_model::DefaultCostModel, search_workload};
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
     physical_planner::{
         compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-        select_candidate, CandidateCost, CompiledPhysicalDAG, InputContract, PhysicalASAPDAG,
+        select_candidate, CandidateCost, CompiledPhysicalDAG, CompiledPhysicalPlan, InputContract,
         Source,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
+use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::ASAPOp;
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
-use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
     let workload = PlanningWorkload {
@@ -40,26 +44,22 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static
             ..Default::default()
         }),
     };
-    let root = Rc::new(
-        asap_frontend_promql::lower_promql_workload(&workload, 0)
-            .unwrap()
-            .remove(0),
-    );
-    let root = Rc::new(
-        asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
-            .unwrap(),
-    );
+    let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
+        .unwrap()
+        .remove(0);
+    let root = asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
+        .unwrap();
     search_workload(vec![("grouped-rate", root)])
 }
 
-fn grouped_rate() -> PostAsapDAG {
+fn grouped_rate() -> PhysicalASAPDAG {
     let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
         .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
-    compile_post_asap_dag(&selected).unwrap()
+    compile_physical_asap_dag(&selected).unwrap()
 }
 fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs
@@ -81,7 +81,7 @@ fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -
     })
 }
 
-/// Rate readouts and grouped Sum can run together during bounded precompute;
+/// Rate evaluations and grouped Sum can run together during bounded precompute;
 /// storing per-series rates instead leaves the same Sum in the query DAG.
 #[test]
 fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
@@ -92,22 +92,20 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::SummaryAgg {
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                     family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
-                }
+                })
             )
         })
         .unwrap();
-    let readout = dag
+    let evaluation = dag
         .nodes
         .iter()
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::FinalizeExactAccumulator
-                }
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
             ) && dag
                 .edges
                 .iter()
@@ -116,12 +114,12 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .unwrap();
     let input_schema = Arc::new(state.output_schema.clone());
     let (family, update, grouping) = match &state.payload {
-        PostAsapOperatorPayload::SummaryAgg {
+        PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
             family,
             input,
             grouping,
             ..
-        } => (family, input, grouping),
+        }) => (family, input, grouping),
         _ => unreachable!(),
     };
     let range_ms = Some((-58_000, 2_000));
@@ -139,7 +137,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 .as_any()
                 .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .readout(asap_physical_operators::Statistic::Rate, range_ms, None)
+                .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
                 .unwrap()
                 .unwrap();
             let summary = Value::Summary {
@@ -169,9 +167,9 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         })
         .collect();
     let batch = Batch::try_new(input_schema.clone(), rows).unwrap();
-    let root = u64::from(dag.root.0);
-    let state_id = u64::from(state.id.0);
-    let rate_id = u64::from(readout.id.0);
+    let root = dag.roots[0] as u64;
+    let state_id = state.id as u64;
+    let rate_id = evaluation.id as u64;
     let frontiers = asap_physical_operators::physical_planner::enumerate_frontiers(
         &dag,
         &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
@@ -367,7 +365,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .as_any()
         .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
         .unwrap()
-        .readout(asap_physical_operators::Statistic::Rate, range_ms, None)
+        .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
         .unwrap()
         .unwrap();
     assert_ne!(
@@ -376,7 +374,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     );
 }
 
-/// Enumerated frontiers include both grouped-result and per-series readout
+/// Enumerated frontiers include both grouped-result and per-series evaluation
 /// persistence; an explicit Rate-state input retains its original semantics.
 #[test]
 fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
@@ -388,18 +386,18 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
         .find(|node| {
             matches!(
                 &node.payload,
-                PostAsapOperatorPayload::SummaryAgg {
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                     family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
-                }
+                })
             )
         })
         .unwrap();
     let inputs = BTreeMap::from([(
-        u64::from(state.id.0),
+        state.id as u64,
         InputContract::bounded(Arc::new(state.output_schema.clone())),
     )]);
-    let roots = [u64::from(dag.root.0)];
+    let roots = [dag.roots[0] as u64];
     let frontiers = enumerate_frontiers(&dag, &inputs, &roots, 4096).unwrap();
     let candidates = compile_candidates(&dag, inputs.clone(), &roots, &frontiers)
         .into_iter()
@@ -422,14 +420,14 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
     let mut executed = 0;
     for forest in inventory.candidates {
         let root = &forest[0].1;
-        let dag = compile_post_asap_dag(root).unwrap();
+        let dag = compile_physical_asap_dag(root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::SummaryAgg {
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                     family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
-                }
+                })
             )
         }) else {
             continue;
@@ -440,30 +438,30 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             .find(|node| {
                 matches!(
                     node.payload,
-                    PostAsapOperatorPayload::SummaryAgg {
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                         family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                         ..
-                    }
+                    })
                 )
             })
-            .map(|node| u64::from(node.id.0))
-            .unwrap_or(u64::from(dag.root.0));
+            .map(|node| node.id as u64)
+            .unwrap_or(dag.roots[0] as u64);
         let physical_asap_dags = compile_candidates(
             &dag,
             BTreeMap::from([(
-                u64::from(state.id.0),
+                state.id as u64,
                 InputContract::bounded(Arc::new(state.output_schema.clone())),
             )]),
-            &[u64::from(dag.root.0)],
+            &[dag.roots[0] as u64],
             &[vec![], vec![boundary]],
         );
         let (family, input, grouping) = match &state.payload {
-            PostAsapOperatorPayload::SummaryAgg {
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 family,
                 input,
                 grouping,
                 ..
-            } => (family, input, grouping),
+            }) => (family, input, grouping),
             _ => unreachable!(),
         };
         let schema = Arc::new(state.output_schema.clone());
@@ -558,14 +556,14 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
 /// The per-frontier lowering used before compile-once cuts: each boundary
 /// choice lowers the precompute and query DAGs from the logical DAG again.
 fn recompiled_candidate(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     inputs: &BTreeMap<u64, InputContract>,
     roots: &[u64],
     frontier: &[u64],
-) -> Result<PhysicalASAPDAG, asap_physical_operators::Error> {
+) -> Result<CompiledPhysicalPlan, asap_physical_operators::Error> {
     use asap_physical_operators::plan::Emission;
     if frontier.is_empty() {
-        return Ok(PhysicalASAPDAG {
+        return Ok(CompiledPhysicalPlan {
             precompute: None,
             query: compile(dag, inputs.clone(), roots)?,
             materialized_outputs: BTreeMap::new(),
@@ -580,7 +578,7 @@ fn recompiled_candidate(
     }
     let mut query_inputs = inputs.clone();
     query_inputs.extend(materialized_outputs.clone());
-    Ok(PhysicalASAPDAG {
+    Ok(CompiledPhysicalPlan {
         precompute: Some(precompute),
         query: compile(dag, query_inputs, roots)?,
         materialized_outputs,
@@ -588,7 +586,7 @@ fn recompiled_candidate(
 }
 
 fn assert_cuts_match_recompilation(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     inputs: BTreeMap<u64, InputContract>,
     roots: &[u64],
     min_frontiers: usize,
@@ -615,13 +613,18 @@ fn grouped_rate_cuts_equal_per_frontier_compilation() {
     let state = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .find(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .unwrap();
     let inputs = BTreeMap::from([(
-        u64::from(state.id.0),
+        state.id as u64,
         InputContract::bounded(Arc::new(state.output_schema.clone())),
     )]);
-    assert_cuts_match_recompilation(&dag, inputs, &[u64::from(dag.root.0)], 3);
+    assert_cuts_match_recompilation(&dag, inputs, &[dag.roots[0] as u64], 3);
 }
 
 /// Cuts of a DAG whose nodes lower to helper operators (current-series
@@ -655,26 +658,32 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
-    let root = Rc::new(
+    let root =
         asap_physical_operators::physical_planner::promql_rows::with_series_identity(&original)
-            .unwrap(),
-    );
+            .unwrap();
     let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
         std::slice::from_ref(&root),
     )
     .candidate(&root)
     .unwrap();
-    let dag = compile_post_asap_dag(&selected).unwrap();
+    let dag = compile_physical_asap_dag(&selected).unwrap();
     let raw = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+        .find(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(
+                    planner_types::ir::NonASAPOp::TimeRange { .. }
+                )
+            )
+        })
         .unwrap();
     let inputs = BTreeMap::from([(
-        u64::from(raw.id.0),
+        raw.id as u64,
         InputContract::bounded(Arc::new(raw.output_schema.clone())),
     )]);
-    let roots = [u64::from(dag.root.0)];
+    let roots = [dag.roots[0] as u64];
     let compiled = compile(&dag, inputs.clone(), &roots).unwrap();
     // The root reads its population through a Sort helper numbered by the root.
     let helper = u64::MAX - (roots[0] << 16);
@@ -694,25 +703,24 @@ fn cut_candidate_rejects_invalid_frontiers() {
     let state = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .find(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
+            )
+        })
         .unwrap();
-    let readout = dag
+    let evaluation = dag
         .nodes
         .iter()
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::FinalizeExactAccumulator
-                }
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
             )
         })
         .unwrap();
-    let (state_id, rate_id, root) = (
-        u64::from(state.id.0),
-        u64::from(readout.id.0),
-        u64::from(dag.root.0),
-    );
+    let (state_id, rate_id, root) = (state.id as u64, evaluation.id as u64, dag.roots[0] as u64);
     let inputs = BTreeMap::from([(
         state_id,
         InputContract::bounded(Arc::new(state.output_schema.clone())),

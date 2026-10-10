@@ -9,16 +9,20 @@ use asap_physical_operators::{
     values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+use planner_types::ir::NonASAPOp;
+use planner_types::ir::Predicate;
+use planner_types::ir::ScalarExpr as QueryExpr;
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema},
-    pre_asap::{CompareOpKind, DataType, JoinKind, Predicate, QueryExpr},
+    post_asap::{Field, FieldDataType},
+    pre_asap::{CompareOpKind, DataType, JoinKind},
 };
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
-    Arc::new(Schema {
-        closed: true,
+    Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: fields
             .iter()
             .map(|(name, dtype, nullable)| Field {
@@ -74,11 +78,12 @@ fn keys(rows: &[Vec<Value>]) -> Vec<Vec<Vec<u8>>> {
         .collect()
 }
 fn eq_predicate() -> Predicate {
-    Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(0)),
+    Predicate(QueryExpr::Compare {
+        semantics: planner_types::ir::ExprSemantics::Sql,
+        left: Box::new(QueryExpr::Column(0)),
         op: CompareOpKind::Eq,
-        right: Rc::new(QueryExpr::Column(1)),
-    }))
+        right: Box::new(QueryExpr::Column(1)),
+    })
 }
 fn join(left: Vec<Value>, right: Vec<Value>, kind: JoinKind, keyed: bool) -> Vec<Vec<Value>> {
     let input = schema(&[("key", DataType::Float64, true)]);
@@ -345,7 +350,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
     use asap_physical_operators::physical_planner::compile_node;
     use planner_types::{
         post_asap::*,
-        pre_asap::{AggIntent, Field, GroupKeys, Reduction as PlanReduction},
+        pre_asap::{AggIntent, GroupKeys, Reduction as PlanReduction},
     };
     let input = schema(&[("v", DataType::Int64, false)]);
     for measure in [
@@ -353,8 +358,12 @@ fn global_extrema_bind_with_planner_derived_schema() {
         AggIntent::Max { col: Some(0) },
     ] {
         let planner_input =
-            planner_types::pre_asap::Schema::new(vec![Field::plain("v", DataType::Int64, false)]);
-        let derived = planner_types::pre_asap::query_expr::aggregate_output_schema(
+            planner_types::pre_asap::Schema::new(vec![planner_types::pre_asap::Field::plain(
+                "v",
+                DataType::Int64,
+                false,
+            )]);
+        let derived = planner_types::pre_asap::aggregate_output_schema(
             &planner_input,
             &PlanReduction::Reduce(GroupKeys::by(vec![])),
             std::slice::from_ref(&measure),
@@ -364,20 +373,19 @@ fn global_extrema_bind_with_planner_derived_schema() {
         let result = derived.fields[0].clone();
         let output = schema(&[(
             &result.name,
-            result.dtype.plain().unwrap().clone(),
+            result.plain_dtype().unwrap().clone(),
             result.nullable,
         )]);
-        let node = PostAsapDAGNode {
-            id: PostAsapNodeId(1),
-            payload: PostAsapOperatorPayload::Value {
-                operation: ValueOperation::Exact(ExactOperation::Aggregate {
-                    reduction: PlanReduction::Reduce(GroupKeys::by(vec![])),
-                    measures: vec![measure],
-                    output_names: vec![result.name],
-                    filters: vec![],
-                    having: None,
-                }),
-            },
+        let node = PhysicalASAPDAGNode {
+            id: 1,
+            payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
+                reduction: PlanReduction::Reduce(GroupKeys::by(vec![])),
+                measures: vec![measure],
+                output_names: vec![result.name],
+                filters: vec![],
+                having: None,
+                child: 0,
+            }),
             output_state: ExecutionDataState::QUERY_ROWS,
             output_schema: (*output).clone(),
             guarantee: None,
@@ -408,9 +416,10 @@ fn planner_comparisons_handle_nan_without_execution_errors() {
         CompareOpKind::Ge,
     ] {
         let expression = QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(0)),
+            semantics: planner_types::ir::ExprSemantics::Sql,
+            left: Box::new(QueryExpr::Column(0)),
             op: op.clone(),
-            right: Rc::new(QueryExpr::Column(1)),
+            right: Box::new(QueryExpr::Column(1)),
         };
         let compiled = CompiledExpression::compile(&expression, &input).unwrap();
         for row in [
@@ -475,9 +484,10 @@ fn mixed_numeric_comparisons_preserve_large_integer_precision() {
         ("b", DataType::Float64, false),
     ]);
     let expr = QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(0)),
+        semantics: planner_types::ir::ExprSemantics::Sql,
+        left: Box::new(QueryExpr::Column(0)),
         op: CompareOpKind::Gt,
-        right: Rc::new(QueryExpr::Column(1)),
+        right: Box::new(QueryExpr::Column(1)),
     };
     let compiled = CompiledExpression::compile(&expr, &input).unwrap();
     for (a, b, expected) in [
@@ -543,8 +553,9 @@ fn boolean_truth_tables_agree_between_expression_paths() {
 
 // Partial/final execution must agree with one build for an uncompacted KLL population.
 #[test]
-fn kll_partial_merge_and_multiple_readouts_preserve_population() {
+fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 512 }),
@@ -588,10 +599,10 @@ fn kll_partial_merge_and_multiple_readouts_preserve_population() {
             dag.add(
                 id,
                 vec![build],
-                Operator::readout(
+                Operator::evaluation(
                     state.clone(),
                     0,
-                    asap_physical_operators::operators::ReadoutQuery::Sketch(
+                    asap_physical_operators::operators::SummaryEvaluation::Sketch(
                         planner_types::post_asap::SketchStatistic::Quantile { q },
                     ),
                 )
@@ -662,6 +673,7 @@ fn zero_column_output_obeys_memory_limit() {
 fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
     use asap_physical_operators::Statistic;
     use planner_types::post_asap::{ExactKind, ExactParams};
+
     let input = schema(&[("v", DataType::Float64, false)]);
     for (kind, params, statistic) in [
         (ExactKind::Min, ExactParams::Min, Statistic::Min),
@@ -683,11 +695,11 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         dag.add(
             2,
             vec![1],
-            Operator::readout(
+            Operator::evaluation(
                 state,
                 0,
-                asap_physical_operators::operators::ReadoutQuery::Exact(
-                    asap_physical_operators::summary_kernels::exact::ExactReadout {
+                asap_physical_operators::operators::SummaryEvaluation::Exact(
+                    asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                         statistic,
                         lookback_ms: None,
                     },

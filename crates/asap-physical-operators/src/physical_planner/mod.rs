@@ -1,23 +1,25 @@
 //! Compile logical computation to native operators with typed external inputs.
 //! Compilation needs no readers; deployment resolves inputs after selection.
-use crate::operators::ReadoutQuery;
-use crate::summary_kernels::exact::ExactReadout;
+use crate::operators::SummaryEvaluation;
+use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
     plan::{Boundedness, Emission, NodeId, PhysicalDAG, PhysicalOperator, PlanProperties},
     values::{Batch, SchemaRef},
     Error,
 };
+use planner_types::ir::physical_export::{
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
+    PhysicalASAPOperatorPayload as Payload,
+};
+use planner_types::ir::{ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr};
 use planner_types::{
-    post_asap::{
-        ExactOperation, FieldDataType, PostAsapDAG, PostAsapDAGNode,
-        PostAsapOperatorPayload as Payload, SketchStatistic, SummaryInputExpr, ValueOperation,
-    },
+    post_asap::{FieldDataType, SketchStatistic, SummaryInputExpr},
     pre_asap::{
-        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
-        Reduction as PlannerReduction,
+        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, Reduction as PlannerReduction,
     },
 };
+mod logical;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -39,7 +41,8 @@ pub mod promql_values;
 mod candidates;
 pub use candidates::{
     compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-    frontier_from_timing, select_candidate, CandidateCost, CandidateSelection, PhysicalASAPDAG,
+    frontier_from_timing, select_candidate, CandidateCost, CandidateSelection,
+    CompiledPhysicalPlan,
 };
 
 mod compiled;
@@ -50,7 +53,7 @@ mod row_values;
 /// Compile computation without opening or retaining deployment readers.
 /// Input contracts identify explicit boundaries selected by maintenance planning.
 pub fn compile(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
@@ -60,7 +63,7 @@ pub fn compile(
 /// Convenience for callers that already resolved inputs. Lowering still uses
 /// only their contracts, and instantiation checks those contracts again.
 pub fn bind<'a>(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
 ) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
@@ -73,11 +76,12 @@ pub fn bind<'a>(
 
 /// Resolve raw scan connectors before invoking the reader-independent compiler.
 pub fn bind_with_data_sources<'a>(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
     data_sources: &crate::sources::DataSources,
 ) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
+    let restored = logical::restore(dag)?;
     // Only resolve scans reachable below the selected input boundaries.
     let mut pending = roots.to_vec();
     let mut seen = BTreeSet::new();
@@ -85,22 +89,19 @@ pub fn bind_with_data_sources<'a>(
         if !seen.insert(id) || sources.contains_key(&id) {
             continue;
         }
-        let node = dag
+        let _node = dag
             .nodes
             .iter()
-            .find(|n| u64::from(n.id.0) == id)
+            .find(|n| n.id as u64 == id)
             .ok_or_else(|| invalid(format!("missing node {id}")))?;
-        if let Payload::Fallback {
-            expression: expression @ QueryExpr::Scan { .. },
-        } = &node.payload
-        {
-            sources.insert(id, Box::new(data_sources.bind(expression)?));
+        if matches!(restored[&id].non_asap(), Some(NonASAPOp::Scan { .. })) {
+            sources.insert(id, Box::new(data_sources.bind(&restored[&id])?));
         } else {
             pending.extend(
                 dag.edges
                     .iter()
-                    .filter(|e| u64::from(e.consumer.0) == id)
-                    .map(|e| u64::from(e.producer.0)),
+                    .filter(|e| e.consumer as u64 == id)
+                    .map(|e| e.producer as u64),
             );
         }
     }
@@ -123,64 +124,62 @@ fn helper_id(node: NodeId, index: u64) -> NodeId {
 }
 
 fn compile_internal(
-    dag: &PostAsapDAG,
+    dag: &PhysicalASAPDAG,
     mut sources: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
+    let restored = logical::restore(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
         .nodes
         .iter()
-        .map(|node| (u64::from(node.id.0), node))
+        .map(|node| (node.id as u64, node))
         .collect::<BTreeMap<_, _>>();
     let mut dependencies = BTreeMap::<NodeId, Vec<NodeId>>::new();
     // Binary input order is semantic; serialized edge order is not.
     let mut edges = dag.edges.iter().collect::<Vec<_>>();
     edges.sort_by_key(|edge| {
         (
-            edge.consumer.0,
+            edge.consumer,
             match edge.role {
-                planner_types::post_asap::EdgeRole::Left => 0,
-                planner_types::post_asap::EdgeRole::Input => 1,
-                planner_types::post_asap::EdgeRole::Right => 2,
+                planner_types::ir::physical_export::EdgeRole::Left => 0,
+                planner_types::ir::physical_export::EdgeRole::Input => 1,
+                planner_types::ir::physical_export::EdgeRole::Right => 2,
+                planner_types::ir::physical_export::EdgeRole::ScalarRef => 3,
             },
         )
     });
-    // Scalar literal operands of query-time arithmetic are folded into the consumer.
-    let mut literals = BTreeMap::<NodeId, (f64, bool)>::new();
+    let literals = BTreeMap::<NodeId, (f64, bool)>::new();
     for edge in edges {
-        let consumer = u64::from(edge.consumer.0);
-        if let (
-            Payload::Fallback { expression },
-            Some(PostAsapDAGNode {
-                payload: Payload::Binary { .. },
-                ..
-            }),
-        ) = (
-            &nodes[&u64::from(edge.producer.0)].payload,
-            nodes.get(&consumer),
-        ) {
-            if let Some(value) = row_values::scalar_literal(expression) {
-                let left = edge.role == planner_types::post_asap::EdgeRole::Left;
-                if literals.insert(consumer, (value, left)).is_some() {
-                    return Err(invalid("binary with two scalar literals is not folded"));
-                }
-                continue;
+        dependencies
+            .entry(edge.consumer as u64)
+            .or_default()
+            .push(edge.producer as u64);
+    }
+    let mut fallback = BTreeMap::new();
+    for (&id, root) in &restored {
+        let raw_summary_input = matches!(root.non_asap(), Some(NonASAPOp::TimeRange { .. }))
+            && dag.edges.iter().any(|e| {
+                e.producer as u64 == id
+                    && matches!(
+                        nodes[&(e.consumer as u64)].payload,
+                        Payload::ASAP(ASAPOp::SummaryAgg { .. })
+                    )
+            });
+        if !root.contains_asap() && !raw_summary_input {
+            if let Ok(lowered) = promql_fallback::lower(root) {
+                fallback.insert(id, lowered);
             }
         }
-        dependencies
-            .entry(u64::from(edge.consumer.0))
-            .or_default()
-            .push(u64::from(edge.producer.0));
     }
     let known = |id: &NodeId| {
         nodes.contains_key(id)
             || promql_fallback::raw_series_owner(*id).is_some_and(|owner| {
                 matches!(
                     nodes.get(&owner),
-                    Some(PostAsapDAGNode {
-                        payload: Payload::Fallback { .. },
+                    Some(PhysicalASAPDAGNode {
+                        payload: Payload::NonASAP(_),
                         ..
                     })
                 )
@@ -204,7 +203,7 @@ fn compile_internal(
             return Err(invalid(format!("missing root {id}")));
         }
         pending.push((id, true));
-        if !sources.contains_key(&id) {
+        if !sources.contains_key(&id) && !fallback.contains_key(&id) {
             for &input in dependencies.get(&id).into_iter().flatten() {
                 pending.push((input, false));
             }
@@ -229,7 +228,9 @@ fn compile_internal(
                 .iter()
                 .map(|id| Arc::new(nodes[id].output_schema.clone()))
                 .collect::<Vec<_>>();
-            if matches!(node.payload, Payload::SummaryMerge) && inputs.len() > 1 {
+            if matches!(node.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
+                && inputs.len() > 1
+            {
                 if schemas.iter().any(|s| s != &schemas[0]) {
                     return Err(invalid("summary merge inputs have different schemas"));
                 }
@@ -241,20 +242,11 @@ fn compile_internal(
                 inputs = vec![auxiliary];
                 schemas.truncate(1);
             }
-            // A consumed bare selector supplies raw range rows (e.g. to a
-            // per-entity summary), not an instant vector, so only its consumer computes.
-            let raw_rows = matches!(
-                &node.payload,
-                Payload::Fallback {
-                    expression: QueryExpr::TimeRange { .. }
-                }
-            ) && dag.edges.iter().any(|e| u64::from(e.producer.0) == id);
-            if let (Payload::Fallback { expression }, false) = (&node.payload, raw_rows) {
-                let promql_fallback::Lowering {
-                    selectors,
-                    mut steps,
-                } = promql_fallback::lower(expression)
-                    .map_err(|error| invalid(format!("node {id}: {error}")))?;
+            if let Some(promql_fallback::Lowering {
+                selectors,
+                mut steps,
+            }) = fallback.remove(&id)
+            {
                 let mut slots = Vec::new();
                 for (i, (_, schema)) in selectors.iter().enumerate() {
                     let slot = promql_fallback::raw_series_input(id, i);
@@ -300,10 +292,7 @@ fn compile_internal(
                 )?;
                 continue;
             }
-            if let Payload::Value {
-                operation: ValueOperation::MaintainPopulation { population },
-            } = &node.payload
-            {
+            if let Payload::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &node.payload {
                 use planner_types::post_asap::maintained_population::PopulationInput;
                 let PopulationInput::CurrentSeries(spec) = &population.input else {
                     return Err(invalid(
@@ -336,22 +325,18 @@ fn compile_internal(
                 )?;
                 continue;
             }
-            if let Payload::Value {
-                operation: ValueOperation::ReadPopulation { readout },
-            } = &node.payload
-            {
+            if let Payload::ASAP(ASAPOp::EvaluatePopulation { evaluation, .. }) = &node.payload {
                 use planner_types::post_asap::maintained_population::{
                     PopulationInput, PopulationStatistic,
                 };
                 let [producer] = inputs.as_slice() else {
-                    return Err(invalid("population readout requires one input"));
+                    return Err(invalid("population evaluation requires one input"));
                 };
-                let Payload::Value {
-                    operation: ValueOperation::MaintainPopulation { population },
-                } = &nodes[producer].payload
+                let Payload::ASAP(ASAPOp::MaintainPopulation { population, .. }) =
+                    &nodes[producer].payload
                 else {
                     return Err(invalid(
-                        "population readout requires its declared population",
+                        "population evaluation requires its declared population",
                     ));
                 };
                 let PopulationInput::CurrentSeries(spec) = &population.input else {
@@ -363,9 +348,9 @@ fn compile_internal(
                     ));
                 }
                 let input = schemas[0].clone();
-                let PopulationStatistic::TopK { k } = readout else {
+                let PopulationStatistic::TopK { k } = evaluation else {
                     let mut chain =
-                        row_values::population_aggregate(&input, &spec.grouping, readout)?;
+                        row_values::population_aggregate(&input, &spec.grouping, evaluation)?;
                     let last = chain.pop().expect("nonempty chain");
                     let mut inputs = inputs;
                     for operator in chain {
@@ -404,26 +389,24 @@ fn compile_internal(
             }
             // A closed row must include either all source labels or the explicit
             // complete-label identity. Projected labels alone are insufficient.
-            if let Payload::SummaryAgg {
+            if let Payload::ASAP(ASAPOp::SummaryAgg {
                 family,
                 input: update,
                 reduction: PlannerReduction::PerEntity,
                 grouping,
                 filter: None,
-            } = &node.payload
+                ..
+            }) = &node.payload
             {
                 let [input_id] = inputs.as_slice() else {
                     return Err(invalid("per-entity summary requires one input"));
                 };
-                let Payload::Fallback {
-                    expression: QueryExpr::TimeRange { child, .. },
-                } = &nodes[input_id].payload
-                else {
+                let Some(NonASAPOp::TimeRange { child, .. }) = restored[input_id].non_asap() else {
                     return Err(invalid(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                let QueryExpr::Scan { schema, .. } = child.as_ref() else {
+                let Some(NonASAPOp::Scan { schema, .. }) = child.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
                 if !schema.closed || update.item.is_some() {
@@ -462,7 +445,16 @@ fn compile_internal(
                 )?;
                 continue;
             }
-            if let Payload::Binary { operator } = &node.payload {
+            if let Payload::NonASAP(NonASAPOp::BinaryOp {
+                operator,
+                return_bool,
+                ..
+            }) = &node.payload
+            {
+                let operator = crate::expressions::binary::BinaryOperator::from_logical(
+                    operator,
+                    *return_bool,
+                );
                 let query_time = node.output_state.timing
                     == planner_types::post_asap::ExecutionTiming::QueryTime;
                 if let Some(&(value, left)) = literals.get(&id) {
@@ -505,19 +497,11 @@ fn compile_internal(
                 // carry the series identity.
                 if let (true, [left, right]) = (query_time, schemas.as_slice()) {
                     if !label_map(left) && !label_map(right) {
-                        // A scalar-valued Fallback operand, such as `scalar(x)`, has no labels.
-                        let scalar = |input: &NodeId| {
-                            matches!(
-                                nodes.get(input).map(|node| &node.payload),
-                                Some(Payload::Fallback { expression })
-                                    if promql_fallback::scalar(expression)
-                            )
-                        };
                         let binary = Operator::series_binary(
                             left.clone(),
                             right.clone(),
                             operator.clone(),
-                            [scalar(&inputs[0]), scalar(&inputs[1])],
+                            [false, false],
                         )
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
                         physical_dag.add(id, inputs, binary.with_output_schema(output)?)?;
@@ -525,14 +509,11 @@ fn compile_internal(
                     }
                 }
             }
-            if let Payload::Value {
-                operation: ValueOperation::FinalizeExactAccumulator,
-            } = &node.payload
-            {
+            if let Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) = &node.payload {
                 // Exact counts read out as Int64; PromQL declares a Float64 sample.
-                let readout = bind_operation(node, &schemas)
+                let evaluation = bind_operation(node, &schemas)
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                let actual = readout.schema();
+                let actual = evaluation.schema();
                 let converted = actual.fields.iter().zip(&output.fields).position(|(a, d)| {
                     a.dtype == FieldDataType::Plain(DataType::Int64)
                         && d.dtype == FieldDataType::Plain(DataType::Float64)
@@ -555,8 +536,8 @@ fn compile_internal(
                         .collect();
                     let project =
                         Operator::project(actual, columns)?.with_output_schema(output.clone())?;
-                    physical_dag.add(auxiliary, inputs, readout)?;
-                    if temporal_readout_drops_name(node) {
+                    physical_dag.add(auxiliary, inputs, evaluation)?;
+                    if temporal_evaluation_drops_name(node) {
                         physical_dag.add(auxiliary - 1, vec![auxiliary], project)?;
                         physical_dag.add(
                             id,
@@ -572,7 +553,7 @@ fn compile_internal(
             }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
-            if operator.is_counter_readout() {
+            if operator.is_counter_evaluation() {
                 let mut pending = vec![id];
                 let mut visited = BTreeSet::new();
                 let mut ranges = BTreeSet::new();
@@ -580,9 +561,8 @@ fn compile_internal(
                     if !visited.insert(ancestor) {
                         continue;
                     }
-                    if let Payload::Fallback {
-                        expression: QueryExpr::TimeRange { range, .. },
-                    } = &nodes[&ancestor].payload
+                    if let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) =
+                        &nodes[&ancestor].payload
                     {
                         ranges.insert(
                             i64::try_from(range.as_millis())
@@ -593,13 +573,13 @@ fn compile_internal(
                     pending.extend(dependencies.get(&ancestor).into_iter().flatten().copied());
                 }
                 if ranges.len() > 1 {
-                    return Err(invalid("counter readout has ambiguous logical windows"));
+                    return Err(invalid("counter evaluation has ambiguous logical windows"));
                 }
                 if let Some(lookback) = ranges.into_iter().next() {
                     operator = operator.with_counter_lookback(lookback)?;
                 }
             }
-            if temporal_readout_drops_name(node) {
+            if temporal_evaluation_drops_name(node) {
                 physical_dag.add(auxiliary, inputs, operator)?;
                 physical_dag.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
             } else {
@@ -611,38 +591,45 @@ fn compile_internal(
     Ok(physical_dag)
 }
 
-// Temporal summary readouts produce PromQL vectors, whose range functions drop
+// Temporal summary evaluations produce PromQL vectors, whose range functions drop
 // the metric name before matching/filtering. Stored state retains its full identity.
-fn temporal_readout_drops_name(node: &PostAsapDAGNode) -> bool {
+fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
     node.output_schema
         .fields
         .iter()
         .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN)
         && matches!(
             &node.payload,
-            Payload::Value {
-                operation: ValueOperation::FinalizeExactAccumulator
-            } | Payload::SummaryEstimate {
-                query: SketchStatistic::Quantile { .. }
-                    | SketchStatistic::Cardinality
-                    | SketchStatistic::PointCount { .. }
-                    | SketchStatistic::FrequencyL2
-                    | SketchStatistic::FrequencyEntropy
-            }
+            Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
+                | Payload::ASAP(ASAPOp::SummaryEstimate {
+                    query: SketchStatistic::Quantile { .. }
+                        | SketchStatistic::Cardinality
+                        | SketchStatistic::PointCount { .. }
+                        | SketchStatistic::FrequencyL2
+                        | SketchStatistic::FrequencyEntropy,
+                    ..
+                })
         )
 }
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
-pub fn compile_node(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
+pub fn compile_node(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
     }
     bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
 }
 
-fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
-    if let Payload::Binary { operator } = &node.payload {
+fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
+    if let Payload::NonASAP(NonASAPOp::BinaryOp {
+        operator,
+        return_bool,
+        ..
+    }) = &node.payload
+    {
+        let operator =
+            crate::expressions::binary::BinaryOperator::from_logical(operator, *return_bool);
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
         };
@@ -688,44 +675,46 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
         }
         return Operator::vector_binary(left.clone(), right.clone(), operator.clone(), false);
     }
-    if let Payload::RelationalJoin {
-        join_kind,
+    if let Payload::NonASAP(NonASAPOp::Join {
+        kind: join_kind,
         pred,
-        pruning,
-    } = &node.payload
+        ..
+    }) = &node.payload
     {
-        use planner_types::{post_asap::CandidateCompleteness, pre_asap::JoinKind};
-        if pruning.is_some() && *join_kind != JoinKind::Semi {
-            return Err(invalid("pruning certificate requires a semi-join"));
-        }
-        if matches!(pruning,Some(CandidateCompleteness::Certified { guarantee }) if guarantee.has_unknown() || guarantee.metric != planner_types::post_asap::ErrorMetric::TopKMembership)
-        {
-            return Err(invalid("invalid pruning certificate"));
-        }
         let [left, right] = inputs else {
             return Err(invalid("join requires two inputs"));
         };
-        if *join_kind == JoinKind::Semi {
-            if let Ok(keys) = equijoin_keys(pred, left, right) {
-                let operator = Operator::semi_join(left.clone(), right.clone(), keys)?;
-                return Ok(
-                    if matches!(pruning, Some(CandidateCompleteness::Certified { .. })) {
-                        operator.require_complete_right()
-                    } else {
-                        operator
-                    },
-                );
+        let pred = planner_types::ir::Predicate(local_scalar(&pred.0)?);
+        if *join_kind == planner_types::pre_asap::JoinKind::Semi {
+            if let Ok(keys) = equijoin_keys(&pred, left, right) {
+                return Operator::semi_join(left.clone(), right.clone(), keys);
             }
-        }
-        if matches!(pruning, Some(CandidateCompleteness::Certified { .. })) {
-            return Err(invalid("certified pruning requires explicit equijoin keys"));
         }
         return Operator::relational_join(
             left.clone(),
             right.clone(),
             join_kind.clone(),
-            pred,
+            &pred,
             Arc::new(node.output_schema.clone()),
+        );
+    }
+    if let Payload::NonASAP(NonASAPOp::Values { rows, schema, .. }) = &node.payload {
+        if !inputs.is_empty() {
+            return Err(invalid("Values takes no relational inputs"));
+        }
+        let empty = Arc::new(planner_types::pre_asap::Schema::default());
+        let rows = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|expr| expression(expr, &empty)?.evaluate(&[]))
+                    .collect::<Result<Vec<_>, Error>>()
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let schema = Arc::new(schema.clone());
+        return Operator::source(
+            schema.clone(),
+            vec![crate::values::Batch::try_new(schema, rows)?],
         );
     }
     let [input] = inputs else {
@@ -734,8 +723,34 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
         ));
     };
     match &node.payload {
-        Payload::Value { operation, .. } => match operation {
-            ValueOperation::Project { cols, .. } => Operator::project(
+        Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
+            let state = summary_column(input)?;
+            use crate::Statistic as S;
+            use planner_types::post_asap::ExactKind as E;
+            let statistic = match &input.fields[state].dtype {
+                FieldDataType::ExactAggregate(kind, _) => match kind {
+                    E::Sum => S::Sum,
+                    E::Count => S::Count,
+                    E::Min => S::Min,
+                    E::Max => S::Max,
+                    E::Rate => S::Rate,
+                    E::Increase => S::Increase,
+                    _ => return Err(invalid("exact family evaluation is unsupported")),
+                },
+                _ => return Err(invalid("exact finalization requires exact state")),
+            };
+            Operator::evaluation(
+                input.clone(),
+                state,
+                SummaryEvaluation::Exact(ExactEvaluation {
+                    statistic,
+                    lookback_ms: None,
+                }),
+            )
+        }
+
+        Payload::NonASAP(operator) => match operator {
+            NonASAPOp::Project { cols, .. } => Operator::project(
                 input.clone(),
                 cols.iter()
                     .enumerate()
@@ -748,21 +763,23 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                                 .name
                                 .clone(),
                             match &col.expr {
-                                QueryExpr::Column(index) => Expression::Column(*index),
+                                ScalarExpr::Column(index) => Expression::Column(*index),
                                 expr => expression(expr, input)?,
                             },
                         ))
                     })
                     .collect::<Result<_, Error>>()?,
             ),
-            ValueOperation::Filter { pred } => {
+            NonASAPOp::Filter { pred, .. } => {
                 Operator::filter(input.clone(), expression(&pred.0, input)?)
             }
-            ValueOperation::Sort { keys, partition_by } => Operator::sort(
+            NonASAPOp::Sort {
+                keys, partition_by, ..
+            } => Operator::sort(
                 input.clone(),
                 keys.iter()
                     .map(|key| {
-                        let QueryExpr::Column(column) = key.expr else {
+                        let ScalarExpr::Column(column) = key.expr else {
                             return Err(invalid(
                                 "sort expression must be projected before sorting",
                             ));
@@ -776,23 +793,25 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                     .collect::<Result<_, Error>>()?,
                 groups(input, partition_by)?,
             ),
-            ValueOperation::Limit {
+            NonASAPOp::Limit {
                 n,
                 offset,
                 partition_by,
+                ..
             } => Operator::limit(
                 input.clone(),
-                *n as u64,
+                n.unwrap_or(usize::MAX) as u64,
                 *offset as u64,
                 groups(input, partition_by)?,
             ),
-            ValueOperation::Exact(ExactOperation::Aggregate {
+            NonASAPOp::Aggregate {
                 reduction,
                 measures,
                 output_names,
                 filters,
                 having: None,
-            }) => {
+                ..
+            } => {
                 if filters.iter().any(Option::is_some) {
                     return Err(invalid("filtered aggregate has no native implementation"));
                 }
@@ -829,40 +848,16 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                     .collect::<Result<_, Error>>()?;
                 Operator::aggregate(input.clone(), groups(input, keys)?, measures)
             }
-            ValueOperation::FinalizeExactAccumulator => {
-                let state = summary_column(input)?;
-                use crate::Statistic as S;
-                use planner_types::post_asap::ExactKind as E;
-                let statistic = match &input.fields[state].dtype {
-                    FieldDataType::ExactAggregate(kind, _) => match kind {
-                        E::Sum => S::Sum,
-                        E::Count => S::Count,
-                        E::Min => S::Min,
-                        E::Max => S::Max,
-                        E::Rate => S::Rate,
-                        E::Increase => S::Increase,
-                        _ => return Err(invalid("exact family readout is unsupported")),
-                    },
-                    _ => return Err(invalid("exact finalization requires exact state")),
-                };
-                Operator::readout(
-                    input.clone(),
-                    state,
-                    ReadoutQuery::Exact(ExactReadout {
-                        statistic,
-                        lookback_ms: None,
-                    }),
-                )
-            }
             _ => Err(invalid("value operation has no native implementation")),
         },
-        Payload::SummaryAgg {
+        Payload::ASAP(ASAPOp::SummaryAgg {
             family,
             input: update,
             reduction,
             grouping,
             filter,
-        } => {
+            ..
+        }) => {
             if filter.is_some() {
                 return Err(invalid(
                     "filtered summary update has no native implementation",
@@ -933,7 +928,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                 groups(input, keys)?,
             )
         }
-        Payload::SummaryMerge => {
+        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
             let state = summary_column(input)?;
             Operator::summary_merge(
                 input.clone(),
@@ -943,19 +938,19 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
                     .collect(),
             )
         }
-        Payload::SummaryEstimate { query } => {
+        Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
             if let SketchStatistic::TopK { k } = query {
-                return Operator::keyed_readout(
+                return Operator::keyed_evaluation(
                     input.clone(),
                     summary_column(input)?,
                     *k,
                     Arc::new(node.output_schema.clone()),
                 );
             }
-            Operator::readout(
+            Operator::evaluation(
                 input.clone(),
                 summary_column(input)?,
-                ReadoutQuery::Sketch(query.clone()),
+                SummaryEvaluation::Sketch(query.clone()),
             )
         }
         _ => Err(invalid(
@@ -1009,9 +1004,13 @@ fn groups(input: &SchemaRef, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     }
     Ok(groups.keys().to_vec())
 }
-fn expression(expr: &QueryExpr, input: &SchemaRef) -> Result<Expression, Error> {
+fn expression(
+    expr: &ScalarExpr<PhysicalASAPNodeId>,
+    input: &SchemaRef,
+) -> Result<Expression, Error> {
+    let expr = local_scalar(expr)?;
     Ok(Expression::planner(
-        crate::expressions::CompiledExpression::compile(expr, input)?,
+        crate::expressions::CompiledExpression::compile(&expr, input)?,
     ))
 }
 
@@ -1057,7 +1056,7 @@ impl PhysicalOperator<Batch, SchemaRef> for CheckedSource<'_> {
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.
-fn preflight_depth(dag: &PostAsapDAG) -> Result<(), Error> {
+fn preflight_depth(dag: &PhysicalASAPDAG) -> Result<(), Error> {
     let mut remaining = dag
         .nodes
         .iter()
@@ -1110,23 +1109,24 @@ fn preflight_depth(dag: &PostAsapDAG) -> Result<(), Error> {
 
 /// Join predicates address the concatenated left/right schema.
 fn semi_join_keys(
-    expr: &QueryExpr,
+    expr: &ScalarExpr,
     left: usize,
     right: usize,
     keys: &mut Vec<(usize, usize)>,
 ) -> Result<(), Error> {
     match expr {
-        QueryExpr::BoolAnd(parts) => {
+        ScalarExpr::BoolAnd(parts) => {
             for part in parts {
                 semi_join_keys(part, left, right, keys)?;
             }
         }
-        QueryExpr::Compare {
+        ScalarExpr::Compare {
             left: a,
             op: CompareOpKind::Eq,
             right: b,
+            ..
         } => {
-            let (QueryExpr::Column(a), QueryExpr::Column(b)) = (a.as_ref(), b.as_ref()) else {
+            let (ScalarExpr::Column(a), ScalarExpr::Column(b)) = (a.as_ref(), b.as_ref()) else {
                 return Err(invalid("semi-join requires column equality keys"));
             };
             let (a, b) = if a < b { (*a, *b) } else { (*b, *a) };
@@ -1143,7 +1143,7 @@ fn semi_join_keys(
 /// Resolve equality keys against the Planner join's concatenated input schema.
 /// Deployments may use these positions to bind their source columns.
 pub fn equijoin_keys(
-    pred: &planner_types::pre_asap::Predicate,
+    pred: &planner_types::ir::Predicate,
     left: &planner_types::post_asap::Schema,
     right: &planner_types::post_asap::Schema,
 ) -> Result<Vec<(usize, usize)>, Error> {
@@ -1153,4 +1153,13 @@ pub fn equijoin_keys(
         return Err(invalid("semi-join requires explicit matching keys"));
     }
     Ok(keys)
+}
+
+fn local_scalar(expr: &ScalarExpr<PhysicalASAPNodeId>) -> Result<ScalarExpr, Error> {
+    if !expr.operator_refs().is_empty() {
+        return Err(invalid(
+            "scalar plan reads require explicit execution bindings",
+        ));
+    }
+    Ok(expr.map_operator_refs(&mut |_| unreachable!("no operator references")))
 }

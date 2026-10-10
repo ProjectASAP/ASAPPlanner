@@ -114,7 +114,7 @@ impl CurrentSeriesInput {
 /// Membership is part of state identity. Table rows must never acquire implicit
 /// latest-per-series selection, stale markers, or a PromQL lookback.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PopulationInput<N = crate::pre_asap::QueryExpr> {
+pub enum PopulationInput<N = crate::ir::OperatorNode> {
     CurrentSeries(CurrentSeriesInput),
     Rows {
         input: std::rc::Rc<N>,
@@ -124,13 +124,13 @@ pub enum PopulationInput<N = crate::pre_asap::QueryExpr> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MaintainedPopulation<N = crate::pre_asap::QueryExpr> {
+pub struct MaintainedPopulation<N = crate::ir::OperatorNode> {
     pub input: PopulationInput<N>,
     pub max_k: usize,
     pub quantiles: bool,
 }
 
-impl MaintainedPopulation {
+impl MaintainedPopulation<crate::pre_asap::QueryExpr> {
     pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
         match &self.input {
             PopulationInput::CurrentSeries(spec) => spec.matches_input(input),

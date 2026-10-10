@@ -17,8 +17,8 @@ mod major;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use asap_types::ir::OperatorNode;
 use asap_types::parsed_workload::ParsedWorkload;
-use asap_types::post_asap::SummaryNode;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{
@@ -173,7 +173,7 @@ pub struct QueryLifecyclePlan {
     pub plan: SummaryMaintenanceLifecyclePlan,
 }
 
-/// One plan per workload entry, in `QueryWorkload::entries()` order;
+/// One multi-root workload DAG with query/lifecycle bindings in entry order;
 /// [`check_contract`] enforces that.
 ///
 /// Plans are not deduplicated across entries: a summary state that several
@@ -184,25 +184,96 @@ pub struct QueryLifecyclePlan {
 #[non_exhaustive]
 pub struct PlanOutput {
     pub plans: Vec<QueryLifecyclePlan>,
+    /// Exact scalar expressions, keyed by workload entry; embedded plan reads remain visible.
+    pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
 }
 
 impl PlanOutput {
     pub fn new(plans: Vec<QueryLifecyclePlan>) -> Self {
-        Self { plans }
+        Self {
+            plans,
+            scalar_roots: Vec::new(),
+        }
     }
 
     /// Entry indices in output order.
     pub fn entry_indices(&self) -> Vec<usize> {
-        self.plans.iter().map(|p| p.entry_index).collect()
+        let mut indices: Vec<_> = self
+            .plans
+            .iter()
+            .map(|p| p.entry_index)
+            .chain(self.scalar_roots.iter().map(|(i, _)| *i))
+            .collect();
+        if !self.scalar_roots.is_empty() {
+            indices.sort_unstable();
+        }
+        indices
     }
 
-    /// The selected DAG root per query.
-    pub fn dags(&self) -> Vec<Rc<SummaryNode>> {
+    /// All query roots in workload order, including standalone scalars.
+    pub fn roots(&self) -> Vec<asap_types::ir::QueryRoot> {
+        let mut roots: Vec<_> = self
+            .plans
+            .iter()
+            .map(|p| {
+                (
+                    p.entry_index,
+                    asap_types::ir::QueryRoot::Operator(Rc::clone(&p.plan.root)),
+                )
+            })
+            .chain(
+                self.scalar_roots
+                    .iter()
+                    .map(|(i, expr)| (*i, asap_types::ir::QueryRoot::Scalar(expr.clone()))),
+            )
+            .collect();
+        roots.sort_by_key(|(i, _)| *i);
+        roots.into_iter().map(|(_, root)| root).collect()
+    }
+
+    /// The selected operator roots. Use `roots()` to include scalar queries.
+    pub fn operator_roots(&self) -> Vec<Rc<OperatorNode>> {
         self.plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
     }
 
+    /// Unique operators in the entire workload DAG, including scalar-plan dependencies.
+    /// Several query roots can reach the same operator; it is returned once.
+    pub fn operators(&self) -> Vec<Rc<OperatorNode>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut nodes = Vec::new();
+        for root in self.roots() {
+            let inputs = match root {
+                asap_types::ir::QueryRoot::Operator(node) => vec![node],
+                asap_types::ir::QueryRoot::Scalar(expr) => {
+                    expr.operator_refs().into_iter().cloned().collect()
+                }
+            };
+            for input in inputs {
+                for node in OperatorNode::reachable(&input) {
+                    if seen.insert(Rc::as_ptr(&node)) {
+                        nodes.push(node);
+                    }
+                }
+            }
+        }
+        nodes
+    }
+
+    /// The workload as one physical ASAP DAG: a root per operator query, in
+    /// plan order, with shared sub-DAGs exported once. Standalone scalar
+    /// roots have no physical form yet and are left out.
+    pub fn execution_timed_dag(
+        &self,
+    ) -> Result<
+        asap_types::ir::physical_export::PhysicalASAPDAG,
+        crate::SummaryMaintenanceTimingError,
+    > {
+        let plans: Vec<_> = self.plans.iter().map(|p| &p.plan).collect();
+        crate::execution_timed_workload_dag(&plans)
+    }
+
     pub fn len(&self) -> usize {
-        self.plans.len()
+        self.plans.len() + self.scalar_roots.len()
     }
 
     pub fn is_empty(&self) -> bool {

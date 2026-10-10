@@ -6,19 +6,22 @@ use asap_physical_operators::{
     values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::physical_export::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::ir::ASAPOp;
+use planner_types::ir::BinaryOperator;
 use planner_types::{
-    post_asap::{
-        BinaryOperator, ExecutionDataState, Field, FieldDataType, PostAsapDAGNode, PostAsapNodeId,
-        PostAsapOperatorPayload, Schema,
-    },
+    post_asap::{ExecutionDataState, Field, FieldDataType},
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
 fn schema() -> SchemaRef {
-    Arc::new(Schema {
-        closed: true,
+    Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![
             Field {
                 table: None,
@@ -61,10 +64,18 @@ fn program() -> CompiledPhysicalDAG {
     })
 }
 fn program_for(operator: BinaryOperator) -> CompiledPhysicalDAG {
+    program_for_bool(operator, false)
+}
+fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhysicalDAG {
     let schema = schema();
-    let node = PostAsapDAGNode {
-        id: PostAsapNodeId(2),
-        payload: PostAsapOperatorPayload::Binary { operator },
+    let node = PhysicalASAPDAGNode {
+        id: 2,
+        payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
+            operator,
+            return_bool,
+            lhs: 0,
+            rhs: 1,
+        }),
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
         guarantee: None,
@@ -156,12 +167,15 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
     use planner_types::pre_asap::CompareOpKind;
     for return_bool in [false, true] {
         let physical_dag = promql_values::compile_binary(
-            &BinaryOperator {
-                kind: BinaryOpKind::Compare(CompareOpKind::Lt),
-                vector_match: None,
-                checked_relative_division: false,
-                checked_finite_division: false,
-            },
+            &asap_physical_operators::expressions::binary::BinaryOperator::from_logical(
+                &BinaryOperator {
+                    kind: BinaryOpKind::Compare(CompareOpKind::Lt),
+                    vector_match: None,
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                },
+                return_bool,
+            ),
             return_bool,
             true,
             false,
@@ -285,12 +299,15 @@ fn binary_obeys_memory_and_cancellation() {
 // A `bool` comparison over label-map vectors yields 1 or 0 and drops the name.
 #[test]
 fn label_map_bool_comparison_drops_the_name() {
-    let program = program_for(BinaryOperator {
-        kind: BinaryOpKind::CompareBool(planner_types::pre_asap::CompareOpKind::Gt),
-        vector_match: None,
-        checked_relative_division: false,
-        checked_finite_division: false,
-    });
+    let program = program_for_bool(
+        BinaryOperator {
+            kind: BinaryOpKind::Compare(planner_types::pre_asap::CompareOpKind::Gt),
+            vector_match: None,
+            checked_relative_division: false,
+            checked_finite_division: false,
+        },
+        true,
+    );
     let rows = evaluate_with(
         program,
         vec![row("a", "api", 6.)],
@@ -309,9 +326,9 @@ fn label_map_bool_comparison_drops_the_name() {
     assert!(matches!(row[1], Value::Float64(v) if v == 1.));
 }
 
-// Stored temporal readouts drop metric names before filter comparisons and set matching.
+// Stored temporal evaluations drop metric names before filter comparisons and set matching.
 #[test]
-fn stored_series_readouts_support_filters_and_sets() {
+fn stored_series_evaluations_support_filters_and_sets() {
     use asap_physical_operators::{
         physical_planner::compile, summary_kernels::exact::ExactAccumulator,
     };
@@ -319,14 +336,15 @@ fn stored_series_readouts_support_filters_and_sets() {
     use planner_types::pre_asap::{
         schema::PROMQL_SERIES_IDENTITY, CompareOpKind, PromQLVectorSetOpKind,
     };
+
     for (exact_kind, params) in [
         (ExactKind::Sum, ExactParams::Sum),
         (ExactKind::Count, ExactParams::Count),
     ] {
         let family = FieldDataType::ExactAggregate(exact_kind.clone(), params);
-        let state_schema = Arc::new(Schema {
-            closed: true,
+        let state_schema = Arc::new(planner_types::pre_asap::Schema {
             unique_keys: vec![],
+            closed: false,
             fields: vec![
                 Field {
                     table: None,
@@ -350,36 +368,44 @@ fn stored_series_readouts_support_filters_and_sets() {
             BinaryOpKind::Set(PromQLVectorSetOpKind::And),
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
         ] {
-            let nodes = (0..5)
-                .map(|id| PostAsapDAGNode {
-                    id: PostAsapNodeId(id),
-                    payload: match id {
-                        0 | 1 => PostAsapOperatorPayload::SummaryMerge,
-                        2 | 3 => PostAsapOperatorPayload::Value {
-                            operation: ValueOperation::FinalizeExactAccumulator,
+            let nodes =
+                (0..5)
+                    .map(|id| PhysicalASAPDAGNode {
+                        id,
+                        payload: match id {
+                            0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
+                                children: vec![],
+                            }),
+                            2 | 3 => PhysicalASAPOperatorPayload::ASAP(
+                                ASAPOp::FinalizeExactAccumulator { child: id - 2 },
+                            ),
+                            _ => PhysicalASAPOperatorPayload::NonASAP(
+                                planner_types::ir::NonASAPOp::BinaryOp {
+                                    operator: BinaryOperator {
+                                        kind: kind.clone(),
+                                        vector_match: None,
+                                        checked_relative_division: false,
+                                        checked_finite_division: false,
+                                    },
+                                    return_bool: false,
+                                    lhs: 2,
+                                    rhs: 3,
+                                },
+                            ),
                         },
-                        _ => PostAsapOperatorPayload::Binary {
-                            operator: BinaryOperator {
-                                kind: kind.clone(),
-                                vector_match: None,
-                                checked_relative_division: false,
-                                checked_finite_division: false,
-                            },
+                        output_state: if id < 2 {
+                            ExecutionDataState::INGESTION_SUMMARY
+                        } else {
+                            ExecutionDataState::QUERY_ROWS
                         },
-                    },
-                    output_state: if id < 2 {
-                        ExecutionDataState::INGESTION_SUMMARY
-                    } else {
-                        ExecutionDataState::QUERY_ROWS
-                    },
-                    output_schema: if id < 2 {
-                        (*state_schema).clone()
-                    } else {
-                        value_schema.clone()
-                    },
-                    guarantee: None,
-                })
-                .collect::<Vec<_>>();
+                        output_schema: if id < 2 {
+                            (*state_schema).clone()
+                        } else {
+                            value_schema.clone()
+                        },
+                        guarantee: None,
+                    })
+                    .collect::<Vec<_>>();
             let edges = [
                 (0, 2, EdgeRole::Input),
                 (1, 3, EdgeRole::Input),
@@ -387,20 +413,20 @@ fn stored_series_readouts_support_filters_and_sets() {
                 (3, 4, EdgeRole::Right),
             ]
             .into_iter()
-            .map(|(producer, consumer, role)| PostAsapDAGEdge {
-                producer: PostAsapNodeId(producer),
-                consumer: PostAsapNodeId(consumer),
+            .map(|(producer, consumer, role)| PhysicalASAPDAGEdge {
+                producer,
+                consumer,
                 role,
-                intermediate_schema: nodes[producer as usize].output_schema.clone(),
-                data_state: nodes[producer as usize].output_state,
+                intermediate_schema: nodes[producer].output_schema.clone(),
+                data_state: nodes[producer].output_state,
                 grouping: GroupingEdgeCompatibility::NotApplicable,
                 window: WindowEdgeCompatibility::NotApplicable,
             })
             .collect();
-            let dag = PostAsapDAG {
+            let dag = PhysicalASAPDAG {
                 nodes,
                 edges,
-                root: PostAsapNodeId(4),
+                roots: vec![4],
             };
             let physical_dag = compile(
                 &dag,
