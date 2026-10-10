@@ -5,14 +5,13 @@
 This document defines the boundary between ASAPPlanner's logical plans,
 physical lowering, statistics resolution, and analytical resource estimation.
 It answers which representation is authoritative at each stage and prevents
-the cost model from being coupled directly to either logical IR.
+the cost model from being coupled directly to the logical IR.
 
 The integration pipeline is:
 
 ```text
-pre-ASAP QueryExpr  ─┐
-                     ├─ physical lowering ─> PhysicalOperator DAG
-post-ASAP SummaryExpr┘                              │
+logical OperatorNode DAG ─ physical lowering ─> PhysicalOperator DAG
+(NonASAPOp + ASAPOp nodes)                              │
                                                     v
                                            OperatorStatistics
                                                     │
@@ -30,8 +29,8 @@ Each representation is authoritative for a different concern:
 
 | Representation | Authoritative concern |
 |---|---|
-| `QueryExpr` | Original exact query semantics: sources, predicates, relational and PromQL operations, and output shape. |
-| `SummaryExpr` | Logical summary semantics: selected family, grouping strategy, summary composition, and summary readout. |
+| `NonASAPOp` nodes | Exact query semantics: sources, predicates, relational and PromQL operations, and output shape. |
+| `ASAPOp` nodes | Logical summary semantics: selected family, grouping strategy, summary composition, and summary evaluation. |
 | `PhysicalOperator` DAG | Selected executable algorithms, their configuration, physical identity, edges, and execution multiplicity. |
 | `OperatorStatistics` | Workload-dependent evidence required by each selected physical operator's resource formula. |
 | `ResourceEstimate` | Estimated CPU operations, peak live memory, and physical source/disk reads over one comparison scope. |
@@ -39,7 +38,7 @@ Each representation is authoritative for a different concern:
 `PhysicalOperator` is therefore the source of truth for the operator vocabulary
 consumed by analytical costing. `OperatorStatistics` corresponds one-to-one
 with that vocabulary. It must not independently invent operator kinds or copy
-all variants from either logical IR.
+all variants from the logical IR.
 
 The canonical physical-plan types should live at a neutral boundary shared by
 lowering, costing, explanation, and downstream compilation. Their conceptual
@@ -51,7 +50,7 @@ being established.
 
 One logical operation may choose between algorithms or expand into a physical
 sub-DAG. Conversely, one physical operator may implement nodes originating
-from either logical IR.
+from either operator category (`NonASAPOp` or `ASAPOp`).
 
 Examples include:
 
@@ -61,14 +60,14 @@ Examples include:
   supported join algorithm.
 - `SummaryAgg` may lower to an exact accumulator build, CMS build, KLL build,
   or another physical summary algorithm selected by the candidate.
-- `SummaryEstimate` must lower to a readout operator compatible with the
+- `SummaryEstimate` must lower to a evaluation operator compatible with the
   concrete summary state it consumes.
 - shared logical sub-DAGs become shared physical nodes only when they refer to
   the same physical identity and compatible evidence.
 
-For this reason, aligning `OperatorStatistics` directly with `QueryExpr` would
-lose post-ASAP summary implementations, while aligning it directly with
-`SummaryExpr` would lose raw query operators and physical algorithm choices.
+For this reason, aligning `OperatorStatistics` directly with the logical
+operators would lose physical algorithm choices, and with only one category
+would lose either summary implementations or raw query operators.
 
 ## Lowering obligations
 
@@ -91,14 +90,16 @@ its modeled descendants is invalid because it undercounts the candidate.
 
 ### Pre-ASAP lowering
 
-`KeepPreAsap` recursively lowers its contained `QueryExpr`. Typical physical
+Every `NonASAPOp` node lowers recursively, whether it is in a raw query or
+kept exact inside a post-ASAP plan. Typical physical
 operators include scans, filters, projections, hash aggregates, joins,
 ordering, bounded Top-K, limits, and PromQL-specific operators. The selected
 physical algorithm, rather than the logical spelling, determines the formula.
 
 ### Post-ASAP lowering
 
-Every `SummaryExpr` operation also needs explicit physical realization:
+Every `ASAPOp` node, and every exact operator composed with one, also needs
+explicit physical realization:
 
 | Logical summary operation | Required physical realization |
 |---|---|
@@ -107,38 +108,24 @@ Every `SummaryExpr` operation also needs explicit physical realization:
 | `SummaryMerge` | merge operator over compatible concrete summary states |
 | `SummarySubtract` | subtract operator supported by the selected state representation |
 | `SummaryDelete` | physical deletion/update operator supported by the selected representation |
-| `SummaryEstimate` | family- and query-specific readout operator |
-| `KeepPreAsap` | recursive lowering of the contained `QueryExpr` |
-| `BinaryOp` | binary evaluation preserving operand order, execution timing and any typed finite/relative-division guard |
-| `ValueOperation` | concrete realization of the value operation with its required execution timing and data state |
-| `RelationalJoin` | concrete row-join algorithm preserving join kind and predicate |
-| `RelationalJoin` with `JoinKind::Semi` | retain left rows matching explicit right-side keys; candidate pruning carries completeness evidence and ordinary TopK ranks the result |
+| `SummaryEstimate` | family- and query-specific evaluation operator |
+| `FinalizeExactAccumulator` | exact-state finalization before value consumers |
+| `MaintainPopulation` / `EvaluatePopulation` | maintained-population update and its aggregate or TopK-prefix evaluation |
+| retained `NonASAPOp` sub-DAG | recursive lowering of the exact operators (see above) |
+| `BinaryOp` | binary evaluation preserving operand order, the node's execution timing and any typed finite/relative-division guard |
+| `Project` / `Filter` / `Sort` / `Limit` / `Aggregate` over a evaluation | concrete realization at the node's execution timing and data state |
+| `Join` | concrete row-join algorithm preserving join kind and predicate |
+| `Join` with `JoinKind::Semi` | retain left rows matching explicit right-side keys; candidate pruning carries completeness evidence and ordinary TopK ranks the result |
 
 This table is a completeness requirement, not a claim that every realization
 already exists. Until lowering introduces an explicit physical operator,
 statistics contract, validation rule, and resource formula for an operation,
 a candidate containing it is unavailable.
 
-The streaming integration can consume a complete binding through
-`SummaryNodeEvidence`. That binding is keyed to exact `SummaryNode`
-identities and uses structured evidence for aggregate state, join, merge,
-subtract, delete, readout, and retained pre-ASAP work. It is a physical
-evidence boundary, not automatic physical lowering: a deployment must still
-select each concrete implementation and provide all edges, resource facts,
-multiplicities, source ownership, and stable physical identities. The planner
-fails closed when any reachable `SummaryExpr` node lacks that binding.
-
-The raw/query portion of a streaming comparison remains a `PhysicalDAG` using
-the canonical `PhysicalOperator` and `OperatorStatistics` pairing. Summary
-evidence is kept separate only where lifecycle-driven update, retention, and
-expiration multiplicities require facts beyond the query-DAG
-`Once`/`PerEvaluation` schedule. It must not redefine workload, lifecycle, or
-summary-family semantics.
-
-Lifecycle choice affects the physical DAG but does not replace it. Ephemeral,
-prepared, shared, and continuously maintained alternatives determine when
-build, update, readout, merge, subtract, or delete nodes execute. The physical
-operators still determine how each execution consumes CPU, memory, and I/O.
+Materialization choice (Stage 2, #509) affects the physical DAG but does not
+replace it: it determines when build, update, evaluation, merge, subtract, or
+delete nodes execute. The physical operators still determine how each execution
+consumes CPU, memory, and I/O.
 
 ## Statistics contract
 
@@ -427,7 +414,7 @@ recovering average semantics from query text.
 
 ### Candidate pruning is a sub-DAG
 
-Candidate-based TopK uses a summary key readout, a general semi-join over
+Candidate-based TopK uses a summary key evaluation, a general semi-join over
 explicit matching key columns, grouped Sort by the authoritative score, and
 grouped Limit. Sort and Limit carry the same partition keys.
 The join preserves authoritative left-side values and does not rank or limit
@@ -440,10 +427,12 @@ fields. The phase assignment API updates producer edge states and rejects an
 ingestion computation that depends on query-time work. Deployment capability,
 storage readiness, schemas and approximation guarantees remain separate checks.
 
-Post-ASAP DAG wire version 4 removes the special membership operator, its edge
+Post-ASAP DAG wire version 4 removed the special membership operator, its edge
 roles and the duplicate operator phase fields without compatibility aliases.
+Version 6 (current) exports one node per operator: retained exact operators are
+`Relational` nodes, not embedded sub-DAGs.
 
-Post-ASAP DAG wire version 6 adds a per-measure row predicate to the aggregate
+Post-ASAP DAG wire version 7 adds a per-measure row predicate to the aggregate
 operators (#466): `filters` on the exact aggregate value operation, parallel to
 its measures, and `filter` on `SummaryAgg`, gating which rows update the
 summary state. The version bump makes an older reader fail loudly instead of
@@ -465,38 +454,8 @@ a numeric entity key is not a score. Exact accumulator inputs are explicitly
 finalized before row operators consume them. None of these operations proves
 candidate completeness; that evidence belongs to the semi-join's pruning step.
 
-The semantic `SummaryExpr` constructors still propose an initial execution
-layout. Uniform phase assignment applies to the exported post-ASAP DAG;
+The logical DAG carries no execution layout: `apply_materialization_timings`
+writes each node's timing from a `MaterializationAssignment` before export (all
+query time by default). Uniform phase
+assignment applies to the exported post-ASAP DAG;
 it is not a claim that every deployment has implemented every placement.
-
-
-## Summary cost evidence across data-arrival modes
-
-`SummaryMaintenanceCostModel` binds `SummaryNodeEvidence` and
-`SummaryOperatorEvidence` independently of data-arrival mode. `ComparisonScope`
-and the canonical `DataWorkload` determine arrival semantics; individual operator
-resource records do not define another workload model.
-
-`SummaryMaintenanceInputs::from_workload` requires fresh snapshot cardinality.
-For `AtRest`, it derives zero arrivals without requiring ingestion-rate evidence;
-a fresh nonzero or invalid rate contradicts that declaration and is rejected.
-For `ContinuouslyIngesting`, fresh, finite, nonnegative rate evidence remains
-mandatory. Missing continuous rate evidence is never treated as zero.
-Raw and summary evidence supplied directly by a provider obey the same arrival
-invariant. Their source lineage, horizon, evaluation count, and snapshot dimensions
-must still match. The existing lifecycle planner selects direct builds for a fixed
-snapshot and charges bootstrap work, result evaluation, and retention; it charges
-no arrival updates. This does not add computation-placement policy.
-
-`Mixed` and `Unknown` remain unsupported for analytical comparisons: the current
-workload schema cannot identify separate backlog and arrival populations. The
-adapter fails explicitly rather than guessing a split. The estimator version is
-`summary-maintenance-resource-v2`; evidence type names drop the `Streaming` prefix
-(`SummaryMaintenanceInputs`, `SummaryPhysicalInputEvidence`, `SummaryAggregateEvidence`,
-`RetainedSubDAGEvidence`, `RawInputEvidence`, and the summary window/alternative
-types). Update source imports; no legacy-name aliases are provided.
-
-Regressions cover a fixed snapshot with no rate evidence, contradictory arrival
-rates, scope mismatches, missing continuous-rate/cardinality evidence, and actual
-lifecycle selection of a completely costed at-rest summary against its raw scan.
-The existing continuous-ingestion and mixed-arrival rejection tests remain.

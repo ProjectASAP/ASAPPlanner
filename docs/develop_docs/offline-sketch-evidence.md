@@ -60,8 +60,7 @@ distribution or machine; the provider does not interpolate between datasets.
 Each measured resource is an optional `Measurement` with `value`, optional `stddev`,
 `samples`, and optional `method`. CPU fields are process CPU nanoseconds per
 operation; `build_cpu_ns` measures empty construction. Building an ingested
-snapshot additionally requires `sample_count × update_cpu_ns`; the lifecycle
-helper returns that sum only when both measurements exist. Memory and disk
+snapshot additionally requires `sample_count × update_cpu_ns`. Memory and disk
 fields are bytes; `scan_bytes` records bytes read by scans, not storage occupancy.
 Producer methods must state what
 was measured and how normalization was performed. `retained_bytes` is distinct
@@ -87,12 +86,10 @@ scores as CPU or measured savings.
 
 Deployment cost models can own the provider and call `lookup` with their own
 parameter sizing. This preserves the deployment's other cost and capability
-hooks. The provider's lifecycle helper returns available build/update CPU costs
-for a single independently instantiated state. It deliberately leaves retention,
-retirement and read costs unknown. In particular, a point-frequency benchmark
-read does not price a total-count read, even when both use CMS. A deployment must
-match readout semantics and supply the missing lifecycle and raw-query evidence
-before selecting and pricing a complete physical plan. Never combine these
+hooks. A point-frequency benchmark read does not price a total-count read, even
+when both use CMS. A deployment must match evaluation semantics and supply
+retention, retirement, read and raw-query evidence before selecting and pricing
+a complete physical plan. Never combine these
 nanosecond costs with CPU operation counts without explicit calibration.
 
 `error` contains offline observed statistics and a query descriptor. Its metric
@@ -116,7 +113,7 @@ not be passed as these disjoint phase measurements.
 
 `MeasurementQueryBinding` is the producer's explicit assertion identifying the
 read/error probe population. The consumer checks that binding and the error
-record's readout kind/value type; it cannot recover or certify the original
+record's evaluation kind/value type; it cannot recover or certify the original
 probe set from an aggregate error number alone.
 
 The supported workload is an immutable i64 point-frequency snapshot, fully
@@ -131,7 +128,7 @@ post-merge error and an exact merge baseline exist.
 
 The caller supplies an `EmpiricalAccuracyRequirement`: the exact observed error
 metric, maximum accepted mean, and minimum number of offline trials. This is
-separate from `AccuracyTarget`. Every candidate must match the readout descriptor,
+separate from `AccuracyTarget`. Every candidate must match the evaluation descriptor,
 error metric, trial count and all ordinary distribution/configuration/environment
 checks. A zero observed error is neither proof of exactness nor a per-key bound.
 

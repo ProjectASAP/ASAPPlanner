@@ -9,8 +9,8 @@ What that buys:
 
 * One call in place of six across three stages. `CandidateLogicalASAPDAGs` and
   `GlobalSelection` no longer appear in user code.
-* The root-to-entry bindings a caller used to build by hand are derived, and
-  their ordering contract is checked rather than assumed.
+* The root-to-entry binding a caller used to build by hand is derived, and
+  its ordering contract is checked rather than assumed.
 * A new optimization algorithm can be freely implemented as a trait implementation, rather than a
   rule disguised to fit a two-phase pipeline it does not share.
 
@@ -20,7 +20,6 @@ Unchanged: `CandidateLogicalASAPDAGs`, `cost_sorted`, `global_selection`, and th
 ```text
 PlanningWorkload ──lowering──▶ ParsedWorkload ──OptimizationPass──▶ PlanOutput
     + frontend deps                            + models
-                                               + lifecycle input
 ```
 
 ---
@@ -64,7 +63,6 @@ Details of these types are provided below.
 | `workload` | `&PlanningWorkload` |
 | `frontend_specific` | `Sql { catalog }` / `Promql { now_ms, histograms }` / `Metricsql`; fixed by `query_workload.language` |
 | `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults |
-| `lifecycle` | Planning clock and runtime capabilities for the maintenance-versus-recompute decision every plan carries |
 | `pass` | `None` uses `MajorPass` |
 
 ### `OptimizationInput`
@@ -73,7 +71,6 @@ Details of these types are provided below.
 pub struct OptimizationInput<'a> {
     pub workload: &'a ParsedWorkload,
     pub models: PlanningModels<'a>,          // same type UserInput uses
-    pub lifecycle: LifecycleInput,           // same type UserInput uses
 }
 ```
 
@@ -83,19 +80,18 @@ pub struct OptimizationInput<'a> {
 
 ```rust
 pub struct PlanOutput {
-    pub plans: Vec<QueryLifecyclePlan>,   // one per workload entry, in entries() order
+    pub plans: Vec<QueryPlan>,   // one per workload entry, in entries() order
 }
 
-pub struct QueryLifecyclePlan {
-    pub entry_index: usize,        // index into QueryWorkload::entries()
-    pub plan: SummaryMaintenanceLifecyclePlan,   // its `root` is the DAG
+pub struct QueryPlan {
+    pub entry_index: usize,      // index into QueryWorkload::entries()
+    pub root: Rc<OperatorNode>,  // selected post-ASAP DAG; shared nodes are the same Rc
 }
 ```
 
-Every plan carries the maintenance decisions, so the pass always runs
-lifecycle-aware selection. A cost model that cannot price lifecycles
-(`DefaultCostModel` today) makes that selection fall back to raw recompute for
-every summary target; supply a model with the lifecycle cost hooks.
+Plans carry no materialization decision. `PlanOutput::execution_timed_dag()`
+times every summary at query time until Stage 2 materialization (#509) decides
+per sub-DAG whether to materialize and whether at ingestion or query time.
 
 ---
 
@@ -112,8 +108,9 @@ The `MajorPass` described below will be used by default, which corresponds to th
 |---|---|
 | Build roots | `Id` is the entry's position in `entries()`; the accuracy target comes from its `requirements` |
 | Candidate search | `search_workload_with_targets` with `default_strategies_with_evidence` |
-| Select | `global_selection`, or `global_selection_with_summary_maintenance_lifecycles` with a `WorkloadDemand` derived from the `ParsedWorkload` |
-| Assemble, per root | `assemble_selected_dag`, or its lifecycle-aware counterpart |
+| Select | `CandidateLogicalASAPDAGs::global_selection` |
+| Assemble, per root | `GlobalSelection::assemble_selected_dag` |
+| Share | `asap_types::ir::cse::share_common_sub_dags` across the assembled roots |
 
 Moving it behind the trait changes one thing for existing developers:
 **`ReplacementStrategy` is now a concept of `MajorPass`, not of the optimization
@@ -159,70 +156,60 @@ for name in registry.names() {
 
 `PassRegistry` is caller-owned, not a link-time global, so two tests in one binary cannot see each other's registrations.
 
-### 3.3 The three existing workflows, in this shape
+### 3.3 The existing workflows, in this shape
 
-[Input, output, and workflows](input-output-workflow.md) describes three ways to
-use the candidate space. Only the last is what a pass produces; the other two
-stay on the old interfaces.
+[Input, output, and workflows](input-output-workflow.md) describes two ways to
+use the candidate space. The second is what a pass produces; the first stays
+on the old interfaces.
 
 | Workflow there | Here |
 |---|---|
 | Ranked view (`cost_sorted`) | Not covered by this design, you should handle it with old interfaces |
-| Selection and DAG assembly | Not covered either: `search_workload_with_targets` + `global_selection` + `assemble_selected_dag` |
-| Summary-maintenance-lifecycle-aware helper | `PlanOutput` |
+| Selection and DAG assembly | `PlanOutput` |
 
-The third is no longer a call sequence the caller drives.
+Selection and assembly are no longer a call sequence the caller drives.
 Following is an example of how the old workflow maps to the new interface.
 
 ```rust
-// Before — from a PlanningWorkload and a catalog, with lifecycle decisions.
+// Before — from a PlanningWorkload and a catalog.
 
 // 1. Lower every normalized entry, and record which entry each root came from.
 //    Not lower_sql_batch: it walks query_batch alone and drops repeating entries.
 let mut roots = Vec::new();
-let mut entry_indices = Vec::new();
 for (index, entry) in workload.query_workload.entries().enumerate() {
     let accuracy = entry.requirements.accuracy.target();
     let expr = lower_sql_dialect(&entry.query.0, &catalog, dialect.clone(), accuracy.clone())
         .await?;
-    roots.push((index, Rc::new(expr), Some(accuracy)));
-    entry_indices.push(index);
+    roots.push((index, expr, Some(accuracy)));
 }
 
 // 2. Search for candidates.
 let strategies = default_strategies_with_evidence(&cost_model, &evidence);
 let space = search_workload_with_targets(roots, &strategies, &accuracy_model);
 
-// 3. Select once for the whole workload, re-binding roots to workload entries.
-let demand = WorkloadDemand {
-    workload: &workload.query_workload,
-    data_workload: workload.data_workload.as_ref(),
-    entry_indices: &entry_indices,
-};
-let selection = global_selection_with_summary_maintenance_lifecycles(
-    &space, demand, now_ms, horizon, capabilities, &cost_model)?;
+// 3. Select once for the whole workload.
+let selection = space.global_selection(&cost_model);
 
-// 4. Assemble once per root.
-let mut plans = Vec::new();
+// 4. Assemble once per root, then share common sub-DAGs across roots.
+let mut assembled = Vec::new();
 for (index, root) in &space.roots {
-    let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
-        &selection, root, demand, now_ms, horizon, capabilities, &cost_model)?;
-    plans.push((*index, plan));
+    if let Some(dag) = selection.assemble_selected_dag(root)? {
+        assembled.push((*index, dag));
+    }
 }
+let plans = share_common_sub_dags(assembled);
 ```
 
 ```rust
 // After.
 let output = e2e_plan(
     UserInput::new(&workload, FrontendInput::Sql { catalog: &catalog },
-                   PlanningModels::builtin(),
-                   LifecycleInput::new(now_ms, capabilities).with_horizon(horizon))
+                   PlanningModels::builtin())
 ).await?;
 ```
 
-Steps 1 and 3 are where the two bindings lived: the `Id` carried through the
-roots tuple, and the `&[usize]` rebuilt for `WorkloadDemand`. Both had to agree
-with `entries()` order, and nothing checked that they did. `MajorPass` still
+Step 1 is where the binding lived: the `Id` carried through the roots tuple had
+to agree with `entries()` order, and nothing checked that it did. `MajorPass` still
 runs all four steps; another pass need not run any of them.
 
 ## 4. Code layout
@@ -230,7 +217,7 @@ runs all four steps; another pass need not run any of them.
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `LifecycleInput`, `optimize`, `PassRegistry`, `MajorPass` |
+| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `MajorPass` |
 | `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch |
 
 ```text
@@ -242,9 +229,9 @@ asap-planner ──┬──> asap-frontend-{sql, promql, metricsql}
 
 `asap-planner` is separate because it is the only crate depending on every
 frontend; before it, the sole facade re-exporting more than one was
-`asap-devtools`, a developer-tools crate. `PlanningModels` and `LifecycleInput`
-live in `asap-aware-mapping` because both inputs use them, and `asap-planner`
-re-exports them.
+`asap-devtools`, a developer-tools crate. `PlanningModels` lives in
+`asap-aware-mapping` because both inputs use it, and `asap-planner` re-exports
+it.
 
 ---
 

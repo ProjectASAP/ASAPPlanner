@@ -1,5 +1,4 @@
-//! Unified operator and scalar representation from #511.
-//! Legacy consumers remain on their existing representation until the planner cutover.
+//! The operator IR from #511: one operator DAG for every planning stage.
 pub mod aggregate_schema;
 pub mod asap;
 pub mod error;
@@ -20,11 +19,11 @@ pub mod cse;
 pub mod flat;
 /// Physical ASAP DAG: the flattened operators plus execution timing.
 pub mod physical_export;
-/// Execution timing for physical plans: a lifecycle assignment expanded onto every node.
+/// Execution timing for physical plans: a materialization assignment expanded onto every node.
 pub mod timing;
 pub use timing::{
-    apply_lifecycle_timings, data_state, planned_data_state, split_shared_by_phase,
-    validate_default, LifecycleAssignment, TimingMemo,
+    apply_materialization_timings, data_state, planned_data_state, split_shared_by_phase,
+    validate_maintained, MaterializationAssignment, TimingMemo,
 };
 pub mod schema_support;
 /// Semantic observation coverage, separate from field layout and physical timing.

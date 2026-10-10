@@ -10,28 +10,28 @@
 //! heavy-hitter sketch when approximate — is a post-ASAP cost-aware decision,
 //! not encoded here. The semantic distinction that *is* made at lowering is
 //! intent vs operator: a heavy-hitter aggregate becomes `TopK`, whereas a
-//! generic `ORDER BY value LIMIT k` stays as the `QueryExpr::Sort + Limit`
+//! generic `ORDER BY value LIMIT k` stays as the `NonASAPOp::Sort + Limit`
 //! operator pair.
 
 use serde::{Deserialize, Serialize};
 
-use crate::pre_asap::query_expr::DataModel;
+use crate::ir::operator_properties::DataModel;
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType};
 use crate::types::AccuracyTarget;
 
 /// "What to compute" — the vocabulary the planner pivots on.
 ///
-/// Grouping for `TopK` rides on the enclosing `QueryExpr::Aggregate.by`
+/// Grouping for `TopK` rides on the enclosing `NonASAPOp::Aggregate`'s `reduction`
 /// (positional `ColumnId`s), like every other aggregate; the intent itself
 /// carries only `k` + the accuracy target.
 ///
 /// The single-column reducers (`Sum` / `Min` / `Max` / `Avg` / `StdDev` /
 /// `Variance` / `Quantile`) carry `col: Option<C>` — the input
 /// column they reduce, generic over the column-reference state the same way
-/// [`QueryExpr`](super::query_expr::QueryExpr) is: positional `ColumnId` once
-/// bound (the default, and every existing use of the bare `AggIntent` name),
-/// or an unresolved name-based `ColumnRef` for a front end constructing this
-/// intent directly, before the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has run.
+/// the rest of the vocabulary is: positional `ColumnId` once bound (the
+/// default, and every existing use of the bare `AggIntent` name), or an
+/// unresolved name-based `ColumnRef` for a front end constructing this
+/// intent directly, before name resolution (`asap_frontend_common`) has run.
 /// `None` is the PromQL convention "the time-series sample value"; SQL
 /// `SUM(bytes), AVG(latency)` sets distinct `Some(_)`s so a multi-aggregate
 /// node binds each reducer to the right column, and `plan::bind` knows which
@@ -128,7 +128,7 @@ pub enum AggIntent<C = ColumnId> {
 
     // ── Time-series streaming derivatives ────────────────────────────────
     // Counter-reset adjustment; not equivalent to Sum/Count over a window.
-    // The temporal range lives on the enclosing `QueryExpr::TimeRange` node,
+    // The temporal range lives on the enclosing `NonASAPOp::TimeRange` node,
     // not in the intent — this keeps the intent vocabulary range-agnostic.
     Rate,
     /// PromQL `irate(v[w])` — reset-aware rate from the final two samples.
@@ -234,7 +234,7 @@ pub enum AggIntent<C = ColumnId> {
     /// A time / calendar accessor (issue #46) — `timestamp`, `minute`, `hour`,
     /// `day_of_week`, … over each sample's timestamp (or, for the no-arg forms,
     /// over the evaluation time). Label-preserving per-series value transform.
-    /// (`time()` is the evaluation time itself — a `QueryExpr::EvalTimestamp` leaf,
+    /// (`time()` is the evaluation time itself — a `ScalarExpr::EvalTimestamp` leaf,
     /// not this.)
     TimeFn(TimeFunc),
 
@@ -378,9 +378,8 @@ pub enum MathFunc {
 }
 
 // `requires` / `is_per_series` / `output_column` never read `col`'s value —
-// only its presence via a `{ .. }` pattern — so, unlike
-// `QueryExpr::output_schema` (which genuinely cannot compile for an
-// unresolved DAG — see its own doc), nothing stops these from being generic
+// only its presence via a `{ .. }` pattern — so, unlike schema derivation
+// (which needs bound positions), nothing stops these from being generic
 // over every `C`. And a front end constructing `AggIntent<ColumnRef>`
 // directly (issue #179) does need `is_per_series` pre-binding — it decides
 // the `PerEntity`/`Reduce` reduction shape right at construction time (see
@@ -529,7 +528,7 @@ impl<C: Clone> AggIntent<C> {
 
 impl<C: Clone> AggIntent<C> {
     /// Output column name + type produced by this intent over `input`.
-    /// Used by `QueryExpr::Aggregate`'s schema-derivation rule. The PromQL
+    /// Used by `NonASAPOp::Aggregate`'s schema-derivation rule. The PromQL
     /// convention names the column after the intent kind so consumers can
     /// locate it without an alias lookup.
     pub fn output_column(&self, input: &Field) -> Field {

@@ -69,7 +69,7 @@ query text or cost estimates.
 flowchart TD
     Request[Query semantics and accuracy target] --> Generate[Generate candidates and size parameters]
     Evidence[Scoped source contracts and evidence] --> Generate
-    Generate --> Local[Derive local readout guarantees]
+    Generate --> Local[Derive local evaluation guarantees]
     Evidence --> Local
     Local --> Compose[Propagate guarantees through the DAG]
     Evidence --> Compose
@@ -100,7 +100,7 @@ is ready, or that a complete deployment cost is available.
 
 ## Local estimator models and parameter sizing
 
-A local model describes a specific readout of a specific estimator with
+A local model describes a specific evaluation of a specific estimator with
 committed parameters and applicable assumptions. A family name or a parameter
 such as HLL precision is not, by itself, a confidence certificate.
 
@@ -121,8 +121,8 @@ The built-in models currently include:
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
 | KMV / Theta | Parameter-derived cardinality bounds using the registered variance/Chebyshev model at 99% confidence |
-| UnivMon | Exact unit-update total for the supported readout; no universal guarantee for all its statistics |
-| Other families/readouts | No default certificate where no accuracy model is registered |
+| UnivMon | Exact unit-update total for the supported evaluation; no universal guarantee for all its statistics |
+| Other families/evaluations | No default certificate where no accuracy model is registered |
 
 This table describes Planner's registered contracts, not independent
 mathematical verification of every estimator or permission to substitute
@@ -214,7 +214,7 @@ an observation into a guarantee.
 
 A deployment supplies `EstimatorContract::ClassicHll` for the complete aggregate
 expression. It asserts the classic estimator, independent uniform bucket
-hashing and an enforced maximum distinct population per readout, including
+hashing and an enforced maximum distinct population per evaluation, including
 all merged panes. Planner combines this contract with the query or allocated
 local target, selects a supported precision, derives the guarantee and uses
 the normal propagation and selection checks.
@@ -290,7 +290,7 @@ accuracy/
 ├── allocation.rs       # End-to-end budget allocation
 ├── reconciliation.rs   # Accuracy coordination across consumers
 └── estimators/
-    ├── mod.rs          # Family/readout dispatch and source-contract integration
+    ├── mod.rs          # Family/evaluation dispatch and source-contract integration
     ├── kll.rs
     ├── ddsketch.rs
     ├── hll.rs          # Generic HLL and bounded Classic HLL
@@ -308,7 +308,7 @@ share the same contract.
 
 Adding an estimator or composition requires:
 
-1. A precisely defined error metric, estimator/readout semantics and assumptions.
+1. A precisely defined error metric, estimator/evaluation semantics and assumptions.
 2. Sizing behavior and a guarantee derived from the committed parameters, including unsupported parameter domains.
 3. Explicit evidence requirements, population scope and provenance.
 4. Propagation rules where supported; rejection or retained unknowns elsewhere.

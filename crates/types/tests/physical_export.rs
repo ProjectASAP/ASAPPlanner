@@ -3,8 +3,8 @@ use asap_types::ir::physical_export::{
     compile_physical_asap_dag, PhysicalASAPDAGDocument, PhysicalASAPDAGValidationError,
 };
 use asap_types::ir::{
-    apply_lifecycle_timings, ASAPOp, LifecycleAssignment, NonASAPOp, Operator, OperatorNode,
-    TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
+    OperatorNode, TimingMemo,
 };
 use asap_types::post_asap::{ExactKind, ExactParams, ExecutionTiming, SummaryUpdate};
 use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Reduction, Schema, Source};
@@ -38,12 +38,12 @@ fn plan() -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// Default lifecycle: the summary is maintained at ingestion time and read at query time.
+/// A summary maintained at ingestion time is read at query time.
 #[test]
 fn timed_plan_exports_with_timing() {
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         &plan(),
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_ingestion_time(),
         &mut TimingMemo::new(),
     )
     .unwrap();
@@ -71,9 +71,9 @@ fn timed_plan_exports_with_timing() {
 /// A query-time producer cannot feed an ingestion-time consumer.
 #[test]
 fn query_time_input_to_ingestion_is_rejected() {
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         &plan(),
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_ingestion_time(),
         &mut TimingMemo::new(),
     )
     .unwrap();
@@ -102,11 +102,11 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
         child: state,
     }))
     .unwrap();
-    let assignment = LifecycleAssignment::default_maintained();
+    let assignment = MaterializationAssignment::all_query_time();
     let mut memo = TimingMemo::new();
     let timed: Vec<_> = [first, second]
         .iter()
-        .map(|root| apply_lifecycle_timings(root, &assignment, &mut memo).unwrap())
+        .map(|root| apply_materialization_timings(root, &assignment, &mut memo).unwrap())
         .collect();
     let dag = compile_physical_asap_workload(&timed).unwrap();
     dag.validate().unwrap();

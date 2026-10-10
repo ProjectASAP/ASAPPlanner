@@ -8,7 +8,7 @@ deployment-level decision, and run the selected contract.
 
 For the integration workflow, start with [ASAPPlanner input, output, and
 workflows](input-output-workflow.md). It defines inputs, `CandidateLogicalASAPDAGs`, selection
-and summary-maintenance lifecycle workflows, and future replanning support.
+and assembly workflows, and future replanning support.
 
 ## Planner component flow
 
@@ -17,16 +17,12 @@ flowchart TD
     W["PlanningWorkload: query demand + optional data facts"]
     F["Frontend dependencies: SQL catalog or PromQL time"]
     E["Strategy, accuracy model, and applicable evidence"]
-    PRE["Frontend lowering → canonical Pre-ASAP QueryExpr roots"]
+    PRE["Frontend lowering → canonical Pre-ASAP OperatorNode roots"]
     SEARCH["Whole-workload candidate search: sharing, legality, accuracy"]
     SPACE["CandidateLogicalASAPDAGs: compact logical candidate DAG space"]
     RANK["Optional cost_sorted: ranked inspection view"]
     SELECT["Optional global_selection + assemble_selected_dag"]
     DAG["Selected logical Post-ASAP DAG"]
-    LINPUT["Optional lifecycle inputs: horizon, rates, capabilities, costs"]
-    LIFE["global_selection_with_summary_maintenance_lifecycles"]
-    LMAT["assemble_selected_dag_with_summary_maintenance_lifecycles"]
-    LPLAN["SummaryMaintenanceLifecyclePlan: DAG root + lifecycle decisions"]
     BACKEND["Downstream: bind physical alternatives, decide deployment, compile and execute"]
     W --> PRE
     F --> PRE
@@ -35,19 +31,15 @@ flowchart TD
     SEARCH --> SPACE
     SPACE --> RANK --> BACKEND
     SPACE --> SELECT --> DAG --> BACKEND
-    SPACE --> LIFE
-    LINPUT --> LIFE --> LMAT --> LPLAN --> BACKEND
 ```
 
 `CandidateLogicalASAPDAGs` is the output of logical candidate search. Each target's candidate set holds
-alternatives and rejection reasons, but no selected maintenance lifecycle.
-Choose among the three branches: inspect candidates (optionally ranked), select
-and assemble logical DAGs, or select and assemble with summary-maintenance
-lifecycle decisions. Use the last branch when Planner owns the maintenance
-decision; otherwise the backend owns it. Its first
-call returns a `GlobalSelection`; the second returns a
-`SummaryMaintenanceLifecyclePlan` with an assembled DAG root and lifecycle
-decisions. No branch by itself deploys or executes a physical plan.
+alternatives and rejection reasons, but no materialization decision.
+Choose between two branches: inspect candidates (optionally ranked), or select
+and assemble logical DAGs. Stage 2 materialization (#509) will decide per
+sub-DAG whether to materialize and whether at ingestion or query time; until
+then every summary runs at query time. No branch by itself deploys or executes
+a physical plan.
 Known-invalid evidence rejects a logical candidate. Missing accuracy evidence
 leaves a constructible candidate visible in `CandidateLogicalASAPDAGs` but uncertified; default
 selection does not commit it without the required guarantee. Cost evidence can
@@ -58,9 +50,10 @@ an unsupported physical alternative into a deployable plan.
 
 | Area | Main crate or module | Responsibility |
 |---|---|---|
-| Shared IR | `asap-types` | Pre-ASAP and Post-ASAP expressions, schemas, workloads, guarantees, and exported plan data |
+| Shared IR | `asap-types` | The unified operator IR (`ir`: one `OperatorNode` before and after ASAP optimization), schemas, workloads, guarantees, and exported plan data |
+| Front-end common | `frontend-common` | Name-based `UnresolvedOp` tree shared by the front ends, and `resolve_root` into the operator IR |
 | Query frontends | `frontend-sql`, `frontend-promql`, `frontend-metricsql` | Parse source languages and produce canonical Pre-ASAP queries |
-| ASAP-aware mapping | `asap-aware-mapping` | Candidate generation, CSE, legality, accuracy propagation, lifecycle expansion, costing, and ranking |
+| ASAP-aware mapping | `asap-aware-mapping` | Candidate generation, CSE, legality, accuracy propagation, costing, and ranking |
 | Developer inspection | `devtools` | Expose planner DAGs, alternatives, decisions, and explanations for inspection |
 | End-to-end validation | `integration-tests` | Verify behavior across frontends, mapping, and output IR |
 
@@ -76,8 +69,7 @@ The primary output is `CandidateLogicalASAPDAGs`; `cost_sorted` derives an optio
 view with index-aligned costs. Downstream may inspect compatible choices
 across targets rather than assuming the first candidate is a feasible
 physical workload plan. Candidates carry logical summary algorithms,
-parameters, and guarantees; selected maintenance lifecycle decisions appear
-only after a summary-maintenance-lifecycle-aware helper runs. Rejection reasons
+parameters, and guarantees, but no materialization decision. Rejection reasons
 are retained in the candidate space.
 
 ASAPQuery-backend and other downstream applications translate the candidates
@@ -89,10 +81,8 @@ must not silently change Planner-owned semantics.
 
 `CandidateLogicalASAPDAGs::global_selection` optionally coordinates structural choices across
 targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic DAG.
-Those plain APIs do not establish physical feasibility or a
-maintenance-versus-recompute decision. The lifecycle-aware selection call uses
-additional workload and evidence inputs; its DAG assembly call returns a
-plan with both a root and lifecycle decisions. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
+Those APIs do not establish physical feasibility or a
+materialization decision. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
 for the distinction. Downstream may consume candidates directly and retains
 responsibility for physical commitment.
 
@@ -103,7 +93,6 @@ responsibility for physical commitment.
 - [Post-ASAP IR](../concepts/post-asap-ir.md)
 - [ASAP-aware mapping](asap-aware-mapping.md)
 - [Accuracy guarantees](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md)
-- [Workload demand and summary lifecycle](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
 - [Physical-plan integration](physical-plan-integration.md)
 - [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
 - [Searching over plans](asap-aware-plan-search.md)

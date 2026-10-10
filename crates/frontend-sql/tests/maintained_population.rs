@@ -3,8 +3,8 @@ use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::{
     ir::{
-        apply_lifecycle_timings, cse::share_common_sub_dags,
-        physical_export::compile_physical_asap_dag, ASAPOp, LifecycleAssignment, NonASAPOp,
+        apply_materialization_timings, cse::share_common_sub_dags,
+        physical_export::compile_physical_asap_dag, ASAPOp, MaterializationAssignment, NonASAPOp,
         Operator, OperatorNode, TimingMemo,
     },
     post_asap::maintained_population::{MaintainedPopulation, PopulationInput},
@@ -38,12 +38,12 @@ fn population(mut node: &OperatorNode) -> (&Rc<OperatorNode>, &MaintainedPopulat
     (child, population)
 }
 
-/// Export `plan` the way the planner does: assign the default lifecycle
+/// Export `plan` the way the planner does: assign the default materialization
 /// timings, then compile the timed DAG.
 fn compile(plan: &Rc<OperatorNode>) -> Result<(), String> {
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         plan,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::all_query_time(),
         &mut TimingMemo::new(),
     )
     .map_err(|e| e.to_string())?;
