@@ -16,7 +16,7 @@ asap-frontend-common = { path = "../frontend-common" }
 promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "9fede7eecca923c9882fe256484d00d37f8706cb" }
 
 [dev-dependencies]
-asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-plan-selection = { path = "../plan-selection" }
 asap-logical-optimizer = { path = "../logical-optimizer" }
 
 # Corpus tests live in domain folders (observability) but must still be declared

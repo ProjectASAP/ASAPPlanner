@@ -31,7 +31,7 @@
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic).
-//! [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)
+//! [`cost_sorted`](crate::candidate_selection::cost_sorted)
 //! (via [`asap_logical_optimizer::pass1::replacement`]'s own `cse_preference`) and
 //! [`DefaultCostModel::estimate_cost`] are this crate's own callers.
 
@@ -44,7 +44,7 @@ use asap_types::ir::schema::{
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 
-use crate::recurrence::{
+use crate::cost::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
 };
@@ -251,7 +251,7 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 
 /// A CSE-detected, legality-gated shared sub-DAG with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
-/// [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)
+/// [`cost_sorted`](crate::candidate_selection::cost_sorted)
 /// (via [`asap_logical_optimizer::pass1::replacement`]'s own `cse_preference`) the first time it
 /// needs a representative bound node for a sub-DAG that
 /// [`asap_types::ir::cse::share_common_sub_dags`] already collapsed
@@ -506,7 +506,7 @@ pub trait CostModel {
 
     // ── Recurrence-aware costing (issue #287) ───────────────────────────
     //
-    // See `crate::recurrence`'s module docs for the full cost model
+    // See `crate::cost::recurrence`'s module docs for the full cost model
     // (`maintained_cost_rate`/`recompute_cost_rate` formulas, units,
     // provenance of every new input). The three hooks below are the
     // per-update-event/per-read/per-recomputation cost primitives that
@@ -517,7 +517,7 @@ pub trait CostModel {
     /// Cost of maintaining `candidate`'s bound summary for a single ingest
     /// update event. Units: cost units per update — the
     /// `maintenance_cost_per_update` term of `maintained_cost_rate`
-    /// (`crate::recurrence`), where it is multiplied by an `UpdateRate` in
+    /// (`crate::cost::recurrence`), where it is multiplied by an `UpdateRate` in
     /// **Hz** (`update_rate * maintenance_cost_per_update`).
     ///
     /// Default: a small nominal constant, `Cost(0.01)` — deliberately
@@ -587,7 +587,7 @@ pub trait CostModel {
     /// `Share`/`RecomputeIndependently` choice, weighted by how *often*
     /// `candidate`'s consumers actually run (`recurrence`) instead of only
     /// how many structurally exist (`candidate.consumer_count`). See
-    /// `crate::recurrence`'s module docs for the full design.
+    /// `crate::cost::recurrence`'s module docs for the full design.
     ///
     /// - `recurrence.is_empty()` (no [`RepeatingEntry`]/[`DataWorkload`]-derived
     ///   metadata available): delegates to
@@ -619,7 +619,7 @@ pub trait CostModel {
     /// [`ReplacementSubDAG`] candidate at `target` — a real `f64`, not just a
     /// relative rank, meant for a caller that wants to *display* "candidate A
     /// costs ≈ X, candidate B costs ≈ Y" (e.g. a DAG-visualization view built
-    /// on [`cost_sorted`](crate::plan_selection::candidate_selection::cost_sorted)),
+    /// on [`cost_sorted`](crate::candidate_selection::cost_sorted)),
     /// not just order candidates against each other — that ordering job
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
     /// [`ASAPStrategies`](asap_logical_optimizer::pass1::replacement::ASAPStrategies)
@@ -1006,7 +1006,7 @@ mod tests {
         // 2 * 100
         assert_eq!(raw_recompute_cost_rate(&inputs).unwrap().0, 200.0);
         assert_eq!(
-            crate::recurrence::total_cost(CostRate(5.0), Horizon(10.0), Cost(3.0)),
+            crate::cost::recurrence::total_cost(CostRate(5.0), Horizon(10.0), Cost(3.0)),
             Cost(53.0)
         );
     }

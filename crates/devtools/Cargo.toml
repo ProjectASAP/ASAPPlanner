@@ -10,7 +10,7 @@ edition = "2021"
 [dependencies]
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
-asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-plan-selection = { path = "../plan-selection" }
 asap-logical-optimizer = { path = "../logical-optimizer" }
 
 # Used by the show_ir / dag_export / variant_coverage bins (catalog schemas,

@@ -1,0 +1,18 @@
+[package]
+name = "asap-plan-selection"
+version = "0.1.0"
+edition = "2021"
+
+# #509 Stage 3: plan selection, the only stage that uses the cost model.
+# Depends on asap-types, Stage 1 and Stage 2; never on the facade or the
+# executor. tests/stage3_dependencies.rs checks this manifest.
+[dependencies]
+asap-types = { path = "../types" }
+asap-logical-optimizer = { path = "../logical-optimizer" }
+asap-physical-optimizer = { path = "../physical-optimizer" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+asap-frontend-promql = { path = "../frontend-promql" }

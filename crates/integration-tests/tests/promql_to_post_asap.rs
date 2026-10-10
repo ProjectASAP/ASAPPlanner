@@ -8,8 +8,6 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{
     maintained, maintained_post_asap_dag, post_asap_dag, timed,
@@ -25,7 +23,9 @@ use asap_logical_optimizer::{
     search_workload, search_workload_with_targets, ASAPStrategies, AccuracyModel, Replacement,
     ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_types::ir::operator::Reduction;
+use asap_plan_selection::candidate_selection::global_selection;
+use asap_plan_selection::cost::cost_model::DefaultCostModel;
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::CompositionOperator;
 use asap_types::ir::scalar::ColumnRef;

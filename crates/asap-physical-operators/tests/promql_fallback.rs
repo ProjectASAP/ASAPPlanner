@@ -1224,11 +1224,11 @@ fn histogram_quantile_rejects_equal_output_label_sets() {
 // for an approximate target, and the selected DAG compiles and executes.
 #[test]
 fn histogram_quantile_selection_keeps_the_exact_fallback() {
-    use asap_aware_mapping::cost_model::DefaultCostModel;
     use asap_logical_optimizer::{
         accuracy::DefaultAccuracyModel, default_strategies, search_workload_with_targets,
         Replacement,
     };
+    use asap_plan_selection::cost::cost_model::DefaultCostModel;
     let samples = buckets(&[("job=a", HISTOGRAM)]);
     for target in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.01)] {
         for query in [
@@ -1249,14 +1249,13 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
                     Replacement::SubDAG(node) if !node.contains_asap() && node.operator == root.operator)),
                 "{query}: {candidates:?}"
             );
-            let selected =
-                asap_aware_mapping::plan_selection::candidate_selection::global_selection(
-                    &space,
-                    &DefaultCostModel,
-                )
-                .assemble_selected_dag(planned)
-                .unwrap()
-                .unwrap();
+            let selected = asap_plan_selection::candidate_selection::global_selection(
+                &space,
+                &DefaultCostModel,
+            )
+            .assemble_selected_dag(planned)
+            .unwrap()
+            .unwrap();
             let dag = compile_physical_asap_dag(&selected).unwrap();
             let rows = evaluate_dag(&root, &dag, &[("x_bucket", &samples)], 60).unwrap();
             let values: Vec<_> = rows.iter().map(|(_, _, v)| *v).collect();

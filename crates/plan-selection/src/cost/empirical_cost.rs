@@ -6,7 +6,7 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
 
-use crate::cost_model::{CostModel, DefaultCostModel};
+use crate::cost::cost_model::{CostModel, DefaultCostModel};
 use asap_logical_optimizer::pass1::replacement::{
     accuracy_budget, accuracy_target, default_size_params, ReplacementSubDAG, TargetSubDAG,
 };
@@ -14,7 +14,7 @@ use asap_logical_optimizer::pass1::replacement::{
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const EVIDENCE_MODEL_VERSION: &str = "empirical-update-cpu-v1";
 
-pub use crate::empirical_resources::ResourceMeasurements;
+pub use crate::cost::empirical_resources::ResourceMeasurements;
 pub use asap_types::workload::resources::Measurement;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -317,23 +317,6 @@ fn nonnegative(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 
-/// The existing fixed-snapshot CMS/CountSketch contract needs no separate
-/// preparation. Other families must measure that phase, including an explicit
-/// zero when no preparation is necessary; absence is not free work.
-pub(crate) fn snapshot_prepare_cpu(row: &OfflineMeasurement) -> Option<f64> {
-    match &row.metrics.resources.cpu.prepare_cpu_ns {
-        Some(measurement) => nonnegative(measurement.value).then_some(measurement.value),
-        None if matches!(
-            row.algorithm,
-            SketchAlgorithm::Cms | SketchAlgorithm::CountSketch
-        ) =>
-        {
-            Some(0.0)
-        }
-        None => None,
-    }
-}
-
 fn validate_context(
     distribution: &DistributionDescriptor,
     environment: &EnvironmentDescriptor,
@@ -416,7 +399,7 @@ mod tests {
     #[test]
     fn checked_in_synthetic_example_is_valid() {
         let artifact: EvidenceArtifact = serde_json::from_str(include_str!(
-            "../tests/data/offline-evidence-synthetic.json"
+            "../../tests/data/offline-evidence-synthetic.json"
         ))
         .unwrap();
         artifact.validate().unwrap();
@@ -425,7 +408,7 @@ mod tests {
             .implementation
             .contains("SYNTHETIC"));
         let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/develop_docs/offline-sketch-evidence.schema.json"
+            "../../../../docs/develop_docs/offline-sketch-evidence.schema.json"
         ))
         .unwrap();
         assert_eq!(
@@ -457,25 +440,6 @@ mod tests {
             });
             assert!(artifact.validate().is_err());
         }
-    }
-
-    /// Only the established frequency-sketch contract can omit preparation.
-    #[test]
-    fn unmeasured_preparation_for_other_families_stays_unknown() {
-        let (mut artifact, _, _) = fixture();
-        let row = &mut artifact.records[0];
-        row.algorithm = SketchAlgorithm::CountSketch;
-        assert_eq!(snapshot_prepare_cpu(row), Some(0.0));
-        row.algorithm = SketchAlgorithm::Kll;
-        row.params = SketchParams::Kll { k: 269 };
-        assert_eq!(snapshot_prepare_cpu(row), None);
-        row.metrics.resources.cpu.prepare_cpu_ns = Some(Measurement {
-            value: 17.0,
-            stddev: None,
-            samples: 1,
-            method: None,
-        });
-        assert_eq!(snapshot_prepare_cpu(row), Some(17.0));
     }
 
     fn fixture() -> (EvidenceArtifact, EvidenceContext, AggIntent) {
