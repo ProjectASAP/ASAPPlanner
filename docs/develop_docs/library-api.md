@@ -141,7 +141,7 @@ async lower_sql_dialect(query: &str, catalog: &SqlCatalog,
 | `ElasticSQL` | Returns `UnsupportedDialect` |
 
 The catalog is required and describes your tables. For a complete schema-building
-example, see [the CLI frontend example](../../crates/devtools/src/bin/show_pre_asap_ir.rs).
+example, see [the CLI frontend example](../../crates/devtools/src/bin/show_logical_dag.rs).
 
 ## Generate and rank candidates
 
