@@ -8,7 +8,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::compile_physical_asap_dag;
+use common::{compile_physical_asap_dag, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::physical::lift_plain;
@@ -1220,42 +1220,42 @@ fn histogram_quantile_rejects_equal_output_label_sets() {
     assert!(error.contains("same labelset"), "{error}");
 }
 
-// Candidate search keeps a classic histogram_quantile whole and exact, even
-// for an approximate target, and the selected DAG compiles and executes.
+// The stage pipeline keeps a classic histogram_quantile exact, with no sketch,
+// even for an approximate target. Over raw buckets it keeps the whole
+// expression, which compiles and executes; under a `sum by (le)` it may keep
+// the sum as an exact accumulator, which this whole-expression harness does
+// not bind.
 #[test]
 fn histogram_quantile_selection_keeps_the_exact_fallback() {
-    use asap_logical_optimizer::{
-        accuracy::DefaultAccuracyModel, default_strategies, search_workload_with_targets,
-        Replacement,
-    };
-    use asap_plan_selection::cost::cost_model::DefaultCostModel;
+    use planner_types::ir::{schema::FieldDataType, ASAPOp, OperatorNode};
     let samples = buckets(&[("job=a", HISTOGRAM)]);
     for target in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.01)] {
-        for query in [
-            "histogram_quantile(0.5, x_bucket)",
-            "histogram_quantile(0.5, sum by (le, job) (x_bucket))",
+        for (query, whole) in [
+            ("histogram_quantile(0.5, x_bucket)", true),
+            (
+                "histogram_quantile(0.5, sum by (le, job) (x_bucket))",
+                false,
+            ),
         ] {
             let root =
                 promql_rows::with_series_identity(&parse_with(query, target.clone())).unwrap();
-            let space = search_workload_with_targets(
-                vec![(query, root.clone(), Some(target.clone()))],
-                &default_strategies(),
-                &DefaultAccuracyModel,
-            );
-            let planned = &space.roots[0].1;
-            let candidates = &space.candidates_for_target(planned).unwrap().candidates;
+            let selected = selected_dag(root.clone(), target.clone());
             assert!(
-                candidates.iter().all(|c| matches!(&c.replacement,
-                    Replacement::SubDAG(node) if !node.contains_asap() && node.operator == root.operator)),
-                "{query}: {candidates:?}"
+                !OperatorNode::reachable(&selected)
+                    .iter()
+                    .any(|node| matches!(
+                        &node.operator,
+                        planner_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                            family: FieldDataType::Sketch(..),
+                            ..
+                        })
+                    )),
+                "{query}: {selected:?}"
             );
-            let selected = asap_plan_selection::candidate_selection::global_selection(
-                &space,
-                &DefaultCostModel,
-            )
-            .assemble_selected_dag(planned)
-            .unwrap()
-            .unwrap();
+            if !whole {
+                continue;
+            }
+            assert!(!selected.contains_asap(), "{query}: {selected:?}");
             let dag = compile_physical_asap_dag(&selected).unwrap();
             let rows = evaluate_dag(&root, &dag, &[("x_bucket", &samples)], 60).unwrap();
             let values: Vec<_> = rows.iter().map(|(_, _, v)| *v).collect();

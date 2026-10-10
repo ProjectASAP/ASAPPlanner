@@ -1,21 +1,13 @@
 //! Structurally identical summary producers chosen by different queries are
 //! shared after Pass 1: one `Rc<OperatorNode>` across their plans.
 
-use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, OperatorNode};
 use std::rc::Rc;
 
-use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_optimizer::accuracy::{
-    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-};
+use asap_logical_optimizer::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use asap_logical_optimizer::pass1::replacement::{default_size_params, DEFAULT_DELTA};
-use asap_logical_optimizer::{
-    search_workload_with_targets, ASAPStrategies, Replacement, ReplacementStrategy,
-    ReplacementSubDAG, TargetSubDAG,
-};
-use asap_plan_selection::candidate_selection::global_selection;
+use asap_logical_optimizer::{Replacement, ReplacementSubDAG, TargetSubDAG};
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{CostModel, DefaultCostModel};
 use asap_planner::pass::{PlanOutput, QueryPlan};
@@ -82,15 +74,6 @@ impl CostModel for PreferSketch {
 const PREFER_LARGE_KLL: PreferSketch = PreferSketch(|kind| match kind.params() {
     SketchParams::Kll { k } => 1.0 / f64::from(*k),
     _ => 1.0,
-});
-
-/// Prefers UnivMon, which can serve every frequency moment from one state.
-const PREFER_UNIVMON: PreferSketch = PreferSketch(|kind| {
-    if kind.algorithm() == &SketchAlgorithm::UnivMon {
-        0.0
-    } else {
-        1.0
-    }
 });
 
 fn requirements(epsilon: f64) -> QueryRequirements {
@@ -499,61 +482,6 @@ impl AccuracyModel for UnivMonEvidence {
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
         DefaultAccuracyModel.satisfies(guarantee, target)
     }
-}
-
-/// Distinct count, entropy and L2 over one input, certified by an accuracy
-/// model and selected by a cost model preferring UnivMon, read one UnivMon state: #515 sharing is the summary-capability rule
-/// when the states are identical. This runs the legacy search; the stage
-/// pipeline's counterpart is
-/// `frequency_moments_share_one_univmon_in_the_stage_pipeline`.
-#[test]
-fn certified_frequency_evaluations_share_one_univmon_state() {
-    let queries = [
-        ("distinct_over_time(m[5m])", 0.02),
-        ("entropy_over_time(m[5m])", 0.02),
-        ("l2_over_time(m[5m])", 0.02),
-    ];
-    let workload = promql_workload(&queries);
-    let roots = lower_promql_workload(&workload, NOW_MS)
-        .expect("lowers")
-        .into_iter()
-        .zip(queries)
-        .enumerate()
-        .map(|(index, (expr, (_, epsilon)))| (index, expr, Some(AccuracyTarget::Epsilon(epsilon))))
-        .collect();
-    let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(
-        ASAPStrategies::new_with_planning_inputs(&UnivMonEvidence, &EqualSplitAllocator),
-    )];
-    let space = search_workload_with_targets(roots, &strategies, &UnivMonEvidence);
-    let selection = global_selection(&space, &PREFER_UNIVMON);
-    let assembled = space
-        .roots
-        .iter()
-        .map(|(index, root)| {
-            let dag = selection
-                .assemble_selected_dag(root)
-                .expect("assembles")
-                .expect("root has a group");
-            (*index, dag)
-        })
-        .collect();
-    let mut states: Vec<Rc<OperatorNode>> = Vec::new();
-    for (_, root) in share_common_sub_dags(assembled) {
-        assert!(root.guarantee.is_some(), "{:?}", root.operator);
-        let asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
-            &root.operator
-        else {
-            panic!("summary evaluation: {:?}", root.operator);
-        };
-        assert!(matches!(
-            &summary_input.operator,
-            asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::UnivMon
-        ));
-        states.push(Rc::clone(summary_input));
-    }
-    assert_eq!(states.len(), 3);
-    assert!(states.iter().all(|state| Rc::ptr_eq(state, &states[0])));
 }
 
 /// #509 Example 2 through the stage pipeline: distinct count, entropy and L2
