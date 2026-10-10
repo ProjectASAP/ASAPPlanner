@@ -1,0 +1,2903 @@
+//! End-to-end SQL → unresolved → resolved operator DAG lowering tests.
+//!
+//! Validates the DataFusion front end: SQL parses + plans, lowers directly to
+//! the name-based `UnresolvedOp` tree (issue #179), and the shared
+//! `resolve_root` produces the positional, canonical `OperatorNode` DAG (the
+//! same resolver the PromQL path uses). Every node's schema is derived during
+//! resolution, so a successful `lower` already proves schema derivation is
+//! total over the tree.
+
+use ::asap_frontend_sql::unified as asap_frontend_sql;
+use asap_types::ir::Predicate;
+use std::rc::Rc;
+
+use asap_frontend_common::{UnresolvedOp, UnresolvedScalar};
+use asap_frontend_sql::{
+    lower_sql, lower_sql_dialect, SqlCatalog, SqlError as LoweringError, SqlLowerer,
+};
+use asap_types::ir::{ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr};
+use asap_types::pre_asap::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::pre_asap::{
+    AggIntent, CompareOpKind, GroupKeys, JoinKind, Reduction, ScalarValue, Source,
+    WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
+};
+use asap_types::types::AccuracyTarget;
+use asap_types::workload::SqlDialect;
+
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
+}
+
+/// `metrics(ts, service, latency, bytes)` + `hosts(service, region)`.
+fn catalog() -> SqlCatalog {
+    SqlCatalog::new()
+        .with_table(
+            "metrics",
+            Schema::with_time_index(
+                vec![
+                    col("ts", DataType::Timestamp),
+                    col("service", DataType::Utf8),
+                    col("latency", DataType::Float64),
+                    col("bytes", DataType::Int64),
+                ],
+                0,
+                vec![vec![0, 1]],
+            ),
+        )
+        .with_table(
+            "hosts",
+            Schema::new(vec![
+                col("service", DataType::Utf8),
+                col("region", DataType::Utf8),
+            ]),
+        )
+}
+
+async fn lower(sql: &str) -> Rc<OperatorNode> {
+    lower_sql(sql, &catalog(), AccuracyTarget::Exact)
+        .await
+        .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
+}
+
+/// The operator of a front-end node: a front-end DAG never holds an ASAP node.
+fn op(node: &OperatorNode) -> &NonASAPOp {
+    node.expect_non_asap()
+}
+
+#[tokio::test]
+async fn planning_subquery_bridge_rejects_a_relation_without_vector_conversion() {
+    let result = lower_sql("SELECT max(value) FROM (SELECT asap_promql_subquery(21600000, 60000) AS value FROM (SELECT sum(bytes) AS value FROM metrics))", &catalog(), AccuracyTarget::Exact).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn planning_histogram_bridge_reuses_classic_bucket_intent() {
+    let query = lower(
+        "SELECT asap_histogram_quantile(0.95) AS value FROM (\
+           SELECT service AS le, sum(bytes) AS value FROM metrics GROUP BY service)",
+    )
+    .await;
+    let NonASAPOp::Aggregate {
+        reduction,
+        measures,
+        child,
+        ..
+    } = op(&query)
+    else {
+        panic!("expected canonical histogram aggregate");
+    };
+    // One histogram over all rows; the bucket bound is the child's column 0.
+    assert!(reduction.expect_reduce().keys().is_empty());
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::HistogramQuantile { q, le: 0 }] if (*q - 0.95).abs() < 1e-12
+    ));
+    assert!(matches!(op(child), NonASAPOp::Project { .. }));
+}
+
+#[tokio::test]
+async fn planning_relation_bridges_reject_ambiguous_shapes() {
+    let missing_alias = lower_sql(
+        "SELECT asap_promql_subquery(300000, 60000) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(missing_alias.to_string().contains("must have an alias"));
+
+    let histogram_with_extra_column = lower_sql(
+        "SELECT service, asap_histogram_quantile(0.95) AS value FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(histogram_with_extra_column
+        .to_string()
+        .contains("only expression"));
+
+    let invalid_q = lower_sql(
+        "SELECT asap_histogram_quantile(1.5) AS value FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(invalid_q.to_string().contains("finite and in [0,1]"));
+}
+
+/// Find the first `Aggregate` node along the single-child spine.
+fn find_aggregate(node: &OperatorNode) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
+    match op(node) {
+        NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            ..
+        } => Some((reduction.expect_reduce(), measures)),
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Dedup { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => find_aggregate(child),
+        _ => None,
+    }
+}
+
+/// The first `Aggregate` node itself, for tests that need its child.
+fn find_aggregate_node(node: &OperatorNode) -> Option<&OperatorNode> {
+    match op(node) {
+        NonASAPOp::Aggregate { .. } => Some(node),
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. } => find_aggregate_node(child),
+        _ => None,
+    }
+}
+
+/// The names of the columns the first `Aggregate`'s reducers read, resolved
+/// against its child's schema, plus whether that child is a materializing
+/// `Project` (issue #110).
+fn reducer_input_names(node: &OperatorNode) -> (Vec<String>, bool) {
+    let NonASAPOp::Aggregate {
+        measures, child, ..
+    } = op(find_aggregate_node(node).expect("expected an Aggregate"))
+    else {
+        unreachable!()
+    };
+    let schema = &child.schema;
+    let names = measures
+        .iter()
+        .flat_map(|a| a.input_cols())
+        .map(|id| schema.fields[id].name.clone())
+        .collect();
+    (names, matches!(op(child), NonASAPOp::Project { .. }))
+}
+
+/// Find the first `Join` node along the single-child spine.
+fn find_join(node: &OperatorNode) -> Option<&OperatorNode> {
+    match op(node) {
+        NonASAPOp::Join { .. } => Some(node),
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Aggregate { child, .. }
+        | NonASAPOp::Dedup { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => find_join(child),
+        _ => None,
+    }
+}
+
+/// The first `Filter` node along the single-child spine.
+fn find_filter(node: &OperatorNode) -> Option<&OperatorNode> {
+    match op(node) {
+        NonASAPOp::Filter { .. } => Some(node),
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Aggregate { child, .. }
+        | NonASAPOp::Dedup { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => find_filter(child),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn where_folds_predicate_onto_scan() {
+    // WHERE folds onto the Scan predicates, below the SELECT projection.
+    let qe = lower("SELECT * FROM metrics WHERE service = 'api'").await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    let NonASAPOp::Scan {
+        source,
+        predicates,
+        schema,
+    } = op(child)
+    else {
+        panic!("expected Scan under the projection, got {child:?}");
+    };
+    assert!(matches!(source, Source::Table { table_ref } if table_ref == "metrics"));
+    assert_eq!(predicates.len(), 1, "WHERE clause folded onto the scan");
+    assert!(
+        schema.closed,
+        "a catalog-backed SQL scan has a closed schema"
+    );
+}
+
+#[tokio::test]
+async fn multi_aggregate_group_by_binds_columns_positionally() {
+    // SUM(bytes)=col 3, AVG(latency)=col 2, GROUP BY service=col 1.
+    let qe = lower("SELECT service, SUM(bytes), AVG(latency) FROM metrics GROUP BY service").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate in the tree");
+    assert_eq!(by, &vec![1], "GROUP BY service → column 1");
+    assert!(
+        measures.contains(&AggIntent::Sum { col: Some(3) }),
+        "SUM(bytes) → Sum{{col:3}}, got {measures:?}"
+    );
+    assert!(
+        measures.contains(&AggIntent::Avg { col: Some(2) }),
+        "AVG(latency) → Avg{{col:2}}, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn projection_over_aggregate_resolves_output_types_via_output_names() {
+    // The enclosing Projection references the aggregates by DataFusion's
+    // generated names (e.g. "sum(metrics.bytes)"); output_names threads those
+    // onto the canonical Aggregate so the Project resolves real types — not
+    // the Utf8 fallback that an unresolved column would get.
+    let qe = lower("SELECT SUM(bytes), AVG(latency) FROM metrics").await;
+    let schema = &qe.schema;
+    assert_eq!(schema.fields.len(), 2);
+    assert_eq!(
+        schema.fields[0].dtype,
+        DataType::Int64,
+        "SUM(bytes:Int64) resolves to Int64, not the Utf8 fallback"
+    );
+    assert_eq!(
+        schema.fields[1].dtype,
+        DataType::Float64,
+        "AVG(latency) resolves to Float64"
+    );
+}
+
+#[tokio::test]
+async fn single_agg_group_by_keeps_key_in_output_schema() {
+    // A tabular single-aggregate GROUP BY routes through the positional
+    // Aggregate.by path (not the PromQL fused-Partition shape), so the group
+    // key is a real output column the enclosing SELECT projection resolves.
+    let qe = lower("SELECT service, SUM(bytes) FROM metrics GROUP BY service").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate (not a Partition)");
+    assert_eq!(by, &vec![1], "GROUP BY service → Aggregate.by column 1");
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Sum { col: Some(3) }]
+    ));
+
+    // Both the group key and the aggregate resolve in the root projection schema.
+    let schema = &qe.schema;
+    assert_eq!(schema.fields.len(), 2);
+    assert_eq!(
+        schema.fields[0].dtype,
+        DataType::Utf8,
+        "service is in the output"
+    );
+    assert_eq!(schema.fields[1].dtype, DataType::Int64, "SUM(bytes)");
+}
+
+#[tokio::test]
+async fn count_ranked_topk_is_heavy_hitter() {
+    // `ORDER BY COUNT(*) DESC LIMIT k` over a single COUNT aggregate is the one
+    // case the heavy-hitter (frequency) sketch is correct for. The shared
+    // `canonicalize` pass (issue #34) promotes it to the canonical two-level
+    // form: an outer global `TopK` (by: []) over the explicit inner `Count`
+    // grouped by `service`.
+    let qe = lower(
+        "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        by.is_empty(),
+        "outer TopK is a global ranking (by: []), got {by:?}"
+    );
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::TopK { k: 10, .. }]),
+        "count-ranked topk → heavy-hitter TopK, got {measures:?}"
+    );
+    // The inner child is the explicit Count, grouped by service (col 1).
+    let NonASAPOp::Aggregate { child, .. } = op(&qe) else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    let (inner_by, inner_measures) = find_aggregate(child).expect("expected inner Count aggregate");
+    assert_eq!(inner_by, &vec![1], "inner Count grouped by service → col 1");
+    assert!(
+        matches!(inner_measures.as_slice(), [AggIntent::Count { .. }]),
+        "inner aggregate is the explicit Count, got {inner_measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn count_ranked_topk_via_alias_is_also_heavy_hitter() {
+    // Regression for #20: aliasing `COUNT(*)` in the ORDER BY used to defeat the
+    // SQL front-end gate. The positional `canonicalize` pass now promotes it too,
+    // so the aliased and inline forms produce an identical canonical tree.
+    let inline = lower(
+        "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
+    )
+    .await;
+    let aliased = lower(
+        "SELECT service, COUNT(*) AS cnt FROM metrics GROUP BY service ORDER BY cnt DESC LIMIT 10",
+    )
+    .await;
+    assert_eq!(
+        inline, aliased,
+        "aliased count-ranked topk must match the inline form"
+    );
+    let (_, measures) = find_aggregate(&aliased).expect("expected an Aggregate");
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::TopK { k: 10, .. }]),
+        "aliased count-ranked topk → heavy-hitter TopK, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn non_count_ranked_limit_keeps_the_aggregate() {
+    // Ranking by AVG (not a count) must NOT become a frequency heavy-hitter —
+    // the AVG aggregate has to survive as a generic Sort+Limit.
+    let qe = lower(
+        "SELECT service, AVG(latency) AS a FROM metrics GROUP BY service ORDER BY a DESC LIMIT 10",
+    )
+    .await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        measures.iter().any(|a| matches!(a, AggIntent::Avg { .. })),
+        "AVG must be preserved, got {measures:?}"
+    );
+    assert!(
+        !measures.iter().any(|a| matches!(a, AggIntent::TopK { .. })),
+        "AVG ranking must not become a frequency heavy-hitter, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn distinct_value_reducer_is_rejected_not_dropped() {
+    // The canonical intent algebra has no distinct-Sum; SUM(DISTINCT x) must
+    // be rejected, not silently lowered as SUM(x).
+    let res = lower_sql(
+        "SELECT SUM(DISTINCT bytes) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await;
+    assert!(res.is_err(), "SUM(DISTINCT ...) should be rejected");
+}
+
+#[tokio::test]
+async fn aggregate_over_an_expression_reduces_a_derived_column() {
+    // The canonical `AggIntent` reduces a column, not an arbitrary expression.
+    // `SUM(bytes + 1)` used to be rejected for that reason; since #110 the
+    // expression is materialized as a derived column in a `Project` beneath
+    // the aggregate, and reduced there.
+    let qe = lower("SELECT SUM(bytes + 1) FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Sum { col: Some(_) }]),
+        "expected Sum bound to the derived column, got {measures:?}"
+    );
+    let (names, materialized) = reducer_input_names(&qe);
+    assert!(materialized, "expected a materializing Project");
+    assert!(
+        names[0].contains("bytes") && names[0].contains('1'),
+        "the reduced column should be the projected `bytes + 1`, got {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn count_star_is_count_intent() {
+    let qe = lower("SELECT COUNT(*) FROM metrics").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(by.is_empty());
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+}
+
+#[tokio::test]
+async fn count_distinct_is_cardinality() {
+    let qe = lower("SELECT COUNT(DISTINCT service) FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Cardinality { .. }]
+    ));
+}
+
+#[tokio::test]
+async fn select_distinct_lowers_to_distinct_with_positional_cols() {
+    // SELECT DISTINCT → a `Dedup` node whose `cols` are positional ColumnIds
+    // (not name-based ColumnRefs). DataFusion's `Distinct::All` dedups on every
+    // column, so `cols` is empty here — but the field type is now `Vec<ColumnId>`.
+    let qe = lower("SELECT DISTINCT service FROM metrics").await;
+    let NonASAPOp::Dedup { cols, .. } = op(&qe) else {
+        panic!("expected a Dedup at the root, got {qe:?}");
+    };
+    let _: &Vec<usize> = cols; // compile-time: positional ids, not ColumnRefs
+    assert!(cols.is_empty(), "DISTINCT * dedups on all columns");
+}
+
+#[tokio::test]
+async fn inner_join_lowers_to_join_over_two_scans() {
+    // INNER JOIN over two distinct tables → a canonical Join with both leaves as Scans.
+    let qe = lower(
+        "SELECT metrics.bytes, hosts.region \
+         FROM metrics JOIN hosts ON metrics.service = hosts.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    let NonASAPOp::Join {
+        kind, left, right, ..
+    } = op(join)
+    else {
+        unreachable!("find_join only returns Join");
+    };
+    assert_eq!(*kind, JoinKind::Inner);
+    assert!(matches!(op(left), NonASAPOp::Scan { .. }));
+    assert!(matches!(op(right), NonASAPOp::Scan { .. }));
+}
+
+/// The two `ColumnId`s an equijoin predicate `Column(l) = Column(r)` binds to,
+/// returned sorted so the assertion is independent of left/right ordering.
+fn join_eq_columns(join: &OperatorNode) -> [usize; 2] {
+    let NonASAPOp::Join { pred, .. } = op(join) else {
+        unreachable!("expected a Join");
+    };
+    let ScalarExpr::Compare {
+        left,
+        op: CompareOpKind::Eq,
+        right,
+        ..
+    } = &pred.0
+    else {
+        panic!("expected an equijoin Compare, got {:?}", pred.0);
+    };
+    match (left.as_ref(), right.as_ref()) {
+        (ScalarExpr::Column(l), ScalarExpr::Column(r)) => {
+            let mut cols = [*l, *r];
+            cols.sort_unstable();
+            cols
+        }
+        other => panic!("expected Field = Field, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn join_predicate_disambiguates_shared_column_name() {
+    // Issue #7: `metrics.service = hosts.service` shares a column name across the
+    // join. The qualified refs must bind to two *distinct* positions in the
+    // concatenated schema, not collapse onto the first `service`.
+    // metrics(ts,service,latency,bytes) ++ hosts(service,region)
+    // → metrics.service = col 1, hosts.service = col 4.
+    let qe = lower(
+        "SELECT metrics.bytes, hosts.region \
+         FROM metrics JOIN hosts ON metrics.service = hosts.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    assert_eq!(
+        join_eq_columns(join),
+        [1, 4],
+        "join key must bind to distinct positions, not the same `service`"
+    );
+}
+
+#[tokio::test]
+async fn derived_table_join_disambiguates_via_alias() {
+    // Issue #66: a join over two *derived tables* must bind its keys to distinct
+    // positions. Before the fix the derived output columns lost their qualifier,
+    // so `a.service` and `b.service` both fell back to the first bare `service`
+    // (col 0) — `service = service`, always true → a silent cross product.
+    // Concatenated: a[service,region] ++ b[service,region] → a.service=0, b.service=2.
+    let qe = lower(
+        "SELECT a.region, b.region \
+         FROM (SELECT service, region FROM hosts) a \
+         JOIN (SELECT service, region FROM hosts) b ON a.service = b.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    assert_eq!(
+        join_eq_columns(join),
+        [0, 2],
+        "derived-table join keys must bind to distinct positions, not both to the first `service`"
+    );
+}
+
+#[tokio::test]
+async fn derived_table_select_star_join_disambiguates_via_alias() {
+    // Same as above but `SELECT *` derived tables (the non-Projection path that
+    // wraps the inner plan in an identity re-qualifying projection).
+    let qe = lower(
+        "SELECT a.region, b.region \
+         FROM (SELECT * FROM hosts) a JOIN (SELECT * FROM hosts) b \
+         ON a.service = b.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    let [l, r] = join_eq_columns(join);
+    assert_ne!(
+        l, r,
+        "SELECT * derived-table join keys must not collapse to one column"
+    );
+}
+
+#[tokio::test]
+async fn self_join_disambiguates_via_aliases() {
+    // A self-join shares *every* column name; the alias qualifiers (`a`/`b`) are
+    // the only way to tell the two `service` columns apart.
+    // metrics ++ metrics → a.service = col 1, b.service = col 5 (4 cols/side).
+    let qe = lower(
+        "SELECT a.bytes, b.latency \
+         FROM metrics a JOIN metrics b ON a.service = b.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a self-Join in the tree");
+    assert_eq!(
+        join_eq_columns(join),
+        [1, 5],
+        "self-join keys must bind to distinct sides"
+    );
+}
+
+#[tokio::test]
+async fn qualified_where_over_join_resolves_to_right_side() {
+    // Issue #7 beyond the join key: a WHERE on the *duplicated* column name
+    // (`service` exists on both sides) must bind to the qualified side, not the
+    // first match. metrics.service = col 1, hosts.service = col 4 → `hosts.service`
+    // must resolve to 4. (Unoptimized plan keeps the Filter above the Join — no
+    // predicate pushdown — so it binds against the concatenated schema.)
+    let qe = lower(
+        "SELECT metrics.bytes FROM metrics JOIN hosts ON metrics.service = hosts.service \
+         WHERE hosts.service = 'api'",
+    )
+    .await;
+    let filter = find_filter(&qe).expect("expected a Filter over the join");
+    let NonASAPOp::Filter { pred, .. } = op(filter) else {
+        unreachable!("find_filter only returns Filter");
+    };
+    assert!(
+        matches!(&pred.0, ScalarExpr::Compare { left, op: CompareOpKind::Eq, .. }
+            if matches!(left.as_ref(), ScalarExpr::Column(4))),
+        "hosts.service must bind to concatenated position 4 (not the first `service`), got {:?}",
+        pred.0
+    );
+}
+
+#[tokio::test]
+async fn self_join_group_by_disambiguates_via_qualifier() {
+    // Group-key qualifier fix: GROUP BY on the *duplicated* column over a
+    // self-join must bind to the qualified side, not first-match. metrics ⋈
+    // metrics → a.service = col 1, b.service = col 5. (Without qualified keys,
+    // both `GROUP BY a.service` and `GROUP BY b.service` collapsed to col 1.)
+    let qe_b = lower(
+        "SELECT b.service, COUNT(*) FROM metrics a JOIN metrics b \
+         ON a.service = b.service GROUP BY b.service",
+    )
+    .await;
+    let (by, _) = find_aggregate(&qe_b).expect("expected an Aggregate over the self-join");
+    assert_eq!(
+        by,
+        &vec![5],
+        "GROUP BY b.service binds to the b side (col 5)"
+    );
+
+    let qe_a = lower(
+        "SELECT a.service, COUNT(*) FROM metrics a JOIN metrics b \
+         ON a.service = b.service GROUP BY a.service",
+    )
+    .await;
+    let (by, _) = find_aggregate(&qe_a).expect("expected an Aggregate over the self-join");
+    assert_eq!(
+        by,
+        &vec![1],
+        "GROUP BY a.service binds to the a side (col 1)"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_over_join_binds_against_concatenated_schema() {
+    // GROUP BY a right-table column over a join: the key must resolve against
+    // the concatenated schema, exercising the bottom-up converter end to end.
+    // Two aggregates → the multi-agg path, which carries GROUP BY keys as
+    // positional `Aggregate.by` (as does every reducing GROUP BY).
+    let qe = lower(
+        "SELECT hosts.region, SUM(metrics.bytes), COUNT(*) \
+         FROM metrics JOIN hosts ON metrics.service = hosts.service \
+         GROUP BY hosts.region",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate over the join");
+    // metrics(ts,service,latency,bytes) ++ hosts(service,region) →
+    // region is column 5, bytes is column 3 of the concatenated schema.
+    assert_eq!(
+        by,
+        &vec![5],
+        "GROUP BY hosts.region → concatenated column 5"
+    );
+    assert!(
+        measures.contains(&AggIntent::Sum { col: Some(3) }),
+        "SUM(metrics.bytes) → Sum{{col:3}}, got {measures:?}"
+    );
+}
+
+// ── Issue #111: IN / EXISTS subquery predicates become semi / anti joins ────
+//
+// The front end now leaves them as `UnresolvedScalar::{InSubquery, Exists}`
+// filter conjuncts; the shared `canonicalize` pass (run by `resolve_root`)
+// lowers each to the semi-/anti-join, so the resolved DAG a test sees is the
+// same join shape the front end used to emit directly.
+
+/// The first `Join` node's `(kind, predicate, left column count)`.
+fn join_parts(node: &OperatorNode) -> (&JoinKind, &ScalarExpr, usize) {
+    let NonASAPOp::Join {
+        kind,
+        pred,
+        left,
+        right: _,
+    } = op(find_join(node).expect("expected a Join"))
+    else {
+        unreachable!()
+    };
+    (kind, &pred.0, left.schema.fields.len())
+}
+
+#[tokio::test]
+async fn in_subquery_lowers_to_a_semi_join() {
+    // `metrics(ts, service, latency, bytes)` — service is column 1.
+    let qe =
+        lower("SELECT service FROM metrics WHERE service IN (SELECT service FROM hosts)").await;
+    let (kind, pred, left_len) = join_parts(&qe);
+    assert_eq!(kind, &JoinKind::Semi);
+    assert_eq!(left_len, 4);
+
+    // The predicate resolves against `left ++ right`. Both relations have a
+    // `service` column, so a name-based lookup would bind *both* sides to the
+    // left's — silently making this `service = service`, always true. The key is
+    // bound positionally to the subquery's column (right after the left's),
+    // which makes that impossible.
+    let ScalarExpr::Compare { left, right, .. } = pred else {
+        panic!("expected a comparison, got {pred:?}");
+    };
+    assert_eq!(**left, ScalarExpr::Column(1), "outer service");
+    assert_eq!(
+        **right,
+        ScalarExpr::Column(left_len),
+        "the subquery key, not the outer column again"
+    );
+}
+
+#[tokio::test]
+async fn a_semi_join_outputs_only_the_left_schema() {
+    // The right side is a filter, not a source of columns.
+    let qe =
+        lower("SELECT service FROM metrics WHERE service IN (SELECT service FROM hosts)").await;
+    let join = find_join(&qe).expect("expected a Join");
+    let names: Vec<_> = join.schema.fields.iter().map(|c| c.name.clone()).collect();
+    assert_eq!(names, ["ts", "service", "latency", "bytes"]);
+}
+
+#[tokio::test]
+async fn a_subquery_key_that_is_an_expression_still_binds() {
+    // `SELECT bytes + 1 …` has no column name of its own; the join key binds
+    // to it positionally rather than through an unreferenceable `col_0`.
+    let qe =
+        lower("SELECT service FROM metrics WHERE bytes IN (SELECT bytes + 1 FROM metrics)").await;
+    assert_eq!(join_parts(&qe).0, &JoinKind::Semi);
+}
+
+#[tokio::test]
+async fn a_multi_column_in_subquery_is_rejected() {
+    let err = lower_sql(
+        "SELECT service FROM metrics WHERE service IN (SELECT service, region FROM hosts)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("IN must select one column");
+    // DataFusion's planner rejects this before `lower_in_subquery`'s own
+    // arity check; either message names the one-column rule.
+    assert!(format!("{err}").contains("one column"), "got {err}");
+}
+
+#[tokio::test]
+async fn an_ordinary_conjunct_still_folds_onto_the_scan() {
+    // The residual filter stays *below* the semi-join, where the converter can
+    // still fold it onto the Scan. A semi-join only drops left rows, so the
+    // orders agree.
+    let qe = lower(
+        "SELECT service FROM metrics WHERE bytes > 10 \
+         AND service IN (SELECT service FROM hosts)",
+    )
+    .await;
+    fn scan_has_predicate(node: &OperatorNode) -> bool {
+        match op(node) {
+            NonASAPOp::Scan { predicates, .. } => !predicates.is_empty(),
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Aggregate { child, .. } => scan_has_predicate(child),
+            NonASAPOp::Join { left, right, .. } => {
+                scan_has_predicate(left) || scan_has_predicate(right)
+            }
+            _ => false,
+        }
+    }
+    assert_eq!(join_parts(&qe).0, &JoinKind::Semi);
+    assert!(
+        scan_has_predicate(&qe),
+        "WHERE bytes > 10 should reach the Scan"
+    );
+}
+
+/// Find the first `SQLWindowFunc` node along the single-child spine.
+fn find_windowfunc(node: &OperatorNode) -> Option<&OperatorNode> {
+    match op(node) {
+        NonASAPOp::SQLWindowFunc { .. } => Some(node),
+        NonASAPOp::Project { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Aggregate { child, .. }
+        | NonASAPOp::Dedup { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => find_windowfunc(child),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn window_function_lowers_to_positional_windowfunc() {
+    // ROW_NUMBER() OVER (PARTITION BY service ORDER BY bytes DESC).
+    let qe = lower(
+        "SELECT service, ROW_NUMBER() OVER (PARTITION BY service ORDER BY bytes DESC) \
+         FROM metrics",
+    )
+    .await;
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let NonASAPOp::SQLWindowFunc {
+        func,
+        partition_by,
+        order_by,
+        ..
+    } = op(win)
+    else {
+        unreachable!("find_windowfunc only returns SQLWindowFunc");
+    };
+    assert_eq!(*func, WindowFuncKind::RowNumber);
+    assert_eq!(partition_by, &vec![1], "PARTITION BY service → col 1");
+    assert_eq!(order_by.len(), 1);
+    assert_eq!(
+        order_by[0].expr,
+        ScalarExpr::Column(3),
+        "ORDER BY bytes → col 3"
+    );
+    assert!(!order_by[0].ascending, "DESC");
+
+    // The window output column is appended to the schema (Int64 for ROW_NUMBER),
+    // and the enclosing projection resolves it (output_name threading).
+    let schema = &qe.schema;
+    assert!(
+        schema.fields.iter().any(|c| c.dtype == DataType::Int64),
+        "row_number output column present, got {:?}",
+        schema.fields
+    );
+}
+
+#[tokio::test]
+async fn window_aggregate_lowers_to_windowfunc() {
+    let qe = lower("SELECT service, SUM(bytes) OVER (PARTITION BY service) FROM metrics").await;
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let NonASAPOp::SQLWindowFunc { func, args, .. } = op(win) else {
+        unreachable!();
+    };
+    assert_eq!(*func, WindowFuncKind::Sum);
+    assert_eq!(args, &vec![ScalarExpr::Column(3)], "SUM(bytes) → arg col 3");
+}
+
+// ── Window frames (issue #268) ───────────────────────────────────────────────
+
+/// The frame clause must actually reach the IR, not just the display string:
+/// three window frames that differ semantically must lower to different
+/// `SQLWindowFunc.frame` values.
+#[tokio::test]
+async fn window_frame_is_captured_not_dropped() {
+    let default_frame =
+        lower("SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts) FROM metrics")
+            .await;
+    let two_preceding = lower(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+    let unbounded_following = lower(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM metrics",
+    )
+    .await;
+
+    let frame_of = |node: &OperatorNode| {
+        let NonASAPOp::SQLWindowFunc { frame, .. } = op(find_windowfunc(node).unwrap()) else {
+            unreachable!();
+        };
+        frame
+            .clone()
+            .expect("newly lowered SQL always records a frame")
+    };
+    let (a, b, c) = (
+        frame_of(&default_frame),
+        frame_of(&two_preceding),
+        frame_of(&unbounded_following),
+    );
+    assert_ne!(a, b, "default frame vs ROWS 2 PRECEDING must differ");
+    assert_ne!(
+        a, c,
+        "default frame vs ROWS CURRENT..UNBOUNDED FOLLOWING must differ"
+    );
+    assert_ne!(b, c);
+
+    assert_eq!(b.units, WindowFrameUnits::Rows);
+    assert_eq!(
+        b.start_bound,
+        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Int64(2)))
+    );
+    assert_eq!(b.end_bound, WindowFrameBound::CurrentRow);
+
+    assert_eq!(c.start_bound, WindowFrameBound::CurrentRow);
+    assert_eq!(
+        c.end_bound,
+        WindowFrameBound::Following(WindowFrameOffset::Scalar(ScalarValue::Null))
+    );
+}
+
+#[tokio::test]
+async fn range_interval_frame_is_preserved() {
+    let qe = lower(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+    let NonASAPOp::SQLWindowFunc {
+        frame: Some(frame), ..
+    } = op(find_windowfunc(&qe).unwrap())
+    else {
+        panic!("expected a window function with a concrete frame");
+    };
+
+    assert_eq!(frame.units, WindowFrameUnits::Range);
+    assert_eq!(
+        frame.start_bound,
+        WindowFrameBound::Preceding(WindowFrameOffset::Interval {
+            months: 0,
+            days: 0,
+            nanoseconds: 3_600_000_000_000,
+        })
+    );
+    assert_eq!(frame.end_bound, WindowFrameBound::CurrentRow);
+}
+
+#[tokio::test]
+async fn range_numeric_frames_remain_scalar_offsets() {
+    let integer = lower(
+        "SELECT SUM(bytes) OVER (ORDER BY bytes \
+         RANGE BETWEEN 2 PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+    let fractional = lower(
+        "SELECT SUM(latency) OVER (ORDER BY latency \
+         RANGE BETWEEN 1.5 PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+
+    let start_bound = |node: &OperatorNode| {
+        let NonASAPOp::SQLWindowFunc {
+            frame: Some(frame), ..
+        } = op(find_windowfunc(node).unwrap())
+        else {
+            panic!("expected a window function with a concrete frame");
+        };
+        frame.start_bound.clone()
+    };
+
+    assert_eq!(
+        start_bound(&integer),
+        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Int64(2)))
+    );
+    assert_eq!(
+        start_bound(&fractional),
+        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Float64(1.5)))
+    );
+}
+
+/// `GROUPS` frames aren't in this repo's SQL corpora and nothing downstream
+/// interprets frame semantics yet — rejected explicitly rather than silently
+/// mis-lowered.
+#[tokio::test]
+async fn groups_frame_is_rejected() {
+    let err = lower_sql(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         GROUPS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("GROUPS frame unit must be rejected");
+    assert!(format!("{err}").contains("GROUPS"), "got {err}");
+}
+
+// ── Nested query functions: derived tables / inline views (issue #27) ───────────
+
+/// Collect every `AggIntent` in the DAG, root-to-leaf (every reachable node,
+/// including operators referenced from scalar positions).
+fn all_intents(root: &Rc<OperatorNode>) -> Vec<AggIntent> {
+    OperatorNode::reachable(root)
+        .iter()
+        .filter_map(|node| match op(node) {
+            NonASAPOp::Aggregate { measures, .. } => Some(measures.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[tokio::test]
+async fn derived_table_aggregate_over_aggregate_nests() {
+    // `MAX(s)` over a derived table `(SELECT service, SUM(bytes) AS s … GROUP BY
+    // service)` — the SQL counterpart of PromQL function nesting (issue #27).
+    // Both reductions survive into the canonical tree: an outer `Max` over
+    // the inner `Sum`.
+    let qe = lower(
+        "SELECT MAX(s) FROM \
+         (SELECT service, SUM(bytes) AS s FROM metrics GROUP BY service) t",
+    )
+    .await;
+    let intents = all_intents(&qe);
+    assert!(
+        intents.iter().any(|i| matches!(i, AggIntent::Max { .. })),
+        "outer MAX survives, got {intents:?}"
+    );
+    assert!(
+        intents.iter().any(|i| matches!(i, AggIntent::Sum { .. })),
+        "inner SUM survives, got {intents:?}"
+    );
+    // The whole nested tree's output schema derives (positional resolution
+    // is total across the derived-table boundary).
+    assert_eq!(qe.schema.fields.len(), 1);
+}
+
+#[tokio::test]
+async fn derived_table_outer_avg_over_inner_percentile() {
+    // Outer exact `AVG` over an inner approximate `Quantile` — each layer keeps
+    // its own intent (the per-node sketch-vs-exact choice is a post-ASAP decision).
+    let qe = lower(
+        "SELECT AVG(p) FROM \
+         (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
+          FROM metrics GROUP BY service) t",
+    )
+    .await;
+    let intents = all_intents(&qe);
+    assert!(intents.iter().any(|i| matches!(i, AggIntent::Avg { .. })));
+    assert!(intents
+        .iter()
+        .any(|i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)));
+}
+
+#[tokio::test]
+async fn filter_over_derived_aggregate_resolves_alias_column() {
+    // `WHERE t.s > 100` over a derived aggregate — the qualified ref `t.s`
+    // resolves by bare name against the derived output schema, and the Filter
+    // sits above the inner Aggregate.
+    let qe = lower(
+        "SELECT t.service, t.s FROM \
+         (SELECT service, SUM(bytes) AS s FROM metrics GROUP BY service) t \
+         WHERE t.s > 100",
+    )
+    .await;
+    assert!(
+        find_filter(&qe).is_some(),
+        "the outer WHERE lowers to a Filter, got {qe:?}"
+    );
+    assert!(all_intents(&qe)
+        .iter()
+        .any(|i| matches!(i, AggIntent::Sum { .. })));
+    // Schema derivation is total across the boundary: the root carries one.
+    assert_eq!(qe.schema.fields.len(), 2);
+}
+
+#[tokio::test]
+async fn scalar_subquery_in_predicate_lowers_through_a_cross_join() {
+    let qe =
+        lower("SELECT service FROM metrics WHERE bytes > (SELECT AVG(bytes) FROM metrics)").await;
+    let filter = find_filter(&qe).unwrap();
+    let NonASAPOp::Filter { pred, child } = op(filter) else {
+        panic!()
+    };
+    assert!(matches!(op(child), NonASAPOp::Scan { .. }));
+    assert!(
+        matches!(&pred.0,ScalarExpr::Compare { right,.. } if matches!(right.as_ref(),ScalarExpr::ScalarSubquery(_)))
+    );
+    qe.validate_structure().unwrap();
+}
+
+#[tokio::test]
+async fn correlated_exists_lifts_its_correlation_into_the_join() {
+    // `EXISTS (SELECT 1 FROM hosts h WHERE h.service = m.service)` → a semi-join
+    // on `h.service = m.service`. The `SELECT 1` projection is dropped: a
+    // semi-join keeps no right columns, and it would have projected away the
+    // very column the correlation needs.
+    let qe = lower(
+        "SELECT service FROM metrics m WHERE EXISTS \
+         (SELECT 1 FROM hosts h WHERE h.service = m.service)",
+    )
+    .await;
+    let (kind, pred, left_len) = join_parts(&qe);
+    assert_eq!(kind, &JoinKind::Semi);
+    let ScalarExpr::Compare { left, right, .. } = pred else {
+        panic!("expected the correlation as a comparison, got {pred:?}");
+    };
+    assert_eq!(
+        **left,
+        ScalarExpr::Column(left_len),
+        "h.service (right side)"
+    );
+    assert_eq!(**right, ScalarExpr::Column(1), "m.service (left side)");
+}
+
+#[tokio::test]
+async fn not_exists_lowers_to_an_anti_join() {
+    let qe = lower(
+        "SELECT service FROM metrics m WHERE NOT EXISTS \
+         (SELECT 1 FROM hosts h WHERE h.service = m.service)",
+    )
+    .await;
+    assert_eq!(join_parts(&qe).0, &JoinKind::Anti);
+}
+
+#[tokio::test]
+async fn an_uncorrelated_exists_is_an_unconditional_semi_join() {
+    // No correlation → keep every left row iff the right side has any row.
+    let qe = lower("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)").await;
+    let (kind, pred, _) = join_parts(&qe);
+    assert_eq!(kind, &JoinKind::Semi);
+    assert_eq!(*pred, ScalarExpr::Literal(ScalarValue::Boolean(true)));
+}
+
+#[tokio::test]
+async fn where_exists_resolves_to_a_semi_join_over_the_subquery() {
+    // The front end emits `Filter { Exists(s) }`; the resolved DAG is the
+    // `Semi` join with the subquery (a filtered `hosts` scan) on the right.
+    let qe = lower(
+        "SELECT service FROM metrics WHERE EXISTS (SELECT service FROM hosts WHERE region = 'eu')",
+    )
+    .await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected the SELECT list as a Project, got {qe:?}");
+    };
+    let NonASAPOp::Join {
+        kind,
+        pred,
+        left,
+        right,
+    } = op(child)
+    else {
+        panic!("expected the Semi join directly under the Project, got {child:?}");
+    };
+    assert_eq!(*kind, JoinKind::Semi);
+    assert_eq!(pred.0, ScalarExpr::Literal(ScalarValue::Boolean(true)));
+    assert!(
+        matches!(op(left), NonASAPOp::Scan { .. }),
+        "left is metrics"
+    );
+    let NonASAPOp::Project { child: scan, .. } = op(right) else {
+        panic!("expected the subquery's projection on the right, got {right:?}");
+    };
+    assert!(
+        matches!(op(scan), NonASAPOp::Scan { predicates, .. } if predicates.len() == 1),
+        "the subquery's WHERE stays on its own Scan, got {scan:?}"
+    );
+    assert_eq!(
+        child.schema.fields.len(),
+        4,
+        "a semi join outputs the left's columns alone"
+    );
+}
+
+#[tokio::test]
+async fn not_in_subquery_is_rejected_rather_than_mislowered_as_an_anti_join() {
+    let qe =
+        lower("SELECT service FROM metrics WHERE service NOT IN (SELECT service FROM hosts)").await;
+    let filter = find_filter(&qe).unwrap();
+    let NonASAPOp::Filter { pred, .. } = op(filter) else {
+        panic!()
+    };
+    assert!(matches!(
+        pred.0,
+        ScalarExpr::InSubquery { negated: true, .. }
+    ));
+    qe.validate_structure().unwrap();
+}
+
+#[tokio::test]
+async fn a_correlated_in_subquery_is_rejected() {
+    let err = lower_sql(
+        "SELECT service FROM metrics m WHERE service IN \
+         (SELECT h.service FROM hosts h WHERE h.region = m.service)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("correlated IN needs both a key match and a correlation");
+    assert!(format!("{err}").contains("correlated IN"), "got {err}");
+}
+
+// ── Subquery-valued expressions at the `UnresolvedOp` level ─────────────────
+
+/// `SqlLowerer::lower` output, before `resolve_root`.
+async fn lower_unresolved(sql: &str) -> UnresolvedOp {
+    let catalog = catalog();
+    SqlLowerer::new(&catalog)
+        .lower(sql, &AccuracyTarget::Exact)
+        .await
+        .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
+}
+
+#[tokio::test]
+async fn scalar_subquery_in_projection_lowers_to_a_scalar_subquery_item() {
+    // An uncorrelated `(SELECT max(v) FROM t2)` in the SELECT list is a
+    // `ScalarSubquery` projection item reading its own lowered plan; the
+    // cross-join rewrite is `canonicalize`'s job, not the front end's.
+    let tree = lower_unresolved("SELECT (SELECT max(latency) FROM metrics) FROM hosts").await;
+    let UnresolvedOp::Project { cols, child, .. } = &tree else {
+        panic!("expected the SELECT list as a Project, got {tree:?}");
+    };
+    assert!(
+        matches!(child.as_ref(), UnresolvedOp::Scan { source: Source::Table { table_ref }, .. }
+            if table_ref == "hosts"),
+        "the outer relation stays the projection's child, got {child:?}"
+    );
+    assert_eq!(cols.len(), 1);
+    let UnresolvedScalar::ScalarSubquery(sub) = &cols[0].expr else {
+        panic!("expected a ScalarSubquery item, got {:?}", cols[0].expr);
+    };
+    let UnresolvedOp::Project { child: inner, .. } = sub.as_ref() else {
+        panic!("expected the subquery's own SELECT list, got {sub:?}");
+    };
+    assert!(
+        matches!(inner.as_ref(), UnresolvedOp::Aggregate { measures, .. }
+            if matches!(measures.as_slice(), [AggIntent::Max { .. }])),
+        "the subquery plan is lowered as a root of its own, got {inner:?}"
+    );
+}
+
+#[tokio::test]
+async fn exists_and_in_subqueries_lower_to_scalar_filter_conjuncts() {
+    // The front end no longer builds the semi join itself: `EXISTS` / `IN
+    // (…)` are `Filter` predicates reading the subquery operator.
+    let tree =
+        lower_unresolved("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)").await;
+    let UnresolvedOp::Project { child, .. } = &tree else {
+        panic!("expected a Project, got {tree:?}");
+    };
+    assert!(
+        matches!(child.as_ref(), UnresolvedOp::Filter { pred, .. }
+            if matches!(pred.0, UnresolvedScalar::Exists { negated: false, .. })),
+        "expected Filter {{ Exists }}, got {child:?}"
+    );
+
+    let tree = lower_unresolved(
+        "SELECT service FROM metrics WHERE service IN (SELECT service FROM hosts)",
+    )
+    .await;
+    let UnresolvedOp::Project { child, .. } = &tree else {
+        panic!("expected a Project, got {tree:?}");
+    };
+    assert!(
+        matches!(child.as_ref(), UnresolvedOp::Filter { pred, .. }
+            if matches!(pred.0, UnresolvedScalar::InSubquery { negated: false, .. })),
+        "expected Filter {{ InSubquery }}, got {child:?}"
+    );
+}
+
+// ── `SELECT` without `FROM`, unary minus, SQL expression semantics ──────────
+
+#[tokio::test]
+async fn select_without_from_projects_over_one_empty_row() {
+    // `SELECT 1` has no table: DataFusion's `EmptyRelation` is one empty
+    // input row, which the SELECT list projects a literal over.
+    let qe = lower("SELECT 1").await;
+    let NonASAPOp::Project { cols, child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0].expr, ScalarExpr::Literal(ScalarValue::Int64(1)));
+    let NonASAPOp::Values { rows, schema } = op(child) else {
+        panic!("expected Values under the Project, got {child:?}");
+    };
+    assert_eq!(rows, &vec![Vec::<ScalarExpr>::new()], "one empty row");
+    assert!(schema.fields.is_empty() && schema.closed);
+    assert_eq!(qe.schema.fields.len(), 1);
+    assert_eq!(qe.schema.fields[0].dtype, DataType::Int64);
+}
+
+#[tokio::test]
+async fn values_lowers_to_one_row_per_values_row() {
+    let qe = lower("SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS v(n, s)").await;
+    let values = OperatorNode::reachable(&qe)
+        .into_iter()
+        .find(|n| matches!(op(n), NonASAPOp::Values { .. }))
+        .expect("expected a Values node");
+    let NonASAPOp::Values { rows, schema } = op(&values) else {
+        unreachable!()
+    };
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[1],
+        vec![
+            ScalarExpr::Literal(ScalarValue::Int64(2)),
+            ScalarExpr::Literal(ScalarValue::Utf8("b".into())),
+        ]
+    );
+    assert_eq!(schema.fields.len(), 2);
+    assert_eq!(schema.fields[0].dtype, DataType::Int64);
+    assert_eq!(schema.fields[1].dtype, DataType::Utf8);
+    assert_eq!(
+        qe.schema
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        ["n", "s"]
+    );
+}
+
+#[tokio::test]
+async fn unary_minus_lowers_to_negative() {
+    // `-x` over a column is the `Negative` scalar (a negative *literal* is
+    // folded by DataFusion's planner before lowering).
+    let qe = lower("SELECT -latency FROM metrics").await;
+    let NonASAPOp::Project { cols, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    assert_eq!(
+        cols[0].expr,
+        ScalarExpr::Negative {
+            expr: Box::new(ScalarExpr::Column(2)),
+            semantics: ExprSemantics::Sql,
+        }
+    );
+    assert_eq!(qe.schema.fields[0].dtype, DataType::Float64);
+}
+
+#[tokio::test]
+async fn sql_comparisons_and_arithmetic_carry_sql_semantics() {
+    let qe = lower("SELECT bytes * 8 FROM metrics WHERE latency > 1.5").await;
+    let NonASAPOp::Project { cols, child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    assert!(
+        matches!(
+            &cols[0].expr,
+            ScalarExpr::Arithmetic {
+                semantics: ExprSemantics::Sql,
+                ..
+            }
+        ),
+        "got {:?}",
+        cols[0].expr
+    );
+    let NonASAPOp::Scan { predicates, .. } = op(child) else {
+        panic!("expected the WHERE folded onto the Scan, got {child:?}");
+    };
+    assert!(
+        matches!(
+            &predicates[0].0,
+            ScalarExpr::Compare {
+                semantics: ExprSemantics::Sql,
+                ..
+            }
+        ),
+        "got {:?}",
+        predicates[0].0
+    );
+}
+
+// ── Issue #115: Quantile / Cardinality carry their input column ─────────────
+
+#[tokio::test]
+async fn quantile_carries_its_input_column() {
+    // `metrics(ts=0, service=1, latency=2, bytes=3)`. Two quantiles over
+    // different columns must not compare equal — a workload-level dedupe pass
+    // would compare on `AggIntent` equality, so a col-less intent would
+    // collapse them.
+    let qe = lower(
+        "SELECT approx_percentile_cont(latency, 0.5), \
+                approx_percentile_cont(bytes, 0.5) FROM metrics",
+    )
+    .await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [
+                AggIntent::Quantile { col: Some(2), .. },
+                AggIntent::Quantile { col: Some(3), .. }
+            ]
+        ),
+        "quantiles must bind their own column, got {measures:?}"
+    );
+    assert_ne!(
+        measures[0], measures[1],
+        "distinct-column quantiles must not compare equal"
+    );
+}
+
+#[tokio::test]
+async fn count_distinct_carries_its_input_column() {
+    let qe = lower("SELECT COUNT(DISTINCT service), COUNT(DISTINCT bytes) FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [
+                AggIntent::Cardinality { cols: c1, .. },
+                AggIntent::Cardinality { cols: c2, .. }
+            ] if c1 == &[1] && c2 == &[3]
+        ),
+        "cardinalities must bind their own column, got {measures:?}"
+    );
+    assert_ne!(
+        measures[0], measures[1],
+        "distinct-column cardinalities must not compare equal"
+    );
+}
+
+#[tokio::test]
+async fn quantile_and_count_distinct_over_an_expression_bind_the_derived_column() {
+    // A SQL aggregate has no "sample value" to fall back on, so an expression
+    // argument must never reach the canonical tree as `col: None` (#115).
+    // Since #110 it reaches the canonical tree as `col: Some(derived)`
+    // instead of being rejected.
+    for q in [
+        "SELECT approx_percentile_cont(bytes * 8, 0.95) FROM metrics",
+        "SELECT COUNT(DISTINCT bytes * 8) FROM metrics",
+        "SELECT approx_distinct(bytes * 8) FROM metrics",
+    ] {
+        let qe = lower(q).await;
+        let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+        assert!(
+            !measures[0].input_cols().is_empty(),
+            "{q} must bind a column, never the implicit input, got {measures:?}"
+        );
+        let (names, materialized) = reducer_input_names(&qe);
+        assert!(materialized, "{q} expected a materializing Project");
+        assert!(
+            names[0].contains("bytes"),
+            "{q} should reduce the projected `bytes * 8`, got {names:?}"
+        );
+    }
+}
+
+// ── Issue #111: median / approx_median → the φ=0.5 quantile ─────────────────
+
+#[tokio::test]
+async fn median_lowers_to_the_half_quantile() {
+    // `metrics(ts=0, service=1, latency=2, bytes=3)`.
+    for sql in [
+        "SELECT median(latency) FROM metrics",
+        "SELECT approx_median(latency) FROM metrics",
+    ] {
+        let qe = lower(sql).await;
+        let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+        assert!(
+            matches!(
+                measures.as_slice(),
+                [AggIntent::Quantile { col: Some(2), q, .. }] if (*q - 0.5).abs() < 1e-9
+            ),
+            "{sql} should lower to Quantile(0.5) over latency, got {measures:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn median_is_the_same_intent_as_an_explicit_half_percentile() {
+    // Two spellings of one intent: CSE should be able to merge them.
+    let m = lower("SELECT median(latency) FROM metrics").await;
+    let p = lower("SELECT approx_percentile_cont(latency, 0.5) FROM metrics").await;
+    let (_, m_measures) = find_aggregate(&m).expect("expected an Aggregate");
+    let (_, p_measures) = find_aggregate(&p).expect("expected an Aggregate");
+    assert_eq!(m_measures, p_measures);
+}
+
+#[tokio::test]
+async fn median_threads_the_accuracy_target() {
+    // The `approx_` prefix does not decide: the AccuracyTarget does.
+    let qe = lower_sql(
+        "SELECT approx_median(latency) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .await
+    .expect("approx_median should lower");
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Quantile { accuracy: AccuracyTarget::Epsilon(e), .. }]
+                if (*e - 0.01).abs() < 1e-12
+        ),
+        "median must carry the workload's accuracy target, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn median_over_an_expression_binds_the_derived_column() {
+    // Was rejected when filed (#111); supported since #110 materialized the
+    // expression. What must still hold is the #115 rule: never `col: None`.
+    let qe = lower("SELECT median(bytes * 8) FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Quantile { col: Some(_), q, .. }] if (*q - 0.5).abs() < 1e-9),
+        "expected Quantile(0.5) bound to the derived column, got {measures:?}"
+    );
+}
+
+// ── Issue #110: expression GROUP BY (time bucketing) ────────────────────────
+
+#[tokio::test]
+async fn time_bucketing_group_by_lowers_to_a_derived_key() {
+    // The canonical time-series shape: `GROUP BY date_trunc(...)`. The bucket
+    // expression is materialized beneath the aggregate and grouped on.
+    let qe =
+        lower("SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics GROUP BY m").await;
+    let node = find_aggregate_node(&qe).expect("expected an Aggregate");
+    let NonASAPOp::Aggregate {
+        reduction,
+        measures,
+        child,
+        ..
+    } = op(node)
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(op(child), NonASAPOp::Project { .. }),
+        "expected a materializing Project beneath the Aggregate"
+    );
+    let schema = &child.schema;
+    assert_eq!(reduction, &Reduction::by(vec![0]));
+    assert!(
+        schema.fields[0].name.contains("date_trunc"),
+        "group key should be the projected bucket, got {:?}",
+        schema.fields[0].name
+    );
+    // The reducer still binds its own column, not the bucket.
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Sum { col: Some(1) }]
+    ));
+}
+
+#[tokio::test]
+async fn time_bucketing_keeps_the_scan_predicate() {
+    // The projection is inserted above the scan, so a WHERE clause still folds
+    // onto the Scan rather than being stranded.
+    let qe = lower(
+        "SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics \
+         WHERE bytes > 10 GROUP BY m",
+    )
+    .await;
+    fn scan_has_predicate(node: &OperatorNode) -> bool {
+        match op(node) {
+            NonASAPOp::Scan { predicates, .. } => !predicates.is_empty(),
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Aggregate { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. } => scan_has_predicate(child),
+            _ => false,
+        }
+    }
+    assert!(scan_has_predicate(&qe), "WHERE should stay on the Scan");
+}
+
+#[tokio::test]
+async fn a_plain_group_by_inserts_no_projection() {
+    // Queries that lowered before #110 must keep their exact tree shape — the
+    // projection appears only when something actually needs materializing.
+    for q in [
+        "SELECT service, SUM(bytes) FROM metrics GROUP BY service",
+        "SELECT SUM(bytes) FROM metrics",
+        "SELECT COUNT(*) FROM metrics",
+    ] {
+        let qe = lower(q).await;
+        let NonASAPOp::Aggregate { child, .. } =
+            op(find_aggregate_node(&qe).expect("expected an Aggregate"))
+        else {
+            unreachable!()
+        };
+        assert!(
+            !matches!(op(child), NonASAPOp::Project { .. }),
+            "{q} should not gain a projection"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_shared_expression_is_materialized_once() {
+    let qe = lower("SELECT SUM(bytes * 2), MIN(bytes * 2) FROM metrics").await;
+    let NonASAPOp::Aggregate {
+        measures, child, ..
+    } = op(find_aggregate_node(&qe).expect("expected an Aggregate"))
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        child.schema.fields.len(),
+        1,
+        "the two reducers should share one derived column"
+    );
+    assert_eq!(measures[0].input_cols(), measures[1].input_cols());
+}
+
+// ── Issue #118: multi-level grouping expands into one Aggregate per level ───
+
+/// The branches of the first `Concat` along the single-child spine.
+fn merge_branches(node: &OperatorNode) -> &Vec<Rc<OperatorNode>> {
+    fn find(node: &OperatorNode) -> Option<&Vec<Rc<OperatorNode>>> {
+        match op(node) {
+            NonASAPOp::Concat { children, .. } => Some(children),
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. } => find(child),
+            _ => None,
+        }
+    }
+    find(node).expect("expected a Concat")
+}
+
+/// `(group keys, column names)` of each merged grouping level.
+fn grouping_levels(node: &OperatorNode) -> Vec<(GroupKeys, Vec<String>)> {
+    merge_branches(node)
+        .iter()
+        .map(|b| {
+            let NonASAPOp::Project { child, .. } = op(b) else {
+                panic!("expected a Project per level, got {b:?}");
+            };
+            let NonASAPOp::Aggregate { reduction, .. } = op(child) else {
+                panic!("expected an Aggregate under the Project, got {child:?}");
+            };
+            let names = b.schema.fields.iter().map(|c| c.name.clone()).collect();
+            (reduction.expect_reduce().clone(), names)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn rollup_expands_to_one_aggregate_per_prefix() {
+    // ROLLUP(a, b) → (a,b), (a), () — three levels, widest first.
+    let qe =
+        lower("SELECT service, bytes, SUM(latency) FROM metrics GROUP BY ROLLUP(service, bytes)")
+            .await;
+    let levels = grouping_levels(&qe);
+    let keys: Vec<_> = levels.iter().map(|(by, _)| by.clone()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            GroupKeys::by(vec![1, 3]),
+            GroupKeys::by(vec![1]),
+            GroupKeys::none(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn cube_expands_to_the_power_set() {
+    // CUBE(a, b) → (a,b), (a), (b), () — four levels.
+    let qe =
+        lower("SELECT service, bytes, SUM(latency) FROM metrics GROUP BY CUBE(service, bytes)")
+            .await;
+    assert_eq!(grouping_levels(&qe).len(), 4);
+}
+
+#[tokio::test]
+async fn a_mixed_grouping_set_is_normalized_by_datafusion() {
+    // `GROUP BY g, ROLLUP(d)` arrives as one GroupingSets, not a plain key
+    // alongside a grouping set — so there is only one shape to handle.
+    let qe =
+        lower("SELECT service, bytes, SUM(latency) FROM metrics GROUP BY service, ROLLUP(bytes)")
+            .await;
+    assert_eq!(grouping_levels(&qe).len(), 2);
+}
+
+#[tokio::test]
+async fn omitted_grouping_keys_become_typed_nulls() {
+    // Every level must emit every key — as NULL where the level omits it — or
+    // `Concat` (which takes the first child's schema) would misdescribe the rest.
+    // The null is *cast*: a bare Null literal infers as Float64.
+    let qe = lower("SELECT service, SUM(bytes) FROM metrics GROUP BY ROLLUP(service)").await;
+    let levels = grouping_levels(&qe);
+    assert_eq!(levels.len(), 2);
+    for (_, names) in &levels {
+        assert_eq!(
+            names,
+            &["service".to_string(), "sum(metrics.bytes)".to_string()]
+        );
+    }
+
+    // The `()` level projects `service` as a Utf8 null, not a Float64 one.
+    let schema = &merge_branches(&qe)[1].schema;
+    assert_eq!(schema.fields[0].name, "service");
+    assert_eq!(
+        schema.fields[0].dtype,
+        DataType::Utf8,
+        "the omitted key must keep its declared type"
+    );
+}
+
+#[tokio::test]
+async fn grouping_levels_are_union_compatible() {
+    let qe = lower(
+        "SELECT service, bytes, SUM(latency) FROM metrics GROUP BY GROUPING SETS ((service),(bytes),())",
+    )
+    .await;
+    let shapes: Vec<_> = merge_branches(&qe)
+        .iter()
+        .map(|b| {
+            b.schema
+                .fields
+                .iter()
+                .map(|c| (c.name.clone(), c.dtype.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        shapes.windows(2).all(|w| w[0] == w[1]),
+        "levels disagree: {shapes:?}"
+    );
+}
+
+#[tokio::test]
+async fn grouping_function_is_rejected() {
+    // `__grouping_id` is dropped when the levels are expanded. It is observable
+    // only through `GROUPING(col)`, so dropping it loses nothing representable —
+    // this test is what makes that true.
+    let err = lower_sql(
+        "SELECT service, SUM(bytes), GROUPING(service) FROM metrics GROUP BY ROLLUP(service)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("GROUPING() must be rejected while __grouping_id is dropped");
+    assert!(format!("{err}").contains("grouping"), "got {err}");
+}
+
+#[tokio::test]
+async fn a_non_column_key_inside_a_grouping_set_is_rejected() {
+    // The #110 derived-column machinery covers plain `GROUP BY <expr>`; inside a
+    // grouping set the key also has to be reinstatable as a typed null.
+    let err = lower_sql(
+        "SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics GROUP BY ROLLUP(m)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("expression key inside ROLLUP must be rejected");
+    assert!(
+        format!("{err}").contains("non-column key inside a multi-level grouping"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn multi_level_grouping_composes_with_a_derived_reducer_argument() {
+    // #110's materializing Project sits beneath every level's Aggregate.
+    let qe = lower("SELECT service, SUM(bytes * 8) FROM metrics GROUP BY ROLLUP(service)").await;
+    for b in merge_branches(&qe) {
+        let NonASAPOp::Project { child, .. } = op(b) else {
+            panic!("expected a Project per level");
+        };
+        let NonASAPOp::Aggregate {
+            measures, child, ..
+        } = op(child)
+        else {
+            panic!("expected an Aggregate");
+        };
+        assert!(matches!(
+            measures.as_slice(),
+            [AggIntent::Sum { col: Some(_) }]
+        ));
+        assert!(
+            matches!(op(child), NonASAPOp::Project { .. }),
+            "the derived-column projection should sit under each level"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_ambiguous_passthrough_column_is_rejected_only_when_projecting() {
+    // A `Project` carries one relation qualifier for all its columns, so `a.k`
+    // and `b.k` cannot both survive it. That only matters once a projection is
+    // inserted: without a derived column the join keys resolve as before.
+    let ok = lower_sql(
+        "SELECT m.service, h.service, SUM(m.bytes) FROM metrics m \
+         JOIN hosts h ON m.service = h.service GROUP BY m.service, h.service",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await;
+    assert!(
+        ok.is_ok(),
+        "no derived column ⇒ no projection ⇒ no ambiguity"
+    );
+
+    let err = lower_sql(
+        "SELECT m.service, h.service, SUM(m.bytes * 2) FROM metrics m \
+         JOIN hosts h ON m.service = h.service GROUP BY m.service, h.service",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("ambiguous passthrough must be rejected, not silently resolved");
+    assert!(format!("{err}").contains("ambiguous column"), "got {err}");
+}
+
+// ── Issue #111: array_agg is deliberately not an intent (WONTFIX) ───────────
+
+#[tokio::test]
+async fn array_agg_is_deliberately_rejected() {
+    // Not a coverage gap. `AggIntent` exists so the planner can bind a sketch or
+    // a mergeable accumulator per node; `array_agg` pre-aggregates nothing (its
+    // output is O(input rows)), has no bounded-memory approximate form, and its
+    // partial state *is* the data. An `AggIntent::ArrayAgg` would force every
+    // arm of `plan::boundary::realize` — an exhaustive match — to answer
+    // `PassThrough`. Contrast `median`, which is `Quantile { q: 0.5 }` and does
+    // feed the sketch path.
+    //
+    // This test exists so the rejection reads as a decision rather than a gap.
+    let err = lower_sql(
+        "SELECT array_agg(service) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("array_agg must not lower to an intent");
+    assert!(
+        format!("{err}").contains("unsupported aggregate: array_agg"),
+        "expected a clean UnsupportedAggregate, got {err}"
+    );
+}
+
+// ── Issue #225: catalog-driven ClickHouse builtins (countIf, generalizing
+// uniqExact from #221) ───────────────────────────────────────────────────
+
+async fn lower_clickhouse(sql: &str) -> Rc<OperatorNode> {
+    lower_sql_dialect(
+        sql,
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
+}
+
+fn temporal_aggregate(node: &OperatorNode) -> (&AggIntent, std::time::Duration, &OperatorNode) {
+    match op(node) {
+        NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures,
+            child,
+            ..
+        } => {
+            let NonASAPOp::TimeRange { range, child, .. } = op(child) else {
+                panic!("temporal Aggregate must directly wrap TimeRange, got {child:?}");
+            };
+            (&measures[0], *range, child)
+        }
+        NonASAPOp::Project { child, .. } | NonASAPOp::Filter { child, .. } => {
+            temporal_aggregate(child)
+        }
+        other => panic!("expected temporal Aggregate, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn explicit_temporal_aggregates_share_promql_intents_and_timerange() {
+    for (function, expected) in [
+        ("asap_rate", AggIntent::Rate),
+        ("asap_increase", AggIntent::Increase),
+    ] {
+        let sql = format!(
+            "SELECT service, {function}(latency, ts, 300000) AS v \
+             FROM metrics WHERE service = 'api' GROUP BY service"
+        );
+        let qe = lower_clickhouse(&sql).await;
+        let (intent, range, child) = temporal_aggregate(&qe);
+        assert_eq!(intent, &expected);
+        assert_eq!(range, std::time::Duration::from_secs(300));
+        assert!(matches!(op(child), NonASAPOp::Project { child, .. }
+            if matches!(op(child), NonASAPOp::Scan { predicates, .. } if predicates.len() == 1)));
+
+        let NonASAPOp::Project { cols, .. } = op(&qe) else {
+            panic!("SELECT list must remain a Project, got {qe:?}");
+        };
+        assert!(matches!(cols[0].expr, ScalarExpr::Column(2)));
+        assert_eq!(cols[1].alias.as_deref(), Some("v"));
+        assert!(matches!(cols[1].expr, ScalarExpr::Column(1)));
+    }
+}
+
+#[tokio::test]
+async fn temporal_aggregate_rejects_non_timestamp_and_non_positive_window() {
+    for sql in [
+        "SELECT asap_rate(latency, bytes, 300000) FROM metrics",
+        "SELECT asap_rate(latency, ts, 0) FROM metrics",
+        "SELECT asap_rate(latency, ts, bytes) FROM metrics",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("invalid temporal arguments must fail closed");
+        assert!(
+            format!("{err}").contains("timestamp argument")
+                || format!("{err}").contains("window_ms"),
+            "unexpected error for {sql}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn temporal_aggregate_rejects_mixed_reducers() {
+    let err = lower_sql_dialect(
+        "SELECT asap_rate(latency, ts, 300000), sum(bytes) FROM metrics",
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("one child cannot carry temporal and ordinary aggregate semantics");
+    assert!(format!("{err}").contains("cannot share an Aggregate node"));
+}
+
+#[tokio::test]
+async fn last_fails_closed_until_an_executable_summary_exists() {
+    let err = lower_sql_dialect(
+        "SELECT service, asap_last(latency, ts, 300000) FROM metrics GROUP BY service",
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("last must not be advertised without an executable physical summary");
+    assert!(format!("{err}").contains("Invalid function 'asap_last'"));
+}
+
+#[tokio::test]
+async fn temporal_grouping_requires_the_complete_declared_series_identity() {
+    let multi_series = SqlCatalog::new().with_table(
+        "samples",
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("service", DataType::Utf8),
+                col("instance", DataType::Utf8),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![vec![0, 1, 2]],
+        ),
+    );
+    for sql in [
+        "SELECT asap_rate(value, ts, 300000) FROM samples",
+        "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &multi_series,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("partial identity must not merge counter series");
+        assert!(format!("{err}").contains("declared series identity"));
+    }
+
+    lower_sql_dialect(
+        "SELECT service, instance, asap_rate(value, ts, 300000) \
+         FROM samples GROUP BY service, instance",
+        &multi_series,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect("the complete declared series identity is safe");
+
+    let row_id_only = SqlCatalog::new().with_table(
+        "samples",
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("service", DataType::Utf8),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![vec![1]],
+        ),
+    );
+    lower_sql_dialect(
+        "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
+        &row_id_only,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("a row key without time does not prove a series identity");
+}
+
+#[tokio::test]
+async fn temporal_grouping_rejects_value_time_and_duplicate_resolved_columns() {
+    for sql in [
+        "SELECT asap_rate(latency, ts, 300000) FROM metrics GROUP BY ts",
+        "SELECT asap_rate(latency, ts, 300000) FROM metrics GROUP BY latency",
+        "SELECT m.service, asap_rate(m.latency, m.ts, 300000) \
+         FROM metrics m GROUP BY m.service, service",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("unsafe or duplicate resolved grouping must fail closed");
+        let message = format!("{err}");
+        assert!(
+            message.contains("timestamp or value")
+                || message.contains("same resolved column more than once"),
+            "unexpected error for {sql}: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn qualified_columns_are_validated_by_resolved_identity() {
+    let qe = lower_clickhouse(
+        "SELECT m.service, asap_increase(m.latency, m.ts, 300000) AS v \
+         FROM metrics AS m GROUP BY m.service",
+    )
+    .await;
+    let (intent, range, _) = temporal_aggregate(&qe);
+    assert_eq!(intent, &AggIntent::Increase);
+    assert_eq!(range, std::time::Duration::from_secs(300));
+}
+
+#[tokio::test]
+async fn project_filter_and_outer_aggregate_preserve_temporal_child() {
+    let qe = lower_clickhouse(
+        "SELECT max(v) FROM (\
+           SELECT service, asap_rate(latency, ts, 300000) AS v \
+           FROM metrics WHERE bytes > 0 GROUP BY service\
+         ) r WHERE v >= 0",
+    )
+    .await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected outer SELECT Project, got {qe:?}");
+    };
+    let NonASAPOp::Aggregate {
+        reduction: Reduction::Reduce(_),
+        measures,
+        child,
+        ..
+    } = op(child)
+    else {
+        panic!("expected outer Aggregate, got {child:?}");
+    };
+    assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
+    let NonASAPOp::Filter { child, .. } = op(child) else {
+        panic!("derived-table WHERE must remain above the inner query, got {child:?}");
+    };
+    let (intent, range, _) = temporal_aggregate(child);
+    assert_eq!(intent, &AggIntent::Rate);
+    assert_eq!(range, std::time::Duration::from_secs(300));
+}
+
+#[tokio::test]
+async fn count_if_lowers_to_a_sum_over_a_derived_indicator_column() {
+    // ClickHouse's `countIf(cond)` has no DataFusion equivalent at all, so it
+    // goes through the same stub-UDAF + catalog-driven `FunctionRewrite`
+    // mechanism `uniqExact` (#221) does — rewritten, before `lower_agg_intent`
+    // ever runs, to `sum(CASE WHEN cond THEN 1 ELSE 0 END)`. A per-measure
+    // filter (#466) could express it as a filtered `Count` now; that move is
+    // a follow-up, so the indicator sum is still the shape to expect.
+    let qe = lower_clickhouse("SELECT countIf(bytes > 100) AS big FROM metrics").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(by.is_empty());
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Sum { col: Some(_) }]),
+        "expected a Sum bound to the derived indicator column, got {measures:?}"
+    );
+    let (_, materialized) = reducer_input_names(&qe);
+    assert!(
+        materialized,
+        "the indicator expression must be materialized in a Project beneath the Aggregate"
+    );
+}
+
+#[tokio::test]
+async fn two_count_ifs_with_different_conditions_stay_distinct_reducers() {
+    // The corpus pattern (`countIf(operation = 'A'), countIf(operation = 'W')`
+    // in one GROUP BY) needs each call's own condition to survive as its own
+    // derived column, not collapse onto a shared one.
+    let qe = lower_clickhouse(
+        "SELECT service, countIf(bytes > 100) AS big, countIf(bytes <= 100) AS small \
+         FROM metrics GROUP BY service",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(*by, GroupKeys::by(vec![0]));
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [
+                AggIntent::Sum { col: Some(a) },
+                AggIntent::Sum { col: Some(b) }
+            ] if a != b
+        ),
+        "expected two distinct Sum reducers, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn count_if_composes_with_group_by() {
+    let qe = lower_clickhouse(
+        "SELECT service, countIf(bytes > 100) AS big FROM metrics GROUP BY service",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(*by, GroupKeys::by(vec![0]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
+}
+
+// ── Issue #232: argMax/argMin -- AggIntent::Extension, not a first-class
+// core variant. A repo-wide search (PromQL front end, other SQL dialects,
+// docs) turned up no second deployment model wanting this two-column,
+// row-selecting shape, so per `AggIntent::Extension`'s own "core only grows
+// for intents ≥2 deployment models actually use" bar, it stays an opaque
+// `Extension` rather than a new `ArgMax`/`ArgMin` core variant. Unlike
+// `countIf`/`uniqExact`, there is no native DataFusion aggregate shape to
+// rewrite to (`RewriteKind::PassThrough`) -- `lower_agg_intent` builds the
+// `AggIntent` directly from the ClickHouse name. ─────────────────────────
+
+#[tokio::test]
+async fn arg_max_lowers_to_an_extension_intent() {
+    // No existing `AggIntent` reducer fits: every one folds one column to a
+    // value derived from itself, while `argMax(arg, val)` returns a
+    // *different* column's value, selected by which row maximizes a second.
+    let qe = lower_clickhouse(
+        "SELECT service, argMax(service, latency) AS busiest FROM metrics GROUP BY service",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(
+        *by,
+        GroupKeys::by(vec![1]),
+        "grouped by `service` (schema index 1)"
+    );
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Extension { ext_kind, .. }] if ext_kind == "arg_max"
+        ),
+        "expected Extension {{ ext_kind: \"arg_max\", .. }}, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn arg_min_lowers_to_its_own_extension_kind() {
+    let qe = lower_clickhouse("SELECT argMin(service, latency) FROM metrics").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(by.is_empty());
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Extension { ext_kind, .. }] if ext_kind == "arg_min"
+        ),
+        "expected Extension {{ ext_kind: \"arg_min\", .. }}, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn arg_max_payload_preserves_both_column_names() {
+    // Core never resolves an `Extension`'s payload, so both columns are kept
+    // as validated bare-column `ColumnRef`s in `payload`, not run through
+    // positional `ColumnId` binding -- see `lower_arg_selector`'s doc.
+    let qe = lower_clickhouse("SELECT argMax(service, latency) AS m FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    let AggIntent::Extension { payload, .. } = &measures[0] else {
+        panic!("expected an Extension intent, got {:?}", measures[0]);
+    };
+    let named = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|c| c.get("Named"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(named("arg_col"), Some("service".to_string()));
+    assert_eq!(named("val_col"), Some("latency".to_string()));
+}
+
+#[tokio::test]
+async fn arg_max_rejects_a_non_column_argument() {
+    // Same "bare column only" rule as every other reducer (`reducer_col`,
+    // issue #115) -- an expression argument is rejected, not silently
+    // dropped or materialized into the wrong column.
+    let err = lower_sql_dialect(
+        "SELECT argMax(service, latency * 2) FROM metrics",
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("argMax over a non-column expression must be rejected");
+    assert!(
+        format!("{err}").contains("non-column expression"),
+        "got {err}"
+    );
+}
+
+// ── Issue #267: lagInFrame/leadInFrame get distinct WindowFuncKind variants,
+// not conflated with ANSI Lag/Lead ──────────────────────────────────────────
+
+#[tokio::test]
+async fn lag_in_frame_lowers_to_its_own_kind_not_lag() {
+    let qe = lower_clickhouse(
+        "SELECT service, lagInFrame(bytes) OVER (PARTITION BY service ORDER BY ts) \
+         FROM metrics",
+    )
+    .await;
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let NonASAPOp::SQLWindowFunc { func, args, .. } = op(win) else {
+        unreachable!();
+    };
+    assert_eq!(*func, WindowFuncKind::LagInFrame);
+    assert_eq!(
+        args,
+        &vec![ScalarExpr::Column(3)],
+        "lagInFrame(bytes) → arg col 3"
+    );
+}
+
+#[tokio::test]
+async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
+    let qe = lower_clickhouse(
+        "SELECT service, leadInFrame(bytes) OVER (PARTITION BY service ORDER BY ts) \
+         FROM metrics",
+    )
+    .await;
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let NonASAPOp::SQLWindowFunc { func, .. } = op(win) else {
+        unreachable!();
+    };
+    assert_eq!(*func, WindowFuncKind::LeadInFrame);
+}
+
+/// Issue #184: `NOW()` in a predicate must lower to the timestamp-typed
+/// `CurrentTimestamp` leaf, not the semantically-opaque function catch-all or
+/// PromQL's Float64 Unix-seconds `EvalTimestamp`.
+#[tokio::test]
+async fn now_in_predicate_lowers_to_current_timestamp() {
+    // WHERE folds onto Scan.predicates (no explicit Filter node).
+    let qe = lower("SELECT * FROM metrics WHERE ts < NOW()").await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    let NonASAPOp::Scan { predicates, .. } = op(child) else {
+        panic!("expected Scan under the projection, got {child:?}");
+    };
+    assert_eq!(predicates.len(), 1);
+    assert!(
+        matches!(&predicates[0].0, ScalarExpr::Compare { right, .. }
+            if matches!(right.as_ref(), ScalarExpr::Cast { expr, to: DataType::Timestamp, .. } if matches!(expr.as_ref(), ScalarExpr::CurrentTimestamp))),
+        "NOW() must lower to CurrentTimestamp, got {:?}",
+        predicates[0].0
+    );
+}
+
+/// The cast that type coercion puts on `100` against a `DOUBLE` column is
+/// folded into the literal, as DataFusion's constant folding does.
+#[tokio::test]
+async fn coerced_literal_is_folded() {
+    let qe = lower("SELECT * FROM metrics WHERE latency < 100").await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    let NonASAPOp::Scan { predicates, .. } = op(child) else {
+        panic!("expected Scan under the projection, got {child:?}");
+    };
+    assert!(
+        matches!(&predicates[..], [Predicate(ScalarExpr::Compare { right, .. })]
+            if matches!(right.as_ref(), ScalarExpr::Literal(ScalarValue::Float64(v)) if *v == 100.0)),
+        "{predicates:?}"
+    );
+}
+
+/// Same for ClickHouse's `now()`, since #184 was raised specifically against
+/// the ClickHouse dialect.
+#[tokio::test]
+async fn clickhouse_now_in_predicate_lowers_to_current_timestamp() {
+    let qe = lower_clickhouse("SELECT * FROM metrics WHERE ts < now()").await;
+    let NonASAPOp::Project { child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    let NonASAPOp::Scan { predicates, .. } = op(child) else {
+        panic!("expected Scan under the projection, got {child:?}");
+    };
+    assert_eq!(predicates.len(), 1);
+    assert!(
+        matches!(&predicates[0].0, ScalarExpr::Compare { right, .. }
+            if matches!(right.as_ref(), ScalarExpr::Cast { expr, to: DataType::Timestamp, .. } if matches!(expr.as_ref(), ScalarExpr::CurrentTimestamp))),
+        "now() must lower to CurrentTimestamp, got {:?}",
+        predicates[0].0
+    );
+}
+
+#[tokio::test]
+async fn current_timestamp_lowers_to_typed_current_timestamp_leaf() {
+    let qe = lower("SELECT CURRENT_TIMESTAMP FROM metrics").await;
+    let NonASAPOp::Project { cols, child, .. } = op(&qe) else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    assert!(matches!(&cols[0].expr, ScalarExpr::CurrentTimestamp));
+    let (dtype, _) = cols[0]
+        .expr
+        .scalar_type(&child.schema)
+        .expect("timestamp type");
+    assert_eq!(dtype, DataType::Timestamp);
+    assert_eq!(qe.schema.fields[0].dtype, DataType::Timestamp);
+}
+
+// A `count` over a non-null input is a plain row count; over a nullable
+// input it keeps SQL's NULL-skipping as the measure's own filter (#466), and
+// only the multi-level grouping path, which cannot carry one, still rejects it.
+#[tokio::test]
+async fn count_null_semantics_become_a_measure_filter() {
+    let catalog = SqlCatalog::new().with_table(
+        "samples",
+        Schema::new(vec![
+            Field::plain("nullable_value", DataType::Float64, true),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+    );
+    for sql in [
+        "SELECT count(*) FROM samples",
+        "SELECT count(1) FROM samples",
+        "SELECT count(value) FROM samples",
+        "SELECT count(value + 1) FROM samples",
+    ] {
+        let qe = lower_sql(sql, &catalog, AccuracyTarget::Exact)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert!(
+            aggregate_filters(&qe).is_empty(),
+            "{sql}: unfiltered row count"
+        );
+    }
+    for sql in [
+        "SELECT count(nullable_value) FROM samples",
+        "SELECT count(NULL) FROM samples",
+        "SELECT count(nullable_value + 1) FROM samples",
+    ] {
+        let qe = lower_sql(sql, &catalog, AccuracyTarget::Exact)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        let [Some(Predicate(cond))] = aggregate_filters(&qe) else {
+            panic!(
+                "{sql}: expected one filtered Count, got {:?}",
+                aggregate_filters(&qe)
+            );
+        };
+        assert!(matches!(cond, ScalarExpr::IsNotNull(_)), "{sql}: {cond:?}");
+    }
+    // Only the second measure is filtered.
+    let qe = lower_sql(
+        "SELECT count(*), count(nullable_value) FROM samples",
+        &catalog,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(aggregate_filters(&qe), [None, Some(_)]));
+    let error = lower_sql(
+        "SELECT count(nullable_value) FROM samples GROUP BY ROLLUP(value)",
+        &catalog,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, LoweringError::UnsupportedFeature(_)),
+        "{error}"
+    );
+}
+
+/// A native SQL map grouping key retains its typed key/value schema.
+#[tokio::test]
+async fn grouped_map_column_preserves_map_type() {
+    let map = DataType::Map {
+        key: Box::new(DataType::Utf8),
+        value: Box::new(DataType::Utf8),
+        value_nullable: false,
+    };
+    let catalog = SqlCatalog::new().with_table(
+        "raw_samples",
+        Schema::new(vec![
+            col("labels", map.clone()),
+            col("value", DataType::Float64),
+        ]),
+    );
+    let query = lower_sql_dialect(
+        "SELECT labels, max(value) AS value FROM raw_samples GROUP BY labels ORDER BY labels",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    assert_eq!(query.schema.fields[0].dtype, map);
+}
+
+#[tokio::test]
+async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
+    let catalog = SqlCatalog::new().with_table(
+        "numbers",
+        Schema::new(vec![
+            Field::plain("i", DataType::Int64, false),
+            Field::plain("n", DataType::Int64, true),
+            Field::plain("f", DataType::Float64, false),
+        ]),
+    );
+    for (call, native) in [
+        ("modulo(i, 3)", "i % 3"),
+        ("modulo(n, -3)", "n % -3"),
+        ("modulo(f, 2.5)", "f % 2.5"),
+        ("modulo(-7, 3)", "-7 % 3"),
+        ("modulo(i, 0)", "i % 0"),
+        ("modulo(modulo(i, 5), 2)", "(i % 5) % 2"),
+    ] {
+        let function = lower_sql_dialect(
+            &format!("SELECT {call} AS value FROM numbers"),
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let operator = lower_sql_dialect(
+            &format!("SELECT {native} AS value FROM numbers"),
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        assert_eq!(function, operator, "{call}");
+        assert_eq!(function.schema, operator.schema);
+    }
+    let nullable = lower_sql_dialect(
+        "SELECT modulo(n, 3) AS value FROM numbers",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap()
+    .schema
+    .clone();
+    assert_eq!(nullable.fields[0].dtype, DataType::Int64);
+    assert!(nullable.fields[0].nullable);
+}
+
+#[tokio::test]
+async fn original_o11y_map_queries_lower_with_typed_results() {
+    let catalog = SqlCatalog::new().with_table(
+        "raw_samples",
+        Schema::new(vec![
+            Field::plain("metric", DataType::Utf8, false),
+            Field::plain("ts_ms", DataType::Int64, false),
+            Field::plain("value", DataType::Float64, false),
+            Field::plain(
+                "labels",
+                DataType::Map {
+                    key: Box::new(DataType::Utf8),
+                    value: Box::new(DataType::Utf8),
+                    value_nullable: false,
+                },
+                false,
+            ),
+        ]),
+    );
+    for sql in [
+        include_str!("data/o11y_q10.sql"),
+        include_str!("data/o11y_q27.sql"),
+        include_str!("data/o11y_q07.sql"),
+        include_str!("data/o11y_q09.sql"),
+        include_str!("data/o11y_q12.sql"),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let schema = &query.schema;
+        assert!(
+            schema
+                .fields
+                .iter()
+                .any(|column| matches!(column.dtype, FieldDataType::Plain(DataType::Map { .. }))),
+            "{schema:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clickhouse_modulo_preserves_projection_names_and_outer_references() {
+    for (sql, name) in [
+        ("SELECT modulo(bytes, 3) FROM metrics", "modulo(bytes, 3)"),
+        (
+            "SELECT modulo(bytes, 3) AS remainder FROM metrics",
+            "remainder",
+        ),
+        (
+            "SELECT \"modulo(bytes, 3)\" FROM (SELECT modulo(bytes, 3) FROM metrics) t",
+            "modulo(bytes, 3)",
+        ),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        assert_eq!(query.schema.fields[0].name, name);
+    }
+}
+
+#[tokio::test]
+async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercion() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain(
+                "labels",
+                DataType::Map {
+                    key: Box::new(DataType::Utf8),
+                    value: Box::new(DataType::Utf8),
+                    value_nullable: false,
+                },
+                false,
+            ),
+            Field::plain("integer", DataType::Int64, false),
+            Field::plain("floating", DataType::Float64, false),
+        ]),
+    );
+    let query = lower_sql_dialect(
+        "SELECT labels['job'] FROM t",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    let output = &query.schema;
+    assert_eq!(output.fields[0].name, "arrayElement(labels, 'job')");
+    assert_eq!(output.fields[0].dtype, DataType::Utf8);
+    assert!(!output.fields[0].nullable);
+    assert!(lower_sql_dialect(
+        "SELECT map()['a'] FROM t",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .is_err());
+    assert!(lower_sql_dialect(
+        "SELECT map('a', integer, 'b', floating) FROM t",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn arg_selector_result_schema_tracks_selected_argument() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain("v", DataType::Float64, false),
+            Field::plain("text", DataType::Utf8, true),
+            Field::plain("ts", DataType::Int64, true),
+        ]),
+    );
+    for (sql, dtype, nullable) in [
+        (
+            "SELECT argMax(v, ts) AS value FROM t",
+            DataType::Float64,
+            false,
+        ),
+        (
+            "SELECT argMin(text, ts) AS value FROM t",
+            DataType::Utf8,
+            true,
+        ),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let schema = &query.schema;
+        assert_eq!(schema.fields[0].dtype, dtype);
+        assert_eq!(schema.fields[0].nullable, nullable);
+    }
+}
+
+#[tokio::test]
+async fn clickhouse_list_element_uses_canonical_typed_access() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain(
+                "samples",
+                DataType::List {
+                    element: Box::new(Field::new("item", DataType::Int64, false)),
+                },
+                false,
+            ),
+            Field::plain("index", DataType::Int64, true),
+        ]),
+    );
+    for (sql, nullable) in [
+        ("SELECT samples[1] AS selected FROM t", false),
+        ("SELECT arrayElement(samples, -1) AS selected FROM t", false),
+        ("SELECT samples[index] AS selected FROM t", true),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let output = &query.schema;
+        assert_eq!(output.fields[0].dtype, DataType::Int64);
+        assert_eq!(output.fields[0].nullable, nullable);
+        let serialized = serde_json::to_string(&query).unwrap();
+        assert!(serialized.contains("asap_element_access"), "{serialized}");
+    }
+    for sql in ["SELECT samples[0] FROM t", "SELECT samples['bad'] FROM t"] {
+        assert!(
+            lower_sql_dialect(
+                sql,
+                &catalog,
+                SqlDialect::ClickhouseSQL,
+                AccuracyTarget::Exact
+            )
+            .await
+            .is_err(),
+            "{sql}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain(
+                "sample",
+                DataType::Struct {
+                    fields: vec![
+                        Field::new("time", DataType::Int64, false),
+                        Field::new("value", DataType::Float64, true),
+                    ],
+                },
+                false,
+            ),
+            Field::plain("index", DataType::Int64, false),
+        ]),
+    );
+    for (sql, dtype, nullable) in [
+        (
+            "SELECT tupleElement(sample, 1) AS chosen FROM t",
+            DataType::Int64,
+            false,
+        ),
+        (
+            "SELECT tupleElement(sample, 'value') AS chosen FROM t",
+            DataType::Float64,
+            true,
+        ),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let output = &query.schema;
+        assert_eq!(output.fields[0].dtype, dtype);
+        assert_eq!(output.fields[0].nullable, nullable);
+        assert!(serde_json::to_string(&query)
+            .unwrap()
+            .contains("asap_struct_field"));
+    }
+    for selector in ["0", "-1", "3", "'missing'", "index"] {
+        let sql = format!("SELECT tupleElement(sample, {selector}) FROM t");
+        assert!(
+            lower_sql_dialect(
+                &sql,
+                &catalog,
+                SqlDialect::ClickhouseSQL,
+                AccuracyTarget::Exact
+            )
+            .await
+            .is_err(),
+            "{sql}"
+        );
+    }
+}
+
+/// Correlation lowers to a nullable numeric result instead of UnsupportedAggregate.
+#[tokio::test]
+async fn corr_result_is_nullable_float() {
+    let query = lower("SELECT corr(latency, bytes) AS correlation FROM metrics").await;
+    let schema = &query.schema;
+    assert_eq!(schema.fields[0].name, "correlation");
+    assert_eq!(schema.fields[0].dtype, DataType::Float64);
+    assert!(schema.fields[0].nullable);
+}
+
+// A multi-column DISTINCT counts tuples; one column stays the single-column
+// intent, so neither form can be mistaken for the other downstream.
+#[tokio::test]
+async fn composite_distinct_counts_tuples() {
+    let cat = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain("a", DataType::Int64, false),
+            Field::plain("b", DataType::Int64, false),
+        ]),
+    );
+    let composite = lower_sql(
+        "SELECT COUNT(DISTINCT a, b) FROM t",
+        &cat,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    let NonASAPOp::Aggregate { measures, .. } =
+        op(find_aggregate_node(&composite).expect("expected an Aggregate"))
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Cardinality { cols, .. }] if cols == &[0, 1]),
+        "{measures:?}"
+    );
+
+    let single = lower_sql(
+        "SELECT COUNT(DISTINCT a) FROM t",
+        &cat,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    let NonASAPOp::Aggregate { measures, .. } =
+        op(find_aggregate_node(&single).expect("expected an Aggregate"))
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Cardinality { cols, .. }] if cols == &[0]),
+        "{measures:?}"
+    );
+}
+
+// An expression argument has no column identity to hash, so it is rejected
+// rather than silently reduced over a probe column.
+#[tokio::test]
+async fn composite_distinct_rejects_expression_arguments() {
+    let cat = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain("a", DataType::Int64, false),
+            Field::plain("b", DataType::Int64, false),
+        ]),
+    );
+    let error = lower_sql(
+        "SELECT COUNT(DISTINCT a, b + 1) FROM t",
+        &cat,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, LoweringError::UnsupportedAggregate(reason)
+            if reason.contains("non-column expression")),
+        "{error}"
+    );
+}
+
+// DISTINCT inputs survive projections introduced by sibling aggregates.
+#[tokio::test]
+async fn distinct_with_derived_sibling() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain("a", DataType::Int64, false),
+            Field::plain("b", DataType::Int64, false),
+        ]),
+    );
+    for sql in [
+        "SELECT count(DISTINCT a), sum(b + 1) FROM t",
+        "SELECT count(DISTINCT a, b), sum(b + 1) FROM t",
+        "SELECT count(DISTINCT a, b), corr(a,b) FROM t",
+    ] {
+        let result = lower_sql(sql, &catalog, AccuracyTarget::Exact).await;
+        assert!(result.is_ok(), "{sql}: {result:?}");
+    }
+}
+
+// ── Issue #466: per-measure FILTER predicates ─────────────────────────────────
+
+/// The first `Aggregate`'s `filters`, positional against its child.
+fn aggregate_filters(qe: &OperatorNode) -> &[Option<Predicate>] {
+    let Some(NonASAPOp::Aggregate { filters, .. }) =
+        find_aggregate_node(qe).map(|n| n.expect_non_asap())
+    else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    filters
+}
+
+// The motivating query: one scan, one grouping, one conditional count next to
+// a plain sum — a single `Aggregate` whose Count carries the condition, with no
+// `Join` and no derived column for the `CASE`.
+#[tokio::test]
+async fn conditional_count_lowers_to_a_filtered_measure() {
+    let qe = lower(
+        "SELECT service, count(CASE WHEN latency > 1.0 THEN 1 END), sum(bytes) \
+         FROM metrics GROUP BY service",
+    )
+    .await;
+    assert!(find_join(&qe).is_none(), "no join: {qe:?}");
+    let (by, measures) = find_aggregate(&qe).unwrap();
+    assert_eq!(by.keys(), &[1]);
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Count { .. }, AggIntent::Sum { col: Some(3) }]
+        ),
+        "{measures:?}"
+    );
+    let [Some(Predicate(cond)), None] = aggregate_filters(&qe) else {
+        panic!("expected [Some, None], got {:?}", aggregate_filters(&qe));
+    };
+    assert!(
+        matches!(cond, ScalarExpr::Compare { left, op: CompareOpKind::Gt, .. }
+            if matches!(left.as_ref(), ScalarExpr::Column(2))),
+        "latency > 1.0 against the scan, got {cond:?}"
+    );
+    let Some(NonASAPOp::Aggregate { child, .. }) =
+        find_aggregate_node(&qe).map(|n| n.expect_non_asap())
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }),
+        "{child:?}"
+    );
+}
+
+// `FILTER (WHERE …)` parses under the DataFusion dialect and lands on exactly
+// the measure it annotates.
+#[tokio::test]
+async fn filter_clause_lowers_to_a_measure_filter() {
+    let qe = lower("SELECT sum(bytes) FILTER (WHERE service = 'a'), count(*) FROM metrics").await;
+    let [Some(Predicate(cond)), None] = aggregate_filters(&qe) else {
+        panic!("expected [Some, None], got {:?}", aggregate_filters(&qe));
+    };
+    assert!(
+        matches!(cond, ScalarExpr::Compare { left, op: CompareOpKind::Eq, right, .. }
+            if matches!(left.as_ref(), ScalarExpr::Column(1))
+                && matches!(right.as_ref(), ScalarExpr::Literal(ScalarValue::Utf8(s)) if s == "a")),
+        "{cond:?}"
+    );
+}
+
+// SQL `count(expr)` skips NULLs; canonical `Count` counts rows and never sees
+// `expr`, so a nullable argument becomes the measure filter `expr IS NOT NULL`
+// instead of being rejected (the pre-#466 behavior) or silently over-counted.
+#[tokio::test]
+async fn count_of_a_nullable_expression_filters_nulls() {
+    let qe = lower("SELECT count(nullif(bytes, 0)) FROM metrics").await;
+    let [Some(Predicate(cond))] = aggregate_filters(&qe) else {
+        panic!("expected [Some], got {:?}", aggregate_filters(&qe));
+    };
+    assert!(matches!(cond, ScalarExpr::IsNotNull(_)), "{cond:?}");
+    assert!(
+        matches!(
+            find_aggregate(&qe).unwrap().1.as_slice(),
+            [AggIntent::Count { .. }]
+        ),
+        "still a row count"
+    );
+}
+
+// The columns a measure filter reads must survive the derived-column
+// `Project` a reducer expression inserts beneath the aggregate.
+#[tokio::test]
+async fn measure_filter_columns_survive_a_derived_column_projection() {
+    let qe = lower("SELECT sum(bytes * 2) FILTER (WHERE latency > 1.0) FROM metrics").await;
+    let Some(NonASAPOp::Aggregate { child, .. }) =
+        find_aggregate_node(&qe).map(|n| n.expect_non_asap())
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(child.expect_non_asap(), NonASAPOp::Project { .. }),
+        "{child:?}"
+    );
+    let [Some(Predicate(cond))] = aggregate_filters(&qe) else {
+        panic!("expected [Some], got {:?}", aggregate_filters(&qe));
+    };
+    let ScalarExpr::Compare { left, .. } = cond else {
+        panic!("{cond:?}");
+    };
+    let ScalarExpr::Column(id) = left.as_ref() else {
+        panic!("{left:?}");
+    };
+    assert_eq!(child.schema.fields[*id].name, "latency");
+}
+
+// `GROUP BY ROLLUP` fans one measure list out into one `Aggregate` per level;
+// a filtered measure there is rejected rather than silently unfiltered.
+#[tokio::test]
+async fn measure_filter_inside_a_rollup_is_rejected() {
+    let err = lower_sql(
+        "SELECT service, count(*) FILTER (WHERE latency > 1.0) FROM metrics GROUP BY ROLLUP(service)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, LoweringError::UnsupportedFeature(_)), "{err}");
+}
