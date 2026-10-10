@@ -1,13 +1,13 @@
 # Schema and Physical Data for ASAP Primitives
 
-This document is the single source of truth for the schema, and column design for ASAP Primitives. This is used in the logical stage (LogicalASAPDAG), and physical stage (PhysicalASAPDAG). 
+This document is the single source of truth for the schema and column design of ASAP primitives. The design is used in the logical stage (LogicalASAPDAG) and the physical stage (PhysicalASAPDAG).
 
 ## 1. Goal, problem, and requirements
 
-Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, it introduces new requirement when we design the schema and node definitions for LogicalASAPDAG and PhysicalASAPDAG.
+Existing database engines work on raw data, or on materialized tables whose schema and column names the user defines explicitly. ASAPPlanner instead plans and executes queries over a mix of raw data and ASAP primitives, which are usually compact summaries of raw data. This adds new requirements to the design of the schema and the node definitions of LogicalASAPDAG and PhysicalASAPDAG.
 
-Assuming we have the Logical DAG defined for a canonicalized representation for a batch of queries (the `LogicalDAG` produced by the frontends, [planning stages §0](planner-layering.md#0-language-specific-frontends); the stages that follow are in [planner-layering.md](planner-layering.md#stages)).
-The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG ([decoupling operators from scalar expressions](decoupling_op_and_expr.md), with the unified operator type in [operator sharing §1.1](operator-sharing.md#11-unified-operator-type)), but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives. The complete list is `ASAPOp` in `crates/types/src/ir/asap.rs`:
+We assume a Logical DAG that represents a batch of queries in canonical form (the `LogicalDAG` produced by the frontends, [planning stages §0](planner-layering.md#0-language-specific-frontends); the stages that follow are in [planner-layering.md](planner-layering.md#stages)).
+The LogicalASAPDAG shares and reuses the NonASAP operator and ScalarExpr nodes of the LogicalDAG ([decoupling operators from scalar expressions](decoupling_op_and_expr.md), with the unified operator type in [operator sharing §1.1](operator-sharing.md#11-unified-operator-type)), but replaces some of its operators with operators that work on ASAP primitives. The complete list is `ASAPOp` in `crates/types/src/ir/asap.rs`:
 
 | Operator | Input → output | Status |
 |---|---|---|
@@ -23,20 +23,18 @@ The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in
 | `Extension` | state → state, named by an extension | reserved |
 
 §5 walks through each of them.
-Each of the Summary operators also require the ASAP primitive information above to inter-operate correctly, preserving semantic correctness. 
+Each summary operator also requires information about the ASAP primitives it reads, so that the operators work together and the query keeps its meaning.
 
-Basically, the following information should be represented to preserve the equivalent query semantics when we introduce ASAP Primitives to logical query representation, and following physical one. 
+So when ASAP primitives are introduced into the logical query representation, and then into the physical one, the following information must be represented to keep the query semantics equivalent:
 
-- What type of the ASAP Primitive is
-- What is the ASAP Primitive parameters
-- What data sources a ASAP primitive summarizes
-- What query intent the summarized ASAP Primitive can support, e.g., statistical aggregation intents, time window aggregation intents
+- What type of ASAP primitive it is
+- What its parameters are
+- What data sources it summarizes
+- What query intents it can support, e.g. statistical aggregation intents and time window aggregation intents
 
+This information is combined with the information of relational and time series operators, such as group by / reduction, filtering, projection, join and time series selection.
 
-
-And these information will be combined with relational or time series query operator information, such as group by/reduction, filtering, projection, join, time series selection, together. 
-
-Therefore, these requirements drive the following schema and metadata, node information, and column design. 
+These requirements drive the schema, metadata, node and column design below.
 
 
 
@@ -61,11 +59,11 @@ Two consequences for the design:
 - Existing systems keep aggregate state internal to one operator. ASAPPlanner makes it a first-class column type so that one state can be shared, merged and stored across queries, which is what §3 and §4 add.
 
 ## 3. Proposed schema design 
-Schema represents the **metadata** of information flow along an **edge** between two nodes in a logical or physical DAG. The schema field is associated with the node in the DAG. The consumer of the node in the DAG takes the schema from the producer node as input. 
+A schema is the **metadata** of the data that flows along an **edge** between two nodes in a logical or physical DAG. Each node stores the schema of its output, and the node that consumes it takes that schema as its input.
 
-Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
-Based on our requirement, each field should contain the following information.
-1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
+The schema definition is shared by LogicalDAG, LogicalASAPDAG and PhysicalASAPDAG. A schema contains fields, and each field maps to a column in the physical data representation.
+Based on the requirements in §1, each field contains the following information.
+1. **What type of ASAP primitive it is, and its parameters.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
    - **Summary state**: described from coarse to fine by four levels:
@@ -80,7 +78,7 @@ Based on our requirement, each field should contain the following information.
    - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
    - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, PerSubpopulationInstance)`.
 
-2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
+2. **What query intents it can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
    - **Statistical aggregation intents** (`AggIntent`, `crates/types/src/pre_asap/agg_intent.rs`): which aggregate the state can answer, and how it is read out.
 
@@ -104,7 +102,7 @@ Based on our requirement, each field should contain the following information.
 
 ## 4. Proposed Node field design 
 
-A node in the physical data will represent the data or summary instance, so a node has a field for **What data sources a ASAP primitive summarizes**. This field is the node's **coverage**.
+A node represents data or a summary instance, so a node records **what data sources an ASAP primitive summarizes**. This is the node's **coverage**.
 
 **At a glance**
 
@@ -122,7 +120,7 @@ A node in the physical data will represent the data or summary instance, so a no
 **Why coverage is not part of the schema.**
 
 - `SummaryMerge` requires all inputs to have the same schema; that check is how it knows they are the same kind of state (same sketch, parameters and grouping).
-- Two summary states worth merging always cover different data. For example, two KLL states for "latency by job", built from minute 0–1 and minute 1–2:
+- Two summary states worth merging always cover different data. For example, `quantile_over_time(0.99, latency[2m])` (p99 of each series of metric `latency`, whose series are identified by label `job`) can be answered from two one-minute KLL states, one for minute 0–1 and one for minute 1–2 (§5.6, Example A):
 
   | | State A | State B | Equal? |
   |---|---|---|---|
@@ -202,7 +200,18 @@ A summary state is a stored aggregation, like `V` in §4.1, whose aggregate is a
 | **`definition`** | *What* is computed? |
 | **`selection`** | *Which rows* went in? |
 
-**Example.** Three states over table `t`, all with the same schema `(job Utf8, state Sketch(KLL k=200))`. `KLL(latency) by[job]` means a KLL sketch of `latency` for each `job`:
+**Example.** Three queries over table `t`:
+
+```sql
+-- S_us: p99 latency per job, US rows
+SELECT job, approx_percentile_cont(latency, 0.99) FROM t WHERE region = 'us' GROUP BY job;
+-- S_eu: p99 latency per job, EU rows
+SELECT job, approx_percentile_cont(latency, 0.99) FROM t WHERE region = 'eu' GROUP BY job;
+-- S_size: p99 size per job, EU rows
+SELECT job, approx_percentile_cont(size, 0.99) FROM t WHERE region = 'eu' GROUP BY job;
+```
+
+With an error target, the planner answers each quantile from a KLL state. All three states have the same schema `(job Utf8, state Sketch(KLL k=200))`. `KLL(latency) by[job]` means a KLL sketch of `latency` for each `job`:
 
 | State | Sub-DAG | `definition` | `selection` |
 |---|---|---|---|
@@ -227,28 +236,30 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration. One walk down the sub-DAG produces both parts: every filter condition either moves into `selection` or stays in `definition`. The definition is described first, then how the planner decides which conditions move into the selection.
 
-**Worked example.** A KLL of request latency per job, over metric `m` with columns `region`, `job`, `value`:
+**Worked example.** p99 latency per job over table `t` (columns `job`, `region`, `latency`):
+
+```sql
+SELECT job,
+       approx_percentile_cont(latency, 0.99) FILTER (WHERE latency < 100)
+FROM (SELECT job, region AS r, latency
+      FROM t
+      WHERE region = 'us' AND latency * 2 > 10)
+GROUP BY job;
+```
+
+The SQL frontend lowers it as follows: `FILTER (WHERE …)` becomes the aggregate's filter, `region AS r` becomes a `Project`, and the `WHERE` conditions are folded into the `Scan`'s predicates. With an error target, the planner answers the quantile from a KLL `SummaryAgg`, read out by a `SummaryEstimate`. The sub-DAG under that `SummaryEstimate`:
 
 ```text
-                 ( next operator )
+                 ( SummaryEstimate p99 )
                          ▲
                          │
-              [[ SummaryAgg ]]     KLL(value) by job,  filter: value < 100
+              [[ SummaryAgg ]]     KLL(latency) by job,  filter: latency < 100
                          ▲
                          │
-                 [ Project ]       job, region AS r, value
+                 [ Project ]       job, region AS r, latency
                          ▲
                          │
-                  [ Filter ]       region = 'us' AND value * 2 > 10
-                         ▲
-                         │
-               [ TimeRange ]       1m (range)
-                         ▲
-                         │
-               [ TimeShift ]       2m
-                         ▲
-                         │
-                  [ Scan m ]
+                  [ Scan t ]       predicates: region = 'us' AND latency * 2 > 10
 ```
 
 ##### The definition
@@ -267,22 +278,19 @@ The `definition` is the `SummaryAgg` together with its sub-DAG, with every condi
 
 So the `definition` holds what the state computes: the computation `C` with its remaining conditions, the summary family and its parameters, the input column, and the grouping `G`.
 
-In the worked example, `value < 100`, `region = 'us'` and the time window move into `selection` (below), and `value * 2 > 10` stays:
+In the worked example, `latency < 100` and `region = 'us'` move into `selection` (below), and `latency * 2 > 10` stays:
 
 ```text
-                 ( next operator )
+                 ( SummaryEstimate p99 )
                          ▲
                          │
-              [[ SummaryAgg ]]     KLL(value) by job          ← filter removed
+              [[ SummaryAgg ]]     KLL(latency) by job            ← filter removed
                          ▲
                          │
-                 [ Project ]       job, region AS r, value    ← unchanged
+                 [ Project ]       job, region AS r, latency      ← unchanged
                          ▲
                          │
-                  [ Filter ]       value * 2 > 10             ← region = 'us' removed
-                         ▲
-                         │
-                  [ Scan m ]                                  ← TimeRange, TimeShift removed
+                  [ Scan t ]       predicates: latency * 2 > 10   ← region = 'us' removed
 ```
 
 **When two definitions are equal.** Merging (§5.6) requires equal definitions.
@@ -301,7 +309,7 @@ In the worked example, `value < 100`, `region = 'us'` and the time window move i
 1. **Collect the conditions.** Go down the sub-DAG from the `SummaryAgg` and collect every filter condition: from `Filter` nodes, from `Scan.predicates`, and from the `SummaryAgg`'s own `filter`. A condition `A AND B` counts as two conditions, `A` and `B`.
 2. **Ask two questions about each condition:**
    - **Rule 1: would it pick the same rows if it were moved to just below the `SummaryAgg`?** `region = 'us'` below a `Project` that only renames columns: yes. `value > 5` below `rate`: no, because it filters the raw samples that `rate` reads, which changes the rate values.
-   - **Rule 2: is it a simple condition on one column?** That is, a value set such as `region IN ('us', 'eu')`, or a range such as `latency < 100`. `value * 2 > 10` is not: it is on an expression.
+   - **Rule 2: is it a simple condition on one column?** That is, a value set such as `region IN ('us', 'eu')`, or a range such as `latency < 100`. `latency * 2 > 10` is not: it is on an expression.
 3. **Putting the two rules together.**
    - If both answers are yes: take the condition out of the sub-DAG and put it into `selection`.
    - If either answer is no: leave it in the sub-DAG, so it is part of `definition`. The paper calls such conditions *residuals*.
@@ -311,12 +319,11 @@ In the worked example:
 
 | Condition | Found at | Rule 1: same rows at the `SummaryAgg`? | Rule 2: simple? | Result |
 |---|---|---|---|---|
-| `value < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `value ∈ (−∞, 100)` |
-| `region = 'us'` | `Filter` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `r ∈ {us}` |
-| `value * 2 > 10` | `Filter` | yes | **no**: it is on an expression, not a column | stays in `definition` |
-| 1 minute, shifted by 2 | `TimeRange` + `TimeShift` | yes | yes, relative time | `selection`: `(−3m, −2m]` |
+| `latency < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `latency ∈ (−∞, 100)` |
+| `region = 'us'` | `Scan.predicates` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `r ∈ {us}` |
+| `latency * 2 > 10` | `Scan.predicates` | yes | **no**: it is on an expression, not a column | stays in `definition` |
 
-So the `selection` is `value ∈ (−∞, 100)`, `r ∈ {us}`, time `(−3m, −2m]`.
+So the `selection` is `latency ∈ (−∞, 100)`, `r ∈ {us}`. A PromQL example with a time window is under **Time** below.
 
 **Rule 1 in detail.** Imagine moving the condition up, one operator at a time, until it is just below the `SummaryAgg`. Every operator it passes must leave the picked rows unchanged. Whether it can pass depends on what the operator does:
 
@@ -329,7 +336,7 @@ So the `selection` is `value ∈ (−∞, 100)`, `r ∈ {us}`, time `(−3m, −
 | `rate` or a window function (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate |
 | any other operator, e.g. `Join`, `Limit` | no | | |
 
-A condition *above* `rate` has nothing to pass. `Filter(value > 0, rate(...))` keeps the rate outputs above 0, and those are exactly the rows the `SummaryAgg` reads, so it becomes `value ∈ (0, ∞)` in `selection`. Only the `TimeRange(5m)` under `rate` stays in `definition`.
+A `Filter` *above* `rate` has nothing to pass: it keeps some rate outputs, and those are exactly the rows the `SummaryAgg` reads. A PromQL comparison such as `rate(m[5m]) > 0` is not lowered to a `Filter`, though, but to a comparison operator (`BinaryOp`), which the walk does not enter. So today it stays in `definition` (last row of **More examples** below).
 
 (This is filter pushdown in reverse. DataFusion's `PushDownFilter` uses the same rules to move filters down.)
 
@@ -346,7 +353,7 @@ Any other shape stays in `definition`:
 
 | Condition | Why it is not one of the shapes |
 |---|---|
-| `value * 2 > 10` | it is on an expression, not a column |
+| `latency * 2 > 10` | it is on an expression, not a column |
 | `a = b` | it compares two columns |
 | `region = 'us' OR job = 'api'` | it uses two columns |
 | `name LIKE 'web%'` | it is a pattern, not a set of values or a range |
@@ -359,7 +366,7 @@ Any other shape stays in `definition`:
 - PromQL labels have no table, so a label is named by its name alone.
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
 
-**Time.** There are two kinds:
+**Time.** Example: `quantile_over_time(0.99, m[1m] offset 2m)` lowers to `TimeRange(1m)` over `TimeShift(2m)` over `Scan m`. Its KLL state (one per series) has `definition` = the `SummaryAgg` over `Scan m`, and `selection` = time `(−3m, −2m]`, the minute that ended 2 minutes before evaluation. There are two kinds of time:
 
 | Kind | Comes from | Example |
 |---|---|---|
@@ -372,17 +379,17 @@ Any other shape stays in `definition`:
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
 - Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
 
-**More examples** of what goes where:
+**More examples** of what goes where. Each query's quantile is answered from a KLL `SummaryAgg`:
 
-| Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
-|---|---|---|
-| `Filter(region = 'us', Scan t)` | `Scan t` | `region ∈ {us}` |
-| `Filter(latency < 100, Scan t)` | `Scan t` | `latency ∈ (−∞, 100)` |
-| `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
-| `Filter(job = 'api', rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `job ∈ {api}` |
-| `Filter(value * 2 > 10, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` and the condition `value * 2 > 10` | nothing |
+| Query | Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
+|---|---|---|---|
+| SQL `… FROM t WHERE region = 'us'` | `Scan t {region = 'us'}` | `Scan t` | `region ∈ {us}` |
+| SQL `… FROM t WHERE latency < 100` | `Scan t {latency < 100}` | `Scan t` | `latency ∈ (−∞, 100)` |
+| PromQL `quantile_over_time(0.99, m[1m] offset 2m)` | `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
+| PromQL `quantile(0.99, rate(m{job="api"}[5m]))` | `rate(TimeRange(5m, Scan m {job = 'api'}))` | all of it | nothing: `job = 'api'` is under `rate`, which the walk cannot pass yet (Rule 1, later) |
+| PromQL `quantile(0.99, rate(m[5m]) > 0)` | `BinaryOp(>, rate(TimeRange(5m, Scan m)), 0)` | all of it | nothing: a PromQL comparison is a `BinaryOp`, not a `Filter` |
 
-In the last two rows `TimeRange(5m)` stays in `definition`: it is the input window of `rate` and changes the rate values, so it does not just pick rows. `value * 2 > 10` stays too, because it is a condition on an expression, not on a column.
+`Scan t {…}` is a `Scan` with those predicates. In the last two rows `TimeRange(5m)` stays in `definition` in any case: it is the input window of `rate` and changes the rate values, so it does not just pick rows.
 
 #### 4.2.3 Cost of deriving coverage
 
@@ -449,7 +456,15 @@ All examples read a table, so values are `Relation`. For PromQL series they woul
 
 **Operator definition.** Turns rows into summary state: one state per group.
 
-**Example.** p99 latency by job, from a KLL sketch with `k = 200`, over table `t`, using only US rows with latency under 10 s.
+**Example.** p99 latency by job, using only US rows with latency under 10 s:
+
+```sql
+SELECT job, approx_percentile_cont(latency, 0.99)
+FROM t WHERE region = 'us' AND latency < 10000
+GROUP BY job;
+```
+
+With an error target, the planner answers the quantile from a KLL sketch with `k = 200`: a `SummaryAgg` builds the state, and a `SummaryEstimate` (5.2) reads p99 from it.
 
 ```text
                  ( next operator )
@@ -484,7 +499,14 @@ coverage() of the SummaryAgg
 
 **Operator definition.** Reads a number out of a sketch, for example a quantile or a count.
 
-**Example.** Read p99 and p50 from the state in 5.1. One state feeds both readouts.
+**Example.** Two queries over the same rows as 5.1, one for p99 and one for p50:
+
+```sql
+SELECT job, approx_percentile_cont(latency, 0.99) FROM t WHERE region = 'us' AND latency < 10000 GROUP BY job;
+SELECT job, approx_percentile_cont(latency, 0.5)  FROM t WHERE region = 'us' AND latency < 10000 GROUP BY job;
+```
+
+Both need the same KLL state, so the planner builds it once (sub-DAG sharing, [Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination)) and reads it twice.
 
 ```text
        ( next operator )                       ( next operator )
@@ -519,7 +541,13 @@ coverage() of the SummaryAgg
 
 **Operator definition.** Turns an exact accumulator (sum, count, min, max, rate, …) into its final value.
 
-**Example.** Total bytes by host, with an exact `Sum` accumulator.
+**Example.** Total bytes by host:
+
+```sql
+SELECT host, SUM(bytes) FROM t GROUP BY host;
+```
+
+The planner answers `SUM` with an exact `Sum` accumulator: a `SummaryAgg` builds it, and `FinalizeExactAccumulator` reads the total.
 
 ```text
                  ( next operator )
@@ -554,7 +582,18 @@ coverage() of the SummaryAgg
 
 **Operator definition.** Keeps every value of a population (not a sketch), so that exact quantiles and top-k can be computed later, and tracks rows entering and leaving.
 
-**Example.** Keep all latencies per job, so that p99 and top-10 can be computed later (5.5).
+**Example.** Exact p99 latency per job, and the top-10 latencies per job:
+
+```sql
+SELECT job, percentile_cont(latency, 0.99) FROM t GROUP BY job;   -- exact target
+SELECT job, latency
+FROM (SELECT job, latency,
+             ROW_NUMBER() OVER (PARTITION BY job ORDER BY latency DESC) AS rn
+      FROM t)
+WHERE rn <= 10;
+```
+
+With an exact target, the planner can keep all latencies per job in one maintained population, and answer both queries from it (5.5):
 
 ```text
                  ( next operator )
@@ -579,7 +618,7 @@ coverage() of the SummaryAgg
 
 **Operator definition.** Computes an exact statistic from a maintained population.
 
-**Example.** p99 and the top-10 latencies by job, both from the one population in 5.4.
+**Example.** The two queries of 5.4 (exact p99 per job, top-10 latencies per job), both read from the one population:
 
 ```text
        ( next operator )                       ( next operator )
@@ -622,21 +661,28 @@ coverage() of the SummaryAgg
 SummaryMerge { children: Vec<C>, group_by: Reduction }
 ```
 
-**Example A: time panes.** The p99 of all samples of metric `m` over the last 2 minutes (one KLL over every series), built from two one-minute panes, the way window composition (Pass 2) builds them. Both panes read the same `Scan`.
+**Example A: time panes.** p99 of each series of metric `m` over the last 2 minutes:
+
+```promql
+quantile_over_time(0.99, m[2m])
+```
+
+Window composition (Pass 2) can answer it from two one-minute panes, one KLL per series in each, merged. Both panes read the same `Scan`.
 
 ```text
                            ( next operator )
                                    ▲
-                                   │  State: state Sketch(KLL k=200)
+                                   │  State: series labels, state Sketch(KLL k=200)
                                    │
                           [[ SummaryMerge ]]
                                    ▲             selection: time (−2m, 0]
                                    │
                  ┌─────────────────┴─────────────────┐
-                 │  State: state Sketch(KLL k=200)   │  State: state Sketch(KLL k=200)
+                 │  State: series labels,            │  State: series labels,
+                 │  state Sketch(KLL k=200)          │  state Sketch(KLL k=200)
                  │                                   │
      [[ SummaryAgg ]]  pane 0             [[ SummaryAgg ]]  pane 1
-     KLL k=200, by nothing                KLL k=200, by nothing
+     KLL k=200, per series                KLL k=200, per series
      selection: time (−1m, 0]             selection: time (−2m, −1m]
                  ▲                                   ▲
                  │                                   │
@@ -660,7 +706,15 @@ pane 0                   (─────────────]
 merge      (───────────────────────────]
 ```
 
-**Example B: regions.** `KLL(latency) by[job]` for `region = 'us'` and for `region = 'eu'` (as in 5.1, without the latency filter) merge into one state for both regions:
+**Example B: regions.** Two queries for p99 latency per job, one per region, and a third for both regions:
+
+```sql
+SELECT job, approx_percentile_cont(latency, 0.99) FROM t WHERE region = 'us' GROUP BY job;
+SELECT job, approx_percentile_cont(latency, 0.99) FROM t WHERE region = 'eu' GROUP BY job;
+SELECT job, approx_percentile_cont(latency, 0.99) FROM t WHERE region IN ('us', 'eu') GROUP BY job;
+```
+
+The first two build `KLL(latency) by[job]` states. The third can be answered by merging them into one state for both regions:
 
 ```text
                            ( next operator )
@@ -685,7 +739,14 @@ merge      (──────────────────────�
                               [ Scan t ]
 ```
 
-**Example C: rollup (planned).** A `by[region, job]` state rolled up to `by[job]`: each job's state is the merge of its per-region states. The same `by[region, job]` state also answers p99 per region and job directly.
+**Example C: rollup (planned).** p99 latency per region and job, and per job:
+
+```sql
+SELECT region, job, approx_percentile_cont(latency, 0.99) FROM t GROUP BY region, job;
+SELECT job, approx_percentile_cont(latency, 0.99) FROM t GROUP BY job;
+```
+
+One `by[region, job]` state answers the first query directly. Rolled up to `by[job]`, it answers the second: each job's state is the merge of its per-region states.
 
 ```text
        ( next operator )                       ( next operator )
@@ -720,23 +781,23 @@ input groups                       output groups
 (eu, web) ─┴─ merge ─────────────▶ web
 ```
 
-**Which merges are allowed.** All states below are `KLL(value) by[job] over Scan m` unless noted:
+**Which merges are allowed.** Each state below is the per-series KLL that answers a PromQL query; `A`, `B` and `C` have the definition `KLL(value) per series over Scan m`:
 
-| State | Selection |
-|---|---|
-| `A` | time `(−1m, 0]` |
-| `B` | time `(−2m, −1m]` |
-| `C` | time `(−90s, −30s]` |
-| `D` | time `(−1m, 0]`, but the `definition` keeps `value * 2 > 10` |
+| State | Query | Selection |
+|---|---|---|
+| `A` | `quantile_over_time(0.99, m[1m])` | time `(−1m, 0]` |
+| `B` | `quantile_over_time(0.99, m[1m] offset 1m)` | time `(−2m, −1m]` |
+| `C` | `quantile_over_time(0.99, m[1m] offset 30s)` | time `(−90s, −30s]` |
+| `D` | `quantile_over_time(0.99, n[1m])` | time `(−1m, 0]`, but over metric `n`: definition `KLL(value) per series over Scan n` |
 
 | Merge | Allowed? | Why | Result's selection |
 |---|---|---|---|
 | `A + B` | ✓ | same definition, no overlap | `(−2m, 0]` (touching ranges join) |
 | `A + C` | ✗ | `(−60s, −30s]` is in both, so those rows would be counted twice | |
 | `A + A` | ✗ | every row is in both | |
-| `A + D` | ✗ | different definitions: `D` only has rows with `value * 2 > 10` | |
+| `A + D` | ✗ | different definitions: `D` reads metric `n`, not `m` | |
 | `A` + a KLL with `k = 400` | ✗ | different schema: `k` is part of the state type, so the merge is rejected before coverage is checked | |
-| `(A + B)` + a state over `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
+| `(A + B)` + the state of `m[1m] offset 2m`, time `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
 
 **Whether inputs may overlap** depends on the summary type (family and algorithm, §3). This is #592 (open), which adds `FieldDataType::family_merges` and `merge_relation`; #646 alone requires every merge to be overlap-free:
 
