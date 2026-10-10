@@ -1,20 +1,22 @@
 //! Query string → planned summary state → `coverage()`, for the examples of
-//! the ASAP primitive schema design doc (#573 §4.2.2). Each query is lowered,
-//! searched and selected with the default cost model, and the quantile's KLL
-//! `SummaryAgg` in the selected DAG is checked.
+//! the ASAP primitive schema design doc (#573 §4.2.2). Each query is lowered
+//! and its Stage 1 logical candidates are enumerated; the quantile's KLL
+//! `SummaryAgg` is checked. Candidates, not the selected plan: the plan the
+//! cost models select for these small queries may build no summary.
 
+use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_logical_optimizer::search_workload;
-use asap_plan_selection::candidate_selection::global_selection;
-use asap_plan_selection::DefaultCostModel;
+use asap_logical_optimizer::pass1::logical_candidates::{
+    compose_logical_candidate, enumerate_choices, enumerate_local_logical_candidates,
+};
 use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
-use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
+use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, Predicate, QueryRoot, ScalarExpr};
 use asap_types::types::AccuracyTarget;
 
 fn accuracy() -> AccuracyTarget {
@@ -24,25 +26,25 @@ fn accuracy() -> AccuracyTarget {
     }
 }
 
-fn plan(pre: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    let space = search_workload(vec![("query", pre)]);
-    global_selection(&space, &DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
-        .expect("materialization failed")
-        .expect("root must be discovered")
-}
-
-/// The single KLL `SummaryAgg` of the selected DAG.
-fn kll_state(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    let states: Vec<_> = OperatorNode::reachable(root)
-        .into_iter()
-        .filter(|node| {
+/// The KLL `SummaryAgg` of the first logical candidate that builds one.
+fn kll_state(root: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    let inventory =
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))], &BTreeMap::new())
+            .unwrap();
+    for choice in enumerate_choices(&inventory, usize::MAX) {
+        let roots = compose_logical_candidate(&inventory, &choice).unwrap();
+        let QueryRoot::Operator(root) = &roots[0].1 else {
+            panic!("operator root")
+        };
+        let state = OperatorNode::reachable(root).into_iter().find(|node| {
             matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
                 if kind.algorithm() == &SketchAlgorithm::Kll)
-        })
-        .collect();
-    assert_eq!(states.len(), 1, "expected one KLL state in {root:#?}");
-    states[0].clone()
+        });
+        if let Some(state) = state {
+            return state;
+        }
+    }
+    panic!("no candidate builds a KLL state");
 }
 
 async fn sql_state(sql: &str) -> Rc<OperatorNode> {
@@ -57,13 +59,11 @@ async fn sql_state(sql: &str) -> Rc<OperatorNode> {
     let pre = lower_sql(sql, &catalog, accuracy())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
-    kll_state(&plan(pre))
+    kll_state(pre)
 }
 
 fn promql_state(query: &str) -> Rc<OperatorNode> {
-    kll_state(&plan(
-        lower_promql(query, accuracy()).expect("lowering failed"),
-    ))
+    kll_state(lower_promql(query, accuracy()).expect("lowering failed"))
 }
 
 fn column(table: Option<&str>, name: &str) -> ColumnIdentity {
@@ -155,6 +155,41 @@ async fn sql_renamed_column_moves_and_expression_stays() {
             if matches!(**left, ScalarExpr::Arithmetic { .. })),
         "the expression condition should stay: {predicates:#?}"
     );
+}
+
+/// The worked example of #573 §4.2.2: the `FILTER` range and the renamed
+/// value set move to the selection, the expression condition stays.
+#[tokio::test]
+async fn sql_worked_example() {
+    let state = sql_state(
+        "SELECT job, approx_percentile_cont(latency, 0.99) FILTER (WHERE latency < 100) \
+         FROM (SELECT job, region AS r, latency FROM t \
+               WHERE region = 'us' AND latency * 2 > 10) \
+         GROUP BY job",
+    )
+    .await;
+    assert_eq!(
+        state.coverage().unwrap().selection,
+        vec![SelectionBox {
+            columns: [
+                (
+                    column(None, "latency"),
+                    Constraint::Interval {
+                        lower: Bound::Unbounded,
+                        upper: Bound::Excluded(ScalarValue::Float64(100.0)),
+                    },
+                ),
+                (column(None, "r"), Constraint::In(vec![utf8("us")])),
+            ]
+            .into(),
+            relative_time: None,
+        }]
+    );
+    let definition = &state.coverage().unwrap().definition;
+    assert!(matches!(
+        definition.asap(),
+        Some(ASAPOp::SummaryAgg { filter: None, .. })
+    ));
 }
 
 #[test]
