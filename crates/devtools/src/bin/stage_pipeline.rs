@@ -10,8 +10,9 @@
 //     local alternative for every target (Pass 1, the Cartesian product), for
 //     the queries as written and, when Pass 2's identical-expression rule
 //     merges something, again with identical sub-DAGs shared ("· shared
-//     input"); in enumeration order and capped by `--max-candidates`
-//     (default 64);
+//     input"), and, when the summary-capability rule applies, again with
+//     one summary sized for its strictest consumer ("· shared summary"); in
+//     enumeration order and capped by `--max-candidates` (default 64);
 //   - stage2_physical_asap: one physical candidate per logical candidate
 //     (operator implementation only, everything at query time), no cost;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
@@ -34,7 +35,7 @@ use asap_logical_optimizer::pass1::logical_candidates::{
 };
 use asap_logical_optimizer::Realization;
 use asap_plan_selection::PlanningModels;
-use asap_plan_selection::{plan_stages, Selection, MAX_ENUMERATED_CANDIDATES};
+use asap_plan_selection::{plan_stages, Selection, Sharing, MAX_ENUMERATED_CANDIDATES};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::schema_support::with_promql_series_identity;
@@ -132,13 +133,13 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     let mut candidates = Vec::new();
     let mut stage2 = Vec::new();
     for candidate in &enumeration.candidates {
-        // Candidates of the shared variant are numbered after the independent ones.
+        // Candidates of each variant are numbered after the previous variants'.
         let mut offset = 0;
         let variant = run
             .stage1
             .iter()
             .find(|v| {
-                let found = v.shared == candidate.shared;
+                let found = v.sharing == candidate.sharing;
                 if !found {
                     offset += combination_count(&v.inventory);
                 }
@@ -148,9 +149,11 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         let inventory = &variant.inventory;
         let index = offset + choice_index(inventory, &candidate.choice) + 1;
         let mut label = label(inventory, &target_owners(inventory), &candidate.choice);
-        if candidate.shared {
-            label += " · shared input";
-        }
+        label += match candidate.sharing {
+            Sharing::Independent => "",
+            Sharing::IdenticalExpressions => " · shared input",
+            Sharing::SummaryCapability => " · shared summary",
+        };
         if let Some(logical) = &candidate.logical {
             let roots: Vec<_> = logical.iter().map(|(_, root)| root.clone()).collect();
             candidates

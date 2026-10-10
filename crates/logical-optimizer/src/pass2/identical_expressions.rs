@@ -15,34 +15,67 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::MetricType;
 
+use super::summary_capability::share_summary_capability;
 use crate::pass1::logical_candidates::{
     enumerate_local_logical_candidates, LocalLogicalCandidates, LogicalCandidateError,
 };
 
-/// One input-sharing form of the workload, with its Pass 1 alternatives.
+/// Which Pass 2 sharing a Stage 1 variant applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sharing {
+    /// Pass 1 over the queries as written.
+    Independent,
+    /// The identical-expression rule: identical sub-DAGs across queries are
+    /// merged, before Pass 1 and again after composition.
+    IdenticalExpressions,
+    /// The summary-capability rule on top of the identical-expression rule
+    /// ([`super::summary_capability`]): targets that can share one summary
+    /// are sized for their strictest consumer, so composition builds
+    /// identical producers, which are merged.
+    SummaryCapability,
+}
+
+impl Sharing {
+    /// Whether identical sub-DAGs are merged after composition.
+    pub fn merges_after_composition(self) -> bool {
+        self != Sharing::Independent
+    }
+}
+
+/// One sharing form of the workload, with its Pass 1 alternatives.
 #[derive(Debug, Clone)]
 pub struct SharingVariant<Id> {
-    /// Whether identical sub-DAGs across queries are merged.
-    pub shared: bool,
+    pub sharing: Sharing,
     pub inventory: LocalLogicalCandidates<Id>,
 }
 
-/// Stage 1 = Pass 1 + Pass 2's identical-expression rule: the independent
-/// variant first, then the shared one when sharing merges at least one node.
+/// Stage 1 = Pass 1 + Pass 2: the independent variant first, then the
+/// identical-expression variant when sharing merges at least one node, then
+/// the summary-capability variant when two targets can share a summary. The
+/// last is skipped when it would repeat the identical-expression variant.
 pub fn stage1_logical_candidates<Id: Clone>(
     roots: Vec<(Id, QueryRoot)>,
     metric_types: &BTreeMap<String, MetricType>,
 ) -> Result<Vec<SharingVariant<Id>>, LogicalCandidateError> {
     let shared = share_identical_expressions(&roots);
     let mut variants = vec![SharingVariant {
-        shared: false,
+        sharing: Sharing::Independent,
         inventory: enumerate_local_logical_candidates(roots, metric_types)?,
     }];
     if let Some(roots) = shared {
         variants.push(SharingVariant {
-            shared: true,
+            sharing: Sharing::IdenticalExpressions,
             inventory: enumerate_local_logical_candidates(roots, metric_types)?,
         });
+    }
+    let base = &variants.last().expect("the independent variant").inventory;
+    if let Some(capability) = share_summary_capability(base)? {
+        if capability.resized || variants.len() == 1 {
+            variants.push(SharingVariant {
+                sharing: Sharing::SummaryCapability,
+                inventory: capability.inventory,
+            });
+        }
     }
     Ok(variants)
 }
@@ -114,8 +147,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            variants.iter().map(|v| v.shared).collect::<Vec<_>>(),
-            [false, true]
+            variants.iter().map(|v| v.sharing).collect::<Vec<_>>(),
+            [Sharing::Independent, Sharing::IdenticalExpressions]
         );
         assert_eq!(
             variants[0].inventory.targets.len(),
@@ -145,6 +178,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(variants.len(), 1);
-        assert!(!variants[0].shared);
+        assert_eq!(variants[0].sharing, Sharing::Independent);
     }
 }
