@@ -10,7 +10,7 @@
 //! accuracy bound they ask for — `quantile(0.99, x)` at `epsilon=0.01` for
 //! one consumer, the same `quantile(0.99, x)` at `epsilon=0.05` for
 //! another — are therefore never the same `Rc`, never collapse into one
-//! [`crate::replacement::TargetSubDAGCandidates`], and [`crate::replacement::SharedSubDAGStrategy`]
+//! [`crate::pass1::replacement::TargetSubDAGCandidates`], and [`crate::pass1::replacement::SharedSubDAGStrategy`]
 //! never even gets a `TargetSubDAG` with `consumer_count >= 2` to propose
 //! sharing for. This crate would build two entirely independent sketches
 //! for what is conceptually one computation, even though a single sketch
@@ -22,7 +22,7 @@
 //! consumer that pattern-matches on a specific `AccuracyTarget` — depends on
 //! that). What this module adds is a *second*, narrower notion of "close
 //! enough to share" that sits entirely inside the [`ReplacementStrategy`]
-//! extension point: one more candidate a [`crate::cost_model::CostModel`]
+//! extension point: one more candidate a `cost_model::CostModel`
 //! may or may not prefer, never a forced rewrite and never a change to what
 //! `share_common_sub_dags` itself merges.
 //!
@@ -31,17 +31,17 @@
 //! Two `NonASAPOp::Aggregate` nodes are accuracy-near-duplicates here iff,
 //! **in this order**:
 //!
-//! 1. Both are the same bindable shape [`crate::replacement::ASAPStrategies`]
+//! 1. Both are the same bindable shape [`crate::pass1::replacement::ASAPStrategies`]
 //!    itself targets — a single measure, no `HAVING` (`bindable_intent`'s own
 //!    scope) — **and** that one measure is one of the four accuracy-bearing
-//!    [`AggIntent`] variants ([`crate::replacement::accuracy_target`]'s own
+//!    [`AggIntent`] variants ([`crate::pass1::replacement::accuracy_target`]'s own
 //!    scope: `Count` / `Quantile` / `Cardinality` / `TopK`). Every other
 //!    intent has no `AccuracyTarget` to reconcile in the first place.
 //! 2. Same `reduction` (grouping), same `output_names`, and the same shared
 //!    `child` (`Rc::ptr_eq`, or value-equal for two independently-built but
 //!    identical sub-DAGs CSE conservatively declined to alias) — the same
-//!    "identical everything else" bar [`crate::rollup::RollupStrategy`] and
-//!    [`crate::topk_reuse::TopKLimitReuseStrategy`] already hold their own
+//!    "identical everything else" bar [`crate::pass1::rollup::RollupStrategy`] and
+//!    [`crate::pass2::topk_reuse::TopKLimitReuseStrategy`] already hold their own
 //!    sibling-reuse candidates to.
 //! 3. The one measure is identical **except** for `accuracy` — same variant,
 //!    same `col`/`q`/`k` (see [`same_intent_except_accuracy`]).
@@ -51,7 +51,7 @@
 //! 5. The tighter candidate's own **output** schema carries a provable
 //!    unique key (`Schema::has_unique_key`) — the exact legality gate
 //!    `share_common_sub_dags` itself applies (see `cse.rs`'s "Legality"
-//!    section) and [`crate::rollup::RollupStrategy::is_legal_rollup_source`]
+//!    section) and [`crate::pass1::rollup::RollupStrategy::is_legal_rollup_source`]
 //!    already reuses verbatim for the identical reason: a producer's output
 //!    is only safely reusable across a second, independent consumer when
 //!    its row identity is provably stable across reads. A global or
@@ -61,7 +61,7 @@
 //!
 //! ## Safety of tightening: why reading the tighter build is always sound
 //!
-//! [`crate::replacement::accuracy_budget`] resolves *every* `AccuracyTarget`
+//! [`crate::pass1::replacement::accuracy_budget`] resolves *every* `AccuracyTarget`
 //! (`Epsilon`/`EpsilonDelta`) to the literal `(eps, delta)` pair
 //! `realizations_for_intent`'s `sketch_realizations` feeds into the
 //! analytical sizing — the same numbers `default_size_params`'
@@ -103,20 +103,20 @@
 //!
 //! Like every [`ReplacementStrategy`], this only ever *proposes* — the
 //! looser-accuracy consumer's own independently-sized candidate (from
-//! [`crate::replacement::ASAPStrategies`]) stays in its
-//! [`crate::replacement::TargetSubDAGCandidates`] right alongside this strategy's
+//! [`crate::pass1::replacement::ASAPStrategies`]) stays in its
+//! [`crate::pass1::replacement::TargetSubDAGCandidates`] right alongside this strategy's
 //! "read the tighter sibling instead" [`Replacement::Rewrite`] candidate;
-//! [`crate::cost_model::CostModel`]-driven ranking picks between them;
+//! `cost_model::CostModel`-driven ranking picks between them;
 //! nothing here removes or filters the independent candidate.
 //!
 //! ## Costing this candidate shape: a dedicated arm, not a reused one
 //!
 //! This strategy's candidates carry their own
-//! [`crate::replacement::ReplacementProvenance::AccuracyReconciliation`]
+//! [`crate::pass1::replacement::ReplacementProvenance::AccuracyReconciliation`]
 //! rather than reusing `LogicalRewrite`
-//! ([`crate::rollup::RollupStrategy`]/[`crate::topk_reuse::TopKLimitReuseStrategy`]'s
+//! ([`crate::pass1::rollup::RollupStrategy`]/[`crate::pass2::topk_reuse::TopKLimitReuseStrategy`]'s
 //! tag), because it needs its own cost treatment in
-//! [`crate::cost_model::DefaultCostModel::estimate_cost`], not just its own
+//! `cost_model::DefaultCostModel::estimate_cost`, not just its own
 //! label. Every other `Replacement::Rewrite` shape that reaches
 //! `estimate_cost` (`SharedSubDAGStrategy`'s `CseRecompute`, `Rollup`'s and
 //! `TopKLimitReuse`'s `LogicalRewrite`) really does rebuild `target` from a
@@ -133,13 +133,13 @@
 //! the literal inversion this module's tests
 //! (`estimate_cost_does_not_scale_with_the_readers_own_consumer_count`)
 //! pin against. `estimate_cost` instead prices this shape as a
-//! [`crate::cost_model::CostModel::cse_shared_maintenance_cost`] read
+//! `cost_model::CostModel::cse_shared_maintenance_cost` read
 //! against `rc`'s **own** bound summary — the same order-of-magnitude,
 //! per-family cost `SharedSubDAGStrategy`'s own `CseShare` candidate is
 //! priced with, reflecting "one more reference into a structure that's
 //! already being maintained" rather than "build a whole new one."
 //!
-//! `CandidateLogicalASAPDAGs::global_selection` treats this rewrite as a cross-group edge:
+//! `candidate_selection::global_selection` treats this rewrite as a cross-group edge:
 //! selecting it increments `rc`'s own `effective_consumer_count`, then lets
 //! that sibling group propagate the uses through its selected implementation.
 //! Accuracy edges are directed strictly from looser to tighter budgets, so
@@ -156,7 +156,7 @@ use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::types::AccuracyTarget;
 
-use crate::replacement::{
+use crate::pass1::replacement::{
     accuracy_budget, accuracy_target, Replacement, ReplacementProvenance, ReplacementStrategy,
     ReplacementSubDAG, TargetSubDAG,
 };
@@ -174,10 +174,10 @@ type BindableAccuracyAggregate<'a> = (
 
 /// The `(reduction, intent, accuracy, output_names, child)` shape this
 /// module operates on: the same single-measure, no-`HAVING` bindable shape
-/// [`crate::replacement::ASAPStrategies`] targets (see that
+/// [`crate::pass1::replacement::ASAPStrategies`] targets (see that
 /// module's private `bindable_intent`), further narrowed to a measure whose
 /// intent actually carries an [`AccuracyTarget`]
-/// ([`crate::replacement::accuracy_target`]'s own scope: `Count` /
+/// ([`crate::pass1::replacement::accuracy_target`]'s own scope: `Count` /
 /// `Quantile` / `Cardinality` / `TopK`). `None` for anything else, including
 /// a multi-measure or `HAVING` aggregate, a non-`Aggregate` node, or an
 /// accuracy-free intent (`Sum`, `Avg`, …).
@@ -207,7 +207,7 @@ fn bindable_accuracy_aggregate(node: &OperatorNode) -> Option<BindableAccuracyAg
 /// same variant, same `col`/`q`/`k`/ranking basis? Only ever called with two
 /// accuracy-bearing intents (both `bindable_accuracy_aggregate`-gated
 /// first), but written as a full match rather than assuming that, the same
-/// defensive-completeness style [`crate::replacement::describe_intent`]
+/// defensive-completeness style [`crate::pass1::replacement::describe_intent`]
 /// uses for its own non-exhaustive `AggIntent` match.
 fn same_intent_except_accuracy(a: &AggIntent, b: &AggIntent) -> bool {
     match (a, b) {
@@ -268,13 +268,13 @@ fn strictly_tighter(a: &AccuracyTarget, b: &AccuracyTarget) -> bool {
 /// tighter accuracy, and proposes reading that sibling's own (to-be-built)
 /// result instead of building an independent, looser copy — "build once at
 /// the tightest of the group's accuracy requirements, all consumers read
-/// from it," ranked by [`crate::cost_model::CostModel`] like any other
+/// from it," ranked by `cost_model::CostModel` like any other
 /// candidate, never forced. See the module docs for the full design.
 ///
 /// `siblings` is **caller-supplied, not discovered here** — the identical
 /// "workload-wide discovery isn't this strategy's job" split
-/// [`crate::rollup::RollupStrategy`] and [`crate::topk_reuse::TopKLimitReuseStrategy`]
-/// already draw; [`crate::replacement::search_workload_with`] constructs
+/// [`crate::pass1::rollup::RollupStrategy`] and [`crate::pass2::topk_reuse::TopKLimitReuseStrategy`]
+/// already draw; [`crate::pass1::replacement::search_workload_with`] constructs
 /// this strategy from the same post-CSE `Aggregate` sibling set it already
 /// builds for `RollupStrategy`.
 pub struct AccuracyReconciliationStrategy {
@@ -302,7 +302,7 @@ impl AccuracyReconciliationStrategy {
     /// Also requires the candidate's own *output* schema to carry a provable
     /// unique key ([`Schema::has_unique_key`]) — the exact legality gate
     /// `ir::cse::share_common_sub_dags` already applies to its own
-    /// sharing decisions, and [`crate::rollup::RollupStrategy`] already
+    /// sharing decisions, and [`crate::pass1::rollup::RollupStrategy`] already
     /// reuses verbatim for the identical reason (see that module's
     /// `is_legal_rollup_source` doc, point 4): a producer's output is only
     /// safely reusable across a second, independent consumer when its row
@@ -388,10 +388,8 @@ impl ReplacementStrategy for AccuracyReconciliationStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cost_model::{CostModel, DefaultCostModel};
     use asap_types::ir::cse::share_common_sub_dags;
     use asap_types::ir::operator::operator_properties::{GroupKeys, Source};
-    use asap_types::ir::schema::SketchAlgorithm;
     use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 
     /// `[ts(0), value(1), job(2)]`.
@@ -532,7 +530,7 @@ mod tests {
         let epsilon_only = AccuracyTarget::Epsilon(0.01);
         let equivalent_epsilon_delta = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
-            delta: crate::replacement::DEFAULT_DELTA,
+            delta: crate::pass1::replacement::DEFAULT_DELTA,
         };
         assert!(dominates(&epsilon_only, &equivalent_epsilon_delta));
         assert!(dominates(&equivalent_epsilon_delta, &epsilon_only));
@@ -576,7 +574,8 @@ mod tests {
         let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
         let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
 
-        let space = crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]);
+        let space =
+            crate::pass1::replacement::search_workload(vec![("tight", tight), ("loose", loose)]);
 
         let loose_root = &space.roots[1].1;
         let loose_group = space
@@ -753,230 +752,5 @@ mod tests {
         let strategy = AccuracyReconciliationStrategy::new(&[Rc::clone(&tight), Rc::clone(&loose)]);
         assert!(!strategy.matches(&TargetSubDAG::new(&loose)));
         assert!(strategy.replacements(&TargetSubDAG::new(&loose)).is_empty());
-    }
-
-    // ── cost: reading the sibling must not be priced like recomputing
-    //    `target` independently per consumer ────────────────────────────────
-
-    #[test]
-    fn estimate_cost_does_not_scale_with_the_readers_own_consumer_count() {
-        // Regression guard for the review-reported sign inversion: pricing
-        // this candidate like `CseRecompute` ("rebuild `target`, once per
-        // consumer") made it artificially *more* expensive exactly as more
-        // of `target`'s own consumers stood to benefit from reading the
-        // already-necessary tighter sibling instead — the literal opposite
-        // of the intended incentive. The real cost is "one more read against
-        // `rc`'s own build," which must not scale with `target`'s own
-        // `consumer_count`.
-        let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
-        let strategy = AccuracyReconciliationStrategy::new(&[Rc::clone(&tight), Rc::clone(&loose)]);
-        let candidate = strategy
-            .replacements(&TargetSubDAG::new(&loose))
-            .into_iter()
-            .next()
-            .expect("loose has a reconciliation candidate reading the tight sibling");
-
-        let cost_model = DefaultCostModel;
-        let single_consumer = TargetSubDAG::with_consumer_count(&loose, 1);
-        let many_consumers = TargetSubDAG::with_consumer_count(&loose, 5);
-
-        let cost_single = cost_model.estimate_cost(&candidate, &single_consumer);
-        let cost_many = cost_model.estimate_cost(&candidate, &many_consumers);
-
-        assert!(
-            cost_single.is_finite(),
-            "expected a real cost, not the NaN placeholder: {cost_single}"
-        );
-        assert_eq!(
-            cost_single, cost_many,
-            "AccuracyReconciliation's estimate_cost must price 'read the sibling', not scale \
-             with the reader's own consumer_count the way CseRecompute's 'rebuild independently \
-             per consumer' formula does (single-consumer: {cost_single}, 5 consumers: \
-             {cost_many})"
-        );
-    }
-
-    // ── cost_sorted / global_selection: single-consumer and shared-consumer ─
-
-    #[test]
-    fn cost_sorted_and_global_selection_handle_a_single_consumer_looser_target() {
-        let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
-        let space = crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]);
-        let loose_root = &space.roots[1].1;
-
-        let cost_model = DefaultCostModel;
-        let ranked = space.cost_sorted(&cost_model);
-        let loose_ranked = ranked
-            .iter()
-            .find(|group| Rc::ptr_eq(group.target, loose_root))
-            .expect("loose has its own ranked group");
-        assert!(
-            loose_ranked.costs.iter().all(|cost| cost.is_finite()),
-            "no candidate should cost NaN under DefaultCostModel: {:?}",
-            loose_ranked.costs
-        );
-        assert!(
-            loose_ranked
-                .candidates
-                .iter()
-                .any(|c| c.strategy == "AccuracyReconciliationStrategy"),
-            "the reconciliation candidate must still be present, ranked, not filtered"
-        );
-
-        let selected = space.global_selection(&cost_model);
-        let chosen = selected
-            .for_target(loose_root)
-            .and_then(|group| group.chosen);
-        assert!(
-            chosen.is_some(),
-            "global_selection must commit to some candidate for a single-consumer looser target"
-        );
-        // With no recompute term at all (it never rebuilds `target`), this
-        // candidate strictly undercuts every ASAPStrategies
-        // candidate (which each pay a recompute term on top of their own
-        // maintenance term) under DefaultCostModel's numbers — the sane
-        // direction: reading an already-necessary sibling should be able to
-        // win on its own merit, not just fail to lose as badly as before.
-        assert_eq!(
-            chosen.map(|c| c.provenance),
-            Some(crate::replacement::ReplacementProvenance::AccuracyReconciliation)
-        );
-    }
-
-    #[test]
-    fn cost_sorted_and_global_selection_handle_a_shared_looser_target() {
-        // The loose accuracy target itself has 2 direct consumers (two
-        // independently-built but structurally identical loose queries
-        // merge onto one Rc via ordinary CSE), *and* a separate,
-        // single-consumer tight sibling exists over the same input — the
-        // scenario the issue itself targets: `SharedSubDAGStrategy`'s own
-        // CseShare/CseRecompute pair is on the table for the loose target's
-        // own 2 consumers at the same time as this strategy's "read the
-        // tight sibling instead" candidate.
-        let scan = metric_scan();
-        let loose_a = (*quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan)).clone();
-        let loose_b = (*quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan)).clone();
-        let tight = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
-
-        let space = crate::replacement::search_workload(vec![
-            ("loose_a", Rc::new(loose_a)),
-            ("loose_b", Rc::new(loose_b)),
-            ("tight", Rc::new(tight)),
-        ]);
-
-        // Fixture sanity: the two loose roots really did merge onto one Rc.
-        assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
-        let loose_group = space
-            .candidates_for_target(&space.roots[0].1)
-            .expect("the merged loose target has a group");
-        assert_eq!(loose_group.consumer_count, 2);
-        assert!(
-            loose_group
-                .candidates
-                .iter()
-                .any(|c| c.strategy == "AccuracyReconciliationStrategy"),
-            "the reconciliation candidate must still be proposed alongside the CSE share/recompute \
-             pair, not crowded out: {:?}",
-            loose_group
-                .candidates
-                .iter()
-                .map(|c| (c.strategy, c.provenance))
-                .collect::<Vec<_>>()
-        );
-
-        let cost_model = DefaultCostModel;
-        let ranked = space.cost_sorted(&cost_model);
-        let loose_ranked = ranked
-            .iter()
-            .find(|group| Rc::ptr_eq(group.target, &space.roots[0].1))
-            .expect("loose has its own ranked group");
-        assert!(
-            loose_ranked.costs.iter().all(|cost| cost.is_finite()),
-            "no candidate should cost NaN under DefaultCostModel, shared or not: {:?}",
-            loose_ranked.costs
-        );
-
-        let selected = space.global_selection(&cost_model);
-        let chosen = selected
-            .for_target(&space.roots[0].1)
-            .and_then(|group| group.chosen);
-        assert!(
-            chosen.is_some(),
-            "global_selection must commit to some candidate for the shared looser target"
-        );
-        // Under `DefaultCostModel`'s numbers, `CseShare` (flat maintenance,
-        // no recompute term) and this strategy's own candidate (also a
-        // flat, non-scaling read cost after the fix) land tied, and
-        // `global_selection` breaks ties in `CseShare`'s favor (it only ever
-        // overrides the CSE choice on a *strict* `<`, not `<=`) — a sane,
-        // deliberate tie-break, not the "reconciliation always loses to
-        // CseShare regardless of its own real merit" bug this test guards
-        // against (see `estimate_cost_does_not_scale_with_the_readers_own_consumer_count`
-        // for the direct regression check that the old `* consumer_count`
-        // scaling — which made this an unfair, ever-widening loss instead
-        // of a tie — is gone).
-        assert_eq!(
-            chosen.map(|c| c.provenance),
-            Some(crate::replacement::ReplacementProvenance::CseShare)
-        );
-    }
-
-    #[test]
-    fn global_selection_propagates_reconciled_consumers_to_the_tighter_group() {
-        struct PreferReconciliation;
-
-        impl CostModel for PreferReconciliation {
-            fn rank_candidates(
-                &self,
-                _intent: &AggIntent,
-                candidates: &[SketchAlgorithm],
-            ) -> Vec<SketchAlgorithm> {
-                candidates.to_vec()
-            }
-
-            fn estimate_cost(
-                &self,
-                candidate: &ReplacementSubDAG,
-                _target: &TargetSubDAG<'_>,
-            ) -> f64 {
-                if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
-                    0.0
-                } else {
-                    100.0
-                }
-            }
-        }
-
-        let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
-        let space = crate::replacement::search_workload(vec![
-            ("tight", Rc::clone(&tight)),
-            ("loose", Rc::clone(&loose)),
-        ]);
-
-        let selected = space.global_selection(&PreferReconciliation);
-        let tight_root = &space.roots[0].1;
-        let loose_root = &space.roots[1].1;
-        assert_eq!(
-            selected
-                .for_target(loose_root)
-                .and_then(|group| group.chosen)
-                .map(|candidate| candidate.provenance),
-            Some(ReplacementProvenance::AccuracyReconciliation),
-            "fixture must select the cross-sibling rewrite"
-        );
-        assert_eq!(
-            selected
-                .for_target(tight_root)
-                .expect("the tighter sibling is a discovered memo group")
-                .effective_consumer_count,
-            2,
-            "the tighter build serves its original root and the reconciled looser root"
-        );
     }
 }

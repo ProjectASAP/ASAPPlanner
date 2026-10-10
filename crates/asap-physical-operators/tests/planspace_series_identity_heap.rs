@@ -6,11 +6,13 @@ mod common;
 use common::compile_physical_asap_dag;
 use planner_types::ir::OperatorNode;
 
-use asap_aware_mapping::{
-    accuracy::{AccuracyEvidenceProvider, DefaultAccuracyModel, PropagationStats},
-    cost_model::DefaultCostModel,
-    replacement::{default_strategies_with_evidence, ReplacementProvenance},
-    search_workload_with_targets, Proposals, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
+use asap_logical_optimizer::{
+    accuracy::AccuracyEvidenceProvider, accuracy::DefaultAccuracyModel, accuracy::PropagationStats,
+    pass1::replacement::default_strategies_with_evidence,
+    pass1::replacement::ReplacementProvenance, search_workload_with_targets, Proposals,
+    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_physical_operators::physical_planner::promql_rows::{
     compile_current_series_evaluation, SERIES_IDENTITY_COLUMN,
@@ -220,8 +222,7 @@ fn global_selection_never_commits_a_series_identity_heap() {
         &strategies,
         &DefaultAccuracyModel,
     );
-    let selected = space
-        .global_selection(&DefaultCostModel)
+    let selected = global_selection(&space, &DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();

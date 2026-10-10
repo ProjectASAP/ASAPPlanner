@@ -1,5 +1,5 @@
 //! Shared maintained-population candidates over canonical relational IR.
-use crate::replacement::{
+use crate::pass1::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_types::ir::operator::maintained_population::*;

@@ -36,7 +36,7 @@ mod stages {
     use std::rc::Rc;
 
     use super::*;
-    use asap_aware_mapping::logical_candidates::{
+    use asap_logical_optimizer::pass1::logical_candidates::{
         compose_logical_candidate, enumerate_local_logical_candidates,
     };
     use asap_types::ir::{OperatorNode, QueryRoot};

@@ -1,11 +1,14 @@
 use std::rc::Rc;
 
-use asap_aware_mapping::accuracy::{
+use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
+use asap_logical_optimizer::accuracy::{
     AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
 };
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
-use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
+use asap_logical_optimizer::pass1::replacement::{
+    default_strategies, search_workload_with_targets,
+};
+use asap_logical_optimizer::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::properties::{
@@ -164,8 +167,7 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
                     .candidates
                     .iter()
                     .any(|candidate| candidate.has_missing_accuracy_evidence()));
-                assert!(!space
-                    .global_selection(&DefaultCostModel)
+                assert!(!global_selection(&space, &DefaultCostModel)
                     .for_target(&space.roots[0].1)
                     .unwrap()
                     .chosen

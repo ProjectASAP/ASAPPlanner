@@ -41,12 +41,12 @@
 //!   (still logical, structurally different from the target but semantically
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
-//!   extension-point shape [`CostModel`](crate::cost_model::CostModel) and [`Matcher`] already use in this
+//!   extension-point shape `CostModel` and [`Matcher`] already use in this
 //!   crate: a new replacement source is a new `impl ReplacementStrategy`, not
 //!   a restructuring of this trait or of any existing strategy. `replacements`
 //!   is **exhaustive, not ranked, not filtered** — reporting "every valid
 //!   candidate" is core's job; picking the best one is left to the caller.
-//!   [`crate::explanation`] (issue #257) is this trait's own downstream
+//!   [`crate::pass1::explanation`] (issue #257) is this trait's own downstream
 //!   consumer, not a second extension point: it explains why a replacement
 //!   exists as a pure view over the candidates strategies registered here
 //!   already produced, rather than re-deriving that explanation with a rule
@@ -54,7 +54,7 @@
 //!
 //! A caller may inspect local replacements, but taking the first candidate
 //! does not establish a compatible workload plan or physical deployability.
-//! For Planner-owned logical selection, call [`CandidateLogicalASAPDAGs::global_selection`]
+//! For Planner-owned logical selection, call `candidate_selection::global_selection`
 //! once and [`GlobalSelection::assemble_selected_dag`] for each wanted query
 //! root. Physical binding, deployment, and execution remain downstream.
 //!
@@ -84,7 +84,7 @@
 //!   fixtures), it reports the two-way candidate CSE's own detection pass
 //!   deliberately declines to pick between on its own: build once and share
 //!   the already-interned sub-DAG, or build it independently at each
-//!   consumer. [`crate::cost_model::CostModel::cse_share_decision`] is where
+//!   consumer. `cost_model::CostModel::cse_share_decision` is where
 //!   that choice actually gets made *today* (a fixed comparison, not a
 //!   search) — this strategy exposes the same two-way choice as an explicit,
 //!   inspectable pair of candidates instead of a cost model's already-decided
@@ -233,8 +233,8 @@
 //!
 //! ### Cost-based final selection — reusing `CostModel`, not a second interface
 //!
-//! [`CandidateLogicalASAPDAGs::cost_sorted`] is the `sorted_by(cost_model)` step, and it
-//! reuses this crate's existing [`CostModel`](crate::cost_model::CostModel) trait rather than inventing a
+//! `candidate_selection::cost_sorted` is the `sorted_by(cost_model)` step, and it
+//! reuses this crate's existing `CostModel` trait rather than inventing a
 //! second cost interface (`docs/design_docs/cse-cost-model-decision.md`,
 //! issue #237, explicitly reasoned about *why* a narrow, direct cost
 //! comparison was enough for the CSE share/recompute decision alone, and
@@ -244,25 +244,25 @@
 //!
 //! - A group whose candidates are the [`SharedSubDAGStrategy`]
 //!   share-vs-recompute pair is ranked by calling
-//!   [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) via this module's own
+//!   `CostModel::cse_share_decision` via this module's own
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
 //! - A group whose candidates are [`ASAPStrategies`]'s sketch-family
-//!   candidates is ranked via [`CostModel::rank_candidates`](crate::cost_model::CostModel::rank_candidates) (the same hook
+//!   candidates is ranked via `CostModel::rank_candidates` (the same hook
 //!   `realizations_for_intent` itself consults), applied to the
 //!   candidates' own [`SketchAlgorithm`]s.
 //! - Any other shape (a single candidate, or a mix this module doesn't have
 //!   a defined comparison for) keeps discovery order — there is nothing to
-//!   rank, or no [`CostModel`](crate::cost_model::CostModel) hook this module knows how to apply; it never
+//!   rank, or no `CostModel` hook this module knows how to apply; it never
 //!   invents a comparison `CostModel` doesn't already define.
 //!
 //! ## Whole-plan (cross-group) selection — issue #271
 //!
-//! [`CandidateLogicalASAPDAGs::cost_sorted`] above ranks every group's candidates
+//! `candidate_selection::cost_sorted` above ranks every group's candidates
 //! independently: it never lets one group's choice influence how another
 //! group is costed. That's the right behavior when groups genuinely don't
 //! interact — which both shipped strategies' one-round convergence (see
 //! "Termination" above) makes the common case — but it's the wrong answer
-//! whenever they do. Concretely: [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) costs a
+//! whenever they do. Concretely: `CostModel::cse_share_decision` costs a
 //! [`SharedSubDAGStrategy`] group by comparing a `consumer_count`-scaled
 //! recompute cost against a fixed maintenance cost — but a **nested**
 //! `SharedSubDAGStrategy` group's *true* recompute burden isn't its own
@@ -275,7 +275,7 @@
 //! per-group ranking has no way to see this — it only ever looks at one
 //! group's own `candidates`, in isolation.
 //!
-//! [`CandidateLogicalASAPDAGs::global_selection`] is that missing step: a single
+//! `candidate_selection::global_selection` is that missing step: a single
 //! **top-down dynamic-programming pass** over the discovered sites,
 //! processed in the topological order [`topological_order`] computes over a
 //! small [`ReferenceDAG`] built for exactly this purpose (parent before
@@ -284,11 +284,11 @@
 //! **effective consumer count** — how many times that site actually runs
 //! once every ancestor's own selected candidate is accounted for — and, for
 //! every [`SharedSubDAGStrategy`]-shaped group, re-decides
-//! [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) against *that* corrected count instead
+//! `CostModel::cse_share_decision` against *that* corrected count instead
 //! of the group's raw structural one. When that group also contains a
 //! non-CSE alternative such as a semantic rewrite, the chosen CSE candidate
 //! and the cheapest non-CSE candidate additionally compete through
-//! [`CostModel::estimate_cost`](crate::cost_model::CostModel::estimate_cost); the CSE pair is no longer allowed to hide an
+//! `CostModel::estimate_cost`; the CSE pair is no longer allowed to hide an
 //! otherwise valid logical alternative. See [`multiplier`]'s doc for the
 //! exact recurrence: a group that chooses `Share` collapses its own
 //! multiplicity to exactly `1` for everything beneath it (one shared
@@ -305,7 +305,7 @@
 //! into it) combined via a real recurrence — not just the MEMO-group
 //! sharing [`CandidateLogicalASAPDAGs`] itself already does for *storing* candidates. That
 //! distinction is exactly what issue #271 raised: this module already looks
-//! like a Cascades/Volcano MEMO, but [`CandidateLogicalASAPDAGs::cost_sorted`] alone never
+//! like a Cascades/Volcano MEMO, but `candidate_selection::cost_sorted` alone never
 //! actually performed this composition step; `global_selection` is that
 //! step, added alongside `cost_sorted` rather than replacing it (both stay
 //! available — see [`RankedTargetSubDAGCandidates`] vs. [`TargetSubDAGSelection`]'s own docs for when
@@ -314,7 +314,7 @@
 //! Two things this deliberately does **not** attempt, both left as
 //! documented follow-up rather than silently overclaimed:
 //!
-//! - [`CostModel::rank_candidates`](crate::cost_model::CostModel::rank_candidates) — the hook
+//! - `CostModel::rank_candidates` — the hook
 //!   [`ASAPStrategies`] groups rank by — takes no `consumer_count`
 //!   parameter at all today, so a `ASAPStrategies` group's selection
 //!   here still falls back to [`rank_group`]'s ordinary (consumer-count-
@@ -327,7 +327,7 @@
 //!   would need, and this module now computes it for every group, sketch
 //!   groups included.
 //! - This is not an exhaustive search over combinations of choices for a
-//!   provably-global optimum in every case. [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision)
+//!   provably-global optimum in every case. `CostModel::cse_share_decision`
 //!   is still a *local*, pairwise comparison at each `SharedSubDAGStrategy`
 //!   site (recompute-total vs. one fixed maintenance cost) — this module
 //!   just now feeds it a *correct* input instead of an *incorrect* one. Two
@@ -350,7 +350,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator::agg_intent::{agg_is_mergeable, AggIntent};
-use asap_types::ir::operator::operator_properties::{BinaryOpKind, Reduction};
+use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::properties::timing::validate_maintained;
 use asap_types::ir::properties::{
     AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee,
@@ -358,30 +358,32 @@ use asap_types::ir::properties::{
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef};
 use asap_types::ir::schema::{
-    EntityIdentity, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy,
+    ColumnId, EntityIdentity, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy,
     NonNegativeWeightProof, SamplingKind, SamplingParams, Schema, SketchAlgorithm, SketchKind,
     SketchParams, SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams,
     SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
-    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, ProjectItem, ScalarExpr, SortKey,
+    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
+    SortKey,
 };
 use asap_types::physical::ExactOperationSchemaError;
 use asap_types::types::AccuracyTarget;
 use std::rc::{Rc, Weak};
 use thiserror::Error;
 
-use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
     DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
 };
-use crate::exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
-use crate::grouping::HydraGroupingStrategy;
-use crate::plan_selection::candidate_selection::{GlobalSelection, TargetSubDAGSelection};
-use crate::rollup::RollupStrategy;
-use crate::topk_reuse::TopKLimitReuseStrategy;
+use crate::pass1::exact_composition::{
+    ExactComposition, ExactCompositionStrategy, OperationPlacement,
+};
+use crate::pass1::grouping::HydraGroupingStrategy;
+use crate::pass1::rollup::RollupStrategy;
+use crate::pass2::reconciliation::AccuracyReconciliationStrategy;
+use crate::pass2::topk_reuse::TopKLimitReuseStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
 /// ([`realize_child`] and [`retain_exact`]). Moved here from the former
@@ -488,10 +490,10 @@ pub enum Replacement {
     /// decision across an explicit update/evaluation boundary (issue #171):
     /// `ValueOperationAtQueryTime` over a child's summary evaluation, or
     /// `ValueOperationAtIngestionTime` feeding a maintained summary above. Carries only a
-    /// reference to the child target — [`CandidateLogicalASAPDAGs::global_selection`]
+    /// reference to the child target — `candidate_selection::global_selection`
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
-    /// `OperatorNode` DAG. See [`crate::exact_composition`].
+    /// `OperatorNode` DAG. See [`crate::pass1::exact_composition`].
     ExactComposition(ExactComposition),
 }
 
@@ -507,7 +509,7 @@ pub fn is_logical_rewrite(node: &OperatorNode) -> bool {
 /// One candidate replacement for a [`TargetSubDAG`], plus a human-readable
 /// `rationale` explaining why it's a valid candidate (meant for a
 /// report/log/debugging a search engine's choices, not machine parsing —
-/// [`crate::explanation::ReplacementExplanation::reason`] literally reuses
+/// [`crate::pass1::explanation::ReplacementExplanation::reason`] literally reuses
 /// this same string rather than inventing new prose of its own.
 #[derive(Debug, Clone)]
 pub struct ReplacementSubDAG {
@@ -542,12 +544,12 @@ pub enum ReplacementProvenance {
     CseShare,
     CseRecompute,
     LogicalRewrite,
-    /// [`crate::accuracy::reconciliation::AccuracyReconciliationStrategy`]'s
+    /// [`crate::pass2::reconciliation::AccuracyReconciliationStrategy`]'s
     /// "read a strictly-tighter sibling instead of building an independent,
     /// looser copy" candidate (issue #273). Kept distinct from
     /// `LogicalRewrite` — even though both are structurally-different,
     /// semantically-equivalent rewrites — because
-    /// [`crate::cost_model::DefaultCostModel::estimate_cost`] needs to price
+    /// `cost_model::DefaultCostModel::estimate_cost` needs to price
     /// it differently: `LogicalRewrite` candidates (`RollupStrategy`,
     /// `TopKLimitReuseStrategy`) still rebuild `target` itself from a
     /// different source, so pricing them like an independent rebuild is
@@ -574,7 +576,7 @@ pub enum ReplacementProvenance {
 /// accuracy-legality grounds (issue #172) — kept alongside the group's
 /// legal candidates in [`TargetSubDAGCandidates::rejected`] so a rejection is as
 /// inspectable (and exportable) as a selection. Never ranked: a
-/// [`CostModel`](crate::cost_model::CostModel) only ever sees [`TargetSubDAGCandidates::candidates`].
+/// `CostModel` only ever sees [`TargetSubDAGCandidates::candidates`].
 #[derive(Debug, Clone)]
 pub struct RejectedCandidate {
     /// Name of the [`ReplacementStrategy`] that considered it.
@@ -601,7 +603,7 @@ pub struct Proposals {
 /// replacement (`replacements`)?
 ///
 /// The extension point this module exists for — the same shape
-/// [`CostModel`](crate::cost_model::CostModel) and [`Matcher`] already use elsewhere in this crate: a new
+/// `CostModel` and [`Matcher`] already use elsewhere in this crate: a new
 /// replacement source is a new `impl ReplacementStrategy`, no restructuring
 /// of this trait or any existing strategy required.
 ///
@@ -626,7 +628,7 @@ pub trait ReplacementStrategy {
 
     /// Every valid replacement for `target` — not ranked, not filtered.
     /// Reporting "every valid candidate" is this method's whole job; picking
-    /// the best one is a [`CostModel`](crate::cost_model::CostModel)'s job, out of scope here.
+    /// the best one is a `CostModel`'s job, out of scope here.
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG>;
 
     /// [`replacements`](Self::replacements) plus the accuracy-illegal
@@ -863,7 +865,7 @@ pub(crate) fn realizations_for_intent(intent: &AggIntent) -> Vec<Realization> {
         | AggIntent::Rate
         | AggIntent::IRate
         | AggIntent::Increase => {
-            let (kind, params) = crate::function_rules::function_rules(intent)
+            let (kind, params) = crate::pass1::function_rules::function_rules(intent)
                 .and_then(|rules| rules.accumulator)
                 .expect("exact accumulator intents have registered realizations");
             vec![exact_accumulator(intent, kind, params)]
@@ -1418,7 +1420,7 @@ impl<'a> ASAPStrategies<'a> {
         // during DAG assembly. Also expose its concrete summary realization
         // for selection.
         if intent_override.is_none() {
-            if let Some(rewritten) = crate::rewrite::composed_aggregate_rewrite(root) {
+            if let Some(rewritten) = crate::pass1::rewrite::composed_aggregate_rewrite(root) {
                 if let Ok(node) = realize_child_with(&rewritten, self.planning_inputs, None) {
                     if node.contains_asap() {
                         proposals.candidates.push(ReplacementSubDAG {
@@ -1722,7 +1724,7 @@ fn describe_realization(intent: &AggIntent, realization: &Realization) -> String
     match realization {
         Realization::Sketch(kind) => format!(
             "{} realizes as a {:?} sketch — one of summary_candidates' \
-             candidates for this intent (asap_aware_mapping::replacement::realizations_for_intent)",
+             candidates for this intent (asap_logical_optimizer::pass1::replacement::realizations_for_intent)",
             describe_intent(intent),
             kind.algorithm()
         ),
@@ -1760,7 +1762,7 @@ fn describe_realization(intent: &AggIntent, realization: &Realization) -> String
 /// this crate's other `AggIntent` matches, e.g. [`realizations_for_intent`]'s)
 /// — this is prose for a rationale string, not a decision, so an unlisted
 /// variant just falls back to its `Debug` tag rather than forcing every
-/// future intent to be named here too. [`crate::explanation`] needs no
+/// future intent to be named here too. [`crate::pass1::explanation`] needs no
 /// counterpart of its own: it reads a candidate's `rationale` — built from
 /// this text — straight off [`ReplacementSubDAG`], rather than re-describing
 /// the same intent a second time.
@@ -1786,23 +1788,17 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// every candidate via [`ASAPStrategies::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`retain_exact`]
 /// when there's no candidate at all — **not** a general single-answer API
-/// for a whole workload. Use [`CandidateLogicalASAPDAGs::global_selection`] and DAG assembly
+/// for a whole workload. Use `candidate_selection::global_selection` and DAG assembly
 /// for coordinated logical selection; physical deployment remains downstream.
 /// `root` must already be the caller's own
 /// `Rc`, never fabricated per call, so this never allocates beyond what the
 /// caller already held.
 ///
-/// `pub(crate)`: reachable from this module's own construction helper
-/// ([`construct_summary_agg`], so a nested aggregate gets its own
-/// independent enumeration instead of inheriting the parent's forced
-/// candidate), from this module's own [`realize_one`] (the representative
-/// bound `OperatorNode` [`cse_preference`] needs for a
-/// [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision) comparison), and from
-/// [`crate::cost_model::DefaultCostModel::estimate_cost`] (the same
-/// representative-node need, for a [`Replacement::Rewrite`] candidate's own
-/// cost estimate). Every other caller goes through
+/// Public because Stage 3 cost models need one representative bound node for
+/// a target: `DefaultCostModel::estimate_cost` and the legacy CSE ranking in
+/// `plan_selection::candidate_selection`. Every other caller goes through
 /// [`ASAPStrategies::replacements`] directly and decides for itself.
-pub(crate) fn realize_child(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+pub fn realize_child(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     realize_child_with(root, CandidatePlanningInputs::with_default_accuracy(), None)
 }
 
@@ -1901,7 +1897,7 @@ fn realize_temporal_average(
     planning_inputs: CandidatePlanningInputs<'_>,
     target: Option<&AccuracyTarget>,
 ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
-    let Some(components) = crate::rewrite::temporal_average_components(root) else {
+    let Some(components) = crate::pass1::rewrite::temporal_average_components(root) else {
         return Ok(None);
     };
     let mut node = realize_child_with(&components, planning_inputs, target)?;
@@ -3012,7 +3008,7 @@ fn construct_summary_agg(
         // Explicit snapshot selection prevents historical observations from
         // becoming repeated weights in an instant-vector heap.
         let root = Rc::new(node.clone());
-        let population = crate::maintained_population::MaintainedPopulationStrategy::new(
+        let population = crate::pass1::maintained_population::MaintainedPopulationStrategy::new(
             std::slice::from_ref(&root),
         )
         .candidate(&root)
@@ -3628,7 +3624,7 @@ fn compose_guarantee(
                 // Lipschitz constant — over an approximate child this is a
                 // deterministic transform with no registered rule.
                 _ => {
-                    crate::function_rules::function_rules(intent)
+                    crate::pass1::function_rules::function_rules(intent)
                         .expect("exact accumulator intents have registered accuracy rules")
                         .accuracy
                 }
@@ -3796,7 +3792,7 @@ fn evaluation(intent: &AggIntent, input: &SummaryUpdate) -> PostAsapSketchStatis
 /// "Non-goals" on why that traversal isn't itself part of this strategy).
 /// This strategy only reframes "two or more consumers already share this
 /// `Rc`" as the two-way choice a downstream cost model (today,
-/// [`CostModel::cse_share_decision`](crate::cost_model::CostModel::cse_share_decision)) picks between: build once and share, or
+/// `CostModel::cse_share_decision`) picks between: build once and share, or
 /// build independently at each consumer.
 pub struct SharedSubDAGStrategy;
 
@@ -3876,14 +3872,14 @@ pub struct TargetSubDAGCandidates {
     /// reference this exact `Rc` — see [`discover_targets`].
     pub consumer_count: usize,
     /// Every distinct alternative discovered for `target`, in discovery
-    /// order (not ranked — see [`CandidateLogicalASAPDAGs::cost_sorted`] for the ranked
+    /// order (not ranked — see `candidate_selection::cost_sorted` for the ranked
     /// view).
     pub candidates: Vec<ReplacementSubDAG>,
     /// Every candidate a strategy considered for `target` but refused on
     /// accuracy-legality grounds (issue #172), plus any `candidates` entry
     /// the root-target check ([`search_workload_with_targets`]) moved here.
-    /// Never ranked — [`CandidateLogicalASAPDAGs::cost_sorted`]/[`CandidateLogicalASAPDAGs::global_selection`]
-    /// read only `candidates`, so a [`CostModel`](crate::cost_model::CostModel) cannot resurrect one.
+    /// Never ranked — `candidate_selection::cost_sorted`/`candidate_selection::global_selection`
+    /// read only `candidates`, so a `CostModel` cannot resurrect one.
     pub rejected: Vec<RejectedCandidate>,
 }
 
@@ -4012,18 +4008,20 @@ pub struct CandidateLogicalASAPDAGs<Id> {
     pub roots: Vec<(Id, Rc<OperatorNode>)>,
     pub(crate) groups: HashMap<*const OperatorNode, TargetSubDAGCandidates>,
     /// Discovery order — stable iteration for [`CandidateLogicalASAPDAGs::target_subdag_candidates`]/
-    /// [`CandidateLogicalASAPDAGs::cost_sorted`], since `HashMap` iteration order isn't.
+    /// `candidate_selection::cost_sorted`, since `HashMap` iteration order isn't.
     pub(crate) order: Vec<*const OperatorNode>,
     /// Composition proofs are computed with the search model, then retained
     /// through costing and DAG assembly so no later default can replace it.
     pub(crate) composition_plans: Vec<PreparedComposition>,
 }
 
-pub(crate) struct PreparedComposition {
-    pub(crate) target: *const OperatorNode,
-    pub(crate) operation: ExactComposition,
-    pub(crate) child: Rc<OperatorNode>,
-    pub(crate) plan: Rc<OperatorNode>,
+/// One exact composition validated during search: `operation` at `target`,
+/// over the child candidate `child`, giving `plan`.
+pub struct PreparedComposition {
+    pub target: *const OperatorNode,
+    pub operation: ExactComposition,
+    pub child: Rc<OperatorNode>,
+    pub plan: Rc<OperatorNode>,
 }
 
 impl<Id> CandidateLogicalASAPDAGs<Id> {
@@ -4222,13 +4220,13 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
                         consumer_count: group.consumer_count,
                         effective_consumer_count: group.consumer_count,
                         chosen: *chosen,
-                        composition: None,
                     },
                 );
             }
             let assembly = GlobalSelection {
                 order: order.clone(),
                 groups,
+                composition_plans: HashMap::new(),
                 assembled_nodes: RefCell::new(assembled_nodes),
             };
             let roots = roots
@@ -4278,6 +4276,21 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
         self.order.iter().map(move |ptr| &self.groups[ptr])
     }
 
+    /// Every discovered target's candidate set, keyed by target identity.
+    pub fn groups(&self) -> &HashMap<*const OperatorNode, TargetSubDAGCandidates> {
+        &self.groups
+    }
+
+    /// Target identities in discovery order.
+    pub fn order(&self) -> &[*const OperatorNode] {
+        &self.order
+    }
+
+    /// The exact compositions validated during search.
+    pub fn composition_plans(&self) -> &[PreparedComposition] {
+        &self.composition_plans
+    }
+
     /// How many distinct targets were discovered.
     pub fn len(&self) -> usize {
         self.groups.len()
@@ -4305,7 +4318,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
 /// when other strategies contributed additional alternatives to the same
 /// memo group. Provenance makes these two orthogonal choices identifiable
 /// without inferring semantics from pointer or expression shape.
-pub(crate) fn cse_candidate_pair(
+pub fn cse_candidate_pair(
     group: &TargetSubDAGCandidates,
 ) -> Option<(&ReplacementSubDAG, &ReplacementSubDAG)> {
     let mut share = None;
@@ -4338,7 +4351,7 @@ pub(crate) fn cse_candidate_pair(
 }
 /// Direct relational-skeleton children and their edge multiplicities.
 /// `Concat` is transparent, matching [`walk_children`]'s site scope.
-pub(crate) fn direct_child_counts(node: &OperatorNode) -> Vec<(*const OperatorNode, usize)> {
+pub fn direct_child_counts(node: &OperatorNode) -> Vec<(*const OperatorNode, usize)> {
     fn push(children: &mut Vec<(*const OperatorNode, usize)>, child: &Rc<OperatorNode>) {
         let ptr = Rc::as_ptr(child);
         match children.iter_mut().find(|(existing, _)| *existing == ptr) {
@@ -4367,6 +4380,432 @@ pub(crate) fn direct_child_counts(node: &OperatorNode) -> Vec<(*const OperatorNo
     collect(node, &mut children);
     children
 }
+// ── GlobalSelection: assemble a DAG from given choices ───────────────────
+
+/// One target sub-DAG's chosen candidate and usage counts: the input
+/// [`GlobalSelection`] assembles a DAG from. Building a DAG from given
+/// choices needs no cost model; whoever makes the choices (enumeration here,
+/// or the legacy cost-based selection in plan selection) fills these in.
+#[derive(Debug)]
+pub struct TargetSubDAGSelection<'a> {
+    /// The target sub-DAG this selection is for.
+    pub target: &'a Rc<OperatorNode>,
+    /// [`TargetSubDAGCandidates::consumer_count`] — how many operator-child positions
+    /// directly reference `target`, ignoring every ancestor's own choice.
+    pub consumer_count: usize,
+    /// How many times `target`'s computation actually runs once every
+    /// ancestor's own selected candidate is accounted for. Equal to
+    /// `consumer_count` unless some ancestor on a path from a root to this
+    /// site has a [`SharedSubDAGStrategy`] alternative that chose to
+    /// recompute independently.
+    pub effective_consumer_count: usize,
+    /// The candidate chosen for this target, or `None` when no replacement
+    /// is selected. The candidate set need not be empty: an unproven DDSketch
+    /// ratio can remain available for backend inspection but be excluded from
+    /// automatic selection, or costing can prefer raw recomputation.
+    /// DAG assembly then preserves exact computation at this target where
+    /// supported, while independently selected children may remain visible.
+    pub chosen: Option<&'a ReplacementSubDAG>,
+}
+
+/// One [`TargetSubDAGSelection`] per discovered site, in the same discovery
+/// order [`CandidateLogicalASAPDAGs::target_subdag_candidates`] uses, plus the
+/// DAG assembly over those choices.
+#[derive(Debug)]
+pub struct GlobalSelection<'a> {
+    order: Vec<*const OperatorNode>,
+    groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'a>>,
+    /// The validated plan of each site whose chosen candidate is a
+    /// [`Replacement::ExactComposition`].
+    composition_plans: HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    /// [`Self::assemble_selected_dag`]'s memo — one bound node per target for the
+    /// life of this selection, so two parents composing over one shared
+    /// child get the *same* `Rc<OperatorNode>` (a kept pre-ASAP sub-DAG
+    /// shared by two parents stays one `Rc` the same way).
+    assembled_nodes: RefCell<HashMap<*const OperatorNode, Rc<OperatorNode>>>,
+}
+
+fn normalize_cross_input_equi_predicate(
+    pred: &Predicate,
+    left_width: usize,
+    total_width: usize,
+) -> Option<Predicate> {
+    let ScalarExpr::Compare {
+        left,
+        op: asap_types::ir::scalar::CompareOpKind::Eq,
+        right,
+        semantics,
+    } = &pred.0
+    else {
+        return None;
+    };
+    let (ScalarExpr::Column(left_id), ScalarExpr::Column(right_id)) =
+        (left.as_ref(), right.as_ref())
+    else {
+        return None;
+    };
+    let is_left = |id: ColumnId| id < left_width;
+    let is_right = |id: ColumnId| left_width <= id && id < total_width;
+    let (left_id, right_id) = if is_left(*left_id) && is_right(*right_id) {
+        (*left_id, *right_id)
+    } else if is_right(*left_id) && is_left(*right_id) {
+        (*right_id, *left_id)
+    } else {
+        return None;
+    };
+    Some(Predicate(ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(left_id)),
+        op: asap_types::ir::scalar::CompareOpKind::Eq,
+        right: Box::new(ScalarExpr::Column(right_id)),
+        semantics: *semantics,
+    }))
+}
+
+impl<'a> GlobalSelection<'a> {
+    /// A selection over `groups`, listed in `order`. `composition_plans`
+    /// holds the validated plan of every site that chose an exact composition.
+    pub fn new(
+        order: Vec<*const OperatorNode>,
+        groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'a>>,
+        composition_plans: HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    ) -> Self {
+        Self {
+            order,
+            groups,
+            composition_plans,
+            assembled_nodes: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// One selection per discovered target sub-DAG, in discovery order.
+    pub fn target_selections(&self) -> impl Iterator<Item = &TargetSubDAGSelection<'a>> {
+        self.order.iter().map(move |ptr| &self.groups[ptr])
+    }
+
+    /// The selection for `target`, if `target`'s own `Rc` is a discovered
+    /// site (i.e. `Rc::ptr_eq` to some node reachable from the workload's
+    /// roots).
+    pub fn for_target(&self, target: &Rc<OperatorNode>) -> Option<&TargetSubDAGSelection<'a>> {
+        self.groups.get(&Rc::as_ptr(target))
+    }
+
+    /// Link this selection's per-site decisions into one data_state-validated
+    /// post-ASAP DAG rooted at `target` — the one place a committed
+    /// composition's child *reference* becomes an actual `Rc<OperatorNode>`
+    /// edge (issue #171). `None` if `target` is not a discovered site.
+    ///
+    /// Per site: a [`Replacement::ExactComposition`] uses its validated
+    /// operation/child plan, retaining the search model's guarantee;
+    /// a bound-summary [`Replacement::SubDAG`] is
+    /// re-linked so its `SummaryAgg` child is the child target's own
+    /// DAG assembly whenever that is phase-legal beneath maintenance
+    /// (so a child that chose an `ValueOperationAtIngestionTime` actually ends up under
+    /// the summary); a logical-rewrite [`Replacement::SubDAG`] is kept
+    /// as it is (exact); an unmatched site keeps its own operator with each
+    /// child assembled independently ([`Self::assemble_residual`]).
+    /// Memoized by target identity, so a shared inner summary is one `Rc`
+    /// no matter how many roots reach it.
+    pub fn assemble_selected_dag(
+        &self,
+        target: &Rc<OperatorNode>,
+    ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
+        if !self.groups.contains_key(&Rc::as_ptr(target)) {
+            return Ok(None);
+        }
+        self.assemble_target(target).map(Some)
+    }
+
+    /// Assemble a complete query result, including an exact-state evaluation when
+    /// needed. `assemble_selected_dag` also serves internal state frontiers;
+    /// callers exposing query results must use this boundary instead.
+    pub fn assemble_selected_query(
+        &self,
+        target: &Rc<OperatorNode>,
+    ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
+        self.assemble_selected_dag(target)?
+            .map(|node| finalize_query_candidate(node, target))
+            .transpose()
+    }
+
+    fn assemble_target(
+        &self,
+        target: &Rc<OperatorNode>,
+    ) -> Result<Rc<OperatorNode>, RealizationError> {
+        let ptr = Rc::as_ptr(target);
+        if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
+            return Ok(Rc::clone(node));
+        }
+        // A selected summary that realizes its inner aggregate, instead of
+        // hiding it in `KeepPreAsap`, is kept; materialization assignment decides
+        // whether it runs in precompute or at query time.
+        let selected_composed_summary = self
+            .groups
+            .get(&ptr)
+            .and_then(|sel| sel.chosen)
+            .is_some_and(|candidate| {
+                matches!(&candidate.replacement,
+                Replacement::SubDAG(node) if matches!(&node.operator,
+                    Operator::ASAP(ASAPOp::SummaryAgg { child, .. })
+                    if child.contains_asap() || !contains_aggregate(child)))
+            });
+        let node = if query_time_nested_sum(target) && !selected_composed_summary {
+            self.assemble_residual(target)?
+        } else {
+            match self
+                .groups
+                .get(&ptr)
+                .and_then(|sel| sel.chosen)
+                .map(|c| &c.replacement)
+            {
+                None => self.assemble_residual(target)?,
+                Some(Replacement::SubDAG(node)) if node.contains_asap() => {
+                    self.relink_summary(node, target)?
+                }
+                Some(Replacement::SubDAG(kept)) => retain_exact(kept)?,
+                Some(Replacement::ExactComposition(_)) => Rc::clone(
+                    self.composition_plans
+                        .get(&ptr)
+                        .expect("selected compositions have a validated plan"),
+                ),
+            }
+        };
+        self.assembled_nodes
+            .borrow_mut()
+            .insert(ptr, Rc::clone(&node));
+        Ok(node)
+    }
+
+    /// Keep `target`'s own operator and assemble each child independently,
+    /// so a selected summary remains visible beneath a relational operator
+    /// that has no summary realization of its own instead of being
+    /// swallowed by one opaque kept sub-DAG. Every child that is a
+    /// discovered target is assembled (and finalized to query-time values);
+    /// any other child is kept as it is. The guarantee is composed from the
+    /// assembled children: all exact → exact; exactly one child → that
+    /// child's guarantee; otherwise unknown. An inner `Join` first has its
+    /// cross-input equi-predicate normalized; any other join is kept whole.
+    fn assemble_residual(
+        &self,
+        target: &Rc<OperatorNode>,
+    ) -> Result<Rc<OperatorNode>, RealizationError> {
+        if target.children().is_empty() {
+            // A leaf has nothing to assemble beneath it: keep it as it is.
+            return retain_exact(target);
+        }
+        let mut operator = target.operator.clone();
+        if let Operator::NonASAP(NonASAPOp::Join {
+            left,
+            right,
+            kind,
+            pred,
+        }) = &mut operator
+        {
+            let left_width = left.schema.fields.len();
+            let total_width = left_width + right.schema.fields.len();
+            let normalized_pred = matches!(kind, JoinKind::Inner)
+                .then(|| normalize_cross_input_equi_predicate(pred, left_width, total_width))
+                .flatten();
+            let Some(normalized) = normalized_pred else {
+                return retain_exact(target);
+            };
+            *pred = normalized;
+        }
+        let mut failure = None;
+        let mut children = Vec::new();
+        let operator = operator.map_children(|child| {
+            if failure.is_some() {
+                return Rc::clone(child);
+            }
+            let assembled = if self.groups.contains_key(&Rc::as_ptr(child)) {
+                self.assemble_target(child)
+                    .and_then(|node| finalize_query_candidate(node, child))
+            } else {
+                Ok(Rc::clone(child))
+            };
+            match assembled {
+                Ok(node) => {
+                    children.push(Rc::clone(&node));
+                    node
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    Rc::clone(child)
+                }
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        // An operator that computes new values from its input rows has no
+        // sound accuracy composition over an approximate input (e.g. `max`
+        // over a quantile evaluation's rank error). Without a selected
+        // composition such a node stays an exact pre-ASAP sub-DAG; only the
+        // read-time nested SUM keeps its assembled children.
+        let computes_values = matches!(
+            target.non_asap(),
+            Some(
+                NonASAPOp::Aggregate { .. }
+                    | NonASAPOp::BinaryOp { .. }
+                    | NonASAPOp::SQLWindowFunc { .. }
+            )
+        ) && !query_time_nested_sum(target);
+        let approximate_input = children.iter().any(|child| {
+            !child
+                .guarantee
+                .as_ref()
+                .is_some_and(ResultGuarantee::is_exact)
+        });
+        if computes_values && approximate_input {
+            return retain_exact(target);
+        }
+        let guarantee = match children.as_slice() {
+            [child] => child.guarantee.clone(),
+            children
+                if children.iter().all(|child| {
+                    child
+                        .guarantee
+                        .as_ref()
+                        .is_some_and(ResultGuarantee::is_exact)
+                }) =>
+            {
+                Some(ResultGuarantee::exact(format!(
+                    "{} over exact inputs",
+                    target.operator.kind_name()
+                )))
+            }
+            _ => None,
+        };
+        let node = Rc::new(
+            OperatorNode::with_schema(operator, target.schema.clone()).with_guarantee(guarantee),
+        );
+        validate_maintained(&node, ExecutionTiming::QueryTime)?;
+        Ok(node)
+    }
+
+    /// Re-link a bound summary candidate's `SummaryAgg` child to the
+    /// child target's own DAG assembly when that is legal beneath
+    /// maintenance; otherwise keep the candidate exactly as constructed.
+    fn relink_summary(
+        &self,
+        node: &Rc<OperatorNode>,
+        target: &Rc<OperatorNode>,
+    ) -> Result<Rc<OperatorNode>, RealizationError> {
+        let Some(NonASAPOp::Aggregate {
+            child: pre_child, ..
+        }) = target.non_asap()
+        else {
+            return Ok(Rc::clone(node));
+        };
+        let has_maintenance_operation = self
+            .groups
+            .get(&Rc::as_ptr(pre_child))
+            .and_then(|selection| selection.chosen)
+            .is_some_and(|candidate| {
+                matches!(
+                    &candidate.replacement,
+                    Replacement::ExactComposition(composition)
+                        if composition.placement == OperationPlacement::Maintenance
+                )
+            });
+        if !has_maintenance_operation {
+            return Ok(Rc::clone(node));
+        }
+        let new_child = self.assemble_target(pre_child)?;
+        Ok(relink_agg_child(node, &new_child))
+    }
+}
+
+/// A mergeable outer SUM over a relationally wrapped aggregate is a read-time
+/// reduction of the inner summary values. Maintaining the outer SUM directly
+/// would hide that inner temporal aggregate inside one kept sub-DAG and lose
+/// its independently selected summary.
+fn query_time_nested_sum(target: &OperatorNode) -> bool {
+    let Some(NonASAPOp::Aggregate {
+        measures,
+        filters,
+        having: None,
+        child,
+        ..
+    }) = target.non_asap()
+    else {
+        return false;
+    };
+    !any_measure_filtered(filters)
+        && matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+        && contains_aggregate(child)
+}
+
+fn contains_aggregate(expr: &OperatorNode) -> bool {
+    match expr.non_asap() {
+        Some(NonASAPOp::Aggregate { .. }) => true,
+        Some(
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. },
+        ) => contains_aggregate(child),
+        _ => false,
+    }
+}
+
+/// Rebuild `node` (a `SummaryAgg`, possibly under a `SummaryEstimate`) with
+/// `new_child` as the `SummaryAgg`'s child, if the result still validates
+/// as maintained state; otherwise return `node` unchanged.
+fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query,
+        }) => {
+            let inner = relink_agg_child(summary_input, new_child);
+            if Rc::ptr_eq(&inner, summary_input) {
+                return Rc::clone(node);
+            }
+            std::rc::Rc::new(
+                OperatorNode::with_schema(
+                    asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate {
+                        summary_input: inner,
+                        query: query.clone(),
+                    }),
+                    node.schema.clone(),
+                )
+                .with_guarantee(node.guarantee.clone()),
+            )
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            child,
+            family,
+            input,
+            reduction,
+            grouping,
+            filter,
+        }) => {
+            if Rc::ptr_eq(child, new_child) {
+                return Rc::clone(node);
+            }
+            let rebuilt = std::rc::Rc::new(
+                OperatorNode::with_schema(
+                    asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                        child: Rc::clone(new_child),
+                        family: family.clone(),
+                        input: input.clone(),
+                        reduction: reduction.clone(),
+                        grouping: grouping.clone(),
+                        filter: filter.clone(),
+                    }),
+                    node.schema.clone(),
+                )
+                .with_guarantee(node.guarantee.clone()),
+            );
+            match validate_maintained(&rebuilt, ExecutionTiming::IngestionTime) {
+                Ok(_) => rebuilt,
+                Err(_) => Rc::clone(node),
+            }
+        }
+        _ => Rc::clone(node),
+    }
+}
+
 // ── default_strategies ──────────────────────────────────────────────────
 
 /// The context-free strategies [`search_workload`] runs with the built-in
@@ -4375,11 +4814,11 @@ pub(crate) fn direct_child_counts(node: &OperatorNode) -> Vec<(*const OperatorNo
 /// cross-consumer accuracy reconciliation for CSE sharing — see that
 /// module's own docs) are added by [`search_workload`] after CSE and target
 /// discovery, when their sibling context exists.
-/// [`crate::explanation::explain_replacements`] (issue #257) uses
+/// [`crate::pass1::explanation::explain_replacements`] (issue #257) uses
 /// this same set (via [`search_workload`]) rather than keeping a second,
 /// explanation-specific list to stay in sync with.
 ///
-/// [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) is
+/// `AvgToSumOverCountStrategy` is
 /// included here (issue #253) even though it's a
 /// [`Replacement::Rewrite`]-only strategy — it's context-free (`matches`/`replacements` need nothing beyond
 /// the target itself) exactly like [`SharedSubDAGStrategy`], so it belongs
@@ -4394,7 +4833,7 @@ pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
         Box::new(ASAPStrategies::default()),
         Box::new(HydraGroupingStrategy::default()),
         Box::new(SharedSubDAGStrategy),
-        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(crate::pass1::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy),
     ]
 }
@@ -4420,7 +4859,7 @@ pub fn default_strategies_with_evidence<'a>(
             ),
         ),
         Box::new(SharedSubDAGStrategy),
-        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(crate::pass1::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy),
     ]
 }
@@ -4442,7 +4881,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogic
 ///
 /// Runs [`share_common_sub_dags`] once over `roots` first — so every
 /// strategy (and, transitively, every
-/// [`crate::explanation::ReplacementExplanation`] a caller reads off the
+/// [`crate::pass1::explanation::ReplacementExplanation`] a caller reads off the
 /// result) sees the same already-deduplicated DAG — then discovers every
 /// `TargetSubDAG` (see [`discover_targets`]) and runs the
 /// fixpoint loop the module docs describe, capped at
@@ -4464,7 +4903,7 @@ pub fn search_workload_with<'s, Id>(
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
 /// guarantee is fully known and misses the target is moved from
 /// [`TargetSubDAGCandidates::candidates`] to [`TargetSubDAGCandidates::rejected`] *before*
-/// [`CandidateLogicalASAPDAGs::cost_sorted`]/[`CandidateLogicalASAPDAGs::global_selection`] ever rank the
+/// `candidate_selection::cost_sorted`/`candidate_selection::global_selection` ever rank the
 /// group. A constructible candidate with unknown accuracy remains visible for
 /// downstream review under an approximate target, but default whole-plan
 /// selection does not commit it. An exact target cannot accept an unknown
@@ -4963,8 +5402,6 @@ fn walk_children(
 mod tests {
     use super::*;
     use crate::accuracy::PropagationStats;
-    use crate::cost_model::DefaultCostModel;
-    use crate::plan_selection::candidate_selection::sketch_kind_of;
     use crate::test_support::{agg, agg_per_entity, lower_promql, maintained, metric_scan, timed};
     use asap_types::ir::operator::operator_properties::{Reduction as ReductionTy, Source};
     use asap_types::ir::operator::{
@@ -5070,17 +5507,7 @@ mod tests {
                     );
                 }
             }
-            let selected = space
-                .global_selection(&DefaultCostModel)
-                .assemble_selected_query(&space.roots[0].1)
-                .unwrap()
-                .unwrap();
-            for node in inventory
-                .candidates
-                .iter()
-                .map(|forest| &forest[0].1)
-                .chain(std::iter::once(&selected))
-            {
+            for node in inventory.candidates.iter().map(|forest| &forest[0].1) {
                 assert!(
                     node.schema
                         .fields
@@ -5205,7 +5632,7 @@ mod tests {
             .expect("maintained average candidate");
         assert!(operator.checked_finite_division);
         assert!(
-            crate::rewrite::SemanticEquivalentRewriteStrategy
+            crate::pass1::rewrite::SemanticEquivalentRewriteStrategy
                 .replacements(&TargetSubDAG::new(&root))
                 .is_empty(),
             "an unconditional pre-ASAP rewrite would bypass the runtime guard"
@@ -6092,7 +6519,9 @@ mod tests {
             .candidates
             .iter()
             .filter_map(|c| match &c.replacement {
-                Replacement::SubDAG(node) => sketch_kind_of(node),
+                Replacement::SubDAG(node) if node.contains_asap() => {
+                    Some(summary_family_algorithm(node))
+                }
                 _ => None,
             })
             .collect();
@@ -6304,13 +6733,6 @@ mod tests {
                 .count(),
             2
         );
-        let selected = space.global_selection(&DefaultCostModel);
-        assert!(!selected
-            .for_target(&space.roots[0].1)
-            .unwrap()
-            .chosen
-            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
-
         let scan_group = space
             .target_subdag_candidates()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Scan { .. })))
@@ -6361,12 +6783,6 @@ mod tests {
                 Replacement::SubDAG(node) if node.guarantee.is_none()
                     && candidate.has_missing_accuracy_evidence()
             )));
-        assert!(!targeted
-            .global_selection(&DefaultCostModel)
-            .for_target(target)
-            .unwrap()
-            .chosen
-            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
 
         let exact_target = search_workload_with_targets(
             vec![(
@@ -6674,7 +7090,7 @@ mod tests {
     // Moved from the former `bind.rs` (issue #251): `bind.rs`'s own
     // workload-wide orchestration (`implement_workload`/
     // `implement_workload_with`) was deleted. Current whole-workload logical
-    // selection uses `CandidateLogicalASAPDAGs::global_selection`; these tests exercise
+    // selection uses `candidate_selection::global_selection`; these tests exercise
     // `construct_summary_agg`'s schema derivation end to end through
     // `realize_child` — production logic that still lives in this module —
     // so they move here rather than disappear. Unlike `bind.rs` (an
@@ -7689,49 +8105,6 @@ mod tests {
     }
 
     #[test]
-    fn global_selection_can_choose_nested_summaries() {
-        // The same nested summary remains available through workload search
-        // and global cost ranking.
-        let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
-        let outer = agg(vec![], quantile_eps(0.99, 0.1), inner);
-        let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(
-            ASAPStrategies::new_with_planning_inputs(&RankAdditiveModel, &EqualSplitAllocator),
-        )];
-        let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies);
-        let root = &space.roots[0].1;
-        let group = space.candidates_for_target(root).unwrap();
-        assert!(!group.rejected.is_empty());
-        assert!(group.candidates.iter().all(|c| match &c.replacement {
-            // A summary candidate (old `Replacement::Summary`) contains an
-            // ASAP node; a logical rewrite (old `Replacement::Rewrite`) does not.
-            Replacement::SubDAG(node) if node.contains_asap() => {
-                node.guarantee.as_ref().is_some_and(|g| {
-                    DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
-                })
-            }
-            Replacement::SubDAG(_) => false,
-            Replacement::ExactComposition(_) => false,
-        }));
-        let ranked = space.cost_sorted(&DefaultCostModel);
-        let root_ranked = ranked.iter().find(|g| Rc::ptr_eq(g.target, root)).unwrap();
-        assert_eq!(root_ranked.candidates.len(), group.candidates.len());
-
-        let selection = space.global_selection(&DefaultCostModel);
-        let chosen = selection
-            .for_target(root)
-            .unwrap()
-            .chosen
-            .expect("a nested summary candidate wins");
-        let Replacement::SubDAG(node) = &chosen.replacement else {
-            panic!()
-        };
-        assert!(matches!(
-            node.operator,
-            Operator::ASAP(ASAPOp::SummaryEstimate { .. })
-        ));
-    }
-
-    #[test]
     fn root_target_check_removes_candidates_before_cost_ranking() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         // A root target tighter than the node's own ε=0.01: every sketch
@@ -7753,8 +8126,6 @@ mod tests {
             AccuracyError::TargetNotSatisfied { target: AccuracyTarget::Epsilon(e), .. } if e == 0.001
         )));
         assert!(group.rejected.len() >= 2);
-        let selection = space.global_selection(&DefaultCostModel);
-        assert!(selection.for_target(root).unwrap().chosen.is_none());
 
         // A root target the node's own sizing meets keeps every candidate.
         let space = search_workload_with_targets(
@@ -7826,16 +8197,6 @@ mod tests {
             .guarantee
             .as_ref()
             .is_some_and(ResultGuarantee::has_unknown));
-        let selected = space.global_selection(&DefaultCostModel);
-        assert!(!selected
-            .for_target(&space.roots[0].1)
-            .unwrap()
-            .chosen
-            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
-        assert!(selected
-            .assemble_selected_dag(&space.roots[0].1)
-            .unwrap()
-            .is_some());
     }
     // Source evidence alone must enable Planner-owned sizing and certification.
     #[test]
@@ -8034,5 +8395,87 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(reads, std::slice::from_ref(&source));
         }
+    }
+
+    fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
+        Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(left)),
+            op: asap_types::ir::scalar::CompareOpKind::Eq,
+            right: Box::new(ScalarExpr::Column(right)),
+            semantics: asap_types::ir::ExprSemantics::Sql,
+        })
+    }
+
+    #[test]
+    fn relational_join_predicate_requires_and_normalizes_cross_input_columns() {
+        let forward = normalize_cross_input_equi_predicate(&equi_pred(1, 3), 2, 4)
+            .expect("left-to-right equality");
+        let reverse = normalize_cross_input_equi_predicate(&equi_pred(3, 1), 2, 4)
+            .expect("right-to-left equality");
+        assert_eq!(forward, reverse, "reverse equality must be canonicalized");
+        assert!(normalize_cross_input_equi_predicate(&equi_pred(0, 1), 2, 4).is_none());
+        assert!(normalize_cross_input_equi_predicate(&equi_pred(0, 4), 2, 4).is_none());
+    }
+
+    // A value projection cannot consume an opaque exact accumulator edge.
+    #[test]
+    fn residual_projection_finalizes_selected_exact_state() {
+        let inner = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&[]));
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
+                cols: vec![ProjectItem {
+                    expr: ScalarExpr::Column(0),
+                    alias: Some("result".into()),
+                }],
+                qualifier: None,
+                child: inner.clone(),
+            }))
+            .unwrap();
+        let space = search_workload_with_targets(
+            vec![("q", root.clone(), Some(AccuracyTarget::Exact))],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        // No site has a chosen candidate, so the root is assembled as a residual.
+        let groups = space
+            .target_subdag_candidates()
+            .map(|group| {
+                (
+                    Rc::as_ptr(&group.target),
+                    TargetSubDAGSelection {
+                        target: &group.target,
+                        consumer_count: group.consumer_count,
+                        effective_consumer_count: group.consumer_count,
+                        chosen: None,
+                    },
+                )
+            })
+            .collect();
+        let selected = GlobalSelection::new(space.order.clone(), groups, HashMap::new());
+        // CSE re-interns the workload, so the space's root/child `Rc`s are not
+        // the fixture's. Assembly only assembles children that are discovered
+        // targets, so seed the memo under the space's own child pointer.
+        let root = Rc::clone(&space.roots[0].1);
+        let Some(NonASAPOp::Project { child: inner, .. }) = root.non_asap() else {
+            unreachable!()
+        };
+        assert!(space.candidates_for_target(inner).is_some());
+        selected
+            .assembled_nodes
+            .borrow_mut()
+            .insert(Rc::as_ptr(inner), realize(inner.as_ref()).unwrap());
+        let node = selected.assemble_target(&root).unwrap();
+        let Operator::NonASAP(NonASAPOp::Project { child, .. }) = &node.operator else {
+            panic!("expected Project");
+        };
+        assert!(matches!(
+            child.operator,
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
+        ));
+        assert!(child
+            .schema
+            .fields
+            .iter()
+            .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
     }
 }

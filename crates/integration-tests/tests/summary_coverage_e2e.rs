@@ -6,9 +6,11 @@
 use std::ops::Bound;
 use std::rc::Rc;
 
-use asap_aware_mapping::{search_workload, DefaultCostModel};
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
+use asap_aware_mapping::DefaultCostModel;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
+use asap_logical_optimizer::search_workload;
 use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
@@ -24,8 +26,7 @@ fn accuracy() -> AccuracyTarget {
 
 fn plan(pre: Rc<OperatorNode>) -> Rc<OperatorNode> {
     let space = search_workload(vec![("query", pre)]);
-    space
-        .global_selection(&DefaultCostModel)
+    global_selection(&space, &DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered")

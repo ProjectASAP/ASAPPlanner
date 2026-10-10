@@ -1,170 +1,167 @@
-//! Whole-workload selection over the legacy Stage 1 search space
+//! Legacy whole-workload selection over the Stage 1 search space
 //! ([`CandidateLogicalASAPDAGs`]): per-target cost ranking, recurrence
-//! profiles, global selection and assembly of the selected DAG. It lives here,
-//! not in `replacement`, so that Stage 1 does not depend on the cost model.
-//! The stage pipeline does not call it; its deletion is tracked in #580.
+//! profiles and global selection. These are free functions over Stage 1
+//! types, so that Stage 1 does not depend on the cost model. Assembling the
+//! selected DAG is Stage 1's [`GlobalSelection`]; [`CostedGlobalSelection`]
+//! adds the cost comparison behind each chosen exact composition.
+//!
+//! The stage pipeline does not call this module. It is deleted under #580.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::non_asap::any_measure_filtered;
-use asap_types::ir::operator::operator_properties::JoinKind;
-use asap_types::ir::properties::timing::validate_maintained;
-use asap_types::ir::properties::{ExecutionTiming, ResultGuarantee};
-use asap_types::ir::schema::{ColumnId, FieldDataType, GroupingStrategy, SketchAlgorithm};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
+use asap_types::ir::schema::{FieldDataType, GroupingStrategy, SketchAlgorithm};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
 use crate::cost_model::{
     raw_recompute_cost_rate, CostModel, CseCandidate, ExactCompositionCostInputs,
     ExactCompositionCostRequest, ShareDecision,
 };
-use crate::exact_composition::OperationPlacement;
 use crate::recurrence::{
     CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
 };
-use crate::replacement::{
-    bindable_intent, cse_candidate_pair, direct_child_counts, finalize_query_candidate,
-    is_logical_rewrite, realize_child, retain_exact, CandidateLogicalASAPDAGs, PreparedComposition,
-    RealizationError, Replacement, ReplacementProvenance, ReplacementSubDAG, TargetSubDAG,
-    TargetSubDAGCandidates,
+use asap_logical_optimizer::pass1::exact_composition::OperationPlacement;
+use asap_logical_optimizer::pass1::replacement::{
+    bindable_intent, cse_candidate_pair, direct_child_counts, is_logical_rewrite, realize_child,
+    CandidateLogicalASAPDAGs, GlobalSelection, PreparedComposition, Replacement,
+    ReplacementProvenance, ReplacementSubDAG, TargetSubDAG, TargetSubDAGCandidates,
+    TargetSubDAGSelection,
 };
 
-impl ReplacementSubDAG {
-    /// Physical feasibility evidence for this candidate. A pure logical
-    /// rewrite needs no new operator. Unknown support is checked during
-    /// physical/deployment compilation; explicit rejection prevents selection.
-    pub fn runtime_support_evidence(&self, cost_model: &dyn CostModel) -> Option<bool> {
-        match &self.replacement {
-            Replacement::ExactComposition(composition) => {
-                cost_model.value_operation_support_evidence(&composition.op, composition.placement)
-            }
-            // Any summary decision, including one rooted in a relational
-            // operator above its evaluations, asks the deployment for support.
-            Replacement::SubDAG(node) if !is_logical_rewrite(node) => {
-                cost_model.summary_support_evidence(node)
-            }
-            Replacement::SubDAG(_) => Some(true),
+/// Physical feasibility evidence for `candidate`. A pure logical
+/// rewrite needs no new operator. Unknown support is checked during
+/// physical/deployment compilation; explicit rejection prevents selection.
+pub fn runtime_support_evidence(
+    candidate: &ReplacementSubDAG,
+    cost_model: &dyn CostModel,
+) -> Option<bool> {
+    match &candidate.replacement {
+        Replacement::ExactComposition(composition) => {
+            cost_model.value_operation_support_evidence(&composition.op, composition.placement)
         }
+        // Any summary decision, including one rooted in a relational
+        // operator above its evaluations, asks the deployment for support.
+        Replacement::SubDAG(node) if !is_logical_rewrite(node) => {
+            cost_model.summary_support_evidence(node)
+        }
+        Replacement::SubDAG(_) => Some(true),
     }
 }
 
-impl<Id> CandidateLogicalASAPDAGs<Id> {
-    /// The `sorted_by(cost_model)` step: every group, each with its own
-    /// candidates ranked best-first under `cost_model` where this module
-    /// knows how (see the module docs' "Cost-based final selection"
-    /// section) — groups themselves stay in discovery order, since targets
-    /// are independent decision points, not alternatives competing with
-    /// each other.
-    ///
-    /// Ranking itself is decided entirely by [`rank_group`] before
-    /// [`RankedTargetSubDAGCandidates::costs`] is ever computed — pairing each candidate with
-    /// [`CostModel::grouping_state_cost`] for grouping alternatives, or
-    /// [`CostModel::estimate_cost`] otherwise, is an additive annotation
-    /// for a caller that wants to *display* a cost (e.g. a
-    /// DAG-visualization view), not a second ranking signal, so plugging in
-    /// a `CostModel` whose `estimate_cost` disagrees with its own
-    /// `rank_candidates`/`cse_share_decision` (a deployment bug, not
-    /// something this method tries to protect against) would show a
-    /// `RankedTargetSubDAGCandidates` whose `costs` aren't monotonically non-decreasing —
-    /// `cost_sorted`'s own ordering guarantee is unaffected either way.
-    pub fn cost_sorted(&self, cost_model: &dyn CostModel) -> Vec<RankedTargetSubDAGCandidates<'_>> {
-        self.order
-            .iter()
-            .map(|ptr| {
-                let group = &self.groups[ptr];
-                let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
-                let mut candidates = rank_group(group, cost_model);
-                // Availability is candidate-specific and cannot be expressed
-                // by `rank_candidates`' exhaustive permutation contract.
-                // Keep unavailable alternatives for explanation, but place
-                // them after every selectable candidate.
-                candidates.sort_by_key(|candidate| {
-                    cost_model.candidate_cost(candidate, &target).is_none()
-                });
-                let costs = candidates
-                    .iter()
-                    .map(|c| {
-                        cost_model
-                            .grouping_state_cost(c, &target)
-                            .map_or_else(|| cost_model.estimate_cost(c, &target), |cost| cost.0)
-                    })
-                    .collect();
-                RankedTargetSubDAGCandidates {
-                    target: &group.target,
-                    consumer_count: group.consumer_count,
-                    candidates,
-                    costs,
-                }
-            })
-            .collect()
-    }
-
-    /// Recurrence-aware counterpart to [`Self::cost_sorted`]. CSE
-    /// share/recompute pairs are ordered with the target's recurrence
-    /// profile; all other candidate shapes retain their existing ranking.
-    pub fn cost_sorted_with_recurrence(
-        &self,
-        cost_model: &dyn CostModel,
-        profiles: &RecurrenceProfileMap,
-        horizon: Option<Horizon>,
-    ) -> Result<Vec<RankedTargetSubDAGCandidates<'_>>, RecurrenceError> {
-        self.order
-            .iter()
-            .map(|ptr| {
-                let group = &self.groups[ptr];
-                let mut candidates = rank_group(group, cost_model);
-                if cse_candidate_pair(group).is_some() {
-                    if let Some(decision) = decide_group_with_recurrence(
-                        group,
-                        group.consumer_count,
-                        profiles.for_target(&group.target),
-                        horizon,
-                        cost_model,
-                    )? {
-                        candidates.sort_by_key(|candidate| match candidate.provenance {
-                            ReplacementProvenance::CseShare if decision == ShareDecision::Share => {
-                                0
-                            }
-                            ReplacementProvenance::CseRecompute
-                                if decision == ShareDecision::RecomputeIndependently =>
-                            {
-                                0
-                            }
-                            ReplacementProvenance::CseShare
-                            | ReplacementProvenance::CseRecompute => 2,
-                            _ => 1,
-                        });
-                    }
-                }
-                let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
-                let costs = candidates
-                    .iter()
-                    .map(|candidate| {
-                        cost_model
-                            .grouping_state_cost(candidate, &target)
-                            .map_or_else(
-                                || cost_model.estimate_cost(candidate, &target),
-                                |cost| cost.0,
-                            )
-                    })
-                    .collect();
-                Ok(RankedTargetSubDAGCandidates {
-                    target: &group.target,
-                    consumer_count: group.consumer_count,
-                    candidates,
-                    costs,
+/// The `sorted_by(cost_model)` step: every group, each with its own
+/// candidates ranked best-first under `cost_model` where this module
+/// knows how (see the module docs' "Cost-based final selection"
+/// section) — groups themselves stay in discovery order, since targets
+/// are independent decision points, not alternatives competing with
+/// each other.
+///
+/// Ranking itself is decided entirely by [`rank_group`] before
+/// [`RankedTargetSubDAGCandidates::costs`] is ever computed — pairing each candidate with
+/// [`CostModel::grouping_state_cost`] for grouping alternatives, or
+/// [`CostModel::estimate_cost`] otherwise, is an additive annotation
+/// for a caller that wants to *display* a cost (e.g. a
+/// DAG-visualization view), not a second ranking signal, so plugging in
+/// a `CostModel` whose `estimate_cost` disagrees with its own
+/// `rank_candidates`/`cse_share_decision` (a deployment bug, not
+/// something this method tries to protect against) would show a
+/// `RankedTargetSubDAGCandidates` whose `costs` aren't monotonically non-decreasing —
+/// `cost_sorted`'s own ordering guarantee is unaffected either way.
+pub fn cost_sorted<'a, Id>(
+    space: &'a CandidateLogicalASAPDAGs<Id>,
+    cost_model: &dyn CostModel,
+) -> Vec<RankedTargetSubDAGCandidates<'a>> {
+    space
+        .order()
+        .iter()
+        .map(|ptr| {
+            let group = &space.groups()[ptr];
+            let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+            let mut candidates = rank_group(group, cost_model);
+            // Availability is candidate-specific and cannot be expressed
+            // by `rank_candidates`' exhaustive permutation contract.
+            // Keep unavailable alternatives for explanation, but place
+            // them after every selectable candidate.
+            candidates
+                .sort_by_key(|candidate| cost_model.candidate_cost(candidate, &target).is_none());
+            let costs = candidates
+                .iter()
+                .map(|c| {
+                    cost_model
+                        .grouping_state_cost(c, &target)
+                        .map_or_else(|| cost_model.estimate_cost(c, &target), |cost| cost.0)
                 })
+                .collect();
+            RankedTargetSubDAGCandidates {
+                target: &group.target,
+                consumer_count: group.consumer_count,
+                candidates,
+                costs,
+            }
+        })
+        .collect()
+}
+
+/// Recurrence-aware counterpart to [`cost_sorted`]. CSE
+/// share/recompute pairs are ordered with the target's recurrence
+/// profile; all other candidate shapes retain their existing ranking.
+pub fn cost_sorted_with_recurrence<'a, Id>(
+    space: &'a CandidateLogicalASAPDAGs<Id>,
+    cost_model: &dyn CostModel,
+    profiles: &RecurrenceProfileMap,
+    horizon: Option<Horizon>,
+) -> Result<Vec<RankedTargetSubDAGCandidates<'a>>, RecurrenceError> {
+    space
+        .order()
+        .iter()
+        .map(|ptr| {
+            let group = &space.groups()[ptr];
+            let mut candidates = rank_group(group, cost_model);
+            if cse_candidate_pair(group).is_some() {
+                if let Some(decision) = decide_group_with_recurrence(
+                    group,
+                    group.consumer_count,
+                    profiles.for_target(&group.target),
+                    horizon,
+                    cost_model,
+                )? {
+                    candidates.sort_by_key(|candidate| match candidate.provenance {
+                        ReplacementProvenance::CseShare if decision == ShareDecision::Share => 0,
+                        ReplacementProvenance::CseRecompute
+                            if decision == ShareDecision::RecomputeIndependently =>
+                        {
+                            0
+                        }
+                        ReplacementProvenance::CseShare | ReplacementProvenance::CseRecompute => 2,
+                        _ => 1,
+                    });
+                }
+            }
+            let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+            let costs = candidates
+                .iter()
+                .map(|candidate| {
+                    cost_model
+                        .grouping_state_cost(candidate, &target)
+                        .map_or_else(
+                            || cost_model.estimate_cost(candidate, &target),
+                            |cost| cost.0,
+                        )
+                })
+                .collect();
+            Ok(RankedTargetSubDAGCandidates {
+                target: &group.target,
+                consumer_count: group.consumer_count,
+                candidates,
+                costs,
             })
-            .collect()
-    }
+        })
+        .collect()
 }
 
 // ── Recurrence-aware cost context (issue #287) ──────────────────────────
 
 /// One [`RecurrenceProfile`] per discovered [`TargetSubDAGCandidates`] target, built by
-/// [`CandidateLogicalASAPDAGs::recurrence_profiles`] — the "carry `RepeatingEntry.demand`
+/// [`recurrence_profiles`] — the "carry `RepeatingEntry.demand`
 /// and relevant `DataWorkload` into ASAP-aware search/cost context"
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
 /// currency [`CandidateLogicalASAPDAGs::candidates_for_target`]/[`GlobalSelection::for_target`] already
@@ -196,172 +193,170 @@ impl RecurrenceProfileMap {
     }
 }
 
-impl<Id> CandidateLogicalASAPDAGs<Id> {
-    /// Build one [`RecurrenceProfile`] per discovered site, by walking every
-    /// root's whole reachable sub-DAG (the same relational-skeleton
-    /// traversal [`discover_targets`] itself used to discover those sites)
-    /// and folding each root's own recurrence tag
-    /// (a normalized repeating rate or a one-time invocation count) into every
-    /// site reachable from it.
-    ///
-    /// `root_recurrence` is positional: `root_recurrence[i]` describes
-    /// `self.roots[i]` — the same order [`search_workload`]/
-    /// [`search_workload_with`] were originally called with (post-CSE
-    /// dedup preserves both root count and order — see
-    /// `asap_types::ir::cse::share_common_sub_dags`'s own
-    /// `.map(...).collect()` body). This keeps `Id` fully opaque (no `Eq`/
-    /// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
-    /// caller/query identifiers opaque" requirement) at the cost of the
-    /// caller keeping the two slices in step; `root_recurrence.len()` must
-    /// equal `self.roots.len()`.
-    ///
-    /// A shared sub-DAG reachable from more than one root aggregates every
-    /// reaching root's contribution — repeating roots' rates are summed and
-    /// one-shot roots
-    /// increment [`RecurrenceProfile::one_shot_consumers`] — so a summary
-    /// consumed by queries with different intervals gets one profile
-    /// reflecting all of them, per issue #287's "support a shared sub-DAG
-    /// consumed by queries with different intervals".
-    ///
-    /// `update_rate` is applied uniformly to every discovered site *that
-    /// this walk actually reached from some root* (see the "unreachable
-    /// sites" note below): today's
-    /// [`asap_types::workload::DataWorkload`] is a single
-    /// workload-level value (applies to every query in a `QueryWorkload`),
-    /// not per-target, so there is no finer-grained source to attach
-    /// instead. `None` when no `DataWorkload` evidence was available —
-    /// preserves "missing metadata" behavior for the update-rate term alone
-    /// even when repeating/one-shot consumer information is present.
-    ///
-    /// A parent that structurally references the same child more than once
-    /// (e.g. `BinaryOp{lhs: X, rhs: X}`) credits that child with one
-    /// contribution per reference, not one contribution per distinct node —
-    /// matching how [`TargetSubDAGCandidates::consumer_count`] counts that occurrence.
-    /// Multiplicity is propagated through the full descendant path: if the
-    /// repeated parent is independently evaluated twice, its child is also
-    /// evaluated twice. This supplies recurrence-aware selection with the
-    /// effective structural execution rate rather than mere reachability.
-    ///
-    /// **Unreachable sites**: [`CandidateLogicalASAPDAGs`] can contain a site no root's own
-    /// structural DAG actually reaches — e.g. one only ever produced by a
-    /// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
-    /// (this walk only follows [`TargetSubDAGCandidates::target`]'s own structural
-    /// children, the same scope [`discover_targets`] uses for the original
-    /// roots, never a candidate's rewritten value). Such a site gets
-    /// [`RecurrenceProfile::EMPTY`] — in particular, `update_rate` is
-    /// **not** stamped onto it — so it falls back to the ordinary
-    /// structural decision instead of being charged an ingest-driven
-    /// maintenance cost against a real evaluation/one-shot signal of
-    /// exactly zero, which previously made `RecomputeIndependently` win
-    /// there unconditionally, regardless of the site's actual
-    /// `consumer_count` (issue #287 review, bug 2).
-    ///
-    /// Returns [`RecurrenceError::InvalidEvaluationRate`] if any repeating
-    /// rate is non-finite or negative,
-    /// [`RecurrenceError::InvalidUpdateRate`] if `update_rate` is non-finite
-    /// or negative, or [`RecurrenceError::RootCountMismatch`] if
-    /// `root_recurrence.len() != self.roots.len()`.
-    pub fn recurrence_profiles(
-        &self,
-        root_recurrence: &[RootRecurrence],
-        update_rate: Option<UpdateRate>,
-    ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
-        if root_recurrence.len() != self.roots.len() {
-            return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
-                expected: self.roots.len(),
-                got: root_recurrence.len(),
-            });
+/// Build one [`RecurrenceProfile`] per discovered site, by walking every
+/// root's whole reachable sub-DAG (the same relational-skeleton
+/// traversal `discover_targets` itself used to discover those sites)
+/// and folding each root's own recurrence tag
+/// (a normalized repeating rate or a one-time invocation count) into every
+/// site reachable from it.
+///
+/// `root_recurrence` is positional: `root_recurrence[i]` describes
+/// `space.roots[i]` — the same order [`search_workload`]/
+/// [`search_workload_with`] were originally called with (post-CSE
+/// dedup preserves both root count and order — see
+/// `asap_types::ir::cse::share_common_sub_dags`'s own
+/// `.map(...).collect()` body). This keeps `Id` fully opaque (no `Eq`/
+/// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
+/// caller/query identifiers opaque" requirement) at the cost of the
+/// caller keeping the two slices in step; `root_recurrence.len()` must
+/// equal `space.roots.len()`.
+///
+/// A shared sub-DAG reachable from more than one root aggregates every
+/// reaching root's contribution — repeating roots' rates are summed and
+/// one-shot roots
+/// increment [`RecurrenceProfile::one_shot_consumers`] — so a summary
+/// consumed by queries with different intervals gets one profile
+/// reflecting all of them, per issue #287's "support a shared sub-DAG
+/// consumed by queries with different intervals".
+///
+/// `update_rate` is applied uniformly to every discovered site *that
+/// this walk actually reached from some root* (see the "unreachable
+/// sites" note below): today's
+/// [`asap_types::workload::DataWorkload`] is a single
+/// workload-level value (applies to every query in a `QueryWorkload`),
+/// not per-target, so there is no finer-grained source to attach
+/// instead. `None` when no `DataWorkload` evidence was available —
+/// preserves "missing metadata" behavior for the update-rate term alone
+/// even when repeating/one-shot consumer information is present.
+///
+/// A parent that structurally references the same child more than once
+/// (e.g. `BinaryOp{lhs: X, rhs: X}`) credits that child with one
+/// contribution per reference, not one contribution per distinct node —
+/// matching how [`TargetSubDAGCandidates::consumer_count`] counts that occurrence.
+/// Multiplicity is propagated through the full descendant path: if the
+/// repeated parent is independently evaluated twice, its child is also
+/// evaluated twice. This supplies recurrence-aware selection with the
+/// effective structural execution rate rather than mere reachability.
+///
+/// **Unreachable sites**: [`CandidateLogicalASAPDAGs`] can contain a site no root's own
+/// structural DAG actually reaches — e.g. one only ever produced by a
+/// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
+/// (this walk only follows [`TargetSubDAGCandidates::target`]'s own structural
+/// children, the same scope `discover_targets` uses for the original
+/// roots, never a candidate's rewritten value). Such a site gets
+/// [`RecurrenceProfile::EMPTY`] — in particular, `update_rate` is
+/// **not** stamped onto it — so it falls back to the ordinary
+/// structural decision instead of being charged an ingest-driven
+/// maintenance cost against a real evaluation/one-shot signal of
+/// exactly zero, which previously made `RecomputeIndependently` win
+/// there unconditionally, regardless of the site's actual
+/// `consumer_count` (issue #287 review, bug 2).
+///
+/// Returns [`RecurrenceError::InvalidEvaluationRate`] if any repeating
+/// rate is non-finite or negative,
+/// [`RecurrenceError::InvalidUpdateRate`] if `update_rate` is non-finite
+/// or negative, or [`RecurrenceError::RootCountMismatch`] if
+/// `root_recurrence.len() != space.roots.len()`.
+pub fn recurrence_profiles<Id>(
+    space: &CandidateLogicalASAPDAGs<Id>,
+    root_recurrence: &[RootRecurrence],
+    update_rate: Option<UpdateRate>,
+) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
+    if root_recurrence.len() != space.roots.len() {
+        return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
+            expected: space.roots.len(),
+            got: root_recurrence.len(),
+        });
+    }
+    if let Some(rate) = update_rate {
+        crate::recurrence::validate_update_rate(rate)?;
+    }
+    for recurrence in root_recurrence {
+        if let RootRecurrence::Repeating(rate) = recurrence {
+            if !rate.0.is_finite() || rate.0 < 0.0 {
+                return Err(crate::recurrence::RecurrenceError::InvalidEvaluationRate(
+                    *rate,
+                ));
+            }
         }
-        if let Some(rate) = update_rate {
-            crate::recurrence::validate_update_rate(rate)?;
-        }
-        for recurrence in root_recurrence {
-            if let RootRecurrence::Repeating(rate) = recurrence {
-                if !rate.0.is_finite() || rate.0 < 0.0 {
-                    return Err(crate::recurrence::RecurrenceError::InvalidEvaluationRate(
-                        *rate,
+    }
+
+    let mut rates: HashMap<*const OperatorNode, f64> = HashMap::new();
+    let mut one_shot_counts: HashMap<*const OperatorNode, usize> = HashMap::new();
+    // Sites actually reached by at least one root's own recurrence tag
+    // during the walk below — see this method's own "Unreachable
+    // sites" doc.
+    let mut reached: HashSet<*const OperatorNode> = HashSet::new();
+
+    for ((_, root), recurrence) in space.roots.iter().zip(root_recurrence) {
+        let recurrence = *recurrence;
+        let root_ptr = Rc::as_ptr(root);
+        // Carry path multiplicity transitively. If a shared ancestor is
+        // referenced twice, every descendant below an independently
+        // recomputed occurrence is evaluated twice as well; stopping
+        // expansion after the first pointer visit undercounts exactly
+        // the effective-consumer rate recurrence-aware costing needs.
+        let mut queue: VecDeque<(*const OperatorNode, usize)> = VecDeque::new();
+        queue.push_back((root_ptr, 1));
+
+        while let Some((ptr, path_count)) = queue.pop_front() {
+            contribute(
+                ptr,
+                path_count,
+                recurrence,
+                &mut rates,
+                &mut one_shot_counts,
+                &mut reached,
+            );
+            // Every reachable node was itself discovered as its own
+            // `TargetSubDAGCandidates` (`discover_targets` walks the identical
+            // relational-skeleton scope) — its own `target` is the
+            // canonical `Rc` to read children off.
+            if let Some(group) = space.groups().get(&ptr) {
+                for (child, edge_count) in direct_child_counts(&group.target) {
+                    queue.push_back((
+                        child,
+                        path_count
+                            .checked_mul(edge_count)
+                            .expect("query DAG path multiplicity overflowed usize"),
                     ));
                 }
             }
         }
-
-        let mut rates: HashMap<*const OperatorNode, f64> = HashMap::new();
-        let mut one_shot_counts: HashMap<*const OperatorNode, usize> = HashMap::new();
-        // Sites actually reached by at least one root's own recurrence tag
-        // during the walk below — see this method's own "Unreachable
-        // sites" doc.
-        let mut reached: HashSet<*const OperatorNode> = HashSet::new();
-
-        for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
-            let recurrence = *recurrence;
-            let root_ptr = Rc::as_ptr(root);
-            // Carry path multiplicity transitively. If a shared ancestor is
-            // referenced twice, every descendant below an independently
-            // recomputed occurrence is evaluated twice as well; stopping
-            // expansion after the first pointer visit undercounts exactly
-            // the effective-consumer rate recurrence-aware costing needs.
-            let mut queue: VecDeque<(*const OperatorNode, usize)> = VecDeque::new();
-            queue.push_back((root_ptr, 1));
-
-            while let Some((ptr, path_count)) = queue.pop_front() {
-                contribute(
-                    ptr,
-                    path_count,
-                    recurrence,
-                    &mut rates,
-                    &mut one_shot_counts,
-                    &mut reached,
-                );
-                // Every reachable node was itself discovered as its own
-                // `TargetSubDAGCandidates` (`discover_targets` walks the identical
-                // relational-skeleton scope) — its own `target` is the
-                // canonical `Rc` to read children off.
-                if let Some(group) = self.groups.get(&ptr) {
-                    for (child, edge_count) in direct_child_counts(&group.target) {
-                        queue.push_back((
-                            child,
-                            path_count
-                                .checked_mul(edge_count)
-                                .expect("query DAG path multiplicity overflowed usize"),
-                        ));
-                    }
-                }
-            }
-        }
-
-        let mut profiles = HashMap::with_capacity(self.order.len());
-        for ptr in &self.order {
-            let rate = rates.get(ptr).copied().unwrap_or(0.0);
-            let evaluation_rate = (rate > 0.0).then_some(crate::recurrence::EvaluationRate(rate));
-            let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
-            // Bug 2 fix (see "Unreachable sites" above): only a reached
-            // site carries the caller-supplied `update_rate`.
-            let site_update_rate = if reached.contains(ptr) {
-                update_rate
-            } else {
-                None
-            };
-            let node = Rc::clone(&self.groups[ptr].target);
-            profiles.insert(
-                *ptr,
-                (
-                    node,
-                    RecurrenceProfile {
-                        evaluation_rate,
-                        one_shot_consumers,
-                        update_rate: site_update_rate,
-                    },
-                ),
-            );
-        }
-
-        Ok(RecurrenceProfileMap { profiles })
     }
+
+    let mut profiles = HashMap::with_capacity(space.order().len());
+    for ptr in space.order() {
+        let rate = rates.get(ptr).copied().unwrap_or(0.0);
+        let evaluation_rate = (rate > 0.0).then_some(crate::recurrence::EvaluationRate(rate));
+        let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
+        // Bug 2 fix (see "Unreachable sites" above): only a reached
+        // site carries the caller-supplied `update_rate`.
+        let site_update_rate = if reached.contains(ptr) {
+            update_rate
+        } else {
+            None
+        };
+        let node = Rc::clone(&space.groups()[ptr].target);
+        profiles.insert(
+            *ptr,
+            (
+                node,
+                RecurrenceProfile {
+                    evaluation_rate,
+                    one_shot_consumers,
+                    update_rate: site_update_rate,
+                },
+            ),
+        );
+    }
+
+    Ok(RecurrenceProfileMap { profiles })
 }
 
 /// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
 /// when a single parent structurally references `ptr` more than once (see
-/// [`CandidateLogicalASAPDAGs::recurrence_profiles`]'s own doc on edge multiplicity).
+/// [`recurrence_profiles`]'s own doc on edge multiplicity).
 /// A no-op for `times == 0` (an `Rc` returned as a `direct_child_counts`
 /// child always has `edge_count >= 1` in practice, but this keeps the
 /// helper correct regardless).
@@ -389,7 +384,7 @@ fn contribute(
 }
 
 /// One [`TargetSubDAGCandidates`]'s candidates, ranked best-first by
-/// [`CandidateLogicalASAPDAGs::cost_sorted`].
+/// [`cost_sorted`].
 #[derive(Debug)]
 pub struct RankedTargetSubDAGCandidates<'a> {
     pub target: &'a Rc<OperatorNode>,
@@ -568,7 +563,7 @@ fn realize_one(target: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
 /// copy is test-only, so this needs its own for real (non-test) ranking
 /// code — the same "duplicate a small, self-contained traversal rather than
 /// restructure a test helper" call this file's own top doc already makes
-/// for [`discover_targets`].
+/// for `discover_targets`.
 pub(crate) fn sketch_kind_of(node: &OperatorNode) -> Option<SketchAlgorithm> {
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
@@ -596,50 +591,7 @@ fn summary_grouping(node: &OperatorNode) -> Option<&GroupingStrategy> {
 
 // ── global_selection ─────────────────────────────────────────────────────
 
-/// One target sub-DAG's selected choice and usage information — the answer
-/// [`CandidateLogicalASAPDAGs::global_selection`] commits to for one site, after folding in
-/// every ancestor [`SharedSubDAGStrategy`] decision on the path from a
-/// workload root to this site. See the module docs' "Whole-plan
-/// (cross-group) selection" section for the full recurrence.
-///
-/// Contrast with [`RankedTargetSubDAGCandidates`] ([`CandidateLogicalASAPDAGs::cost_sorted`]'s output):
-/// that ranks every candidate for one target in isolation and never commits
-/// to just one; this commits to exactly one (or none), and the count it
-/// ranks against — [`Self::effective_consumer_count`] — can differ from the
-/// target's own raw structural [`TargetSubDAGCandidates::consumer_count`] whenever an
-/// ancestor's choice changes how many times this site truly runs. Use
-/// `cost_sorted` to inspect every alternative for a site; use
-/// `global_selection` when you need this module's best single answer,
-/// accounting for cross-target interaction where it knows how to.
-#[derive(Debug)]
-pub struct TargetSubDAGSelection<'a> {
-    /// The target sub-DAG this selection is for.
-    pub target: &'a Rc<OperatorNode>,
-    /// [`TargetSubDAGCandidates::consumer_count`] — how many operator-child positions
-    /// directly reference `target`, ignoring every ancestor's own choice.
-    pub consumer_count: usize,
-    /// How many times `target`'s computation actually runs once every
-    /// ancestor's own selected candidate is accounted for — see
-    /// [`multiplier`]'s doc for the exact recurrence. Equal to
-    /// `consumer_count` unless some ancestor on a path from a root to this
-    /// site has a [`SharedSubDAGStrategy`] alternative that chose
-    /// [`ShareDecision::RecomputeIndependently`].
-    pub effective_consumer_count: usize,
-    /// The candidate chosen for this target, or `None` when no replacement
-    /// is selected. The candidate set need not be empty: an unproven DDSketch
-    /// ratio can remain available for backend inspection but be excluded from
-    /// automatic selection, or costing can prefer raw recomputation.
-    /// DAG assembly then preserves exact computation at this target where
-    /// supported, while independently selected children may remain visible.
-    pub chosen: Option<&'a ReplacementSubDAG>,
-    /// When `chosen` is a [`Replacement::ExactComposition`]: the child
-    /// decision it was committed together with, and the cost comparison
-    /// that justified it — the explicit target-to-decision provenance
-    /// chain (issue #171).
-    pub composition: Option<CompositionDecision<'a>>,
-}
-
-/// Why [`CandidateLogicalASAPDAGs::global_selection`] committed an exact composition at a
+/// Why [`global_selection`] committed an exact composition at a
 /// site: which child candidate it composes with, and the
 /// cost-units-per-second comparison against the raw fallback that it won.
 #[derive(Debug)]
@@ -662,385 +614,28 @@ pub struct CompositionDecision<'a> {
     pub inputs: ExactCompositionCostInputs,
 }
 
-/// [`CandidateLogicalASAPDAGs::global_selection`]'s result: one [`TargetSubDAGSelection`] per
-/// discovered site, in the same discovery order [`CandidateLogicalASAPDAGs::target_subdag_candidates`]/
-/// [`CandidateLogicalASAPDAGs::cost_sorted`] use.
+/// [`global_selection`]'s result: the [`GlobalSelection`] it committed to,
+/// plus the cost comparison behind each exact composition it chose. The
+/// selection is a Stage 1 type and carries no cost data, so the comparison
+/// is kept here.
 #[derive(Debug)]
-pub struct GlobalSelection<'a> {
-    pub(crate) order: Vec<*const OperatorNode>,
-    pub(crate) groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'a>>,
-    /// [`Self::assemble_selected_dag`]'s memo — one bound node per target for the
-    /// life of this selection, so two parents composing over one shared
-    /// child get the *same* `Rc<OperatorNode>` (a kept pre-ASAP sub-DAG
-    /// shared by two parents stays one `Rc` the same way).
-    pub(crate) assembled_nodes: RefCell<HashMap<*const OperatorNode, Rc<OperatorNode>>>,
+pub struct CostedGlobalSelection<'a> {
+    selection: GlobalSelection<'a>,
+    compositions: HashMap<*const OperatorNode, CompositionDecision<'a>>,
 }
 
-fn normalize_cross_input_equi_predicate(
-    pred: &Predicate,
-    left_width: usize,
-    total_width: usize,
-) -> Option<Predicate> {
-    let ScalarExpr::Compare {
-        left,
-        op: asap_types::ir::scalar::CompareOpKind::Eq,
-        right,
-        semantics,
-    } = &pred.0
-    else {
-        return None;
-    };
-    let (ScalarExpr::Column(left_id), ScalarExpr::Column(right_id)) =
-        (left.as_ref(), right.as_ref())
-    else {
-        return None;
-    };
-    let is_left = |id: ColumnId| id < left_width;
-    let is_right = |id: ColumnId| left_width <= id && id < total_width;
-    let (left_id, right_id) = if is_left(*left_id) && is_right(*right_id) {
-        (*left_id, *right_id)
-    } else if is_right(*left_id) && is_left(*right_id) {
-        (*right_id, *left_id)
-    } else {
-        return None;
-    };
-    Some(Predicate(ScalarExpr::Compare {
-        left: Box::new(ScalarExpr::Column(left_id)),
-        op: asap_types::ir::scalar::CompareOpKind::Eq,
-        right: Box::new(ScalarExpr::Column(right_id)),
-        semantics: *semantics,
-    }))
-}
-
-impl<'a> GlobalSelection<'a> {
-    /// One selection per discovered target sub-DAG, in discovery order.
-    pub fn target_selections(&self) -> impl Iterator<Item = &TargetSubDAGSelection<'a>> {
-        self.order.iter().map(move |ptr| &self.groups[ptr])
-    }
-
-    /// The selection for `target`, if `target`'s own `Rc` is a discovered
-    /// site (i.e. `Rc::ptr_eq` to some node reachable from the workload's
-    /// roots).
-    pub fn for_target(&self, target: &Rc<OperatorNode>) -> Option<&TargetSubDAGSelection<'a>> {
-        self.groups.get(&Rc::as_ptr(target))
-    }
-
-    /// Link this selection's per-site decisions into one data_state-validated
-    /// post-ASAP DAG rooted at `target` — the one place a committed
-    /// composition's child *reference* becomes an actual `Rc<OperatorNode>`
-    /// edge (issue #171). `None` if `target` is not a discovered site.
-    ///
-    /// Per site: a [`Replacement::ExactComposition`] uses its validated
-    /// operation/child plan, retaining the search model's guarantee;
-    /// a bound-summary [`Replacement::SubDAG`] is
-    /// re-linked so its `SummaryAgg` child is the child target's own
-    /// DAG assembly whenever that is phase-legal beneath maintenance
-    /// (so a child that chose an `ValueOperationAtIngestionTime` actually ends up under
-    /// the summary); a logical-rewrite [`Replacement::SubDAG`] is kept
-    /// as it is (exact); an unmatched site keeps its own operator with each
-    /// child assembled independently ([`Self::assemble_residual`]).
-    /// Memoized by target identity, so a shared inner summary is one `Rc`
-    /// no matter how many roots reach it.
-    pub fn assemble_selected_dag(
-        &self,
-        target: &Rc<OperatorNode>,
-    ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
-        if !self.groups.contains_key(&Rc::as_ptr(target)) {
-            return Ok(None);
-        }
-        self.assemble_target(target).map(Some)
-    }
-
-    /// Assemble a complete query result, including an exact-state evaluation when
-    /// needed. `assemble_selected_dag` also serves internal state frontiers;
-    /// callers exposing query results must use this boundary instead.
-    pub fn assemble_selected_query(
-        &self,
-        target: &Rc<OperatorNode>,
-    ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
-        self.assemble_selected_dag(target)?
-            .map(|node| finalize_query_candidate(node, target))
-            .transpose()
-    }
-
-    pub(crate) fn assemble_target(
-        &self,
-        target: &Rc<OperatorNode>,
-    ) -> Result<Rc<OperatorNode>, RealizationError> {
-        let ptr = Rc::as_ptr(target);
-        if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
-            return Ok(Rc::clone(node));
-        }
-        // A selected summary that realizes its inner aggregate, instead of
-        // hiding it in `KeepPreAsap`, is kept; materialization assignment decides
-        // whether it runs in precompute or at query time.
-        let selected_composed_summary = self
-            .groups
-            .get(&ptr)
-            .and_then(|sel| sel.chosen)
-            .is_some_and(|candidate| {
-                matches!(&candidate.replacement,
-                Replacement::SubDAG(node) if matches!(&node.operator,
-                    Operator::ASAP(ASAPOp::SummaryAgg { child, .. })
-                    if child.contains_asap() || !contains_aggregate(child)))
-            });
-        let node = if query_time_nested_sum(target) && !selected_composed_summary {
-            self.assemble_residual(target)?
-        } else {
-            match self
-                .groups
-                .get(&ptr)
-                .and_then(|sel| sel.chosen)
-                .map(|c| &c.replacement)
-            {
-                None => self.assemble_residual(target)?,
-                Some(Replacement::SubDAG(node)) if node.contains_asap() => {
-                    self.relink_summary(node, target)?
-                }
-                Some(Replacement::SubDAG(kept)) => retain_exact(kept)?,
-                Some(Replacement::ExactComposition(_)) => Rc::clone(
-                    &self.groups[&ptr]
-                        .composition
-                        .as_ref()
-                        .expect("selected compositions have a validated decision")
-                        .plan,
-                ),
-            }
-        };
-        self.assembled_nodes
-            .borrow_mut()
-            .insert(ptr, Rc::clone(&node));
-        Ok(node)
-    }
-
-    /// Keep `target`'s own operator and assemble each child independently,
-    /// so a selected summary remains visible beneath a relational operator
-    /// that has no summary realization of its own instead of being
-    /// swallowed by one opaque kept sub-DAG. Every child that is a
-    /// discovered target is assembled (and finalized to query-time values);
-    /// any other child is kept as it is. The guarantee is composed from the
-    /// assembled children: all exact → exact; exactly one child → that
-    /// child's guarantee; otherwise unknown. An inner `Join` first has its
-    /// cross-input equi-predicate normalized; any other join is kept whole.
-    fn assemble_residual(
-        &self,
-        target: &Rc<OperatorNode>,
-    ) -> Result<Rc<OperatorNode>, RealizationError> {
-        if target.children().is_empty() {
-            // A leaf has nothing to assemble beneath it: keep it as it is.
-            return retain_exact(target);
-        }
-        let mut operator = target.operator.clone();
-        if let Operator::NonASAP(NonASAPOp::Join {
-            left,
-            right,
-            kind,
-            pred,
-        }) = &mut operator
-        {
-            let left_width = left.schema.fields.len();
-            let total_width = left_width + right.schema.fields.len();
-            let normalized_pred = matches!(kind, JoinKind::Inner)
-                .then(|| normalize_cross_input_equi_predicate(pred, left_width, total_width))
-                .flatten();
-            let Some(normalized) = normalized_pred else {
-                return retain_exact(target);
-            };
-            *pred = normalized;
-        }
-        let mut failure = None;
-        let mut children = Vec::new();
-        let operator = operator.map_children(|child| {
-            if failure.is_some() {
-                return Rc::clone(child);
-            }
-            let assembled = if self.groups.contains_key(&Rc::as_ptr(child)) {
-                self.assemble_target(child)
-                    .and_then(|node| finalize_query_candidate(node, child))
-            } else {
-                Ok(Rc::clone(child))
-            };
-            match assembled {
-                Ok(node) => {
-                    children.push(Rc::clone(&node));
-                    node
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    Rc::clone(child)
-                }
-            }
-        });
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        // An operator that computes new values from its input rows has no
-        // sound accuracy composition over an approximate input (e.g. `max`
-        // over a quantile evaluation's rank error). Without a selected
-        // composition such a node stays an exact pre-ASAP sub-DAG; only the
-        // read-time nested SUM keeps its assembled children.
-        let computes_values = matches!(
-            target.non_asap(),
-            Some(
-                NonASAPOp::Aggregate { .. }
-                    | NonASAPOp::BinaryOp { .. }
-                    | NonASAPOp::SQLWindowFunc { .. }
-            )
-        ) && !query_time_nested_sum(target);
-        let approximate_input = children.iter().any(|child| {
-            !child
-                .guarantee
-                .as_ref()
-                .is_some_and(ResultGuarantee::is_exact)
-        });
-        if computes_values && approximate_input {
-            return retain_exact(target);
-        }
-        let guarantee = match children.as_slice() {
-            [child] => child.guarantee.clone(),
-            children
-                if children.iter().all(|child| {
-                    child
-                        .guarantee
-                        .as_ref()
-                        .is_some_and(ResultGuarantee::is_exact)
-                }) =>
-            {
-                Some(ResultGuarantee::exact(format!(
-                    "{} over exact inputs",
-                    target.operator.kind_name()
-                )))
-            }
-            _ => None,
-        };
-        let node = Rc::new(
-            OperatorNode::with_schema(operator, target.schema.clone()).with_guarantee(guarantee),
-        );
-        validate_maintained(&node, ExecutionTiming::QueryTime)?;
-        Ok(node)
-    }
-
-    /// Re-link a bound summary candidate's `SummaryAgg` child to the
-    /// child target's own DAG assembly when that is legal beneath
-    /// maintenance; otherwise keep the candidate exactly as constructed.
-    fn relink_summary(
-        &self,
-        node: &Rc<OperatorNode>,
-        target: &Rc<OperatorNode>,
-    ) -> Result<Rc<OperatorNode>, RealizationError> {
-        let Some(NonASAPOp::Aggregate {
-            child: pre_child, ..
-        }) = target.non_asap()
-        else {
-            return Ok(Rc::clone(node));
-        };
-        let has_maintenance_operation = self
-            .groups
-            .get(&Rc::as_ptr(pre_child))
-            .and_then(|selection| selection.chosen)
-            .is_some_and(|candidate| {
-                matches!(
-                    &candidate.replacement,
-                    Replacement::ExactComposition(composition)
-                        if composition.placement == OperationPlacement::Maintenance
-                )
-            });
-        if !has_maintenance_operation {
-            return Ok(Rc::clone(node));
-        }
-        let new_child = self.assemble_target(pre_child)?;
-        Ok(relink_agg_child(node, &new_child))
+impl<'a> CostedGlobalSelection<'a> {
+    /// The decision behind `target`'s chosen exact composition, if it chose one.
+    pub fn composition(&self, target: &Rc<OperatorNode>) -> Option<&CompositionDecision<'a>> {
+        self.compositions.get(&Rc::as_ptr(target))
     }
 }
 
-/// A mergeable outer SUM over a relationally wrapped aggregate is a read-time
-/// reduction of the inner summary values. Maintaining the outer SUM directly
-/// would hide that inner temporal aggregate inside one kept sub-DAG and lose
-/// its independently selected summary.
-fn query_time_nested_sum(target: &OperatorNode) -> bool {
-    let Some(NonASAPOp::Aggregate {
-        measures,
-        filters,
-        having: None,
-        child,
-        ..
-    }) = target.non_asap()
-    else {
-        return false;
-    };
-    !any_measure_filtered(filters)
-        && matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-        && contains_aggregate(child)
-}
+impl<'a> std::ops::Deref for CostedGlobalSelection<'a> {
+    type Target = GlobalSelection<'a>;
 
-fn contains_aggregate(expr: &OperatorNode) -> bool {
-    match expr.non_asap() {
-        Some(NonASAPOp::Aggregate { .. }) => true,
-        Some(
-            NonASAPOp::Project { child, .. }
-            | NonASAPOp::Filter { child, .. }
-            | NonASAPOp::Sort { child, .. }
-            | NonASAPOp::Limit { child, .. },
-        ) => contains_aggregate(child),
-        _ => false,
-    }
-}
-
-/// Rebuild `node` (a `SummaryAgg`, possibly under a `SummaryEstimate`) with
-/// `new_child` as the `SummaryAgg`'s child, if the result still validates
-/// as maintained state; otherwise return `node` unchanged.
-fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    match &node.operator {
-        Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input,
-            query,
-        }) => {
-            let inner = relink_agg_child(summary_input, new_child);
-            if Rc::ptr_eq(&inner, summary_input) {
-                return Rc::clone(node);
-            }
-            std::rc::Rc::new(
-                OperatorNode::with_schema(
-                    asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate {
-                        summary_input: inner,
-                        query: query.clone(),
-                    }),
-                    node.schema.clone(),
-                )
-                .with_guarantee(node.guarantee.clone()),
-            )
-        }
-        Operator::ASAP(ASAPOp::SummaryAgg {
-            child,
-            family,
-            input,
-            reduction,
-            grouping,
-            filter,
-        }) => {
-            if Rc::ptr_eq(child, new_child) {
-                return Rc::clone(node);
-            }
-            let rebuilt = std::rc::Rc::new(
-                OperatorNode::with_schema(
-                    asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
-                        child: Rc::clone(new_child),
-                        family: family.clone(),
-                        input: input.clone(),
-                        reduction: reduction.clone(),
-                        grouping: grouping.clone(),
-                        filter: filter.clone(),
-                    }),
-                    node.schema.clone(),
-                )
-                .with_guarantee(node.guarantee.clone()),
-            );
-            match validate_maintained(&rebuilt, ExecutionTiming::IngestionTime) {
-                Ok(_) => rebuilt,
-                Err(_) => Rc::clone(node),
-            }
-        }
-        _ => Rc::clone(node),
+    fn deref(&self) -> &Self::Target {
+        &self.selection
     }
 }
 
@@ -1061,7 +656,7 @@ fn is_composition_candidate(candidate: &ReplacementSubDAG) -> bool {
     matches!(candidate.replacement, Replacement::ExactComposition(_))
 }
 
-/// Everything [`CandidateLogicalASAPDAGs::global_selection`] threads between sites for
+/// Everything [`global_selection`] threads between sites for
 /// exact compositions (issue #171): child candidates already committed by
 /// an earlier parent, and the maintained summary above each site.
 #[derive(Default)]
@@ -1099,7 +694,7 @@ fn composition_options<'a>(
         let Replacement::ExactComposition(composition) = &candidate.replacement else {
             continue;
         };
-        if candidate.runtime_support_evidence(cost_model) != Some(true) {
+        if runtime_support_evidence(candidate, cost_model) != Some(true) {
             continue;
         }
         let child_ptr = Rc::as_ptr(&composition.child_target);
@@ -1206,306 +801,310 @@ fn composition_options<'a>(
     options
 }
 
-impl<Id> CandidateLogicalASAPDAGs<Id> {
-    /// The whole-plan (cross-group) selection step the module docs'
-    /// "Whole-plan (cross-group) selection" section describes: one
-    /// [`TargetSubDAGSelection`] per discovered site, each ranked against an
-    /// `effective_consumer_count` that accounts for every ancestor
-    /// [`SharedSubDAGStrategy`] decision on the path to it — unlike
-    /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
-    /// group's own raw [`TargetSubDAGCandidates::consumer_count`].
-    /// Uncertified DDSketch ratios remain in [`CandidateLogicalASAPDAGs`] for downstream
-    /// inspection but are not chosen automatically by this selector.
-    pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
-        self.global_selection_impl(cost_model, None, None)
-            .expect("structural global selection cannot produce a recurrence error")
-    }
+/// The whole-plan (cross-group) selection step the module docs'
+/// "Whole-plan (cross-group) selection" section describes: one
+/// [`TargetSubDAGSelection`] per discovered site, each ranked against an
+/// `effective_consumer_count` that accounts for every ancestor
+/// [`SharedSubDAGStrategy`] decision on the path to it — unlike
+/// [`cost_sorted`], whose per-group ranking only ever sees a
+/// group's own raw [`TargetSubDAGCandidates::consumer_count`].
+/// Uncertified DDSketch ratios remain in [`CandidateLogicalASAPDAGs`] for downstream
+/// inspection but are not chosen automatically by this selector.
+pub fn global_selection<'a, Id>(
+    space: &'a CandidateLogicalASAPDAGs<Id>,
+    cost_model: &dyn CostModel,
+) -> CostedGlobalSelection<'a> {
+    global_selection_impl(space, cost_model, None, None)
+        .expect("structural global selection cannot produce a recurrence error")
+}
 
-    /// Recurrence-aware counterpart to [`Self::global_selection`]. The same
-    /// whole-plan traversal and effective structural consumer counts are
-    /// retained, while every CSE share/recompute choice is made from the
-    /// corresponding recurrence profile.
-    pub fn global_selection_with_recurrence(
-        &self,
-        cost_model: &dyn CostModel,
-        profiles: &RecurrenceProfileMap,
-        horizon: Option<Horizon>,
-    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        self.global_selection_impl(cost_model, Some(profiles), horizon)
-    }
+/// Recurrence-aware counterpart to [`global_selection`]. The same
+/// whole-plan traversal and effective structural consumer counts are
+/// retained, while every CSE share/recompute choice is made from the
+/// corresponding recurrence profile.
+pub fn global_selection_with_recurrence<'a, Id>(
+    space: &'a CandidateLogicalASAPDAGs<Id>,
+    cost_model: &dyn CostModel,
+    profiles: &RecurrenceProfileMap,
+    horizon: Option<Horizon>,
+) -> Result<CostedGlobalSelection<'a>, RecurrenceError> {
+    global_selection_impl(space, cost_model, Some(profiles), horizon)
+}
 
-    fn global_selection_impl(
-        &self,
-        cost_model: &dyn CostModel,
-        profiles: Option<&RecurrenceProfileMap>,
-        horizon: Option<Horizon>,
-    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        let dag = reference_dag(self);
-        let topo = topological_order(&self.order, &dag);
+fn global_selection_impl<'a, Id>(
+    space: &'a CandidateLogicalASAPDAGs<Id>,
+    cost_model: &dyn CostModel,
+    profiles: Option<&RecurrenceProfileMap>,
+    horizon: Option<Horizon>,
+) -> Result<CostedGlobalSelection<'a>, RecurrenceError> {
+    let dag = reference_dag(space);
+    let topo = topological_order(space.order(), &dag);
 
-        let mut effective_uses = dag.external_root_uses.clone();
-        let mut chosen_share: HashMap<*const OperatorNode, ShareDecision> = HashMap::new();
-        let mut groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'_>> = HashMap::new();
-        let mut context = CompositionContext::default();
+    let mut effective_uses = dag.external_root_uses.clone();
+    let mut chosen_share: HashMap<*const OperatorNode, ShareDecision> = HashMap::new();
+    let mut groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'a>> = HashMap::new();
+    let mut compositions: HashMap<*const OperatorNode, CompositionDecision<'a>> = HashMap::new();
+    let mut context = CompositionContext::default();
 
-        for ptr in &topo {
-            let group = &self.groups[ptr];
+    for ptr in &topo {
+        let group = &space.groups()[ptr];
 
-            let effective = effective_uses.get(ptr).copied().unwrap_or(0);
-            effective_uses.insert(*ptr, effective);
+        let effective = effective_uses.get(ptr).copied().unwrap_or(0);
+        effective_uses.insert(*ptr, effective);
 
-            // ── Exact compositions (issue #171) ─────────────────────────
-            // A child an earlier parent's composition committed to is
-            // forced to exactly that candidate — the parent/child pair is
-            // one decision. Otherwise, a composition here wins only when
-            // its cost-units-per-second rate is *known* and beats the raw
-            // recompute baseline; missing statistics keep the conservative
-            // path below.
-            let mut composition_decision = None;
-            let forced = context
-                .committed_child
-                .get(ptr)
-                .and_then(|&cptr| group.candidates.iter().find(|c| std::ptr::eq(*c, cptr)));
-            let composed = if forced.is_some() {
-                None
-            } else {
-                composition_options(
-                    group,
-                    &self.groups,
-                    effective,
-                    cost_model,
-                    &context,
-                    &self.composition_plans,
-                )
-                .into_iter()
-                .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
-            };
-            if let Some(option) = &composed {
-                if let Some(child_candidate) = option.decision.child_candidate {
-                    context.committed_child.insert(
-                        Rc::as_ptr(option.decision.child_target),
-                        child_candidate as *const ReplacementSubDAG,
-                    );
-                }
-                if let Replacement::ExactComposition(composition) = &option.candidate.replacement {
-                    if composition.placement == OperationPlacement::Maintenance {
-                        // A chain of functions feeds the same summary.
-                        if let Some(parent) = context.maintaining_parent.get(ptr).cloned() {
-                            context
-                                .maintaining_parent
-                                .insert(Rc::as_ptr(&composition.child_target), parent);
-                        }
+        // ── Exact compositions (issue #171) ─────────────────────────
+        // A child an earlier parent's composition committed to is
+        // forced to exactly that candidate — the parent/child pair is
+        // one decision. Otherwise, a composition here wins only when
+        // its cost-units-per-second rate is *known* and beats the raw
+        // recompute baseline; missing statistics keep the conservative
+        // path below.
+        let mut composition_decision = None;
+        let forced = context
+            .committed_child
+            .get(ptr)
+            .and_then(|&cptr| group.candidates.iter().find(|c| std::ptr::eq(*c, cptr)));
+        let composed = if forced.is_some() {
+            None
+        } else {
+            composition_options(
+                group,
+                space.groups(),
+                effective,
+                cost_model,
+                &context,
+                space.composition_plans(),
+            )
+            .into_iter()
+            .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
+        };
+        if let Some(option) = &composed {
+            if let Some(child_candidate) = option.decision.child_candidate {
+                context.committed_child.insert(
+                    Rc::as_ptr(option.decision.child_target),
+                    child_candidate as *const ReplacementSubDAG,
+                );
+            }
+            if let Replacement::ExactComposition(composition) = &option.candidate.replacement {
+                if composition.placement == OperationPlacement::Maintenance {
+                    // A chain of functions feeds the same summary.
+                    if let Some(parent) = context.maintaining_parent.get(ptr).cloned() {
+                        context
+                            .maintaining_parent
+                            .insert(Rc::as_ptr(&composition.child_target), parent);
                     }
                 }
             }
+        }
 
-            let complete_plan_choice = (!forced.is_some()
-                && composed.is_none()
-                && cost_model.candidate_cost_covers_complete_plan())
-            .then(|| {
-                let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
-                let bound = group
-                    .candidates
-                    .iter()
-                    .filter(|candidate| {
-                        !is_cse_candidate(candidate)
-                            && !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate, cost_model)
+        let complete_plan_choice = (!forced.is_some()
+            && composed.is_none()
+            && cost_model.candidate_cost_covers_complete_plan())
+        .then(|| {
+            let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
+            let bound = group
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    !is_cse_candidate(candidate)
+                        && !is_composition_candidate(candidate)
+                        && is_automatically_selectable(candidate, cost_model)
+                })
+                .filter_map(|candidate| {
+                    cost_model
+                        .candidate_cost(candidate, &effective_target)
+                        .map(|cost| (candidate, cost))
+                })
+                .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
+                .map(|(candidate, _)| candidate);
+            bound.or_else(|| {
+                (cost_model.allow_uncosted_legacy_selection() && effective >= 2)
+                    .then(|| {
+                        decide_with_effective_count(group, effective, cost_model).and_then(
+                            |decision| {
+                                let candidate = pick_shared_sub_dag_candidate(group, decision)?;
+                                chosen_share.insert(*ptr, decision);
+                                Some(candidate)
+                            },
+                        )
                     })
-                    .filter_map(|candidate| {
+                    .flatten()
+            })
+        })
+        .flatten();
+
+        let chosen = if let Some(forced) = forced {
+            Some(forced)
+        } else if let Some(option) = composed {
+            composition_decision = Some(option.decision);
+            Some(option.candidate)
+        } else if cost_model.candidate_cost_covers_complete_plan() {
+            complete_plan_choice
+        } else if effective >= 2 && cse_candidate_pair(group).is_some() {
+            let decision = if let Some(profiles) = profiles {
+                decide_group_with_recurrence(
+                    group,
+                    effective,
+                    profiles.for_target(&group.target),
+                    horizon,
+                    cost_model,
+                )?
+            } else {
+                decide_with_effective_count(group, effective, cost_model)
+            };
+            match decision {
+                Some(decision) => {
+                    let cse = pick_shared_sub_dag_candidate(group, decision);
+                    let effective_target =
+                        TargetSubDAG::with_consumer_count(&group.target, effective);
+                    let logical = group
+                        .candidates
+                        .iter()
+                        .filter(|candidate| {
+                            !is_cse_candidate(candidate)
+                                && !is_composition_candidate(candidate)
+                                && is_automatically_selectable(candidate, cost_model)
+                        })
+                        .filter_map(|candidate| {
+                            cost_model
+                                .candidate_cost(candidate, &effective_target)
+                                .map(|cost| (candidate, cost))
+                        })
+                        .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
+                        .map(|(candidate, _)| candidate);
+                    let cse = cse.filter(|candidate| {
                         cost_model
                             .candidate_cost(candidate, &effective_target)
-                            .map(|cost| (candidate, cost))
-                    })
-                    .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
-                    .map(|(candidate, _)| candidate);
-                bound.or_else(|| {
-                    (cost_model.allow_uncosted_legacy_selection() && effective >= 2)
-                        .then(|| {
-                            decide_with_effective_count(group, effective, cost_model).and_then(
-                                |decision| {
-                                    let candidate = pick_shared_sub_dag_candidate(group, decision)?;
-                                    chosen_share.insert(*ptr, decision);
-                                    Some(candidate)
-                                },
+                            .is_some()
+                            || cost_model.allow_uncosted_legacy_selection()
+                    });
+                    match (cse, logical) {
+                        (Some(cse), Some(logical))
+                            if cost_model
+                                .candidate_cost(cse, &effective_target)
+                                .is_none_or(|cse_cost| {
+                                    cost_model
+                                        .candidate_cost(logical, &effective_target)
+                                        .is_some_and(|logical_cost| logical_cost.0 < cse_cost.0)
+                                }) =>
+                        {
+                            Some(logical)
+                        }
+                        (cse, _) => {
+                            if cse.is_some() {
+                                chosen_share.insert(*ptr, decision);
+                            }
+                            cse
+                        }
+                    }
+                }
+                // `realize_child` couldn't produce even a logical fallback —
+                // not expected in practice for a target that's already
+                // part of a legitimate workload DAG (mirrors
+                // `cse_preference`'s own doc on this same degrade).
+                // Falling back to ordinary local ranking is still a
+                // valid answer, just not a cross-group-aware one; this
+                // group also contributes no Share collapse to its own
+                // children (see `multiplier`'s `_ => effective` arm).
+                None => rank_group(group, cost_model).into_iter().find(|candidate| {
+                    !is_composition_candidate(candidate)
+                        && is_automatically_selectable(candidate, cost_model)
+                        && (cost_model
+                            .candidate_cost(
+                                candidate,
+                                &TargetSubDAG::with_consumer_count(&group.target, effective),
                             )
-                        })
-                        .flatten()
+                            .is_some()
+                            || cost_model.allow_uncosted_legacy_selection())
+                }),
+            }
+        } else {
+            let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
+            rank_group(group, cost_model)
+                .into_iter()
+                .find(|candidate| {
+                    !is_cse_candidate(candidate)
+                        && !is_composition_candidate(candidate)
+                        && is_automatically_selectable(candidate, cost_model)
+                        && (cost_model
+                            .candidate_cost(candidate, &effective_target)
+                            .is_some()
+                            || cost_model.allow_uncosted_legacy_selection())
                 })
-            })
-            .flatten();
-
-            let chosen = if let Some(forced) = forced {
-                Some(forced)
-            } else if let Some(option) = composed {
-                composition_decision = Some(option.decision);
-                Some(option.candidate)
-            } else if cost_model.candidate_cost_covers_complete_plan() {
-                complete_plan_choice
-            } else if effective >= 2 && cse_candidate_pair(group).is_some() {
-                let decision = if let Some(profiles) = profiles {
-                    decide_group_with_recurrence(
-                        group,
-                        effective,
-                        profiles.for_target(&group.target),
-                        horizon,
-                        cost_model,
-                    )?
-                } else {
-                    decide_with_effective_count(group, effective, cost_model)
-                };
-                match decision {
-                    Some(decision) => {
-                        let cse = pick_shared_sub_dag_candidate(group, decision);
-                        let effective_target =
-                            TargetSubDAG::with_consumer_count(&group.target, effective);
-                        let logical = group
-                            .candidates
-                            .iter()
-                            .filter(|candidate| {
-                                !is_cse_candidate(candidate)
-                                    && !is_composition_candidate(candidate)
-                                    && is_automatically_selectable(candidate, cost_model)
-                            })
-                            .filter_map(|candidate| {
-                                cost_model
-                                    .candidate_cost(candidate, &effective_target)
-                                    .map(|cost| (candidate, cost))
-                            })
-                            .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
-                            .map(|(candidate, _)| candidate);
-                        let cse = cse.filter(|candidate| {
+                .or_else(|| {
+                    cse_candidate_pair(group)
+                        .map(|(share, _)| share)
+                        .filter(|candidate| {
                             cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
                                 || cost_model.allow_uncosted_legacy_selection()
-                        });
-                        match (cse, logical) {
-                            (Some(cse), Some(logical))
-                                if cost_model
-                                    .candidate_cost(cse, &effective_target)
-                                    .is_none_or(|cse_cost| {
-                                        cost_model
-                                            .candidate_cost(logical, &effective_target)
-                                            .is_some_and(|logical_cost| logical_cost.0 < cse_cost.0)
-                                    }) =>
-                            {
-                                Some(logical)
-                            }
-                            (cse, _) => {
-                                if cse.is_some() {
-                                    chosen_share.insert(*ptr, decision);
-                                }
-                                cse
-                            }
-                        }
-                    }
-                    // `realize_child` couldn't produce even a logical fallback —
-                    // not expected in practice for a target that's already
-                    // part of a legitimate workload DAG (mirrors
-                    // `cse_preference`'s own doc on this same degrade).
-                    // Falling back to ordinary local ranking is still a
-                    // valid answer, just not a cross-group-aware one; this
-                    // group also contributes no Share collapse to its own
-                    // children (see `multiplier`'s `_ => effective` arm).
-                    None => rank_group(group, cost_model).into_iter().find(|candidate| {
-                        !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate, cost_model)
-                            && (cost_model
-                                .candidate_cost(
-                                    candidate,
-                                    &TargetSubDAG::with_consumer_count(&group.target, effective),
-                                )
-                                .is_some()
-                                || cost_model.allow_uncosted_legacy_selection())
-                    }),
-                }
-            } else {
-                let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
-                rank_group(group, cost_model)
-                    .into_iter()
-                    .find(|candidate| {
-                        !is_cse_candidate(candidate)
-                            && !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate, cost_model)
-                            && (cost_model
-                                .candidate_cost(candidate, &effective_target)
-                                .is_some()
-                                || cost_model.allow_uncosted_legacy_selection())
-                    })
-                    .or_else(|| {
-                        cse_candidate_pair(group)
-                            .map(|(share, _)| share)
-                            .filter(|candidate| {
-                                cost_model
-                                    .candidate_cost(candidate, &effective_target)
-                                    .is_some()
-                                    || cost_model.allow_uncosted_legacy_selection()
-                            })
-                    })
-            };
+                        })
+                })
+        };
 
-            // Record the maintained summary this site's bound candidate
-            // builds, for a child that may compose an `ValueOperationAtIngestionTime`
-            // beneath it.
-            if let (Some(Replacement::SubDAG(node)), Some(NonASAPOp::Aggregate { child, .. })) =
-                (chosen.map(|c| &c.replacement), group.target.non_asap())
-            {
-                if let Some(summary) = maintained_summary(node) {
-                    context
-                        .maintaining_parent
-                        .insert(Rc::as_ptr(child), Rc::clone(summary));
-                }
+        // Record the maintained summary this site's bound candidate
+        // builds, for a child that may compose an `ValueOperationAtIngestionTime`
+        // beneath it.
+        if let (Some(Replacement::SubDAG(node)), Some(NonASAPOp::Aggregate { child, .. })) =
+            (chosen.map(|c| &c.replacement), group.target.non_asap())
+        {
+            if let Some(summary) = maintained_summary(node) {
+                context
+                    .maintaining_parent
+                    .insert(Rc::as_ptr(child), Rc::clone(summary));
             }
-
-            let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
-            match chosen {
-                Some(ReplacementSubDAG {
-                    replacement: Replacement::SubDAG(source),
-                    provenance: ReplacementProvenance::AccuracyReconciliation,
-                    ..
-                }) => {
-                    // Accuracy reconciliation reads another discovered memo
-                    // group, rather than inlining that group's children. Let
-                    // the source group receive the uses and propagate them
-                    // through its own selected realization when its turn
-                    // arrives in topological order.
-                    *effective_uses.entry(Rc::as_ptr(source)).or_insert(0) += outgoing_multiplier;
-                }
-                _ => {
-                    let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
-                        Some(Replacement::SubDAG(rewrite)) if is_logical_rewrite(rewrite) => {
-                            rewrite
-                        }
-                        Some(Replacement::SubDAG(_) | Replacement::ExactComposition(_)) | None => {
-                            &group.target
-                        }
-                    };
-                    for (child, edge_count) in direct_child_counts(selected_rewrite) {
-                        *effective_uses.entry(child).or_insert(0) +=
-                            edge_count * outgoing_multiplier;
-                    }
-                }
-            }
-
-            groups.insert(
-                *ptr,
-                TargetSubDAGSelection {
-                    target: &group.target,
-                    consumer_count: group.consumer_count,
-                    effective_consumer_count: effective,
-                    chosen,
-                    composition: composition_decision,
-                },
-            );
         }
 
-        Ok(GlobalSelection {
-            order: self.order.clone(),
-            groups,
-            assembled_nodes: RefCell::new(HashMap::new()),
-        })
+        let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
+        match chosen {
+            Some(ReplacementSubDAG {
+                replacement: Replacement::SubDAG(source),
+                provenance: ReplacementProvenance::AccuracyReconciliation,
+                ..
+            }) => {
+                // Accuracy reconciliation reads another discovered memo
+                // group, rather than inlining that group's children. Let
+                // the source group receive the uses and propagate them
+                // through its own selected realization when its turn
+                // arrives in topological order.
+                *effective_uses.entry(Rc::as_ptr(source)).or_insert(0) += outgoing_multiplier;
+            }
+            _ => {
+                let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
+                    Some(Replacement::SubDAG(rewrite)) if is_logical_rewrite(rewrite) => rewrite,
+                    Some(Replacement::SubDAG(_) | Replacement::ExactComposition(_)) | None => {
+                        &group.target
+                    }
+                };
+                for (child, edge_count) in direct_child_counts(selected_rewrite) {
+                    *effective_uses.entry(child).or_insert(0) += edge_count * outgoing_multiplier;
+                }
+            }
+        }
+
+        groups.insert(
+            *ptr,
+            TargetSubDAGSelection {
+                target: &group.target,
+                consumer_count: group.consumer_count,
+                effective_consumer_count: effective,
+                chosen,
+            },
+        );
+        if let Some(decision) = composition_decision {
+            compositions.insert(*ptr, decision);
+        }
     }
+
+    let composition_plans = compositions
+        .iter()
+        .map(|(ptr, decision)| (*ptr, Rc::clone(&decision.plan)))
+        .collect();
+    Ok(CostedGlobalSelection {
+        selection: GlobalSelection::new(space.order().to_vec(), groups, composition_plans),
+        compositions,
+    })
 }
 
 fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
@@ -1518,7 +1117,7 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
 fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn CostModel) -> bool {
     candidate.provenance != ReplacementProvenance::RootPhysicalRealization
         && !candidate.has_missing_accuracy_evidence()
-        && candidate.runtime_support_evidence(cost_model) != Some(false)
+        && runtime_support_evidence(candidate, cost_model) != Some(false)
 }
 
 /// How much one direct reference to `parent_ptr` actually costs, once
@@ -1538,7 +1137,7 @@ fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn C
 ///
 /// Composing this recurrence transitively up the whole ancestor chain (not
 /// just the immediate parent) is exactly what makes
-/// [`CandidateLogicalASAPDAGs::global_selection`]'s `effective_consumer_count` differ from
+/// [`global_selection`]'s `effective_consumer_count` differ from
 /// [`TargetSubDAGCandidates::consumer_count`] whenever a `RecomputeIndependently`
 /// ancestor sits anywhere on the path from a root to a site — see the
 /// module docs' "Whole-plan (cross-group) selection" section.
@@ -1616,8 +1215,8 @@ fn pick_shared_sub_dag_candidate(
 
 // ── reference DAG + topological order ─────────────────────────────────
 
-/// The parent/child structure [`CandidateLogicalASAPDAGs::global_selection`]'s DP walks —
-/// built separately from [`discover_targets`]'s own `order`/`nodes`/`counts`
+/// The parent/child structure [`global_selection`]'s DP walks —
+/// built separately from `discover_targets`'s own `order`/`nodes`/`counts`
 /// maps (which only track *aggregate* reference counts, not per-parent
 /// breakdown or direction). Selection needs per-parent edge counts to
 /// distinguish shared producers from repeated uses within one consumer.
@@ -1636,7 +1235,7 @@ struct ReferenceDAG {
     /// a node's "external" use. Nothing inside the DAG decides this (it
     /// isn't a reference from another discovered site), so it's never
     /// subject to any ancestor's Share/Recompute choice — it's the base
-    /// case [`CandidateLogicalASAPDAGs::global_selection`]'s recurrence starts from.
+    /// case [`global_selection`]'s recurrence starts from.
     external_root_uses: HashMap<*const OperatorNode, usize>,
 }
 
@@ -1656,8 +1255,8 @@ fn reference_dag<Id>(space: &CandidateLogicalASAPDAGs<Id>) -> ReferenceDAG {
     for (_, root) in &space.roots {
         *dag.external_root_uses.entry(Rc::as_ptr(root)).or_insert(0) += 1;
     }
-    for ptr in &space.order {
-        let group = &space.groups[ptr];
+    for ptr in space.order() {
+        let group = &space.groups()[ptr];
         record_possible_edges(*ptr, &group.target, &mut dag);
         for candidate in &group.candidates {
             if let Replacement::SubDAG(rewrite) = &candidate.replacement {
@@ -1707,11 +1306,11 @@ fn record_possible_edges(
 
 /// A topological order over `order` (parent before every child) via Kahn's
 /// algorithm on `dag`'s reverse adjacency — needed because
-/// [`discover_targets`]'s own `order` is only a valid *discovery* order
+/// `discover_targets`'s own `order` is only a valid *discovery* order
 /// (first-seen-first), not a valid topological one: a node reached via two
 /// different root paths can have a parent that's discovered *after* it (see
 /// this function's own test for a worked diamond example), which is exactly
-/// backwards for [`CandidateLogicalASAPDAGs::global_selection`]'s recurrence.
+/// backwards for [`global_selection`]'s recurrence.
 fn topological_order(
     order: &[*const OperatorNode],
     dag: &ReferenceDAG,
@@ -1756,16 +1355,24 @@ fn topological_order(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accuracy::DefaultAccuracyModel;
     use crate::cost_model::{Cost, DefaultCostModel};
-    use crate::replacement::{
-        default_strategies, discover_targets, search_workload, search_workload_with,
-        search_workload_with_targets, ASAPStrategies, ReplacementStrategy,
-    };
     use crate::test_support::{agg, lower_promql, metric_scan};
-    use asap_types::ir::operator::agg_intent::default_quantile;
+    use asap_logical_optimizer::accuracy::{
+        AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+    };
+    use asap_logical_optimizer::pass1::replacement::{
+        default_strategies, search_workload, search_workload_with, search_workload_with_targets,
+        ASAPStrategies, ReplacementStrategy,
+    };
+    use asap_logical_optimizer::pass2::reconciliation::AccuracyReconciliationStrategy;
+    use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile, AggIntent};
     use asap_types::ir::operator::operator_properties::Reduction;
-    use asap_types::ir::ProjectItem;
+    use asap_types::ir::properties::{
+        AccuracyError, CompositionOperator, ErrorMetric, ResultGuarantee,
+    };
+    use asap_types::ir::schema::ColumnId;
+    use asap_types::ir::schema::SketchStatistic;
+    use asap_types::ir::{Predicate, ScalarExpr};
     use asap_types::types::AccuracyTarget;
 
     fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
@@ -1783,21 +1390,6 @@ mod tests {
             q,
             accuracy: AccuracyTarget::Epsilon(e),
         }
-    }
-
-    fn realize(expr: &OperatorNode) -> Result<Rc<OperatorNode>, RealizationError> {
-        realize_child(&Rc::new(expr.clone()))
-    }
-
-    #[test]
-    fn relational_join_predicate_requires_and_normalizes_cross_input_columns() {
-        let forward = normalize_cross_input_equi_predicate(&equi_pred(1, 3), 2, 4)
-            .expect("left-to-right equality");
-        let reverse = normalize_cross_input_equi_predicate(&equi_pred(3, 1), 2, 4)
-            .expect("right-to-left equality");
-        assert_eq!(forward, reverse, "reverse equality must be canonicalized");
-        assert!(normalize_cross_input_equi_predicate(&equi_pred(0, 1), 2, 4).is_none());
-        assert!(normalize_cross_input_equi_predicate(&equi_pred(0, 4), 2, 4).is_none());
     }
 
     #[test]
@@ -1836,8 +1428,7 @@ mod tests {
             ),
         ] {
             let space = search_workload(vec![(0usize, Rc::clone(&root))]);
-            let assembled = space
-                .global_selection(&DefaultCostModel)
+            let assembled = global_selection(&space, &DefaultCostModel)
                 .assemble_selected_query(&space.roots[0].1)
                 .unwrap()
                 .unwrap();
@@ -1871,7 +1462,7 @@ mod tests {
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert_eq!(group.consumer_count, 20);
 
-        let ranked = space.cost_sorted(&DefaultCostModel);
+        let ranked = cost_sorted(&space, &DefaultCostModel);
         let ranked_group = ranked
             .iter()
             .find(|g| Rc::ptr_eq(g.target, &space.roots[0].1))
@@ -1917,7 +1508,7 @@ mod tests {
 
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]);
-        let ranked = space.cost_sorted(&PreferDDSketch);
+        let ranked = cost_sorted(&space, &PreferDDSketch);
         let agg_group = ranked
             .iter()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
@@ -1958,7 +1549,7 @@ mod tests {
             };
             let root = agg(vec![2, 3], intent, metric_scan(&["tenant_id", "endpoint"]));
             let space = search_workload(vec![("tenant_endpoint_count", root)]);
-            let ranked = space.cost_sorted(&model);
+            let ranked = cost_sorted(&space, &model);
             let aggregate = ranked
                 .iter()
                 .find(|group| matches!(group.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
@@ -1989,7 +1580,7 @@ mod tests {
     fn cost_sorted_pairs_each_candidate_with_its_own_estimate_cost() {
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]);
-        let ranked = space.cost_sorted(&DefaultCostModel);
+        let ranked = cost_sorted(&space, &DefaultCostModel);
         let agg_group = ranked
             .iter()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
@@ -2075,7 +1666,7 @@ mod tests {
         let space = search_workload(vec![("left", Rc::clone(&aggregate)), ("right", aggregate)]);
         let root = &space.roots[0].1;
         assert!(cse_candidate_pair(space.candidates_for_target(root).unwrap()).is_some());
-        let selected = space.global_selection(&MixedCost);
+        let selected = global_selection(&space, &MixedCost);
         let chosen = selected.for_target(root).unwrap().chosen.unwrap();
         assert!(!is_cse_candidate(chosen));
     }
@@ -2089,8 +1680,8 @@ mod tests {
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]);
 
-        let ranked = space.cost_sorted(&DefaultCostModel);
-        let selected = space.global_selection(&DefaultCostModel);
+        let ranked = cost_sorted(&space, &DefaultCostModel);
+        let selected = global_selection(&space, &DefaultCostModel);
         assert_eq!(ranked.len(), selected.target_selections().count());
 
         for ranked_group in &ranked {
@@ -2115,7 +1706,7 @@ mod tests {
         // doc) — global_selection must not invent a candidate for it.
         let root = metric_scan(&["job"]);
         let space = search_workload(vec![("q", root)]);
-        let selected = space.global_selection(&DefaultCostModel);
+        let selected = global_selection(&space, &DefaultCostModel);
         let scan_group = selected
             .target_selections()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Scan { .. })))
@@ -2153,7 +1744,7 @@ mod tests {
 
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]);
-        let selected = space.global_selection(&PreferDDSketch);
+        let selected = global_selection(&space, &PreferDDSketch);
         let agg_group = selected
             .target_selections()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
@@ -2174,8 +1765,7 @@ mod tests {
                 candidates.to_vec()
             }
         }
-        assert!(space
-            .global_selection(&Uncosted)
+        assert!(global_selection(&space, &Uncosted)
             .for_target(&space.roots[0].1)
             .unwrap()
             .chosen
@@ -2185,32 +1775,36 @@ mod tests {
     #[test]
     fn mixed_rewrite_group_keeps_and_selects_its_explicit_cse_pair() {
         let target = metric_scan(&["job"]);
-        let mut group = TargetSubDAGCandidates::new(Rc::clone(&target), 2);
-        group.candidates = vec![
-            ReplacementSubDAG {
-                strategy: "TestStrategy",
-                replacement: Replacement::SubDAG(Rc::clone(&target)),
-                provenance: ReplacementProvenance::CseShare,
-                rationale: "share".into(),
-            },
-            ReplacementSubDAG {
-                strategy: "TestStrategy",
-                replacement: Replacement::SubDAG(Rc::new(target.as_ref().clone())),
-                provenance: ReplacementProvenance::CseRecompute,
-                rationale: "recompute".into(),
-            },
-            ReplacementSubDAG {
-                strategy: "TestStrategy",
-                replacement: Replacement::SubDAG(
-                    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
-                        NonASAPOp::PromqlVectorFromScalar(ScalarExpr::EvalTimestamp),
-                    ))
-                    .unwrap(),
-                ),
-                provenance: ReplacementProvenance::LogicalRewrite,
-                rationale: "different rewrite strategy".into(),
-            },
-        ];
+        let group = TargetSubDAGCandidates {
+            target: Rc::clone(&target),
+            consumer_count: 2,
+            rejected: Vec::new(),
+            candidates: vec![
+                ReplacementSubDAG {
+                    strategy: "TestStrategy",
+                    replacement: Replacement::SubDAG(Rc::clone(&target)),
+                    provenance: ReplacementProvenance::CseShare,
+                    rationale: "share".into(),
+                },
+                ReplacementSubDAG {
+                    strategy: "TestStrategy",
+                    replacement: Replacement::SubDAG(Rc::new(target.as_ref().clone())),
+                    provenance: ReplacementProvenance::CseRecompute,
+                    rationale: "recompute".into(),
+                },
+                ReplacementSubDAG {
+                    strategy: "TestStrategy",
+                    replacement: Replacement::SubDAG(
+                        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+                            NonASAPOp::PromqlVectorFromScalar(ScalarExpr::EvalTimestamp),
+                        ))
+                        .unwrap(),
+                    ),
+                    provenance: ReplacementProvenance::LogicalRewrite,
+                    rationale: "different rewrite strategy".into(),
+                },
+            ],
+        };
 
         assert!(cse_candidate_pair(&group).is_some());
         let ranked = rank_group(&group, &ConstantCseCost);
@@ -2315,7 +1909,7 @@ mod tests {
 
         // The naive/local answer: cost_sorted ranks c using its raw count
         // (2) alone and prefers RecomputeIndependently.
-        let ranked = space.cost_sorted(&ConstantCseCost);
+        let ranked = cost_sorted(&space, &ConstantCseCost);
         let c_ranked = ranked
             .iter()
             .find(|g| Rc::ptr_eq(g.target, c_via_a))
@@ -2333,7 +1927,7 @@ mod tests {
         // The corrected, cross-group-aware answer: global_selection folds
         // a's own RecomputeIndependently choice into c's effective count
         // (2 from a + 1 from root3 = 3) and flips to Share.
-        let selected = space.global_selection(&ConstantCseCost);
+        let selected = global_selection(&space, &ConstantCseCost);
         let a_selected = selected.for_target(a_rc).unwrap();
         let c_selected = selected.for_target(c_via_a).unwrap();
 
@@ -2406,7 +2000,7 @@ mod tests {
         ]);
         let planned = &space.roots[0].1;
 
-        let selected = space.global_selection(&CompletePlanCost);
+        let selected = global_selection(&space, &CompletePlanCost);
         assert!(selected.for_target(planned).unwrap().chosen.is_none());
     }
 
@@ -2438,7 +2032,7 @@ mod tests {
         assert_eq!(space.candidates_for_target(c_rc).unwrap().consumer_count, 1);
         assert!(cse_candidate_pair(space.candidates_for_target(c_rc).unwrap()).is_some());
 
-        let selected = space.global_selection(&ConstantCseCost);
+        let selected = global_selection(&space, &ConstantCseCost);
         let child = selected.for_target(c_rc).unwrap();
         assert_eq!(child.effective_consumer_count, 2);
         assert!(child.chosen.is_some());
@@ -2491,7 +2085,7 @@ mod tests {
             panic!("expected Filter root");
         };
 
-        let selected = space.global_selection(&AlwaysShare);
+        let selected = global_selection(&space, &AlwaysShare);
         assert_eq!(
             selected
                 .for_target(parent_rc)
@@ -2546,7 +2140,7 @@ mod tests {
         let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(ReplaceFilterChild)];
         let space = search_workload_with(vec![("q", root)], &strategies);
         let root = &space.roots[0].1;
-        let selected = space.global_selection(&DefaultCostModel);
+        let selected = global_selection(&space, &DefaultCostModel);
         let Replacement::SubDAG(rewrite) = &selected
             .for_target(root)
             .unwrap()
@@ -2608,7 +2202,7 @@ mod tests {
         }
         let root = lower_promql("sum_over_time(a[1m])", AccuracyTarget::Exact);
         let space = search_workload(vec![("q", root)]);
-        let selected = space.global_selection(&Unsupported);
+        let selected = global_selection(&space, &Unsupported);
         assert!(selected
             .for_target(&space.roots[0].1)
             .unwrap()
@@ -2655,8 +2249,11 @@ mod tests {
             }
         }
         let space = search_workload(vec![("q", root.clone())]);
-        let selected = space.global_selection(&PreferComposed);
-        let node = selected.assemble_target(&space.roots[0].1).unwrap();
+        let selected = global_selection(&space, &PreferComposed);
+        let node = selected
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .unwrap();
         assert!(matches!(&node.operator,
             Operator::ASAP(ASAPOp::SummaryAgg { reduction: Reduction::Reduce(_), child, .. })
                 if !child.contains_asap()));
@@ -2690,7 +2287,7 @@ mod tests {
         }
         let root = lower_promql("sum by(job)(sum_over_time(a[1m]))", AccuracyTarget::Exact);
         let space = search_workload(vec![("q", root)]);
-        let selection = space.global_selection(&ExplicitCosts);
+        let selection = global_selection(&space, &ExplicitCosts);
         let selected = selection
             .for_target(&space.roots[0].1)
             .unwrap()
@@ -2728,7 +2325,7 @@ mod tests {
         let b = agg(vec![2], AggIntent::Avg { col: None }, metric_scan(&["job"]));
         let space = search_workload(vec![("a", a), ("b", b)]);
         let root = &space.roots[0].1;
-        let selected = space.global_selection(&PreferLogicalRewrite);
+        let selected = global_selection(&space, &PreferLogicalRewrite);
 
         assert_eq!(
             selected
@@ -2766,25 +2363,8 @@ mod tests {
             .unwrap();
         let roots = vec![("a", root_a), ("b", root_b)];
 
-        let mut order = Vec::new();
-        let mut nodes = HashMap::new();
-        let mut counts = HashMap::new();
-        discover_targets(&roots, &mut order, &mut nodes, &mut counts);
-        let groups = order
-            .iter()
-            .map(|ptr| {
-                (
-                    *ptr,
-                    TargetSubDAGCandidates::new(Rc::clone(&nodes[ptr]), counts[ptr]),
-                )
-            })
-            .collect();
-        let space = CandidateLogicalASAPDAGs {
-            roots,
-            groups,
-            order: order.clone(),
-            composition_plans: Vec::new(),
-        };
+        let space = search_workload(roots);
+        let order = space.order();
         let dag = reference_dag(&space);
 
         // Discovery-order sanity: root_b comes after the shared child in
@@ -2806,7 +2386,7 @@ mod tests {
             "fixture sanity: discover_targets's own order must NOT already be topological here"
         );
 
-        let topo = topological_order(&order, &dag);
+        let topo = topological_order(order, &dag);
         let shared_topo_pos = topo.iter().position(|p| *p == shared_ptr).unwrap();
         let root_b_topo_pos = topo.iter().position(|p| *p == root_b_ptr).unwrap();
         assert!(
@@ -2816,50 +2396,464 @@ mod tests {
         );
     }
 
-    // A value projection cannot consume an opaque exact accumulator edge.
+    // ── Selection over Stage 1 candidates (split from `replacement` tests) ─
+
+    // Every exposed query result has a evaluation; internal accumulator frontiers stay states.
     #[test]
-    fn residual_projection_finalizes_selected_exact_state() {
-        let inner = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&[]));
-        let root =
-            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
-                cols: vec![ProjectItem {
-                    expr: ScalarExpr::Column(0),
-                    alias: Some("result".into()),
-                }],
-                qualifier: None,
-                child: inner.clone(),
-            }))
-            .unwrap();
+    fn selected_query_roots_do_not_leak_exact_accumulator_state() {
+        for query in [
+            "sum by(job)(rate(m[1m]))",
+            "sum by(job)(m)",
+            "sum_over_time(m[1m])",
+        ] {
+            let root = lower_promql(query, AccuracyTarget::Exact);
+            let space = search_workload(vec![(0usize, root)]);
+            let selected = global_selection(&space, &DefaultCostModel)
+                .assemble_selected_query(&space.roots[0].1)
+                .unwrap()
+                .unwrap();
+            assert!(
+                selected
+                    .schema
+                    .fields
+                    .iter()
+                    .all(|field| matches!(field.dtype, FieldDataType::Plain(_))),
+                "{query}: query root leaks state: {:?}",
+                selected.schema
+            );
+        }
+    }
+
+    /// Candidates kept with missing accuracy evidence are never chosen automatically.
+    #[test]
+    fn selection_never_chooses_a_candidate_missing_accuracy_evidence() {
+        let never_unproven = |space: &CandidateLogicalASAPDAGs<&str>| {
+            let selected = global_selection(space, &DefaultCostModel);
+            assert!(!selected
+                .for_target(&space.roots[0].1)
+                .unwrap()
+                .chosen
+                .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
+            assert!(selected
+                .assemble_selected_dag(&space.roots[0].1)
+                .unwrap()
+                .is_some());
+        };
+        let count = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        never_unproven(&search_workload(vec![(
+            "q",
+            agg(vec![2], count, metric_scan(&["job"])),
+        )]));
+        never_unproven(&search_workload_with_targets(
+            vec![(
+                "q",
+                agg(vec![2], default_cardinality(), metric_scan(&["job"])),
+                Some(AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                }),
+            )],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        ));
+        let inner = agg(
+            vec![2],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["job"]),
+        );
+        let topk = agg(
+            vec![],
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            inner,
+        );
+        never_unproven(&search_workload_with_targets(
+            vec![("q", topk, Some(AccuracyTarget::Epsilon(0.01)))],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        ));
+    }
+
+    /// A root target that rejects every summary leaves nothing to select.
+    #[test]
+    fn nothing_is_selected_when_the_root_target_rejects_every_summary() {
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let space = search_workload_with_targets(
-            vec![("q", root.clone(), Some(AccuracyTarget::Exact))],
+            vec![("q", q, Some(AccuracyTarget::Epsilon(0.001)))],
             &default_strategies(),
             &DefaultAccuracyModel,
         );
-        let selected = space.global_selection(&DefaultCostModel);
-        // CSE re-interns the workload, so the space's root/child `Rc`s are not
-        // the fixture's. Assembly only assembles children that are discovered
-        // targets, so seed the memo under the space's own child pointer.
-        let root = Rc::clone(&space.roots[0].1);
-        let Some(NonASAPOp::Project { child: inner, .. }) = root.non_asap() else {
-            unreachable!()
-        };
-        assert!(space.candidates_for_target(inner).is_some());
-        selected
-            .assembled_nodes
-            .borrow_mut()
-            .insert(Rc::as_ptr(inner), realize(inner.as_ref()).unwrap());
-        let node = selected.assemble_target(&root).unwrap();
-        let Operator::NonASAP(NonASAPOp::Project { child, .. }) = &node.operator else {
-            panic!("expected Project");
+        let root = &space.roots[0].1;
+        assert!(global_selection(&space, &DefaultCostModel)
+            .for_target(root)
+            .unwrap()
+            .chosen
+            .is_none());
+    }
+
+    /// Admits rank-over-rank composition, which `DefaultAccuracyModel` has no
+    /// rule for, so a nested quantile summary can be selected.
+    struct RankAdditiveModel;
+
+    impl AccuracyModel for RankAdditiveModel {
+        fn local_guarantee(
+            &self,
+            family: &FieldDataType,
+            query: &SketchStatistic,
+        ) -> Option<ResultGuarantee> {
+            DefaultAccuracyModel.local_guarantee(family, query)
+        }
+
+        fn propagate(
+            &self,
+            op: &CompositionOperator,
+            inputs: &[ResultGuarantee],
+            local: Option<&ResultGuarantee>,
+            stats: &PropagationStats,
+        ) -> Result<ResultGuarantee, AccuracyError> {
+            let rank = |g: &ResultGuarantee| g.is_exact() || g.metric == ErrorMetric::Rank;
+            if let (CompositionOperator::ApproximateAggregate, true, Some(local)) =
+                (op, inputs.iter().all(rank), local)
+            {
+                let relabel = |g: &ResultGuarantee| ResultGuarantee {
+                    metric: ErrorMetric::AbsoluteValue,
+                    ..g.clone()
+                };
+                let inputs: Vec<_> = inputs.iter().map(relabel).collect();
+                let mut out =
+                    DefaultAccuracyModel.propagate(op, &inputs, Some(&relabel(local)), stats)?;
+                out.metric = local.metric;
+                return Ok(out);
+            }
+            DefaultAccuracyModel.propagate(op, inputs, local, stats)
+        }
+
+        fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
+            DefaultAccuracyModel.satisfies(guarantee, target)
+        }
+    }
+
+    #[test]
+    fn global_selection_can_choose_nested_summaries() {
+        // The same nested summary remains available through workload search
+        // and global cost ranking.
+        let inner = agg(
+            vec![2],
+            quantile_eps_intent(0.5, 0.1),
+            metric_scan(&["job"]),
+        );
+        let outer = agg(vec![], quantile_eps_intent(0.99, 0.1), inner);
+        let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(
+            ASAPStrategies::new_with_planning_inputs(&RankAdditiveModel, &EqualSplitAllocator),
+        )];
+        let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies);
+        let root = &space.roots[0].1;
+        let group = space.candidates_for_target(root).unwrap();
+        assert!(!group.rejected.is_empty());
+        assert!(group.candidates.iter().all(|c| match &c.replacement {
+            // A summary candidate (old `Replacement::Summary`) contains an
+            // ASAP node; a logical rewrite (old `Replacement::Rewrite`) does not.
+            Replacement::SubDAG(node) if node.contains_asap() => {
+                node.guarantee.as_ref().is_some_and(|g| {
+                    DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
+                })
+            }
+            Replacement::SubDAG(_) => false,
+            Replacement::ExactComposition(_) => false,
+        }));
+        let ranked = cost_sorted(&space, &DefaultCostModel);
+        let root_ranked = ranked.iter().find(|g| Rc::ptr_eq(g.target, root)).unwrap();
+        assert_eq!(root_ranked.candidates.len(), group.candidates.len());
+
+        let selection = global_selection(&space, &DefaultCostModel);
+        let chosen = selection
+            .for_target(root)
+            .unwrap()
+            .chosen
+            .expect("a nested summary candidate wins");
+        let Replacement::SubDAG(node) = &chosen.replacement else {
+            panic!()
         };
         assert!(matches!(
-            child.operator,
-            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
+            node.operator,
+            Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         ));
-        assert!(child
-            .schema
-            .fields
-            .iter()
-            .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
+    }
+
+    // ── Accuracy reconciliation (moved from `accuracy::reconciliation` tests) ─
+
+    mod accuracy_reconciliation {
+        use super::*;
+        use asap_types::ir::operator::operator_properties::Source;
+        use asap_types::ir::schema::{DataType, Field, Schema};
+
+        /// `[ts(0), value(1), job(2)]`, uniquely keyed by `ts` so CSE can hoist it.
+        fn metric_scan() -> Rc<OperatorNode> {
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries { metric: "m".into() },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("value", DataType::Float64, false),
+                        Field::plain("job", DataType::Utf8, true),
+                    ],
+                    0,
+                    vec![vec![0]],
+                ),
+            }))
+            .unwrap()
+        }
+
+        fn quantile(
+            q: f64,
+            accuracy: AccuracyTarget,
+            child: &Rc<OperatorNode>,
+        ) -> Rc<OperatorNode> {
+            agg(
+                vec![2],
+                AggIntent::Quantile {
+                    col: None,
+                    q,
+                    accuracy,
+                },
+                Rc::clone(child),
+            )
+        }
+
+        // ── cost: reading the sibling must not be priced like recomputing
+        //    `target` independently per consumer ────────────────────────────────
+
+        #[test]
+        fn estimate_cost_does_not_scale_with_the_readers_own_consumer_count() {
+            // Regression guard for the review-reported sign inversion: pricing
+            // this candidate like `CseRecompute` ("rebuild `target`, once per
+            // consumer") made it artificially *more* expensive exactly as more
+            // of `target`'s own consumers stood to benefit from reading the
+            // already-necessary tighter sibling instead — the literal opposite
+            // of the intended incentive. The real cost is "one more read against
+            // `rc`'s own build," which must not scale with `target`'s own
+            // `consumer_count`.
+            let scan = metric_scan();
+            let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+            let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
+            let strategy =
+                AccuracyReconciliationStrategy::new(&[Rc::clone(&tight), Rc::clone(&loose)]);
+            let candidate = strategy
+                .replacements(&TargetSubDAG::new(&loose))
+                .into_iter()
+                .next()
+                .expect("loose has a reconciliation candidate reading the tight sibling");
+
+            let cost_model = DefaultCostModel;
+            let single_consumer = TargetSubDAG::with_consumer_count(&loose, 1);
+            let many_consumers = TargetSubDAG::with_consumer_count(&loose, 5);
+
+            let cost_single = cost_model.estimate_cost(&candidate, &single_consumer);
+            let cost_many = cost_model.estimate_cost(&candidate, &many_consumers);
+
+            assert!(
+                cost_single.is_finite(),
+                "expected a real cost, not the NaN placeholder: {cost_single}"
+            );
+            assert_eq!(
+                cost_single, cost_many,
+                "AccuracyReconciliation's estimate_cost must price 'read the sibling', not scale \
+                 with the reader's own consumer_count the way CseRecompute's 'rebuild independently \
+                 per consumer' formula does (single-consumer: {cost_single}, 5 consumers: \
+                 {cost_many})"
+            );
+        }
+
+        // ── cost_sorted / global_selection: single-consumer and shared-consumer ─
+
+        #[test]
+        fn cost_sorted_and_global_selection_handle_a_single_consumer_looser_target() {
+            let scan = metric_scan();
+            let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+            let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
+            let space = search_workload(vec![("tight", tight), ("loose", loose)]);
+            let loose_root = &space.roots[1].1;
+
+            let cost_model = DefaultCostModel;
+            let ranked = cost_sorted(&space, &cost_model);
+            let loose_ranked = ranked
+                .iter()
+                .find(|group| Rc::ptr_eq(group.target, loose_root))
+                .expect("loose has its own ranked group");
+            assert!(
+                loose_ranked.costs.iter().all(|cost| cost.is_finite()),
+                "no candidate should cost NaN under DefaultCostModel: {:?}",
+                loose_ranked.costs
+            );
+            assert!(
+                loose_ranked
+                    .candidates
+                    .iter()
+                    .any(|c| c.strategy == "AccuracyReconciliationStrategy"),
+                "the reconciliation candidate must still be present, ranked, not filtered"
+            );
+
+            let selected = global_selection(&space, &cost_model);
+            let chosen = selected
+                .for_target(loose_root)
+                .and_then(|group| group.chosen);
+            assert!(
+                chosen.is_some(),
+                "global_selection must commit to some candidate for a single-consumer looser target"
+            );
+            // With no recompute term at all (it never rebuilds `target`), this
+            // candidate strictly undercuts every ASAPStrategies
+            // candidate (which each pay a recompute term on top of their own
+            // maintenance term) under DefaultCostModel's numbers — the sane
+            // direction: reading an already-necessary sibling should be able to
+            // win on its own merit, not just fail to lose as badly as before.
+            assert_eq!(
+                chosen.map(|c| c.provenance),
+                Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::AccuracyReconciliation)
+            );
+        }
+
+        #[test]
+        fn cost_sorted_and_global_selection_handle_a_shared_looser_target() {
+            // The loose accuracy target itself has 2 direct consumers (two
+            // independently-built but structurally identical loose queries
+            // merge onto one Rc via ordinary CSE), *and* a separate,
+            // single-consumer tight sibling exists over the same input — the
+            // scenario the issue itself targets: `SharedSubDAGStrategy`'s own
+            // CseShare/CseRecompute pair is on the table for the loose target's
+            // own 2 consumers at the same time as this strategy's "read the
+            // tight sibling instead" candidate.
+            let scan = metric_scan();
+            let loose_a = (*quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan)).clone();
+            let loose_b = (*quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan)).clone();
+            let tight = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
+
+            let space = search_workload(vec![
+                ("loose_a", Rc::new(loose_a)),
+                ("loose_b", Rc::new(loose_b)),
+                ("tight", Rc::new(tight)),
+            ]);
+
+            // Fixture sanity: the two loose roots really did merge onto one Rc.
+            assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
+            let loose_group = space
+                .candidates_for_target(&space.roots[0].1)
+                .expect("the merged loose target has a group");
+            assert_eq!(loose_group.consumer_count, 2);
+            assert!(
+                loose_group
+                    .candidates
+                    .iter()
+                    .any(|c| c.strategy == "AccuracyReconciliationStrategy"),
+                "the reconciliation candidate must still be proposed alongside the CSE share/recompute \
+                 pair, not crowded out: {:?}",
+                loose_group
+                    .candidates
+                    .iter()
+                    .map(|c| (c.strategy, c.provenance))
+                    .collect::<Vec<_>>()
+            );
+
+            let cost_model = DefaultCostModel;
+            let ranked = cost_sorted(&space, &cost_model);
+            let loose_ranked = ranked
+                .iter()
+                .find(|group| Rc::ptr_eq(group.target, &space.roots[0].1))
+                .expect("loose has its own ranked group");
+            assert!(
+                loose_ranked.costs.iter().all(|cost| cost.is_finite()),
+                "no candidate should cost NaN under DefaultCostModel, shared or not: {:?}",
+                loose_ranked.costs
+            );
+
+            let selected = global_selection(&space, &cost_model);
+            let chosen = selected
+                .for_target(&space.roots[0].1)
+                .and_then(|group| group.chosen);
+            assert!(
+                chosen.is_some(),
+                "global_selection must commit to some candidate for the shared looser target"
+            );
+            // Under `DefaultCostModel`'s numbers, `CseShare` (flat maintenance,
+            // no recompute term) and this strategy's own candidate (also a
+            // flat, non-scaling read cost after the fix) land tied, and
+            // `global_selection` breaks ties in `CseShare`'s favor (it only ever
+            // overrides the CSE choice on a *strict* `<`, not `<=`) — a sane,
+            // deliberate tie-break, not the "reconciliation always loses to
+            // CseShare regardless of its own real merit" bug this test guards
+            // against (see `estimate_cost_does_not_scale_with_the_readers_own_consumer_count`
+            // for the direct regression check that the old `* consumer_count`
+            // scaling — which made this an unfair, ever-widening loss instead
+            // of a tie — is gone).
+            assert_eq!(
+                chosen.map(|c| c.provenance),
+                Some(asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare)
+            );
+        }
+
+        #[test]
+        fn global_selection_propagates_reconciled_consumers_to_the_tighter_group() {
+            struct PreferReconciliation;
+
+            impl CostModel for PreferReconciliation {
+                fn rank_candidates(
+                    &self,
+                    _intent: &AggIntent,
+                    candidates: &[SketchAlgorithm],
+                ) -> Vec<SketchAlgorithm> {
+                    candidates.to_vec()
+                }
+
+                fn estimate_cost(
+                    &self,
+                    candidate: &ReplacementSubDAG,
+                    _target: &TargetSubDAG<'_>,
+                ) -> f64 {
+                    if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
+                        0.0
+                    } else {
+                        100.0
+                    }
+                }
+            }
+
+            let scan = metric_scan();
+            let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+            let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
+            let space = search_workload(vec![
+                ("tight", Rc::clone(&tight)),
+                ("loose", Rc::clone(&loose)),
+            ]);
+
+            let selected = global_selection(&space, &PreferReconciliation);
+            let tight_root = &space.roots[0].1;
+            let loose_root = &space.roots[1].1;
+            assert_eq!(
+                selected
+                    .for_target(loose_root)
+                    .and_then(|group| group.chosen)
+                    .map(|candidate| candidate.provenance),
+                Some(ReplacementProvenance::AccuracyReconciliation),
+                "fixture must select the cross-sibling rewrite"
+            );
+            assert_eq!(
+                selected
+                    .for_target(tight_root)
+                    .expect("the tighter sibling is a discovered memo group")
+                    .effective_consumer_count,
+                2,
+                "the tighter build serves its original root and the reconciled looser root"
+            );
+        }
     }
 }

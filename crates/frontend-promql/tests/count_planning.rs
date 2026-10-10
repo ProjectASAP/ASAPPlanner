@@ -1,7 +1,8 @@
 //! Query text through summary selection: counts use observations, never value weights.
-use asap_aware_mapping::accuracy::DefaultAccuracyModel;
 use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::{
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
+use asap_logical_optimizer::accuracy::DefaultAccuracyModel;
+use asap_logical_optimizer::{
     default_strategies, search_workload_with_targets, ASAPStrategies, Replacement,
     ReplacementStrategy, TargetSubDAG,
 };
@@ -39,8 +40,7 @@ fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
     assert!(hydra
         .iter()
         .all(|candidate| candidate.has_missing_accuracy_evidence()));
-    assert!(!space
-        .global_selection(&DefaultCostModel)
+    assert!(!global_selection(&space, &DefaultCostModel)
         .for_target(planned)
         .unwrap()
         .chosen

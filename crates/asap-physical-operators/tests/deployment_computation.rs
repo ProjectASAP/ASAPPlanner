@@ -53,22 +53,25 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
 fn exact_dag(query: &str) -> PhysicalASAPDAG {
     let expression = lower(query);
     let root = promql_rows::with_series_identity(&expression).unwrap_or(expression);
-    let space = asap_aware_mapping::search_workload(vec![("q", root)]);
-    let selected = space
-        .global_selection(&asap_aware_mapping::DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
-        .unwrap()
-        .unwrap();
+    let space = asap_logical_optimizer::search_workload(vec![("q", root)]);
+    let selected = asap_aware_mapping::plan_selection::candidate_selection::global_selection(
+        &space,
+        &asap_aware_mapping::DefaultCostModel,
+    )
+    .assemble_selected_dag(&space.roots[0].1)
+    .unwrap()
+    .unwrap();
     compile_physical_asap_dag(&selected).unwrap()
 }
 
 fn population_dag(query: &str) -> PhysicalASAPDAG {
     let root = promql_rows::with_series_identity(&lower(query)).unwrap();
-    let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
-        std::slice::from_ref(&root),
-    )
-    .candidate(&root)
-    .unwrap();
+    let selected =
+        asap_logical_optimizer::pass1::maintained_population::MaintainedPopulationStrategy::new(
+            std::slice::from_ref(&root),
+        )
+        .candidate(&root)
+        .unwrap();
     compile_physical_asap_dag(&selected).unwrap()
 }
 
@@ -621,10 +624,10 @@ fn population_sums_and_averages_are_compensated() {
 // returns the sketch's total update weight, including colliding items.
 #[test]
 fn stored_count_min_bare_count_compiles_to_a_evaluation() {
-    use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
+    use asap_logical_optimizer::{Replacement, ReplacementStrategy, TargetSubDAG};
     use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
     let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
-    let dag = asap_aware_mapping::ASAPStrategies::default()
+    let dag = asap_logical_optimizer::ASAPStrategies::default()
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| match candidate.replacement {

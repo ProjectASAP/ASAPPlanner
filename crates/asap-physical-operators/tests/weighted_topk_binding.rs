@@ -1,10 +1,9 @@
 //! Planner output binds directly to the shared runtime at a declared rate-value frontier.
 mod common;
-use asap_aware_mapping::{
-    accuracy::{
-        AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-    },
-    ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG,
+use asap_logical_optimizer::{
+    accuracy::AccuracyEvidenceProvider, accuracy::DefaultAccuracyModel,
+    accuracy::EqualSplitAllocator, accuracy::PropagationStats, ASAPStrategies, Replacement,
+    ReplacementStrategy, TargetSubDAG,
 };
 use asap_physical_operators::dag::{
     operators::Operator,
@@ -55,11 +54,11 @@ fn planner_weighted_topk_binds_at_either_deployment_phase() {
 #[test]
 fn physical_binding_does_not_impose_an_accuracy_acceptance_policy() {
     assert_weighted_binding(
-        &asap_aware_mapping::accuracy::NoAccuracyEvidence,
+        &asap_logical_optimizer::accuracy::NoAccuracyEvidence,
         SketchAlgorithm::CmsWithHeap,
     );
     assert_weighted_binding(
-        &asap_aware_mapping::accuracy::NoAccuracyEvidence,
+        &asap_logical_optimizer::accuracy::NoAccuracyEvidence,
         SketchAlgorithm::CountSketchWithHeap,
     );
 }
