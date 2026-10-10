@@ -11,9 +11,9 @@ use asap_types::ir::operator::{AggIntent, Reduction, Source};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::schema::{
-    EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
-    NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchStatistic, SummaryInputExpr,
-    SummaryUpdate, WeightDomain,
+    default_hydra_params, DataType, EntityIdentity, ExactKind, ExactParams, FieldDataType,
+    GroupingStrategy, HydraKind, NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams,
+    SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::types::AccuracyTarget;
@@ -41,6 +41,9 @@ pub struct LocalLogicalTarget {
     ///
     /// [`add_window_forms`]: crate::pass2::window_composition::add_window_forms
     pub windows: Vec<WindowForm>,
+    /// Per alternative, how a sketch's state serves the groups: one
+    /// instance per group, or one shared Hydra grid ([`add_hydra_alternatives`]).
+    pub groupings: Vec<GroupingStrategy>,
     /// Whether the target's input values are [`counter_samples`]. Absorbing
     /// alternatives read the input's own input, which then is too.
     pub counter_input: bool,
@@ -140,16 +143,19 @@ pub fn enumerate_local_logical_candidates<Id>(
                 if let Some(NonASAPOp::Aggregate { measures, .. }) = node.non_asap() {
                     if let [intent] = measures.as_slice() {
                         let alternatives = local_realizations_for_intent(intent)?;
-                        targets.push(LocalLogicalTarget {
+                        let mut target = LocalLogicalTarget {
                             absorbs: vec![None; alternatives.len()],
                             windows: vec![WindowForm::Whole; alternatives.len()],
+                            groupings: vec![GroupingStrategy::default(); alternatives.len()],
                             alternatives,
                             counter_input: node
                                 .children()
                                 .iter()
                                 .all(|child| counter_samples(child, metric_types)),
                             target: node,
-                        });
+                        };
+                        add_hydra_alternatives(&mut target)?;
+                        targets.push(target);
                     }
                 }
             }
@@ -201,8 +207,96 @@ fn add_whole_expression_alternatives(
             target.alternatives.push(heap);
             target.absorbs.push(Some(inner));
             target.windows.push(WindowForm::Whole);
+            target.groupings.push(GroupingStrategy::default());
         }
     }
+}
+
+/// Hydra (#580 W7, count first): a grouped approximate count may keep one
+/// shared Count-Min grid for all its groups instead of one sketch per group.
+/// The grid's collision term adds to the inner sketch's error, so each half
+/// of the budget sizes one: the inner sketch and the grid get ε/2 and δ/2.
+/// Offered when the target has groups (`by`, not `without`) and an item
+/// column the kernel can hash ([`hydra_update`]).
+pub fn add_hydra_alternatives(
+    target: &mut LocalLogicalTarget,
+) -> Result<(), LogicalCandidateError> {
+    let Some(NonASAPOp::Aggregate {
+        child,
+        reduction,
+        measures,
+        ..
+    }) = target.target.non_asap()
+    else {
+        return Ok(());
+    };
+    let [intent @ AggIntent::Count { accuracy }] = measures.as_slice() else {
+        return Ok(());
+    };
+    if *accuracy == AccuracyTarget::Exact
+        || !crate::pass1::grouping::has_subpopulations(reduction)
+        || reduction.group_keys().is_some_and(|keys| keys.is_without())
+        || hydra_update(reduction, &child.schema).is_none()
+    {
+        return Ok(());
+    }
+    let (epsilon, delta) = accuracy_budget(accuracy);
+    let SketchParams::Cms { width, depth } =
+        default_size_params(SketchAlgorithm::Cms, intent, epsilon / 2.0, delta / 2.0)
+    else {
+        return Err(LogicalCandidateError::Unsupported("Count-Min sizing"));
+    };
+    let kind = SketchKind::new(SketchAlgorithm::Cms, SketchParams::Cms { width, depth });
+    let params = default_hydra_params(HydraKind::HydraCms, kind.params())
+        .ok_or(LogicalCandidateError::Unsupported("HydraCms parameters"))?;
+    target.alternatives.push(Realization::Sketch(kind));
+    target.absorbs.push(None);
+    target.windows.push(WindowForm::Whole);
+    target
+        .groupings
+        .push(GroupingStrategy::SharedMultiSubpopulation {
+            kind: HydraKind::HydraCms,
+            params,
+        });
+    Ok(())
+}
+
+/// A HydraCms update (#600's contract): a unit weight per row, hashed by
+/// a [`count_item`].
+fn hydra_update(reduction: &Reduction, child: &Schema) -> Option<SummaryUpdate> {
+    Some(SummaryUpdate {
+        item: Some(SummaryInputExpr::Column(
+            crate::pass1::replacement::column_ref(count_item(reduction, child)?),
+        )),
+        weight: SummaryInputExpr::Constant(1.0),
+        weight_domain: WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::UnitCount,
+        },
+    })
+}
+
+/// The item a count sketch hashes per row: a group's count ignores its
+/// value, so any non-null column the kernels hash (Utf8, Int64 or Bool)
+/// serves, a grouping column first. PromQL labels are nullable; the series
+/// identity is not.
+fn count_item<'a>(
+    reduction: &Reduction,
+    child: &'a Schema,
+) -> Option<&'a asap_types::ir::schema::Field> {
+    let keys = reduction
+        .group_keys()
+        .filter(|keys| !keys.is_without())
+        .into_iter()
+        .flat_map(|keys| keys.iter().copied());
+    keys.chain(0..child.fields.len())
+        .filter_map(|index| child.fields.get(index))
+        .find(|field| {
+            !field.nullable
+                && matches!(
+                    field.dtype,
+                    FieldDataType::Plain(DataType::Utf8 | DataType::Int64 | DataType::Bool)
+                )
+        })
 }
 
 /// The input and update of a whole-expression top-k over `target`'s inner
@@ -434,6 +528,7 @@ pub fn compose_logical_candidate<Id: Clone>(
                             absorbs,
                             counter_input: target.counter_input,
                             window: target.windows[index],
+                            grouping: &target.groupings[index],
                         },
                     )
                 })
@@ -473,6 +568,7 @@ struct Chosen<'a> {
     /// The target's [`LocalLogicalTarget::counter_input`].
     counter_input: bool,
     window: WindowForm,
+    grouping: &'a GroupingStrategy,
 }
 
 fn rewrite(
@@ -511,6 +607,7 @@ fn realize(
         absorbs,
         counter_input,
         window,
+        grouping,
     } = *chosen;
     let Some(NonASAPOp::Aggregate {
         child,
@@ -552,13 +649,17 @@ fn realize(
             None,
         ),
         Realization::Sketch(kind) => (
-            FieldDataType::Sketch(kind.clone(), GroupingStrategy::default()),
+            FieldDataType::Sketch(kind.clone(), grouping.clone()),
             Some(statistic(intent)?),
         ),
         _ => return Err(LogicalCandidateError::Unsupported("summary family")),
     };
     let mut input = match whole {
         Some((_, update)) => update,
+        None if *grouping != GroupingStrategy::PerSubpopulationInstance => {
+            hydra_update(reduction, &child.schema)
+                .ok_or(LogicalCandidateError::Unsupported("Hydra item column"))?
+        }
         None => summary_update(intent, &family, reduction, &child.schema)?,
     };
     if counter_input
@@ -577,7 +678,7 @@ fn realize(
                 family: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
-                grouping: GroupingStrategy::default(),
+                grouping: grouping.clone(),
                 filter: None,
             },
         ))?)
@@ -721,27 +822,16 @@ fn summary_update(
 }
 
 /// SQL `COUNT(*)`: rows have no sample value, and every row counts, so each
-/// adds a unit weight. A sketch hashes an item per row; its bare count
-/// ignores the item's value, so any non-null column serves, a grouping
-/// column first.
+/// adds a unit weight. A sketch hashes a [`count_item`] per row.
 fn sql_row_count_update(
     sketch: bool,
     reduction: &Reduction,
     child: &Schema,
 ) -> Result<SummaryUpdate, LogicalCandidateError> {
     let item = if sketch {
-        let keys = reduction
-            .group_keys()
-            .filter(|keys| !keys.is_without())
-            .into_iter()
-            .flat_map(|keys| keys.iter().copied());
-        let column = keys
-            .chain(0..child.fields.len())
-            .filter_map(|index| child.fields.get(index))
-            .find(|field| field.is_plain() && !field.nullable)
-            .ok_or(LogicalCandidateError::Unsupported(
-                "a COUNT(*) sketch needs a non-null item column",
-            ))?;
+        let column = count_item(reduction, child).ok_or(LogicalCandidateError::Unsupported(
+            "a COUNT(*) sketch needs a non-null item column",
+        ))?;
         Some(SummaryInputExpr::Column(
             crate::pass1::replacement::column_ref(column),
         ))
@@ -983,6 +1073,54 @@ mod tests {
             let root = lower_promql(query, AccuracyTarget::Exact);
             assert_eq!(counter_samples(&root, &metric_types), proven, "{query}");
         }
+    }
+
+    /// Only an approximate count with `by` groups gets a HydraCms
+    /// alternative, sized for half the budget, with a matching grouping.
+    #[test]
+    fn grouped_approximate_count_offers_hydra() {
+        let approximate = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let hydra = |query: &str, accuracy: AccuracyTarget| {
+            let root = lower_promql(query, accuracy);
+            let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+            let inventory = enumerate_local_logical_candidates(
+                vec![(0, QueryRoot::Operator(root))],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            let target = &inventory.targets[0];
+            assert_eq!(target.groupings.len(), target.alternatives.len());
+            target
+                .alternatives
+                .iter()
+                .zip(&target.groupings)
+                .filter(|(_, g)| **g != GroupingStrategy::default())
+                .map(|(a, g)| (a.clone(), g.clone()))
+                .collect::<Vec<_>>()
+        };
+        let offered = hydra("count by (job) (m)", approximate.clone());
+        let [(Realization::Sketch(kind), GroupingStrategy::SharedMultiSubpopulation { params, .. })] =
+            offered.as_slice()
+        else {
+            panic!("one HydraCms alternative: {offered:?}")
+        };
+        assert_eq!(kind.algorithm(), &SketchAlgorithm::Cms);
+        // ⌈e/(ε/2)⌉ columns, ⌈ln(2/δ)⌉ rows, for the inner sketch and the grid.
+        assert_eq!(
+            *params,
+            asap_types::ir::schema::HydraParams::HydraCms {
+                width: 544,
+                depth: 6,
+                shared_rows: 6,
+                shared_columns: 544
+            }
+        );
+        assert!(hydra("count (m)", approximate.clone()).is_empty());
+        assert!(hydra("count without (job) (m)", approximate).is_empty());
+        assert!(hydra("count by (job) (m)", AccuracyTarget::Exact).is_empty());
     }
 
     /// Approximate requests must retain the exact execution alternative too.
