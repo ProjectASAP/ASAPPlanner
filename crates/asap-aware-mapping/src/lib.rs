@@ -195,19 +195,21 @@ pub use pass::{
     optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
     PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan, StagePipeline,
 };
+pub use plan_selection::candidate_selection::{
+    CompositionDecision, GlobalSelection, RankedTargetSubDAGCandidates, RecurrenceProfileMap,
+    TargetSubDAGSelection,
+};
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
     UpdateRate,
 };
 pub use replacement::{
-    default_strategies, default_strategies_with, is_logical_rewrite, search_workload,
-    search_workload_with, search_workload_with_targets, summary_candidates, ASAPStrategies,
-    CandidateLogicalASAPDAGs, CompositionDecision, GlobalSelection, Matcher, Proposals,
-    RankedTargetSubDAGCandidates, Realization, RealizationError, RecurrenceProfileMap,
-    RejectedCandidate, Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
-    SharedSubDAGStrategy, TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection,
-    MAX_SEARCH_ITERATIONS,
+    default_strategies, is_logical_rewrite, search_workload, search_workload_with,
+    search_workload_with_targets, summary_candidates, ASAPStrategies, CandidateLogicalASAPDAGs,
+    Matcher, Proposals, Realization, RealizationError, RejectedCandidate, Replacement,
+    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SharedSubDAGStrategy,
+    TargetSubDAG, TargetSubDAGCandidates, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use topk_reuse::TopKLimitReuseStrategy;

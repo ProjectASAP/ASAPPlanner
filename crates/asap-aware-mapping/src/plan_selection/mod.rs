@@ -19,6 +19,8 @@
 //! every combination: a dynamic program over target nesting (see there).
 //! [`select_exhaustive`] builds and prices every combination, for display and
 //! for checking the program.
+pub mod candidate_selection;
+
 use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;

@@ -147,9 +147,9 @@ Search calls `propose`, so rejected candidates remain available for explanation.
 
 > What are all semantically valid alternatives for this target?
 
-`replacements` must be **exhaustive and not cost-filtered**. When its output has
-a preferred order, that ordering must come from the supplied `CostModel`; the
-strategy must still return every supported legal candidate. Required accuracy,
+`replacements` must be **exhaustive and not cost-filtered**. Strategies take no
+`CostModel`; output order carries no cost preference, and ranking happens at
+selection time. The strategy must return every supported legal candidate. Required accuracy,
 schema and capability checks can reject an otherwise applicable algorithm;
 exhaustiveness is not a promise of all theoretically possible plans.
 
@@ -164,7 +164,9 @@ accumulator, or a pass-through that keeps the original operation instead of
 building a summary. `realizations_for_intent` enumerates these concrete
 realizations; `ASAPStrategies::replacements()` constructs each one as
 a `ReplacementSubDAG`. It returns all
-candidates in preferred order without selecting a winner. At workload scale,
+candidates in `summary_candidates` order, sized by the analytical estimators,
+without selecting a winner; `AggIntent::Extension` intents stay
+`Realization::PassThrough`. At workload scale,
 `search_workload`/`search_workload_with` preserve all supported legal alternatives
 across every `TargetSubDAG`. Optional planner APIs coordinate compatible semantic selections; physical
 commitment and placement remain downstream deployment decisions.
@@ -201,7 +203,7 @@ see [code architecture §3](asap-aware-mapping-architecture.md#3-how-the-current
 
 ### `CostModel`
 
-`CostModel` covers every deployment-specific numeric or configuration decision—not only which candidate is cheapest. For example, sketch sizing trades memory and update cost for accuracy, so it belongs here too.
+`CostModel` covers deployment-specific preference and cost decisions. It is consulted only at selection time (`cost_sorted`, `global_selection` and their `_with_recurrence` variants), never during candidate generation: sketch parameters come from the analytical estimators (`accuracy::estimators::size_params`), and extension intents stay pass-through.
 
 The crate cannot hardcode real deployment costs: `asap-aware-mapping` uses `asap-types` and pinned `asap_sketchlib` mapping
 bounds, but does not execute workloads or own deployment measurements. Most hooks therefore provide the crate's built-in static behavior as a default. Override only the decisions your deployment needs to change.
@@ -209,9 +211,6 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
 | Hook | Use it to | Default? |
 |---|---|---|
 | `rank_candidates` | Order valid sketch algorithms | No |
-| `size_params` | Convert an accuracy target into sketch parameters | Yes |
-| `realize_extension` | Map a custom intent to a realization | Yes |
-| `evaluation_extension` | Query a custom extension summary | Panics until paired with a custom realization |
 | `cse_recompute_cost` | Estimate independent recomputation | Yes |
 | `cse_shared_maintenance_cost` | Estimate shared maintenance | Yes |
 | `cse_share_decision` | Choose sharing or recomputation | Yes |
@@ -221,41 +220,6 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
 
   ```rust
   fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchAlgorithm]) -> Vec<SketchAlgorithm>;
-  ```
-
-- **`size_params`** — choose parameters, such as sketch capacity, for an already-selected `SketchAlgorithm` and accuracy target `(eps, delta)`, where `eps` is the tolerated error and `delta` is the tolerated probability of exceeding that error. It is separate from ranking so a deployment can customize sizing without changing algorithm preference. The trait provides a default implementation.
-
-  ```rust
-  fn size_params(&self, kind: SketchAlgorithm, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
-  ```
-
-- **`realize_extension`** — map a deployment-defined `AggIntent::Extension` to a post-ASAP `Realization`. The default is `Realization::PassThrough`.
-
-  Use `AggIntent::Extension { ext_kind, payload }` for intent shapes that only your deployment needs. Core treats both fields as opaque. For example, a deployment can tag an approximate-frequency intent with `ext_kind: "frequency"` and recognize it in `realize_extension`:
-
-  ```rust
-  fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Realization {
-      if ext_kind == "frequency" {
-          Realization::Sketch(SketchKind::new(
-              SketchAlgorithm::CountSketch,
-              SketchParams::CountSketch { width: 1024, depth: 5 },
-          ))
-      } else {
-          Realization::PassThrough  // fall back to the default for anything else
-      }
-  }
-  ```
-
-  Return `Realization::PassThrough` for unrecognized extension kinds. Do not panic.
-
-  ```rust
-  fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Realization;
-  ```
-
-- **`evaluation_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; evaluation defines how it is queried. Override both for the same `ext_kind`. The default evaluation panics to prevent a silent wrong answer.
-
-  ```rust
-  fn evaluation_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchStatistic;
   ```
 
 - **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's sub-DAG independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
@@ -297,7 +261,8 @@ A custom cost model does not necessarily need to override every hook. The curren
 `ReplacementStrategy` answers "what are the candidates for this one target?" `CandidateLogicalASAPDAGs` answers the same question for every target in a whole workload at once, without enumerating `2^N` fully-copied plans for `N` independently-choosable sites.
 
 ```rust
-// replacement.rs
+// replacement.rs (TargetSubDAGCandidates) and
+// plan_selection/candidate_selection.rs (RankedTargetSubDAGCandidates)
 
 // One TargetSubDAGCandidates per distinct TargetSubDAG in the whole workload —
 // never a flat list of fully assembled plans.
@@ -345,7 +310,7 @@ to the selected algorithm and classifies the pair into its category. The public
 `.category()`, `.algorithm()`, and `.params()` accessors expose the committed
 values without permitting an invalid combination.
 
-Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `ASAPStrategies::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
+Where this matters in practice: `CostModel::rank_candidates` and `ASAPStrategies::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
 
 `Sample`, `Wavelet`, and `StatModel` each use a flat `(Kind, Params)` pair. `Sketch` needs the additional algorithm level because multiple algorithms can serve the same purpose—for example, KLL and DDSketch both answer quantile queries.
 
@@ -395,7 +360,7 @@ Each `ReplacementExplanation::reason` is copied verbatim from the matching candi
 
 ### Why there is no `ExplanationRule` trait
 
-Explanations are derived from candidates already present in `CandidateLogicalASAPDAGs`. A new candidate kind therefore requires an `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with`; a second explanation-specific trait would duplicate registration and could drift from the actual search space. Custom callers supply strategies through `explain_replacements_with`, using the same extension point exposed by `search_workload_with`.
+Explanations are derived from candidates already present in `CandidateLogicalASAPDAGs`. A new candidate kind therefore requires an `impl ReplacementStrategy` wired into `default_strategies`; a second explanation-specific trait would duplicate registration and could drift from the actual search space. Custom callers supply strategies through `explain_replacements_with`, using the same extension point exposed by `search_workload_with`.
 
 ### How it derives `location` text
 

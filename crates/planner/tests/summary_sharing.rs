@@ -473,12 +473,9 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
         .enumerate()
         .map(|(index, (expr, (_, epsilon)))| (index, expr, Some(AccuracyTarget::Epsilon(epsilon))))
         .collect();
-    let strategies: Vec<Box<dyn ReplacementStrategy>> =
-        vec![Box::new(ASAPStrategies::new_with_planning_inputs(
-            &PREFER_UNIVMON,
-            &UnivMonEvidence,
-            &EqualSplitAllocator,
-        ))];
+    let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(
+        ASAPStrategies::new_with_planning_inputs(&UnivMonEvidence, &EqualSplitAllocator),
+    )];
     let space = search_workload_with_targets(roots, &strategies, &UnivMonEvidence);
     let selection = space.global_selection(&PREFER_UNIVMON);
     let assembled = space

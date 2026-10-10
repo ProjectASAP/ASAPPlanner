@@ -6,31 +6,20 @@
 //! needs knowledge this crate doesn't have and shouldn't acquire: the crate
 //! doc's layering invariant is that `asap-plan` depends only on [`asap_ir`],
 //! never on a runtime or a deployment model. What it *can* own is the
-//! interface every deployment's cost model plugs into, so [`replacement`]'s
-//! summary selection has exactly one extension point instead of forcing
-//! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
-//! fork `replacement::realizations_for_intent`.
+//! interface every deployment's cost model plugs into, so selection over the
+//! candidates [`replacement`] generates has exactly one extension point.
+//! Candidate generation itself does not consult a cost model.
 //!
-//! This trait is scoped to the approximate-**sketch** family specifically
-//! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
-//! take/return [`SketchAlgorithm`]/[`SketchParams`]) — `asap_sketch` also has
+//! [`CostModel::rank_candidates`] is scoped to the approximate-**sketch**
+//! family specifically (it takes [`SketchAlgorithm`]s) — `asap_sketch` also has
 //! sibling families for sampling-based, wavelet-transform, and fitted
 //! statistical-model summaries
 //! ([`asap_types::ir::schema::SamplingKind`]/…/[`asap_types::ir::schema::StatModelKind`]),
 //! each with its own `(Kind, Params)` pair, deliberately *not* folded into
-//! this trait: no core `AggIntent` picks one of those families today (only
-//! [`CostModel::realize_extension`] can, for a deployment-specific
-//! `AggIntent::Extension`), so there is no ranking/sizing decision for this
-//! trait to own yet. Should a family other than `Sketch` ever need its own
-//! `rank_candidates`/`size_params`, it gets its own trait methods rather
-//! than overloading these ones across incompatible `Kind`/`Params` types.
-//!
-//! Every entry point that doesn't take an explicit `&dyn CostModel`
-//! ([`ASAPStrategies::default_cost_model`](crate::replacement::ASAPStrategies::default_cost_model),
-//! [`search_workload`](crate::replacement::search_workload)) runs against
-//! [`DefaultCostModel`], so a deployment that never plugs in its own cost
-//! model keeps today's static-preference-order behavior exactly, byte for
-//! byte.
+//! this trait: no core `AggIntent` picks one of those families today, so
+//! there is no ranking decision for this trait to own yet. Should a family
+//! other than `Sketch` ever need its own ranking, it gets its own trait
+//! method rather than overloading this one across incompatible `Kind` types.
 //!
 //! ## CSE sharing (issue #237, #223 stage 4)
 //!
@@ -50,9 +39,8 @@ use std::rc::Rc;
 
 use crate::exact_composition::ExactOperation;
 use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
-    FieldDataType, GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchStatistic,
+    FieldDataType, GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams,
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 
@@ -62,7 +50,7 @@ use crate::recurrence::{
     RecurrenceProfile,
 };
 use crate::replacement::{
-    realize_child, Realization, Replacement, ReplacementProvenance, ReplacementSubDAG, TargetSubDAG,
+    realize_child, Replacement, ReplacementProvenance, ReplacementSubDAG, TargetSubDAG,
 };
 
 // ── Recurring-cost vocabulary for mixed exact/summary plans (issue #171) ──
@@ -374,15 +362,14 @@ pub fn default_cse_shared_maintenance_cost(family: &FieldDataType) -> Cost {
     Cost(weight * UNIT)
 }
 
-/// Ranks the candidate sketch algorithms for one [`AggIntent`], best choice
-/// first.
+/// Selection-time preferences and costs over the candidates Stage 1
+/// generates.
 ///
 /// [`replacement::summary_candidates`] returns every algorithm that *can* answer an
 /// intent, in an arbitrary static preference order (issue #98's "one home"
-/// for the candidate set). A `CostModel` re-orders that list under real,
-/// deployment-specific cost knowledge this crate has no way to know about —
-/// `replacement::realizations_for_intent` constructs every candidate in the
-/// resulting order.
+/// for the candidate set), and candidate generation keeps that order. A
+/// `CostModel` re-orders the candidates when they are selected, under real,
+/// deployment-specific cost knowledge this crate has no way to know about.
 pub trait CostModel {
     /// Whether [`Self::candidate_cost`] prices a complete physical
     /// alternative, including its raw baseline, rather than a local
@@ -433,39 +420,6 @@ pub trait CostModel {
         candidates: &[SketchAlgorithm],
     ) -> Vec<SketchAlgorithm>;
 
-    /// Size [`SketchParams`] for `kind` (one of the candidates
-    /// [`rank_candidates`](Self::rank_candidates) put first) under the
-    /// resolved `(eps, delta)` accuracy budget.
-    ///
-    /// Splitting sizing out from candidate selection lets a deployment own
-    /// its own parameter-sizing math (e.g. an empirically-tuned table, or
-    /// discrete rungs required by a downstream catalog) without forking
-    /// `replacement::realizations_for_intent` — the same "one extension
-    /// point" rationale as `rank_candidates`, one level deeper. Default:
-    /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
-    /// (unchanged) — a deployment that only needs to reorder candidates,
-    /// not resize them, can leave this method unimplemented.
-    ///
-    /// # Contract
-    ///
-    /// The returned parameters MUST make `kind` satisfy the supplied
-    /// `(eps, delta)` accuracy budget. This is a semantic requirement, not a
-    /// requirement that parameter fields themselves be numerically monotonic:
-    /// catalog rungs and empirically tuned layouts are allowed, but returning
-    /// a configuration that misses the requested budget makes the resulting
-    /// plan invalid. Accuracy reconciliation relies on this same contract;
-    /// any implementation satisfying a tighter budget necessarily satisfies
-    /// a looser budget for the identical aggregate query.
-    fn size_params(
-        &self,
-        kind: SketchAlgorithm,
-        intent: &AggIntent,
-        eps: f64,
-        delta: f64,
-    ) -> SketchParams {
-        crate::replacement::default_size_params(kind, intent, eps, delta)
-    }
-
     /// Estimated number of distinct subpopulations produced by `target`'s
     /// grouping keys. `None` means the deployment has no cardinality estimate;
     /// grouping alternatives remain legal but keep their discovery order.
@@ -495,39 +449,6 @@ pub trait CostModel {
             }
         };
         Some(Cost(units))
-    }
-
-    /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
-    /// deployment-specific intent shape core has no realization opinion
-    /// for (issue #131). `replacement::realizations_for_intent` consults this
-    /// for every `Extension` node instead of hardcoding `PassThrough`
-    /// (issue #150). Default: `PassThrough` — preserves today's behavior
-    /// for every deployment that doesn't override this, exactly like
-    /// `size_params`'s default-delegates pattern above.
-    fn realize_extension(&self, _ext_kind: &str, _payload: &serde_json::Value) -> Realization {
-        Realization::PassThrough
-    }
-
-    /// Build the `SummaryEstimate` evaluation for an `Extension` intent this
-    /// same `CostModel` realized as `Realization::Sketch` via
-    /// [`realize_extension`](Self::realize_extension). Only ever called
-    /// when `realize_extension` returned `Sketch` for the same
-    /// `(ext_kind, payload)` — `replacement::evaluation` has no other way to build a
-    /// `SketchStatistic` for a shape core doesn't know. A deployment that
-    /// overrides `realize_extension` to return `Sketch` for some
-    /// `ext_kind` MUST also override this for that same `ext_kind`, or
-    /// this default panics loudly (rather than silently misinterpreting
-    /// `payload`) the first time that intent is actually read out.
-    fn evaluation_extension(
-        &self,
-        ext_kind: &str,
-        _payload: &serde_json::Value,
-        _col: &ColumnRef,
-    ) -> SketchStatistic {
-        unimplemented!(
-            "CostModel::realize_extension returned Sketch for ext_kind={ext_kind:?} but \
-             evaluation_extension wasn't overridden to match"
-        )
     }
 
     /// Estimate the one-time cost of recomputing `candidate.sub-DAG`
@@ -867,7 +788,7 @@ pub(crate) fn validated_candidate_ranking(
 }
 
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
-/// order and [`replacement::default_size_params`]'s built-in sizing unchanged.
+/// order.
 ///
 /// [`summary_candidates`]: crate::replacement::summary_candidates
 pub struct DefaultCostModel;
@@ -934,7 +855,7 @@ impl CostModel for DefaultCostModel {
             Replacement::SubDAG(rc)
                 if candidate.provenance == ReplacementProvenance::AccuracyReconciliation =>
             {
-                let Ok(sibling_bound) = realize_child(rc, self) else {
+                let Ok(sibling_bound) = realize_child(rc) else {
                     return f64::NAN;
                 };
                 let cse = CseCandidate {
@@ -951,7 +872,7 @@ impl CostModel for DefaultCostModel {
                 self.cse_shared_maintenance_cost(&cse).0
             }
             Replacement::SubDAG(rc) => {
-                let Ok(bound) = realize_child(target.root, self) else {
+                let Ok(bound) = realize_child(target.root) else {
                     return f64::NAN;
                 };
                 let cse = CseCandidate {
@@ -1053,66 +974,6 @@ mod tests {
         let intent = default_cardinality();
         let candidates = summary_candidates(&intent);
         validated_candidate_ranking(&DuplicatesFirst, &intent, candidates);
-    }
-
-    /// A deployment that only overrides `rank_candidates` keeps
-    /// `asap-plan`'s built-in sizing via the trait's default `size_params`
-    /// body — the split is opt-in per method, not all-or-nothing.
-    #[test]
-    fn size_params_default_body_matches_default_size_params() {
-        let intent = default_cardinality();
-        assert_eq!(
-            AlwaysPreferLast.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
-            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
-        );
-    }
-
-    /// A deployment CAN override `size_params` independently of
-    /// `rank_candidates` — e.g. to size against a catalog-constrained set
-    /// of discrete parameter rungs instead of `asap-plan`'s continuous
-    /// formulas.
-    struct DiscreteKllRungs;
-
-    impl CostModel for DiscreteKllRungs {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            candidates.to_vec()
-        }
-
-        fn size_params(
-            &self,
-            kind: SketchAlgorithm,
-            intent: &AggIntent,
-            eps: f64,
-            delta: f64,
-        ) -> SketchParams {
-            match kind {
-                SketchAlgorithm::Kll => {
-                    let k = if eps >= 0.01 { 200 } else { 2048 };
-                    SketchParams::Kll { k }
-                }
-                other => crate::replacement::default_size_params(other, intent, eps, delta),
-            }
-        }
-    }
-
-    #[test]
-    fn custom_cost_model_can_override_sizing_independently_of_ranking() {
-        use asap_types::ir::operator::agg_intent::default_quantile;
-
-        let intent = default_quantile(0.99);
-        assert_eq!(
-            DiscreteKllRungs.size_params(SketchAlgorithm::Kll, &intent, 0.001, 0.01),
-            SketchParams::Kll { k: 2048 },
-        );
-        // Untouched kinds still fall through to the default formula.
-        assert_eq!(
-            DiscreteKllRungs.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
-            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
-        );
     }
 
     // ── Recurring-cost formulas (issue #171) ─────────────────────────────
