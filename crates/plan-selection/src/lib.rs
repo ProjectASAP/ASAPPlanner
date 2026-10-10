@@ -16,11 +16,16 @@
 //! cannot be built or priced is rejected with its reason; it does not fail
 //! the selection.
 //!
-//! Prices come from [`crate::cost::analytical_cost::estimate_operator`] over edge
+//! Cost is per second of wall time (`docs/design_docs/proposals/stage3-cost-model.md`):
+//! an ingestion-time node over the ingestion rate, a query-time node per
+//! evaluation times the evaluation rate of the roots reaching it ([`RootDemand`]),
+//! plus memory for ingestion-time state that query time reads. Prices come
+//! from [`crate::cost::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
-//! count; summary build and estimation are priced as rows × sketch depth and
-//! rows read out. These numbers are illustrative, not calibrated. Latency
-//! bounds and deployment capabilities are not checked yet.
+//! count, weighted by [`Stage3Calibration`]; summary build and estimation are
+//! priced as rows × sketch depth and rows read out. These numbers are
+//! illustrative, not calibrated. Latency bounds and deployment capabilities
+//! are not checked yet.
 //!
 //! [`select_plan`] chooses over Stage 1's sharing variants without building
 //! every combination: per variant, a dynamic program over target nesting (see
@@ -59,8 +64,7 @@ use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::types::AccuracyTarget;
-use asap_types::workload::DataWorkload;
+use asap_types::workload::{DataWorkload, QueryRecurrence, RepeatedDemand, RootDemand};
 use thiserror::Error;
 
 use crate::cost::analytical_cost::{
@@ -84,8 +88,10 @@ use asap_physical_optimizer::implementation::physical_candidates::{
     stage2_physical, PhysicalCandidate,
 };
 
-pub const COST_UNIT: &str = "cpu_ms_per_workload_evaluation";
-pub const COST_SOURCE: &str = "analytical-cost-v1 (illustrative statistics)";
+/// Cost per second of wall time; one cost unit is one CPU-millisecond under
+/// [`Stage3Calibration::ILLUSTRATIVE`]. See
+/// `docs/design_docs/proposals/stage3-cost-model.md`.
+pub const COST_PER_SECOND: &str = "cost_per_second";
 
 /// Groups assumed for every `by (...)` reduction, absent group-count evidence.
 const DEFAULT_GROUP_COUNT: u64 = 100;
@@ -101,6 +107,53 @@ static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 
+/// Stage 3's price coefficients and amortization horizon. Values are
+/// illustrative until calibrated from measurements.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stage3Calibration {
+    pub cost_per_cpu_op: f64,
+    pub cost_per_scan_byte: f64,
+    /// Price of state retained across evaluations, per byte per second.
+    pub cost_per_retained_byte_second: f64,
+    /// Seconds over which one-off and unknown recurrence is amortized.
+    pub horizon_s: f64,
+    pub version: &'static str,
+}
+
+impl Stage3Calibration {
+    /// 1 ns of CPU per operation; 1 GB retained costs 1/8 vCPU
+    /// (125 CPU-ms per second); one-off work is amortized over 1 h.
+    pub const ILLUSTRATIVE: Self = Self {
+        cost_per_cpu_op: 1e-6,
+        cost_per_scan_byte: 1e-7,
+        cost_per_retained_byte_second: 1.25e-7,
+        horizon_s: 3_600.0,
+        version: "illustrative-v2",
+    };
+
+    fn validate(&self) -> Result<(), AnalyticalCostError> {
+        for (name, value) in [
+            ("cost_per_cpu_op", self.cost_per_cpu_op),
+            ("cost_per_scan_byte", self.cost_per_scan_byte),
+            (
+                "cost_per_retained_byte_second",
+                self.cost_per_retained_byte_second,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(AnalyticalCostError::InvalidCalibration(name, value));
+            }
+        }
+        if !self.horizon_s.is_finite() || self.horizon_s <= 0.0 {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "horizon_s",
+                self.horizon_s,
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Planning logic, as opposed to the scoped facts it consumes: a model can have
 /// a built-in default, evidence about a particular deployment cannot.
 ///
@@ -112,6 +165,7 @@ pub struct PlanningModels<'a> {
     pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
+    pub calibration: Stage3Calibration,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -124,6 +178,7 @@ impl<'a> PlanningModels<'a> {
             cost,
             accuracy,
             evidence,
+            calibration: Stage3Calibration::ILLUSTRATIVE,
         }
     }
 
@@ -135,6 +190,7 @@ impl<'a> PlanningModels<'a> {
             cost: &DEFAULT_COST_MODEL,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
+            calibration: Stage3Calibration::ILLUSTRATIVE,
         }
     }
 
@@ -150,6 +206,11 @@ impl<'a> PlanningModels<'a> {
 
     pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidenceProvider) -> Self {
         self.evidence = evidence;
+        self
+    }
+
+    pub fn with_calibration(mut self, calibration: Stage3Calibration) -> Self {
+        self.calibration = calibration;
         self
     }
 }
@@ -168,7 +229,8 @@ pub struct NodeCost {
 pub struct CandidateCost {
     pub total: f64,
     pub unit: &'static str,
-    pub source: &'static str,
+    /// The cost model and its calibration version.
+    pub source: String,
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
 }
 
@@ -221,11 +283,11 @@ pub enum SelectionError {
 }
 
 /// Reject candidates that miss a query's accuracy target or cannot be priced,
-/// price the rest and select the cheapest (the first on ties). `targets[i]`
-/// is the requirement of `candidate.roots[i]`; `None` imposes none.
+/// price the rest and select the cheapest (the first on ties). `demand[i]`
+/// is the demand of `candidate.roots[i]`.
 pub fn stage3_select(
     cands: &[PhysicalCandidate],
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Selection, SelectionError> {
@@ -233,7 +295,7 @@ pub fn stage3_select(
     let mut rejected = Vec::new();
     let mut best: Option<(&str, f64)> = None;
     for candidate in cands {
-        match assess(candidate, targets, data, &models) {
+        match assess(candidate, demand, data, &models) {
             Ok(cost) => {
                 if best.is_none_or(|(_, total)| cost.total < total) {
                     best = Some((&candidate.id, cost.total));
@@ -256,7 +318,7 @@ pub fn stage3_select(
                 id: candidate.id.clone(),
                 valid: true,
                 reason: format!(
-                    "costlier: {:.3} vs {:.3} {COST_UNIT}",
+                    "costlier: {:.3} vs {:.3} {COST_PER_SECOND}",
                     costs[&candidate.id].total, best_total
                 ),
             });
@@ -273,21 +335,22 @@ pub fn stage3_select(
 /// Stage 3's checks and price for one candidate; `Err` is the rejection reason.
 fn assess(
     candidate: &PhysicalCandidate,
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Result<CandidateCost, String> {
-    if candidate.roots.len() != targets.len() {
+    if candidate.roots.len() != demand.len() {
         return Err(format!(
-            "{} roots but {} accuracy targets",
+            "{} roots but {} root demands (accuracy targets)",
             candidate.roots.len(),
-            targets.len()
+            demand.len()
         ));
     }
-    if let Some(reason) = accuracy_violation(candidate, targets, models) {
+    if let Some(reason) = accuracy_violation(candidate, demand, models) {
         return Err(reason);
     }
-    price(&candidate.dag, data).map_err(|(node, error)| format!("node {node:?}: {error}"))
+    price(&candidate.dag, demand, data, &models.calibration)
+        .map_err(|(node, error)| format!("node {node:?}: {error}"))
 }
 
 /// One Stage 1 sharing variant as selection sees it: candidates of variant
@@ -411,17 +474,17 @@ pub struct Enumeration<Id> {
 /// its reason.
 pub fn select_exhaustive<Id: Clone>(
     stage1: &[SharingVariant<Id>],
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     max: usize,
 ) -> Result<Enumeration<Id>, SelectionError> {
-    exhaustive(&variants(stage1), targets, data, models, max)
+    exhaustive(&variants(stage1), demand, data, models, max)
 }
 
 fn exhaustive<Id: Clone>(
     variants: &[Variant<'_, Id>],
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     max: usize,
@@ -458,7 +521,7 @@ fn exhaustive<Id: Clone>(
         .iter()
         .filter_map(|c| c.physical.clone())
         .collect();
-    let selection = match stage3_select(&physical, targets, data, models) {
+    let selection = match stage3_select(&physical, demand, data, models) {
         Ok(mut selection) => {
             selection.rejected.extend(failed);
             selection
@@ -500,7 +563,7 @@ const ADDITIVITY_TOLERANCE: f64 = 1e-9;
 /// runs once per variant and the cheapest result wins (the first on ties).
 pub fn select_plan<Id: Clone>(
     stage1: &[SharingVariant<Id>],
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<SelectedPlan<Id>, SelectionError> {
@@ -512,9 +575,9 @@ pub fn select_plan<Id: Clone>(
     for variant in variants(stage1) {
         let evaluate = |choice: &[usize]| -> Result<f64, String> {
             let (_, candidate) = realize(variant, choice)?;
-            assess(&candidate, targets, data, &models).map(|cost| cost.total)
+            assess(&candidate, demand, data, &models).map(|cost| cost.total)
         };
-        let plan = match select_variant(variant, targets, data, models, &evaluate) {
+        let plan = match select_variant(variant, demand, data, models, &evaluate) {
             Ok(plan) => plan,
             Err(SelectionError::NoValidCandidate(reasons)) => {
                 failures.extend(reasons);
@@ -562,7 +625,7 @@ fn costlier(id: &str, total: f64, best: f64) -> Rejection {
     Rejection {
         id: id.to_string(),
         valid: true,
-        reason: format!("costlier: {total:.3} vs {best:.3} {COST_UNIT}"),
+        reason: format!("costlier: {total:.3} vs {best:.3} {COST_PER_SECOND}"),
     }
 }
 
@@ -594,7 +657,7 @@ fn costlier(id: &str, total: f64, best: f64) -> Rejection {
 /// guaranteed optimal.
 fn select_variant<Id: Clone>(
     variant: Variant<'_, Id>,
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     evaluate: &dyn Fn(&[usize]) -> Result<f64, String>,
@@ -612,7 +675,7 @@ fn select_variant<Id: Clone>(
     let base = match evaluate(&with(&[])) {
         Ok(base) => base,
         Err(reason) => {
-            return fallback(variant, targets, data, models, with(&[]), reason);
+            return fallback(variant, demand, data, models, with(&[]), reason);
         }
     };
     let local: Vec<Vec<Result<f64, String>>> = inventory
@@ -687,18 +750,18 @@ fn select_variant<Id: Clone>(
         }
     }
     if let Some(reason) = coupling {
-        return fallback(variant, targets, data, models, choice, reason);
+        return fallback(variant, demand, data, models, choice, reason);
     }
     match finish(
         variant,
-        targets,
+        demand,
         data,
         &models,
         choice.clone(),
         SelectionMethod::TreeDp,
     ) {
         Ok(plan) => Ok(plan),
-        Err(reason) => fallback(variant, targets, data, models, choice, reason),
+        Err(reason) => fallback(variant, demand, data, models, choice, reason),
     }
 }
 
@@ -761,14 +824,14 @@ fn best_choice(
 /// Build `choice` in `variant` and run Stage 3 on it.
 fn finish<Id: Clone>(
     variant: Variant<'_, Id>,
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
     choice: Vec<usize>,
     method: SelectionMethod,
 ) -> Result<SelectedPlan<Id>, String> {
     let (logical, physical) = realize(variant, &choice)?;
-    let cost = assess(&physical, targets, data, models)?;
+    let cost = assess(&physical, demand, data, models)?;
     Ok(SelectedPlan {
         shared: variant.shared,
         choice,
@@ -788,14 +851,14 @@ fn finish<Id: Clone>(
 /// `reason`.
 fn fallback<Id: Clone>(
     variant: Variant<'_, Id>,
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     choice: Vec<usize>,
     reason: String,
 ) -> Result<SelectedPlan<Id>, SelectionError> {
     if combination_count(variant.inventory) <= MAX_ENUMERATED_CANDIDATES {
-        let enumeration = exhaustive(&[variant], targets, data, models, MAX_ENUMERATED_CANDIDATES)?;
+        let enumeration = exhaustive(&[variant], demand, data, models, MAX_ENUMERATED_CANDIDATES)?;
         let winner = enumeration
             .candidates
             .iter()
@@ -807,7 +870,7 @@ fn fallback<Id: Clone>(
             .expect("the selected candidate was built");
         let mut plan = finish(
             variant,
-            targets,
+            demand,
             data,
             &models,
             winner.choice.clone(),
@@ -830,7 +893,7 @@ fn fallback<Id: Clone>(
     let method = SelectionMethod::TreeDpNotGuaranteedOptimal {
         reason: reason.clone(),
     };
-    finish(variant, targets, data, &models, choice.clone(), method).map_err(|failure| {
+    finish(variant, demand, data, &models, choice.clone(), method).map_err(|failure| {
         SelectionError::NoValidCandidate(vec![Rejection {
             id: format!("P{}", variant.number(&choice)),
             valid: false,
@@ -856,16 +919,16 @@ pub struct StagePipelineRun<Id> {
 /// that many candidates for display as well (0: none).
 pub fn plan_stages<Id: Clone>(
     roots: Vec<(Id, QueryRoot)>,
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     display: usize,
 ) -> Result<StagePipelineRun<Id>, SelectionError> {
     let stage1 = stage1_logical_candidates(roots)?;
-    let plan = select_plan(&stage1, targets, data, models)?;
+    let plan = select_plan(&stage1, demand, data, models)?;
     let enumeration = match display {
         0 => None,
-        max => Some(select_exhaustive(&stage1, targets, data, models, max)?),
+        max => Some(select_exhaustive(&stage1, demand, data, models, max)?),
     };
     Ok(StagePipelineRun {
         stage1,
@@ -877,11 +940,13 @@ pub fn plan_stages<Id: Clone>(
 /// The first summary estimate that misses its query's target, as a reason.
 fn accuracy_violation(
     candidate: &PhysicalCandidate,
-    targets: &[Option<AccuracyTarget>],
+    demand: &[RootDemand],
     models: &PlanningModels<'_>,
 ) -> Option<String> {
-    for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
-        let Some(target) = target else { continue };
+    for (query, (root, demand)) in candidate.roots.iter().zip(demand).enumerate() {
+        let Some(target) = &demand.accuracy else {
+            continue;
+        };
         for node in OperatorNode::reachable(root) {
             let Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
@@ -937,15 +1002,129 @@ fn family_name(family: &FieldDataType) -> String {
 /// Statistics the analytical model needs, derived once per workload.
 struct Shape {
     series: u64,
-    rows_per_ms: f64,
+    /// λ, rows ingested per second.
+    rows_per_second: f64,
 }
 
-/// Price every node of `dag` once. Nodes are exported children first, so
-/// each node's input statistics are known when it is reached.
+/// λ: the declared ingestion rate, else one sample per series per ingestion
+/// interval, else the default.
+fn ingestion_rate(data: &DataWorkload) -> Result<f64, AnalyticalCostError> {
+    let rate = match (
+        data.ingestion_rate.value,
+        data.input_cardinality.value,
+        data.data_ingestion_interval.value,
+    ) {
+        (Some(rate), _, _) => rate.0,
+        (None, Some(series), Some(interval)) if interval.0 > 0 => {
+            series as f64 * 1_000.0 / interval.0 as f64
+        }
+        _ => DEFAULT_ROWS_PER_SECOND,
+    };
+    if rate.is_finite() && rate >= 0.0 {
+        Ok(rate)
+    } else {
+        Err(AnalyticalCostError::InvalidIngestionRate(rate))
+    }
+}
+
+/// Evaluations per second of a query-time node read by `roots`. Repeating
+/// roots with equal intervals are evaluated together, so each interval
+/// counts once. One-off, scheduled and unknown roots run as one batch: the
+/// most invocations among them, amortized over `horizon_s`.
+fn evaluation_rate<'d>(
+    roots: impl IntoIterator<Item = &'d RootDemand>,
+    horizon_s: f64,
+) -> Result<f64, AnalyticalCostError> {
+    let mut intervals = std::collections::BTreeSet::new();
+    let mut estimated = 0.0;
+    let mut invocations = 0u64;
+    for demand in roots {
+        match &demand.recurrence {
+            QueryRecurrence::Repeated(
+                RepeatedDemand::FixedInterval(interval)
+                | RepeatedDemand::FixedIntervalAt { interval, .. },
+            ) => {
+                intervals.insert(*interval);
+            }
+            QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
+                let rate = estimate.expected_rate.0;
+                if !rate.is_finite() || rate < 0.0 {
+                    return Err(AnalyticalCostError::InvalidRecurrence);
+                }
+                estimated += rate;
+            }
+            QueryRecurrence::Repeated(RepeatedDemand::Scheduled(times)) => {
+                invocations = invocations.max(times.len() as u64);
+            }
+            QueryRecurrence::OneTime {
+                invocations: count, ..
+            } => invocations = invocations.max(*count),
+            QueryRecurrence::Unknown => invocations = invocations.max(1),
+        }
+    }
+    let repeated = evaluation_rate_of(intervals)
+        .map_err(|_| AnalyticalCostError::InvalidRecurrence)?
+        .map_or(0.0, |rate| rate.0);
+    Ok(repeated + estimated + invocations as f64 / horizon_s)
+}
+
+/// For every node, the indices of the roots that reach it.
+fn reaching_roots(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<usize>> {
+    let mut reached: HashMap<PhysicalASAPNodeId, Vec<usize>> = HashMap::new();
+    for (index, &root) in dag.roots.iter().enumerate() {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let roots = reached.entry(id).or_default();
+            if roots.last() == Some(&index) {
+                continue;
+            }
+            roots.push(index);
+            stack.extend(
+                dag.edges
+                    .iter()
+                    .filter(|e| e.consumer == id)
+                    .map(|e| e.producer),
+            );
+        }
+    }
+    reached
+}
+
+/// How far back the time ranges reading `id` reach, in milliseconds: each
+/// range plus the offsets between it and `id`. `None` when no range reads it.
+fn scan_extent_ms(dag: &PhysicalASAPDAG, id: PhysicalASAPNodeId, offset_ms: i64) -> Option<u64> {
+    dag.edges
+        .iter()
+        .filter(|e| e.producer == id)
+        .filter_map(|e| {
+            let consumer = dag.nodes.iter().find(|n| n.id == e.consumer)?;
+            match &consumer.payload {
+                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                    scan_extent_ms(dag, consumer.id, offset_ms.saturating_add(shift.offset_ms))
+                }
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                    Some((range.as_millis() as u64).saturating_add(offset_ms.max(0) as u64))
+                }
+                _ => None,
+            }
+        })
+        .max()
+}
+
+/// Price every node of `dag` once, per second of wall time. Nodes are
+/// exported children first, so each node's input statistics are known when
+/// it is reached. An ingestion-time node is priced over one second of
+/// ingested rows; a query-time node per evaluation, times its evaluation
+/// rate. State an ingestion-time node keeps for query-time readers is also
+/// charged per retained byte per second.
 fn price(
     dag: &PhysicalASAPDAG,
+    demand: &[RootDemand],
     data: &DataWorkload,
+    calibration: &Stage3Calibration,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
+    let first = dag.roots.first().copied().unwrap_or(0);
+    calibration.validate().map_err(|error| (first, error))?;
     let series = data
         .input_cardinality
         .value
@@ -953,22 +1132,22 @@ fn price(
         .max(1);
     let shape = Shape {
         series,
-        rows_per_ms: data
-            .ingestion_rate
-            .value
-            .map_or(DEFAULT_ROWS_PER_SECOND, |rate| rate.0)
-            / 1_000.0,
+        rows_per_second: ingestion_rate(data).map_err(|error| (first, error))?,
     };
-    let calibration = ResourceCalibration {
-        cost_per_cpu_op: 1e-6,
-        cost_per_scan_byte: 1e-7,
+    let rows_per_ms = shape.rows_per_second / 1_000.0;
+    let resources = ResourceCalibration {
+        cost_per_cpu_op: calibration.cost_per_cpu_op,
+        cost_per_scan_byte: calibration.cost_per_scan_byte,
+        // Transient query-time memory is not priced.
         cost_per_retained_byte: 0.0,
-        version: "illustrative-v1".into(),
+        version: calibration.version.into(),
     };
+    let reached = reaching_roots(dag);
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     for node in &dag.nodes {
+        let ingestion = !node.output_state.timing.is_query_time();
         let inputs: Vec<_> = dag
             .edges
             .iter()
@@ -990,30 +1169,28 @@ fn price(
             promql: None,
         };
         let groups = |reduction: &Reduction| {
-            match reduction {
+            let groups = match reduction {
                 Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
                 Reduction::Reduce(keys) if !keys.is_without() => DEFAULT_GROUP_COUNT,
                 _ => shape.series,
+            };
+            // One second of ingested rows does not bound the groups a
+            // maintained state holds.
+            match ingestion {
+                true => groups,
+                false => groups.min(input.rows.max(1)),
             }
-            .min(input.rows.max(1))
         };
         let (out, estimate, detail) = match &node.payload {
             Payload::NonASAP(operator) => match operator {
                 NonASAPOp::Scan { .. } => {
-                    // A scan reads what its time range keeps.
-                    let lookback = dag
-                        .edges
-                        .iter()
-                        .filter(|e| e.producer == node.id)
-                        .filter_map(|e| match &nodes[&e.consumer].payload {
-                            Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                                Some(range.as_millis() as u64)
-                            }
-                            _ => None,
-                        })
-                        .max()
-                        .unwrap_or(DEFAULT_LOOKBACK_MS);
-                    let out = edge(((shape.rows_per_ms * lookback as f64).round() as u64).max(1));
+                    // At ingestion time, one second of arriving rows; at
+                    // query time, as far back as the ranges reading it reach.
+                    let span_ms = match ingestion {
+                        true => 1_000,
+                        false => scan_extent_ms(dag, node.id, 0).unwrap_or(DEFAULT_LOOKBACK_MS),
+                    };
+                    let out = edge(((rows_per_ms * span_ms as f64).round() as u64).max(1));
                     let estimate = estimate_operator(
                         PhysicalOperator::Scan,
                         OperatorStatistics::Scan {
@@ -1099,6 +1276,23 @@ fn price(
                     );
                     (out, estimate, format!("limit to {} rows", out.rows))
                 }
+                // At query time a range keeps only its own span of a longer
+                // scan: a filter on the timestamp.
+                NonASAPOp::TimeRange { range, .. } if !ingestion => {
+                    let rows = (rows_per_ms * range.as_millis() as f64).round() as u64;
+                    let out = edge(input.rows.min(rows.max(1)));
+                    let estimate = estimate_operator(
+                        PhysicalOperator::Filter {
+                            predicate_operations_per_row: 1,
+                        },
+                        OperatorStatistics::Filter { edges: unary(out) },
+                    );
+                    (
+                        out,
+                        estimate,
+                        format!("time range {range:?}: pass {} rows", out.rows),
+                    )
+                }
                 other => {
                     let estimate = estimate_operator(
                         PhysicalOperator::PassThrough,
@@ -1166,8 +1360,29 @@ fn price(
             ),
         };
         let cost = estimate
-            .and_then(|estimate| estimate.calibrated_cost(&calibration))
+            .and_then(|estimate| estimate.calibrated_cost(&resources))
             .map_err(|error| (node.id, error))?;
+        let (cost, detail) = if ingestion {
+            let read_at_query_time = dag.edges.iter().any(|e| {
+                e.producer == node.id && nodes[&e.consumer].output_state.timing.is_query_time()
+            });
+            match read_at_query_time {
+                // The window being built and the completed one.
+                true => {
+                    let retained = 2 * out.rows * state_bytes(node);
+                    (
+                        cost + calibration.cost_per_retained_byte_second * retained as f64,
+                        format!("{detail}; ingestion time, retains {retained} bytes"),
+                    )
+                }
+                false => (cost, format!("{detail}; ingestion time")),
+            }
+        } else {
+            let roots = reached.get(&node.id).into_iter().flatten();
+            let rate = evaluation_rate(roots.filter_map(|&r| demand.get(r)), calibration.horizon_s)
+                .map_err(|error| (node.id, error))?;
+            (cost * rate, format!("{detail}; x {rate:.4} evaluations/s"))
+        };
         output.insert(node.id, out);
         per_node.insert(
             node.id,
@@ -1180,8 +1395,11 @@ fn price(
     }
     Ok(CandidateCost {
         total: per_node.values().map(|n| n.cost).sum(),
-        unit: COST_UNIT,
-        source: COST_SOURCE,
+        unit: COST_PER_SECOND,
+        source: format!(
+            "analytical-cost-v2 (illustrative statistics, calibration {})",
+            calibration.version
+        ),
         per_node,
     })
 }
@@ -1255,6 +1473,18 @@ fn row_bytes(schema: &Schema) -> u64 {
         .max(1)
 }
 
+/// Bytes per group of the state `node` keeps: the summary's state, or the
+/// row of an exact state.
+fn state_bytes(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
+    match &node.payload {
+        Payload::ASAP(ASAPOp::SummaryAgg {
+            family: family @ FieldDataType::Sketch(..),
+            ..
+        }) => summary_shape(family).1,
+        _ => row_bytes(&node.output_schema),
+    }
+}
+
 /// Update operations per input row and bytes per state.
 fn summary_shape(family: &FieldDataType) -> (u64, u64) {
     match family {
@@ -1287,7 +1517,24 @@ mod tests {
     use crate::test_support::lower_promql;
     use asap_physical_optimizer::implementation::physical_candidates::stage2_physical;
     use asap_types::ir::QueryRoot;
-    use asap_types::workload::{Evidence, Rate};
+    use asap_types::types::AccuracyTarget;
+    use asap_types::workload::{Evidence, Predictability, Rate, RepetitionInterval};
+
+    /// A root repeating every `interval_ms`.
+    fn repeating(accuracy: Option<AccuracyTarget>, interval_ms: u32) -> RootDemand {
+        RootDemand {
+            accuracy,
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                RepetitionInterval(interval_ms),
+            )),
+            predictability: Predictability::Unknown,
+        }
+    }
+
+    /// A root repeating every 10 s, as Example 1's panels do.
+    fn every_10s(accuracy: Option<AccuracyTarget>) -> RootDemand {
+        repeating(accuracy, 10_000)
+    }
 
     fn data() -> DataWorkload {
         DataWorkload {
@@ -1357,7 +1604,7 @@ mod tests {
         };
         let selection = stage3_select(
             &candidates,
-            &[Some(strict)],
+            &[every_10s(Some(strict))],
             &data(),
             PlanningModels::builtin(),
         )
@@ -1388,7 +1635,7 @@ mod tests {
         };
         let selection = stage3_select(
             &candidates(),
-            &[Some(target)],
+            &[every_10s(Some(target))],
             &data(),
             PlanningModels::builtin(),
         )
@@ -1417,8 +1664,8 @@ mod tests {
             .unwrap()
     }
 
-    fn no_targets(inventory: &LocalLogicalCandidates<usize>) -> Vec<Option<AccuracyTarget>> {
-        vec![None; inventory.roots.len()]
+    fn no_targets(inventory: &LocalLogicalCandidates<usize>) -> Vec<RootDemand> {
+        vec![every_10s(None); inventory.roots.len()]
     }
 
     /// Real Stage 1 → 3 cost plus a penalty whenever the two named targets
@@ -1426,7 +1673,7 @@ mod tests {
     /// of the target reading it.
     fn coupled<'a>(
         inventory: &'a LocalLogicalCandidates<usize>,
-        targets: &'a [Option<AccuracyTarget>],
+        targets: &'a [RootDemand],
         data: &'a DataWorkload,
         (outer, inner): (usize, usize),
     ) -> impl Fn(&[usize]) -> Result<f64, String> + 'a {
@@ -1655,7 +1902,7 @@ mod tests {
         };
         let selection = stage3_select(
             &candidates,
-            &[Some(target)],
+            &[every_10s(Some(target))],
             &data(),
             PlanningModels::builtin(),
         )
@@ -1681,7 +1928,13 @@ mod tests {
             let rows: Vec<u64> = candidates()
                 .iter()
                 .map(|candidate| {
-                    let cost = price(&candidate.dag, &data).unwrap();
+                    let cost = price(
+                        &candidate.dag,
+                        &[every_10s(None)],
+                        &data,
+                        &Stage3Calibration::ILLUSTRATIVE,
+                    )
+                    .unwrap();
                     cost.per_node[&candidate.dag.roots[0]].rows
                 })
                 .collect();
@@ -1700,7 +1953,7 @@ mod tests {
         };
         let selection = stage3_select(
             &candidates,
-            &[Some(target)],
+            &[every_10s(Some(target))],
             &data(),
             PlanningModels::builtin(),
         )
@@ -1720,5 +1973,269 @@ mod tests {
         let costlier: Vec<_> = selection.rejected.iter().filter(|r| r.valid).collect();
         assert_eq!(costlier.len(), 1);
         assert_ne!(costlier[0].id, selection.selected);
+    }
+
+    /// `query` with its KLL alternative chosen, every state maintained at
+    /// `timing`, as a priced-ready physical DAG.
+    fn kll_dag(query: &str, ingestion: bool) -> PhysicalASAPDAG {
+        use asap_types::ir::{
+            apply_materialization_timings, MaterializationAssignment, TimingMemo,
+        };
+        let inventory = inventory(&[query]);
+        let choice: Vec<_> = inventory
+            .targets
+            .iter()
+            .map(|t| {
+                t.alternatives
+                    .iter()
+                    .position(|a| matches!(a, asap_logical_optimizer::Realization::Sketch(kind) if *kind.algorithm() == SketchAlgorithm::Kll))
+                    .unwrap_or(0)
+            })
+            .collect();
+        let roots: Vec<_> =
+            asap_logical_optimizer::pass1::logical_candidates::compose_logical_candidate(
+                &inventory, &choice,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| match root {
+                QueryRoot::Operator(node) => node,
+                QueryRoot::Scalar(_) => panic!("operator root"),
+            })
+            .collect();
+        let assignment = match ingestion {
+            true => MaterializationAssignment::all_ingestion_time(),
+            false => MaterializationAssignment::all_query_time(),
+        };
+        let mut memo = TimingMemo::new();
+        let timed: Vec<_> = roots
+            .iter()
+            .map(|root| apply_materialization_timings(root, &assignment, &mut memo).unwrap())
+            .collect();
+        asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(&timed)
+            .unwrap()
+            .dag
+    }
+
+    fn node_of(
+        dag: &PhysicalASAPDAG,
+        pick: impl Fn(&Payload) -> bool,
+    ) -> &asap_types::ir::physical_export::PhysicalASAPDAGNode {
+        dag.nodes.iter().find(|n| pick(&n.payload)).unwrap()
+    }
+
+    fn is_scan(payload: &Payload) -> bool {
+        matches!(payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+    }
+
+    fn is_build(payload: &Payload) -> bool {
+        matches!(payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
+    }
+
+    /// An ingestion-time node is priced over λ rows per second, whatever its
+    /// readers' evaluation rate; a query-time node scales with that rate.
+    #[test]
+    fn ingestion_time_node_is_priced_at_the_ingestion_rate() {
+        let dag = kll_dag("quantile_over_time(0.99, m[1m])", true);
+        let scan = node_of(&dag, is_scan);
+        assert!(!scan.output_state.timing.is_query_time());
+        let at = |interval_ms| {
+            price(
+                &dag,
+                &[repeating(None, interval_ms)],
+                &data(),
+                &Stage3Calibration::ILLUSTRATIVE,
+            )
+            .unwrap()
+        };
+        let (fast, slow) = (at(1_000), at(10_000));
+        // data() declares λ = 10 000 rows/s.
+        assert_eq!(fast.per_node[&scan.id].rows, 10_000);
+        let build = node_of(&dag, is_build).id;
+        for id in [scan.id, build] {
+            assert_eq!(fast.per_node[&id].cost, slow.per_node[&id].cost);
+        }
+        let estimate = dag.roots[0];
+        assert!(
+            (fast.per_node[&estimate].cost - 10.0 * slow.per_node[&estimate].cost).abs() < 1e-12
+        );
+    }
+
+    /// The memory term is w × retained bytes: two windows of every group's
+    /// state, for ingestion-time state that query time reads.
+    #[test]
+    fn memory_term_is_weight_times_retained_bytes() {
+        let dag = kll_dag("quantile_over_time(0.99, m[1m])", true);
+        let build = node_of(&dag, is_build);
+        let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) = &build.payload else {
+            unreachable!()
+        };
+        let cost = |w| {
+            let calibration = Stage3Calibration {
+                cost_per_retained_byte_second: w,
+                ..Stage3Calibration::ILLUSTRATIVE
+            };
+            price(&dag, &[every_10s(None)], &data(), &calibration).unwrap()
+        };
+        let (with, without) = (cost(1.25e-7), cost(0.0));
+        // One state per series: data() declares 10 000.
+        let groups = with.per_node[&build.id].rows;
+        assert_eq!(groups, 10_000);
+        let retained = 2 * groups * summary_shape(family).1;
+        let term = with.per_node[&build.id].cost - without.per_node[&build.id].cost;
+        assert!((term - 1.25e-7 * retained as f64).abs() < 1e-12, "{term}");
+        assert!((with.total - without.total - term).abs() < 1e-12);
+        // Query-time state is transient: no memory term.
+        let query_time = kll_dag("quantile_over_time(0.99, m[1m])", false);
+        let (a, b) = (
+            price(
+                &query_time,
+                &[every_10s(None)],
+                &data(),
+                &Stage3Calibration::ILLUSTRATIVE,
+            ),
+            price(
+                &query_time,
+                &[every_10s(None)],
+                &data(),
+                &Stage3Calibration {
+                    cost_per_retained_byte_second: 0.0,
+                    ..Stage3Calibration::ILLUSTRATIVE
+                },
+            ),
+        );
+        assert_eq!(a.unwrap().total, b.unwrap().total);
+    }
+
+    /// A node reached by two roots with equal intervals is evaluated once
+    /// per interval; different intervals add their rates.
+    #[test]
+    fn node_shared_by_roots_with_equal_intervals_is_charged_once() {
+        let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::Exact);
+        let one = stage2_physical("L", std::slice::from_ref(&root))
+            .unwrap()
+            .dag;
+        let two = stage2_physical("L", &[root.clone(), root]).unwrap().dag;
+        let total = |dag: &PhysicalASAPDAG, demand: &[RootDemand]| {
+            price(dag, demand, &data(), &Stage3Calibration::ILLUSTRATIVE)
+                .unwrap()
+                .total
+        };
+        let single = total(&one, &[every_10s(None)]);
+        assert_eq!(total(&two, &[every_10s(None), every_10s(None)]), single);
+        let mixed = total(&two, &[every_10s(None), repeating(None, 20_000)]);
+        assert!((mixed - 1.5 * single).abs() < 1e-12 * single.max(1.0));
+    }
+
+    /// One-off recurrence is amortized over the horizon H:
+    /// invocations × per-evaluation cost / H.
+    #[test]
+    fn one_off_recurrence_is_amortized_over_the_horizon() {
+        let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::Exact);
+        let dag = stage2_physical("L", &[root]).unwrap().dag;
+        let calibration = Stage3Calibration::ILLUSTRATIVE;
+        let total = |recurrence| {
+            let demand = RootDemand {
+                recurrence,
+                ..every_10s(None)
+            };
+            price(&dag, &[demand], &data(), &calibration).unwrap().total
+        };
+        // Once per second: the per-evaluation cost.
+        let per_evaluation = total(QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+            RepetitionInterval(1_000),
+        )));
+        let once = total(QueryRecurrence::OneTime {
+            invocations: 3,
+            execute_at: None,
+        });
+        let expected = 3.0 * per_evaluation / calibration.horizon_s;
+        assert!(
+            (once - expected).abs() < 1e-12 * expected,
+            "{once} vs {expected}"
+        );
+        assert_eq!(
+            total(QueryRecurrence::Unknown),
+            per_evaluation / calibration.horizon_s
+        );
+    }
+
+    /// Regression (#509 Example 3, Pattern A): a scan is priced over the
+    /// longest range plus offset reading it, and each range passes only its
+    /// own span, so sharing one 5-year scan is not costlier than separate
+    /// scans.
+    #[test]
+    fn shared_long_range_scan_is_not_costlier_than_separate_scans() {
+        let queries = [
+            "quantile_over_time(0.99, latency_ms[5y])",
+            "quantile_over_time(0.99, latency_ms[1y])",
+            "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
+            "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
+            "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
+        ];
+        let roots = queries
+            .iter()
+            .enumerate()
+            .map(|(i, query)| {
+                let root = lower_promql(query, AccuracyTarget::Exact);
+                let root =
+                    asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+                (i, QueryRoot::Operator(root))
+            })
+            .collect();
+        let stage1 = stage1_logical_candidates(roots).unwrap();
+        let data = DataWorkload {
+            ingestion_rate: Evidence {
+                value: Some(Rate(1_000_000.0 / 15.0)),
+                ..Default::default()
+            },
+            input_cardinality: Evidence {
+                value: Some(1_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let demand: Vec<_> = queries
+            .iter()
+            .map(|_| RootDemand {
+                recurrence: QueryRecurrence::OneTime {
+                    invocations: 1,
+                    execute_at: None,
+                },
+                ..every_10s(None)
+            })
+            .collect();
+        let total = |shared: bool| {
+            let variant = *variants(&stage1)
+                .iter()
+                .find(|v| v.shared == shared)
+                .unwrap();
+            let raw = vec![0; variant.inventory.targets.len()];
+            let (_, candidate) = realize(variant, &raw).unwrap();
+            let cost = assess(&candidate, &demand, &data, &PlanningModels::builtin()).unwrap();
+            let scan_rows: Vec<_> = candidate
+                .dag
+                .nodes
+                .iter()
+                .filter(|n| is_scan(&n.payload))
+                .map(|n| cost.per_node[&n.id].rows)
+                .collect();
+            (cost.total, scan_rows)
+        };
+        let (shared, shared_scans) = total(true);
+        let (separate, separate_scans) = total(false);
+        let year = 365.0 * 24.0 * 3_600.0 * 1_000_000.0 / 15.0;
+        assert_eq!(shared_scans.len(), 1);
+        assert!(
+            (shared_scans[0] as f64 / year - 5.0).abs() < 0.01,
+            "{shared_scans:?}"
+        );
+        let mut years: Vec<_> = separate_scans
+            .iter()
+            .map(|&rows| (rows as f64 / year).round() as u64)
+            .collect();
+        years.sort();
+        assert_eq!(years, [1, 2, 3, 5, 5]);
+        assert!(shared <= separate, "shared {shared} vs separate {separate}");
     }
 }

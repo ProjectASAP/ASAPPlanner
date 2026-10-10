@@ -427,6 +427,26 @@ impl From<&RepeatingEntry> for QueryWorkloadEntry {
     }
 }
 
+/// What planning needs of one query root beyond its DAG: Stage 3 checks
+/// `accuracy` (`None` imposes no target) and prices by `recurrence`;
+/// Stage 2's ingestion-time eligibility also reads `predictability`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootDemand {
+    pub accuracy: Option<AccuracyTarget>,
+    pub recurrence: QueryRecurrence,
+    pub predictability: Predictability,
+}
+
+impl From<&QueryWorkloadEntry> for RootDemand {
+    fn from(entry: &QueryWorkloadEntry) -> Self {
+        Self {
+            accuracy: Some(entry.requirements.accuracy.target()),
+            recurrence: entry.recurrence.clone(),
+            predictability: entry.predictability.clone(),
+        }
+    }
+}
+
 // ── Data workload ─────────────────────────────────────────────────────────────
 
 /// Whether the data queried by this workload is static, still arriving, or a
