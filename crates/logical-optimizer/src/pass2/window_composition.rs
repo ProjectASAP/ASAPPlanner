@@ -16,21 +16,29 @@
 //! relative time is `(-(o + (i + 1)·w), -(o + i·w)]` (W2). A `SummaryMerge`
 //! combines the panes (W1), which derivation accepts only for disjoint
 //! panes; a tumbling form is used only when the merged coverage is exactly
-//! the whole-window state's. Stage 2 still
-//! runs every node at query time, so until it plans materialization each
-//! evaluation rebuilds all panes.
+//! the whole-window state's. Stage 2 decides whether the panes are rebuilt
+//! at each evaluation, maintained at ingestion time or kept.
+//!
+//! **Shared segments (Q60, Example 3 Pattern A).** Queries reading windows
+//! of one scan at different offsets ([`share_window_segments`]) share one
+//! summary per segment of a grid that every window's boundaries lie on, and
+//! each query merges the segments its range covers.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_types::ir::operator::{Source, TimeShift};
+use asap_types::ir::operator::{AggIntent, Reduction, Source, TimeShift};
 use asap_types::ir::schema::{FieldDataType, GroupingStrategy};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, TimeRangeKind};
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RootDemand};
 
-use crate::pass1::logical_candidates::{LocalLogicalCandidates, LogicalCandidateError};
-use crate::pass1::replacement::Realization;
+use super::summary_capability::{strictest, with_accuracy};
+use crate::pass1::logical_candidates::{
+    local_realizations_for_intent, LocalLogicalCandidates, LogicalCandidateError,
+};
+use crate::pass1::replacement::{accuracy_target, Realization};
 
 /// How a summary alternative covers its query's window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -40,6 +48,9 @@ pub enum WindowForm {
     Whole,
     /// Back-to-back panes of `pane_ms`, merged at each evaluation.
     Tumbling { pane_ms: u64 },
+    /// Segments of `segment_ms` shared by several queries' windows
+    /// ([`share_window_segments`]); built as tumbling panes are.
+    Segments { segment_ms: u64 },
 }
 
 impl WindowForm {
@@ -50,12 +61,20 @@ impl WindowForm {
             WindowForm::Tumbling { pane_ms } => {
                 Some(format!("tumbling {} panes", duration_label(pane_ms)))
             }
+            WindowForm::Segments { segment_ms } => {
+                Some(format!("{} segments", duration_label(segment_ms)))
+            }
         }
     }
 }
 
 fn duration_label(ms: u64) -> String {
-    for (unit, size) in [("h", 3_600_000), ("m", 60_000), ("s", 1_000)] {
+    for (unit, size) in [
+        ("d", 86_400_000),
+        ("h", 3_600_000),
+        ("m", 60_000),
+        ("s", 1_000),
+    ] {
         if ms.is_multiple_of(size) {
             return format!("{}{unit}", ms / size);
         }
@@ -223,6 +242,158 @@ pub fn add_window_forms<Id>(inventory: &mut LocalLogicalCandidates<Id>, demand: 
             target.windows.push(WindowForm::Tumbling { pane_ms });
             target.groupings.push(grouping);
         }
+    }
+}
+
+/// The shared-segment rule (Q60) over a Pass 1 inventory: targets that
+/// estimate the same statistic (up to accuracy) with the same grouping and
+/// no filters, over windows of one scan, share one summary per segment. The
+/// segment width is the gcd of every window's lookback and offset, so each
+/// window `[-(o + lookback), -o)` is a whole number of segments, and each
+/// query merges the segments its range covers. Merging disjoint summaries is
+/// exact (`tumbling_state` checks the derived cover), so no
+/// accuracy is split: every segment is sized for the strictest consumer, as
+/// the summary-capability rule sizes a shared summary.
+///
+/// Only the all-shared form is offered (Q62): in the returned inventory each
+/// grouped target has the segment form of its first mergeable summary as its
+/// only alternative, so composition builds identical segments, which the
+/// identical-expression rule merges. A group is skipped when its windows are
+/// all the same (nothing to split), the union of its windows has more than
+/// [`MAX_PANES`] segments, or its queries recur at different cadences.
+/// `None` when no group remains.
+pub fn share_window_segments<Id: Clone>(
+    inventory: &LocalLogicalCandidates<Id>,
+    demand: &[RootDemand],
+) -> Result<Option<LocalLogicalCandidates<Id>>, LogicalCandidateError> {
+    // The cadences of the roots reaching each node.
+    let mut cadences: HashMap<*const OperatorNode, Vec<Option<u64>>> = HashMap::new();
+    for (index, (_, root)) in inventory.roots.iter().enumerate() {
+        let cadence = demand
+            .get(index)
+            .and_then(|d| evaluation_cadence_ms(&d.recurrence));
+        let operators = match root {
+            QueryRoot::Operator(node) => vec![node],
+            QueryRoot::Scalar(expr) => expr.operator_refs(),
+        };
+        for node in operators.into_iter().flat_map(OperatorNode::reachable) {
+            cadences.entry(Rc::as_ptr(&node)).or_default().push(cadence);
+        }
+    }
+    // Per target: the estimate without its accuracy, the window, and the
+    // grouping, when the rule applies to it.
+    let keyed: Vec<Option<(AggIntent, Window<'_>, &Reduction)>> = inventory
+        .targets
+        .iter()
+        .map(|t| match t.target.non_asap() {
+            Some(NonASAPOp::Aggregate {
+                reduction,
+                measures,
+                filters,
+                having: None,
+                child,
+                ..
+            }) if filters.iter().all(Option::is_none) => match measures.as_slice() {
+                [intent]
+                    if accuracy_target(intent)
+                        .is_some_and(|a| !matches!(a, AccuracyTarget::Exact))
+                        && window(child).is_some_and(|w| w.offset_ms >= 0) =>
+                {
+                    Some((
+                        with_accuracy(intent, AccuracyTarget::Exact),
+                        window(child)?,
+                        reduction,
+                    ))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let same_scan = |a: &Rc<OperatorNode>, b: &Rc<OperatorNode>| Rc::ptr_eq(a, b) || a == b;
+    let mut out = inventory.clone();
+    let mut grouped = vec![false; keyed.len()];
+    let mut any = false;
+    for leader in 0..keyed.len() {
+        let Some((intent, first, reduction)) = &keyed[leader] else {
+            continue;
+        };
+        if grouped[leader] {
+            continue;
+        }
+        let members: Vec<usize> = (leader..keyed.len())
+            .filter(|&t| {
+                keyed[t].as_ref().is_some_and(|(i, w, r)| {
+                    i == intent && r == reduction && same_scan(w.scan, first.scan)
+                })
+            })
+            .collect();
+        for &t in &members {
+            grouped[t] = true;
+        }
+        let windows: Vec<&Window<'_>> = members
+            .iter()
+            .map(|&t| &keyed[t].as_ref().expect("keyed").1)
+            .collect();
+        let bounds = |w: &Window<'_>| (w.offset_ms as u64, w.offset_ms as u64 + w.lookback_ms);
+        let reaching: Vec<Option<u64>> = members
+            .iter()
+            .flat_map(|&t| {
+                cadences
+                    .get(&Rc::as_ptr(&inventory.targets[t].target))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            })
+            .collect();
+        if members.len() < 2
+            || windows.iter().all(|w| bounds(w) == bounds(windows[0]))
+            || reaching.iter().any(|c| *c != reaching[0])
+        {
+            continue;
+        }
+        let width = windows
+            .iter()
+            .fold(0, |g, w| gcd(gcd(g, w.lookback_ms), w.offset_ms as u64));
+        let start = windows.iter().map(|w| bounds(w).0).min().unwrap_or(0);
+        let end = windows.iter().map(|w| bounds(w).1).max().unwrap_or(0);
+        if width == 0
+            || (end - start) / width > MAX_PANES
+            || !windows.iter().all(|w| panes_tile_window(w, width))
+        {
+            continue;
+        }
+        let requirements: Vec<AccuracyTarget> = members
+            .iter()
+            .map(|&t| single_intent(inventory, t))
+            .filter_map(|intent| accuracy_target(intent).cloned())
+            .collect();
+        let target = strictest(requirements.iter());
+        let sized = with_accuracy(single_intent(inventory, leader), target);
+        let grouping = GroupingStrategy::default();
+        let Some(summary) = local_realizations_for_intent(&sized)?
+            .into_iter()
+            .find(|r| family(r, &grouping).is_some_and(|f| f.family_merges()))
+        else {
+            continue;
+        };
+        // The members' estimates differ only in accuracy, so the one sized
+        // summary serves each of them.
+        for &t in &members {
+            out.targets[t].alternatives = vec![summary.clone()];
+            out.targets[t].absorbs = vec![None];
+            out.targets[t].windows = vec![WindowForm::Segments { segment_ms: width }];
+            out.targets[t].groupings = vec![grouping.clone()];
+        }
+        any = true;
+    }
+    Ok(any.then_some(out))
+}
+
+fn single_intent<Id>(inventory: &LocalLogicalCandidates<Id>, t: usize) -> &AggIntent {
+    match inventory.targets[t].target.non_asap() {
+        Some(NonASAPOp::Aggregate { measures, .. }) => &measures[0],
+        _ => unreachable!("grouped targets are single-measure aggregates"),
     }
 }
 
@@ -570,5 +741,100 @@ mod tests {
         assert!(merge(vec![pane(0, 120_000), pane(60_000, 60_000)]).is_err());
         // Panes of 2m over a 5m window leave the oldest minute uncovered.
         assert!(tumbling_state(child, 120_000, kll_state(target)).is_err());
+    }
+
+    const YEAR_MS: u64 = 365 * 86_400_000;
+
+    /// Example 3's Pattern A: five p99 reports over [5y], [1y], [1y offset
+    /// 1y], [1y offset 2y] and [3y offset 2y], one ad hoc batch.
+    fn pattern_a() -> Vec<(usize, QueryRoot)> {
+        [
+            "latency[5y]",
+            "latency[1y]",
+            "latency[1y] offset 1y",
+            "latency[1y] offset 2y",
+            "latency[3y] offset 2y",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, window)| {
+            let root = lower_promql(
+                &format!("quantile_over_time(0.99, {window})"),
+                AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.005,
+                    delta: 0.01,
+                },
+            );
+            let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+            (i, QueryRoot::Operator(root))
+        })
+        .collect()
+    }
+
+    /// The windows' boundaries lie on a 1-year grid, so the five queries
+    /// share five 1-year KLL segments: the variant offers each query only
+    /// that form, and composition with the identical-expression merge builds
+    /// each segment once, read by the merges of every query covering it.
+    #[test]
+    fn pattern_a_shares_five_one_year_segments() {
+        use crate::pass1::logical_candidates::compose_logical_candidate;
+        use crate::pass2::identical_expressions::{
+            share_identical_expressions, stage1_logical_candidates, Sharing,
+        };
+        let variants = stage1_logical_candidates(pattern_a(), &BTreeMap::new(), &[]).unwrap();
+        let segments = variants
+            .iter()
+            .find(|v| v.sharing == Sharing::WindowSegments)
+            .expect("a shared-segment variant");
+        let form = WindowForm::Segments {
+            segment_ms: YEAR_MS,
+        };
+        assert_eq!(form.label().as_deref(), Some("365d segments"));
+        for target in &segments.inventory.targets {
+            assert_eq!(target.windows, [form]);
+            assert!(matches!(
+                &target.alternatives[..],
+                [Realization::Sketch(kind)] if *kind.algorithm() == SketchAlgorithm::Kll
+            ));
+        }
+        let composed = compose_logical_candidate(&segments.inventory, &[0; 5]).unwrap();
+        let composed = share_identical_expressions(&composed).unwrap();
+        let roots: Vec<_> = composed
+            .iter()
+            .map(|(_, root)| match root {
+                QueryRoot::Operator(node) => node.clone(),
+                QueryRoot::Scalar(_) => unreachable!(),
+            })
+            .collect();
+        let mut builds = std::collections::HashSet::new();
+        let mut merges = std::collections::HashSet::new();
+        for node in roots.iter().flat_map(OperatorNode::reachable) {
+            match &node.operator {
+                Operator::ASAP(ASAPOp::SummaryAgg { .. }) => builds.insert(Rc::as_ptr(&node)),
+                Operator::ASAP(ASAPOp::SummaryMerge { .. }) => merges.insert(Rc::as_ptr(&node)),
+                _ => false,
+            };
+        }
+        assert_eq!((builds.len(), merges.len()), (5, 5));
+    }
+
+    /// Queries that recur at different cadences, or read the same window,
+    /// share no segments.
+    #[test]
+    fn segments_need_one_cadence_and_different_windows() {
+        let roots = pattern_a();
+        let inventory =
+            enumerate_local_logical_candidates(roots[..2].to_vec(), &BTreeMap::new()).unwrap();
+        assert!(share_window_segments(&inventory, &[]).unwrap().is_some());
+        let demand = [every(60_000), every(120_000)];
+        assert!(share_window_segments(&inventory, &demand)
+            .unwrap()
+            .is_none());
+        let same = enumerate_local_logical_candidates(
+            vec![roots[1].clone(), (1, roots[1].1.clone())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(share_window_segments(&same, &[]).unwrap().is_none());
     }
 }

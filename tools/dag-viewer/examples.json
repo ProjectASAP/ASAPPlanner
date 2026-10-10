@@ -18,7 +18,7 @@
     "name": "3a · historical p99 batch",
     "example": "planner-layering-3a",
     "file": "out/example3a.json",
-    "story": "An ad hoc batch of five p99 reports over 1–5 years, run once. Each query gets a KLL, and sharing the input scan across all five is cheapest. Exponential histograms are not implemented yet, so no plan shares window summaries across the reports."
+    "story": "An ad hoc batch of five p99 reports over 1–5 years, run once. Each query gets a KLL, and sharing the input scan across all five is cheapest. Pass 2 also offers five 1-year KLL segments shared by all five reports, but the cost model charges each segment's time shift and range for every row of the 5-year scan, so it costs more."
   },
   {
     "id": "example3b",
@@ -32,7 +32,7 @@
     "name": "4a · monthly p99 reports",
     "example": "planner-layering-4a",
     "file": "out/example4a.json",
-    "story": "Example 3a repeated monthly and known in advance. The same shared-input KLL plan wins; its cost is now amortized over the month between runs."
+    "story": "Example 3a repeated monthly and known in advance. The same shared-input KLL plan wins; its cost is now amortized over the month between runs. The shared 1-year segments may now be maintained at ingestion time, but keeping a million per-series KLLs per segment costs far more."
   },
   {
     "id": "example4b",

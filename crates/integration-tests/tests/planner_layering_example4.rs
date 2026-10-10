@@ -98,6 +98,22 @@ fn eh_options(run: &Run) -> BTreeMap<Materialization, (String, PhysicalASAPNodeI
     options_of(run, None, 5)
 }
 
+/// The physical candidates of the shared-segment candidate (Q60), keyed by
+/// the materialization of its segments, with the newest segment's id.
+fn segment_options(run: &Run) -> BTreeMap<Materialization, (String, PhysicalASAPNodeId)> {
+    let logical = run
+        .logical
+        .iter()
+        .find(|c| shares_segments(&c.dag, &c.query_roots))
+        .expect("a candidate sharing window segments");
+    run.physical_of(logical)
+        .map(|p| {
+            let (segment, ..) = sketch_builds(&p.dag)[0];
+            (materialization(p, segment), (p.id.clone(), segment))
+        })
+        .collect()
+}
+
 fn tumbling() -> Option<WindowForm> {
     Some(WindowForm::Tumbling {
         length_ms: PATTERN_B_INTERVAL_MS,
@@ -165,7 +181,7 @@ fn stage2_materialized_output_covers_its_consumers() {
 
 /// The shared EH candidate yields A1 (query time, kept), A2 (ingestion time) and A3 (not materialized).
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram; and A3, not materialized for several consumers (Q44)"]
+#[ignore = "shared segments (Q60) are not kept for one batch, and A3 is not generated (Q44); a one-off batch has no ingestion-time option (Q61)"]
 fn stage2_a_shared_eh_has_three_materialization_options() {
     let found: BTreeSet<_> = eh_options(&run_promql(&once())).into_keys().collect();
     assert_eq!(
@@ -176,43 +192,53 @@ fn stage2_a_shared_eh_has_three_materialization_options() {
 
 /// With data at rest, A2 is not generated; A1 and A3 remain.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram"]
+#[ignore = "shared segments (Q60) are not kept for one batch, and A3 is not generated (Q44)"]
 fn stage2_a_at_rest_drops_the_ingestion_time_option() {
     let found: BTreeSet<_> = eh_options(&run_promql(&at_rest())).into_keys().collect();
     assert_eq!(found, BTreeSet::from([QueryTimeKept, NotMaterialized]));
 }
 
-/// A materialized shared EH is one build node read by all five queries, charged once.
+/// The shared segments (Q60, in place of the spec's EH) are five builds,
+/// each built once, read by all five queries through their merges and
+/// charged once, in every materialization: at query time for the one-off
+/// batch, and also at ingestion time when it repeats monthly (Q61).
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram"]
-fn stage2_a_materialized_eh_is_built_once_for_all_consumers() {
-    let run = run_promql(&once());
-    for (m, (id, build)) in eh_options(&run) {
-        if m == NotMaterialized {
-            continue;
+fn stage2_a_segments_are_built_once_for_all_consumers() {
+    for (workload, expected) in [
+        (once(), BTreeSet::from([NotMaterialized])),
+        (monthly(), BTreeSet::from([IngestionTime, NotMaterialized])),
+    ] {
+        let run = run_promql(&workload);
+        let options = segment_options(&run);
+        assert_eq!(options.keys().copied().collect::<BTreeSet<_>>(), expected);
+        for (id, _) in options.values() {
+            let p = run.physical(id);
+            let segments = sketch_builds(&p.dag);
+            assert_eq!(segments.len(), 5, "{id}");
+            let read: BTreeSet<usize> = segments
+                .iter()
+                .flat_map(|(b, ..)| readers(&p.dag, &p.query_roots, *b))
+                .collect();
+            assert_eq!(read.len(), 5, "{id}");
+            let merges = p
+                .dag
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.payload, Operator::ASAP(ASAPOp::SummaryMerge { .. })))
+                .count();
+            assert_eq!(merges, 5, "{id}");
+            if let Some(cost) = run.selection.costs.get(id) {
+                for (b, ..) in &segments {
+                    assert!(cost.per_node.contains_key(b), "{id}");
+                }
+            }
         }
-        let p = run.physical(&id);
-        let ehs = sketch_builds(&p.dag)
-            .into_iter()
-            .filter(|(b, ..)| {
-                matches!(
-                    window_form(&p.dag, *b),
-                    WindowForm::ExponentialHistogram { .. }
-                )
-            })
-            .count();
-        assert_eq!(ehs, 1, "{id}");
-        assert_eq!(readers(&p.dag, &p.query_roots, build).len(), 5, "{id}");
-        assert!(
-            run.selection.costs[&id].per_node.contains_key(&build),
-            "{id}"
-        );
     }
 }
 
 /// A3 rebuilds the EH for each of the five queries, so it costs more than A1, which builds it once.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram; and A3 (Q44)"]
+#[ignore = "A3, not materialized for several consumers, is not generated (Q44)"]
 fn stage3_a_rebuilding_per_query_costs_more_than_building_once() {
     let run = run_promql(&once());
     let options = eh_options(&run);
@@ -227,7 +253,7 @@ fn stage3_a_rebuilding_per_query_costs_more_than_building_once() {
 
 /// As given (run once, ad hoc), A1 is the cheapest of the three: A2 maintains years of history for one batch.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram"]
+#[ignore = "a one-off batch has no ingestion-time option (Q61), and A3 is not generated (Q44)"]
 fn stage3_a_once_adhoc_prefers_the_query_time_eh() {
     let run = run_promql(&once());
     let options = eh_options(&run);
@@ -239,7 +265,7 @@ fn stage3_a_once_adhoc_prefers_the_query_time_eh() {
 
 /// Repeated monthly and predictable, A2's maintenance is shared by many batches, so A2 gains on A1.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram, maintainable over a monthly window"]
+#[ignore = "a one-off batch has no ingestion-time option to compare with (Q61)"]
 fn stage3_a_monthly_amortizes_ingestion_time_maintenance() {
     let ratio = |workload: PlanningWorkload| {
         let run = run_promql(&workload);

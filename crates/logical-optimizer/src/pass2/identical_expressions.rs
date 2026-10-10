@@ -16,7 +16,7 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{MetricType, RootDemand};
 
 use super::summary_capability::share_summary_capability;
-use super::window_composition::add_window_forms;
+use super::window_composition::{add_window_forms, share_window_segments};
 use crate::pass1::logical_candidates::{
     enumerate_local_logical_candidates, LocalLogicalCandidates, LogicalCandidateError,
 };
@@ -34,6 +34,11 @@ pub enum Sharing {
     /// are sized for their strictest consumer, so composition builds
     /// identical producers, which are merged.
     SummaryCapability,
+    /// The shared-segment rule on top of the identical-expression rule
+    /// ([`share_window_segments`]): queries over windows of one scan merge
+    /// one shared summary per segment, and the identical segments are merged
+    /// after composition.
+    WindowSegments,
 }
 
 impl Sharing {
@@ -56,7 +61,9 @@ pub struct SharingVariant<Id> {
 /// last is skipped when it would repeat the identical-expression variant.
 /// In every variant, the window-composition rule adds tumbling forms of
 /// mergeable alternatives for repeating queries (`demand[i]` is the demand
-/// of `roots[i]`; a root without one gets none).
+/// of `roots[i]`; a root without one gets none). Last, the shared-segment
+/// variant when windows of one scan can share segments: only that form, not
+/// the tumbling forms, for the targets it groups.
 pub fn stage1_logical_candidates<Id: Clone>(
     roots: Vec<(Id, QueryRoot)>,
     metric_types: &BTreeMap<String, MetricType>,
@@ -74,6 +81,7 @@ pub fn stage1_logical_candidates<Id: Clone>(
         });
     }
     let base = &variants.last().expect("the independent variant").inventory;
+    let segments = share_window_segments(base, demand)?;
     if let Some(capability) = share_summary_capability(base)? {
         if capability.resized || variants.len() == 1 {
             variants.push(SharingVariant {
@@ -84,6 +92,12 @@ pub fn stage1_logical_candidates<Id: Clone>(
     }
     for variant in &mut variants {
         add_window_forms(&mut variant.inventory, demand);
+    }
+    if let Some(inventory) = segments {
+        variants.push(SharingVariant {
+            sharing: Sharing::WindowSegments,
+            inventory,
+        });
     }
     Ok(variants)
 }
