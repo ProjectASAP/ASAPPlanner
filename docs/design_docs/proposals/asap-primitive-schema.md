@@ -335,8 +335,8 @@ So the `selection` is `latency ∈ (−∞, 100)`, `r ∈ {us}`. A PromQL exampl
 | `TimeRange` (range) or `TimeShift` (without `@`) | yes | they choose a time window, but do not change any row's values | `region = 'us'` below `TimeRange(1m)` ✓ |
 | `Project` | only if its column is passed through unchanged (a rename is fine) | the column must still be there, with the same values, above the `Project` | `Project [job, region AS r]`: `region = 'us'` ✓, it becomes `r = 'us'`. `Project [job, value * 2 AS v2]`: `value > 5` ✗, `value` is gone |
 | `Aggregate` (later) | only if it uses group columns | a group column has one value per group, so filtering before or after grouping keeps the same groups | below `SUM(value) by job`: `job = 'api'` ✓; `value > 5` ✗, it changes the sums |
-| `rate` or a window function (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate |
-| any other operator, e.g. `Join`, `Limit`, an instant `TimeRange`, a `TimeShift` with `@` | no | | |
+| `rate`, a window function, or an instant `TimeRange` (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate. Below an instant selector: `job = 'api'` ✓; `value > 5` ✗, the latest sample with value > 5 is not the latest sample |
+| any other operator, e.g. `Join`, `Limit`, a `TimeShift` with `@` | no | | |
 
 A `Filter` *above* `rate` has nothing to pass: it keeps some rate outputs, and those are exactly the rows the `SummaryAgg` reads. A PromQL comparison such as `rate(m[5m]) > 0` is not lowered to a `Filter`, though, but to a comparison operator (`BinaryOp`), which the walk does not enter. So today it stays in `definition` (last row of **More examples** below).
 
@@ -377,7 +377,7 @@ Any other shape stays in `definition`:
 
 - PromQL windows exclude their start, so relative windows are open on the left.
 - Window composition ([Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination) of logical optimization) builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
-- An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`. The walk also stops there, so the label matchers of an instant selector stay in `definition` too, for now.
+- An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`. The walk also stops there, so for now the label matchers of an instant selector stay in `definition` too; lifting them is planned together with `rate` (Rule 1).
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
 - Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
 
@@ -422,7 +422,7 @@ Any other shape stays in `definition`:
 | inputs' coverage | at most once per input | usually already cached; otherwise derived and cached now |
 | equal definitions | `O(n·N·f)`: `n·N` node comparisons, each comparing an operator and a schema; often `O(n·f)` | structural comparison of each input's definition with the first one. Shared nodes (`Rc`) compare in `O(1)`, and node pairs already proven equal are remembered |
 | no overlap | `O(n²·b²·f·v²)` | every pair of inputs, every pair of boxes, every shared column |
-| union of selections | `O((n·b)³)` box comparisons, worst case | joins boxes whose time windows touch, or that differ only in one column's value set, until nothing more joins; each join restarts the scan |
+| union of selections | `O((n·b)³)` box comparisons, worst case | joins boxes that differ in only one dimension whose union is again one constraint (touching time windows, touching value ranges, or value sets of one column), until nothing more joins; each join restarts the scan |
 
 For the common cases this is small: `n` one-minute panes in time order have one box each with no columns, so the merge costs `O(n·N·f)` for the definitions, `O(n²)` for overlap and `O(n²)` for the union. Nested merges keep `n` small: a merge of merges compares only its direct inputs, whose coverage is cached.
 
@@ -814,7 +814,7 @@ input groups                       output groups
 |---|---|
 | What comes out? | the children's schema; with `group_by`, only the remaining group columns |
 | When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); `group_by` is not a subset of the children's grouping (planned) |
-| What is its coverage? | the shared `definition` (with the new grouping, once `group_by` exists), and the union of the children's selections. Boxes whose time windows touch join, and so do boxes that differ only in one column's value set (`{us}` and `{eu}` give `{us, eu}`). Everything else stays as separate boxes, including gaps and touching value ranges such as `latency < 100` and `latency >= 100` |
+| What is its coverage? | the shared `definition` (with the new grouping, once `group_by` exists), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
 | State or value? | state in, state out |
 
 **Other uses of coverage.** The planner also uses coverage to read or reuse a state without merging:
