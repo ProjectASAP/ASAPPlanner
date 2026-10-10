@@ -29,6 +29,11 @@ use crate::pass1::replacement::{
 pub struct LocalLogicalTarget {
     pub target: Rc<OperatorNode>,
     pub alternatives: Vec<Realization>,
+    /// Per alternative, the target directly beneath this one that it
+    /// absorbs: its summary reads that target's input, so that target is
+    /// not computed and has no choice of its own (#509 whole-expression
+    /// realization). `None`: the alternative reads this target's input.
+    pub absorbs: Vec<Option<usize>>,
 }
 
 /// Compact Pass 1 inventory; roots and nested producer dependencies are retained.
@@ -101,6 +106,8 @@ pub fn enumerate_local_logical_candidates<Id>(
 ) -> Result<LocalLogicalCandidates<Id>, LogicalCandidateError> {
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
+    // Consumers of each node: the distinct nodes reading it, plus roots.
+    let mut consumers: HashMap<*const OperatorNode, usize> = HashMap::new();
     for (_, root) in &roots {
         root.validate_structure()?;
         let operators = match root {
@@ -108,17 +115,23 @@ pub fn enumerate_local_logical_candidates<Id>(
             QueryRoot::Scalar(expr) => expr.operator_refs(),
         };
         for root in operators {
+            *consumers.entry(Rc::as_ptr(root)).or_default() += 1;
             for node in OperatorNode::reachable(root) {
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
+                }
+                for child in node.children() {
+                    *consumers.entry(Rc::as_ptr(child)).or_default() += 1;
                 }
                 if node.timing.is_some() {
                     return Err(LogicalCandidateError::AssignedTiming);
                 }
                 if let Some(NonASAPOp::Aggregate { measures, .. }) = node.non_asap() {
                     if let [intent] = measures.as_slice() {
+                        let alternatives = local_realizations_for_intent(intent)?;
                         targets.push(LocalLogicalTarget {
-                            alternatives: local_realizations_for_intent(intent)?,
+                            absorbs: vec![None; alternatives.len()],
+                            alternatives,
                             target: node,
                         });
                     }
@@ -126,20 +139,165 @@ pub fn enumerate_local_logical_candidates<Id>(
             }
         }
     }
+    add_whole_expression_alternatives(&mut targets, &consumers);
     Ok(LocalLogicalCandidates { roots, targets })
 }
 
-/// Number of whole-workload candidates: one per choice of an alternative for
-/// every target. Saturates rather than overflowing.
-pub fn combination_count<Id>(inventory: &LocalLogicalCandidates<Id>) -> usize {
-    inventory
-        .targets
+/// Whole-expression top-k (#509 Example 1's Q2): a top-k over a per-item sum
+/// or count is realized as one heap sketch over the inner aggregate's input,
+/// keyed by the ranked item and weighted by the summed value, instead of a
+/// sketch over the inner aggregate's exact result. The decision is the
+/// legacy keyed-additive rule's. Offered only when the inner target has no
+/// other consumer, so absorbing it removes its work.
+fn add_whole_expression_alternatives(
+    targets: &mut [LocalLogicalTarget],
+    consumers: &HashMap<*const OperatorNode, usize>,
+) {
+    let position: HashMap<_, _> = targets
         .iter()
-        .fold(1usize, |n, t| n.saturating_mul(t.alternatives.len()))
+        .enumerate()
+        .map(|(i, t)| (Rc::as_ptr(&t.target), i))
+        .collect();
+    for target in targets.iter_mut() {
+        let Some(NonASAPOp::Aggregate { child, .. }) = target.target.non_asap() else {
+            continue;
+        };
+        let Some(&inner) = position.get(&Rc::as_ptr(child)) else {
+            continue;
+        };
+        if consumers.get(&Rc::as_ptr(child)) != Some(&1)
+            || whole_expression_input(&target.target).is_none()
+        {
+            continue;
+        }
+        let heaps: Vec<_> = target
+            .alternatives
+            .iter()
+            .filter(|a| {
+                matches!(a, Realization::Sketch(kind) if matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                ))
+            })
+            .cloned()
+            .collect();
+        for heap in heaps {
+            target.alternatives.push(heap);
+            target.absorbs.push(Some(inner));
+        }
+    }
+}
+
+/// The input and update of a whole-expression top-k over `target`'s inner
+/// aggregate, by the legacy keyed-additive rule, or `None` when it does not
+/// apply. Rows that carry the full series identity rank it as a column, as
+/// [`summary_update`] does.
+fn whole_expression_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, SummaryUpdate)> {
+    use crate::pass1::replacement::{
+        realize_keyed_additive_summary_input, PhysicalSummaryInputRuleResult,
+    };
+    let Some(NonASAPOp::Aggregate {
+        child,
+        reduction,
+        measures,
+        filters,
+        having: None,
+        ..
+    }) = target.non_asap()
+    else {
+        return None;
+    };
+    let ([intent @ AggIntent::TopK { .. }], true) = (measures.as_slice(), filters.is_empty())
+    else {
+        return None;
+    };
+    // The rule reads only the family's algorithm, and rejects Count-Min over
+    // signed weights. Ask with CountSketch so one update serves both heap
+    // sketches; Stage 3 decides whether Count-Min is admissible, as it does
+    // for every other Count-Min candidate.
+    let family = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CountSketchWithHeap,
+            asap_types::ir::schema::SketchParams::CountSketchWithHeap {
+                width: 1,
+                depth: 1,
+                heap_size: 1,
+            },
+        ),
+        GroupingStrategy::default(),
+    );
+    let PhysicalSummaryInputRuleResult::Realized(realized) =
+        realize_keyed_additive_summary_input(intent, &family, reduction, child)
+    else {
+        return None;
+    };
+    let mut input = realized.input;
+    let per_series = matches!(
+        child.non_asap(),
+        Some(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            ..
+        })
+    );
+    if per_series && realized.child.schema.has_promql_series_identity() {
+        input.item = Some(SummaryInputExpr::Column(ColumnRef::Named(
+            asap_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
+        )));
+    } else if realized.child.schema.closed {
+        // An encoded label set needs an open PromQL schema.
+        return None;
+    }
+    Some((realized.child, input))
+}
+
+/// Number of whole-workload candidates: one per choice of an alternative for
+/// every target, where a target absorbed by the alternative above it takes
+/// only its pass-through (it is not computed). Saturates rather than
+/// overflowing.
+pub fn combination_count<Id>(inventory: &LocalLogicalCandidates<Id>) -> usize {
+    completions(inventory, &[])
+}
+
+/// Valid choices extending `prefix` (choices for the first `prefix.len()`
+/// targets); 0 when `prefix` is invalid. A target and the target its
+/// alternatives absorb are counted together.
+fn completions<Id>(inventory: &LocalLogicalCandidates<Id>, prefix: &[usize]) -> usize {
+    let targets = &inventory.targets;
+    let mut paired = vec![false; targets.len()];
+    let mut total = 1usize;
+    for (t, target) in targets.iter().enumerate() {
+        let Some(u) = target.absorbs.iter().flatten().next().copied() else {
+            continue;
+        };
+        paired[t] = true;
+        paired[u] = true;
+        let absorbing = |c: usize| target.absorbs[c].is_some();
+        let own = target.alternatives.len();
+        let inner = targets[u].alternatives.len();
+        let absorbing_count = (0..own).filter(|&c| absorbing(c)).count();
+        let options = match (prefix.get(t), prefix.get(u)) {
+            (Some(&c), Some(&d)) => usize::from(!absorbing(c) || d == 0),
+            (Some(&c), None) if absorbing(c) => 1,
+            (Some(_), None) => inner,
+            (None, Some(0)) => own,
+            (None, Some(_)) => own - absorbing_count,
+            (None, None) => (own - absorbing_count)
+                .saturating_mul(inner)
+                .saturating_add(absorbing_count),
+        };
+        total = total.saturating_mul(options);
+    }
+    for (j, target) in targets.iter().enumerate().skip(prefix.len()) {
+        if !paired[j] {
+            total = total.saturating_mul(target.alternatives.len());
+        }
+    }
+    total
 }
 
 /// The first `max` choices in enumeration order: mixed radix, the last target
-/// varying fastest. `choice[i]` indexes `inventory.targets[i].alternatives`.
+/// varying fastest, skipping choices for a target its outer choice absorbs.
+/// `choice[i]` indexes `inventory.targets[i].alternatives`.
 pub fn enumerate_choices<Id>(
     inventory: &LocalLogicalCandidates<Id>,
     max: usize,
@@ -147,8 +305,10 @@ pub fn enumerate_choices<Id>(
     let count = combination_count(inventory).min(max);
     let mut choices = Vec::with_capacity(count);
     let mut choice = vec![0; inventory.targets.len()];
-    for _ in 0..count {
-        choices.push(choice.clone());
+    while choices.len() < count {
+        if completions(inventory, &choice) == 1 {
+            choices.push(choice.clone());
+        }
         for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
             *digit += 1;
             if *digit < target.alternatives.len() {
@@ -160,17 +320,41 @@ pub fn enumerate_choices<Id>(
     choices
 }
 
-/// Position of `choice` in [`enumerate_choices`] order.
+/// Position of `choice` in [`enumerate_choices`] order: the valid choices
+/// that precede it.
 pub fn choice_index<Id>(inventory: &LocalLogicalCandidates<Id>, choice: &[usize]) -> usize {
-    inventory
-        .targets
-        .iter()
-        .zip(choice)
-        .fold(0usize, |index, (target, &digit)| {
-            index
-                .saturating_mul(target.alternatives.len())
-                .saturating_add(digit)
-        })
+    let mut index = 0usize;
+    let mut prefix = Vec::with_capacity(choice.len());
+    for &digit in choice {
+        for smaller in 0..digit {
+            prefix.push(smaller);
+            index = index.saturating_add(completions(inventory, &prefix));
+            prefix.pop();
+        }
+        prefix.push(digit);
+    }
+    index
+}
+
+/// The targets alternative `c` of target `t` reads directly: those beneath
+/// `t`, except one it absorbs, whose own targets beneath it are read instead.
+/// `beneath` is [`nested_targets`].
+pub fn read_targets<Id>(
+    inventory: &LocalLogicalCandidates<Id>,
+    beneath: &[Vec<usize>],
+    t: usize,
+    c: usize,
+) -> Vec<usize> {
+    match inventory.targets[t].absorbs[c] {
+        None => beneath[t].clone(),
+        Some(u) => {
+            let mut read: Vec<_> = beneath[t].iter().copied().filter(|&v| v != u).collect();
+            read.extend(&beneath[u]);
+            read.sort_unstable();
+            read.dedup();
+            read
+        }
+    }
 }
 
 /// For each target, the targets directly beneath it: reachable from its input
@@ -224,7 +408,10 @@ pub fn compose_logical_candidate<Id: Clone>(
             target
                 .alternatives
                 .get(index)
-                .map(|alternative| (Rc::as_ptr(&target.target), alternative))
+                .map(|alternative| {
+                    let absorbs = target.absorbs[index].is_some();
+                    (Rc::as_ptr(&target.target), (alternative, absorbs))
+                })
                 .ok_or(LogicalCandidateError::InvalidChoice)
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
@@ -252,10 +439,12 @@ pub fn compose_logical_candidate<Id: Clone>(
 }
 
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
+/// Each target's chosen alternative, and whether it absorbs the target beneath.
+type Chosen<'a> = HashMap<*const OperatorNode, (&'a Realization, bool)>;
 
 fn rewrite(
     node: &Rc<OperatorNode>,
-    chosen: &HashMap<*const OperatorNode, &Realization>,
+    chosen: &Chosen<'_>,
     memo: &mut Memo,
 ) -> Result<Rc<OperatorNode>, LogicalCandidateError> {
     if let Some(done) = memo.get(&Rc::as_ptr(node)) {
@@ -269,8 +458,8 @@ fn rewrite(
         .iter()
         .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
     let rebuilt = match chosen.get(&Rc::as_ptr(node)) {
-        Some(realization) if **realization != Realization::PassThrough => {
-            realize(node, realization, memo)?
+        Some((realization, absorbs)) if **realization != Realization::PassThrough => {
+            realize(node, realization, *absorbs, memo)?
         }
         _ if changed => Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?),
         _ => node.clone(),
@@ -282,6 +471,7 @@ fn rewrite(
 fn realize(
     target: &OperatorNode,
     realization: &Realization,
+    absorbs: bool,
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, LogicalCandidateError> {
     let Some(NonASAPOp::Aggregate {
@@ -307,7 +497,17 @@ fn realize(
             "filtered or HAVING aggregate",
         ));
     }
-    let child = memo[&Rc::as_ptr(child)].clone();
+    let whole =
+        match absorbs {
+            true => Some(whole_expression_input(target).ok_or(
+                LogicalCandidateError::Unsupported("whole-expression top-k input"),
+            )?),
+            false => None,
+        };
+    let child = match &whole {
+        Some((input, _)) => memo[&Rc::as_ptr(input)].clone(),
+        None => memo[&Rc::as_ptr(child)].clone(),
+    };
     let (family, query) = match realization {
         Realization::ExactAggregate { kind, params } => (
             FieldDataType::ExactAggregate(kind.clone(), params.clone()),
@@ -319,7 +519,10 @@ fn realize(
         ),
         _ => return Err(LogicalCandidateError::Unsupported("summary family")),
     };
-    let input = summary_update(intent, &family, reduction, &child.schema)?;
+    let input = match whole {
+        Some((_, update)) => update,
+        None => summary_update(intent, &family, reduction, &child.schema)?,
+    };
     let state = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: child.clone(),
         family,
@@ -480,6 +683,51 @@ mod tests {
         }
         assert!(schemas.windows(2).all(|w| w[0] == w[1]), "{schemas:#?}");
     }
+    /// A top-k over a per-series `sum_over_time` gets whole-expression heap
+    /// sketches that absorb the inner target; enumeration skips the absorbed
+    /// target's choices, and `choice_index` numbers choices in that order.
+    #[test]
+    fn whole_expression_topk_absorbs_the_inner_sum() {
+        let root = lower_promql(
+            "topk by (job) (10, sum_over_time(m[1m]))",
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.001,
+            },
+        );
+        let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+        let inventory =
+            enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let (topk, inner) = inventory
+            .targets
+            .iter()
+            .enumerate()
+            .find_map(|(t, target)| Some((t, target.absorbs.iter().flatten().next().copied()?)))
+            .expect("an absorbing alternative");
+        let absorbing = inventory.targets[topk].absorbs.iter().flatten().count();
+        assert_eq!(absorbing, 2, "Count-Min and CountSketch with heap");
+        // (pass-through, CMS+heap, CountSketch+heap) × (raw, Sum acc) + 2.
+        let choices = enumerate_choices(&inventory, usize::MAX);
+        assert_eq!(choices.len(), 8);
+        assert_eq!(combination_count(&inventory), 8);
+        for (index, choice) in choices.iter().enumerate() {
+            assert_eq!(choice_index(&inventory, choice), index);
+            if inventory.targets[topk].absorbs[choice[topk]].is_some() {
+                assert_eq!(choice[inner], 0);
+                let roots = compose_logical_candidate(&inventory, choice).unwrap();
+                let QueryRoot::Operator(root) = &roots[0].1 else {
+                    panic!("operator root")
+                };
+                assert!(
+                    !OperatorNode::reachable(root)
+                        .iter()
+                        .any(|n| Rc::ptr_eq(n, &inventory.targets[inner].target)),
+                    "the inner sum is not computed"
+                );
+            }
+        }
+    }
+
     /// Approximate requests must retain the exact execution alternative too.
     #[test]
     fn approximate_count_keeps_exact_and_universal_choices() {
