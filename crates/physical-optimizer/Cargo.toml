@@ -1,0 +1,17 @@
+[package]
+name = "asap-physical-optimizer"
+version = "0.1.0"
+edition = "2021"
+
+# #509 Stage 2: physical candidates for each Stage 1 logical candidate.
+# Production code depends only on asap-types: a Stage 1 candidate reaches it as
+# OperatorNode roots. Stage 1 and the PromQL front end are test-only
+# dev-dependencies. Never depends on Stage 3, the facade or the executor.
+# tests/stage2_dependencies.rs checks this manifest.
+[dependencies]
+asap-types = { path = "../types" }
+thiserror = "2"
+
+[dev-dependencies]
+asap-logical-optimizer = { path = "../logical-optimizer" }
+asap-frontend-promql = { path = "../frontend-promql" }
