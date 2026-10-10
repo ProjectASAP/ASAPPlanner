@@ -1,13 +1,13 @@
 # Schema and Physical Data for ASAP Primitives
 
-This document is the single source of truth for the schema and column design of ASAP primitives. The design is used in the logical stage (LogicalASAPDAG) and the physical stage (PhysicalASAPDAG).
+This document is the single source of truth for the schema, and column design for ASAP Primitives. This is used in the logical stage (LogicalASAPDAG), and physical stage (PhysicalASAPDAG). 
 
 ## 1. Goal, problem, and requirements
 
-Existing database engines work on raw data, or on materialized tables whose schema and column names the user defines explicitly. ASAPPlanner instead plans and executes queries over a mix of raw data and ASAP primitives, which are usually compact summaries of raw data. This adds new requirements to the design of the schema and the node definitions of LogicalASAPDAG and PhysicalASAPDAG.
+Unlike existing Database engines, which work on raw data or explicitly defined materialized tables with schema and column names provided by the users, ASAPPlanner is designed for querying and execution over the mix of raw data and ASAP Primitives. ASAP primitives are usually compact summaries over raw data. Therefore, it introduces new requirement when we design the schema and node definitions for LogicalASAPDAG and PhysicalASAPDAG.
 
-We assume a Logical DAG that represents a batch of queries in canonical form (the `LogicalDAG` produced by the frontends, [planning stages §0](planner-layering.md#0-language-specific-frontends); the stages that follow are in [planner-layering.md](planner-layering.md#stages)).
-The LogicalASAPDAG shares and reuses the NonASAP operator and ScalarExpr nodes of the LogicalDAG ([decoupling operators from scalar expressions](decoupling_op_and_expr.md), with the unified operator type in [operator sharing §1.1](operator-sharing.md#11-unified-operator-type)), but replaces some of its operators with operators that work on ASAP primitives. The complete list is `ASAPOp` in `crates/types/src/ir/asap.rs`:
+Assuming we have the Logical DAG defined for a canonicalized representation for a batch of queries (the `LogicalDAG` produced by the frontends, [planning stages §0](planner-layering.md#0-language-specific-frontends); the stages that follow are in [planner-layering.md](planner-layering.md#stages)).
+The LogicalASAPDAG will share/reuse the NonASAP operator and ScalarExpr nodes in LogicalDAG ([decoupling operators from scalar expressions](decoupling_op_and_expr.md), with the unified operator type in [operator sharing §1.1](operator-sharing.md#11-unified-operator-type)), but replacing some operators in LogicalDAG with the operators operated with ASAP Primitives. The complete list is `ASAPOp` in `crates/types/src/ir/asap.rs`:
 
 | Operator | Input → output | Status |
 |---|---|---|
@@ -23,18 +23,20 @@ The LogicalASAPDAG shares and reuses the NonASAP operator and ScalarExpr nodes o
 | `Extension` | state → state, named by an extension | reserved |
 
 §5 walks through each of them.
-Each summary operator also requires information about the ASAP primitives it reads, so that the operators work together and the query keeps its meaning.
+Each of the Summary operators also require the ASAP primitive information above to inter-operate correctly, preserving semantic correctness. 
 
-So when ASAP primitives are introduced into the logical query representation, and then into the physical one, the following information must be represented to keep the query semantics equivalent:
+Basically, the following information should be represented to preserve the equivalent query semantics when we introduce ASAP Primitives to logical query representation, and following physical one. 
 
-- What type of ASAP primitive it is
-- What its parameters are
-- What data sources it summarizes
-- What query intents it can support, e.g. statistical aggregation intents and time window aggregation intents
+- What type of the ASAP Primitive is
+- What is the ASAP Primitive parameters
+- What data sources a ASAP primitive summarizes
+- What query intent the summarized ASAP Primitive can support, e.g., statistical aggregation intents, time window aggregation intents
 
-This information is combined with the information of relational and time series operators, such as group by / reduction, filtering, projection, join and time series selection.
 
-These requirements drive the schema, metadata, node and column design below.
+
+And these information will be combined with relational or time series query operator information, such as group by/reduction, filtering, projection, join, time series selection, together. 
+
+Therefore, these requirements drive the following schema and metadata, node information, and column design. 
 
 
 
@@ -59,11 +61,11 @@ Two consequences for the design:
 - Existing systems keep aggregate state internal to one operator. ASAPPlanner makes it a first-class column type so that one state can be shared, merged and stored across queries, which is what §3 and §4 add.
 
 ## 3. Proposed schema design 
-A schema is the **metadata** of the data that flows along an **edge** between two nodes in a logical or physical DAG. Each node stores the schema of its output, and the node that consumes it takes that schema as its input.
+Schema represents the **metadata** of information flow along an **edge** between two nodes in a logical or physical DAG. The schema field is associated with the node in the DAG. The consumer of the node in the DAG takes the schema from the producer node as input. 
 
-The schema definition is shared by LogicalDAG, LogicalASAPDAG and PhysicalASAPDAG. A schema contains fields, and each field maps to a column in the physical data representation.
-Based on the requirements in §1, each field contains the following information.
-1. **What type of ASAP primitive it is, and its parameters.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
+Schema definition here is shared between LogicalDAG, LogicalASAPDAG, and PhysicalASAPDAG. The schema contain fields, and each field is mapping to a column in the physical data representation. 
+Based on our requirement, each field should contain the following information.
+1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcpre_asapschemars) (`crates/types/src/pre_asap/schema.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
    - **Summary state**: described from coarse to fine by four levels:
@@ -78,7 +80,7 @@ Based on the requirements in §1, each field contains the following information.
    - For a sketch, category, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcpost_asapsketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
    - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Quantile, Kll, Kll { k: 200 } }, PerSubpopulationInstance)`.
 
-2. **What query intents it can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
+2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
    - **Statistical aggregation intents** (`AggIntent`, `crates/types/src/pre_asap/agg_intent.rs`): which aggregate the state can answer, and how it is read out.
 
@@ -102,7 +104,7 @@ Based on the requirements in §1, each field contains the following information.
 
 ## 4. Proposed Node field design 
 
-A node represents data or a summary instance, so a node records **what data sources an ASAP primitive summarizes**. This is the node's **coverage**.
+A node in the physical data will represent the data or summary instance, so a node has a field for **What data sources a ASAP primitive summarizes**. This field is the node's **coverage**.
 
 **At a glance**
 
