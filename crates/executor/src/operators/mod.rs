@@ -126,6 +126,9 @@ enum Kind {
     Aggregate {
         groups: Vec<usize>,
         measures: Vec<Reduction>,
+        /// Per-measure row filters (SQL `FILTER (WHERE …)`); empty when none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        filters: Vec<Option<Expression>>,
     },
     SemiJoin {
         keys: Vec<(usize, usize)>,
@@ -141,12 +144,18 @@ enum Kind {
         value: Option<usize>,
         time: Option<usize>,
         groups: Vec<usize>,
+        /// Rows for which this is not true update no state; their group is kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Box<Expression>>,
     },
     KeyedSummaryBuild {
         family: SummaryFamilyType,
         value: usize,
         items: Vec<usize>,
         groups: Vec<usize>,
+        /// Rows for which this is not true update no state; their group is kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Box<Expression>>,
     },
     /// One shared state for all groups (HydraCms); `weight: None` is a unit count.
     SharedSummaryBuild {
@@ -154,6 +163,9 @@ enum Kind {
         item: usize,
         weight: Option<usize>,
         groups: Vec<usize>,
+        /// Rows for which this is not true update no state; their group is kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Box<Expression>>,
     },
     KeyedEvaluation {
         state: usize,
