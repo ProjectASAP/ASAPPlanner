@@ -18,7 +18,7 @@
     "name": "3a · historical p99 batch",
     "example": "planner-layering-3a",
     "file": "out/example3a.json",
-    "story": "An ad hoc batch of five p99 reports over 1–5 years, run once. Each query gets a KLL, and Pass 2 offers five 1-year KLL segments shared by all five reports. The segments win: each row of the 5-year scan lands in one segment, a time shift is free and a time range pays only for the rows it keeps, so they cost less than sharing only the input scan."
+    "story": "An ad hoc batch of five p99 reports over 1–5 years, run once. Each query gets a KLL, and Pass 2 offers KLL segments shared by all five reports, cut two ways: at the windows' boundaries (four segments, the oldest two years wide) and on the even 1-year grid (five). Segments win: each row of the 5-year scan lands in one segment, a time shift is free and a time range pays only for the rows it keeps. The four boundary segments are cheapest, by the merges they save."
   },
   {
     "id": "example3b",
@@ -32,7 +32,7 @@
     "name": "4a · monthly p99 reports",
     "example": "planner-layering-4a",
     "file": "out/example4a.json",
-    "story": "Example 3a repeated monthly and known in advance. The same shared 1-year segments win, built at query time; their cost is now amortized over the month between runs. They may now be maintained at ingestion time, but keeping a million per-series KLLs per segment costs far more."
+    "story": "Example 3a repeated monthly and known in advance. The same four shared boundary segments win, built at query time; their cost is now amortized over the month between runs. The even 1-year segments may now be maintained at ingestion time, but keeping a million per-series KLLs per segment costs far more."
   },
   {
     "id": "example4b",
