@@ -912,7 +912,7 @@ The intended end-to-end selection pipeline is:
 
 The query lowerer and physical estimator cover the supported raw-query shapes
 listed above. `PhysicalPlanCostModel` executes this pipeline for every
-candidate supplied to `CandidateLogicalASAPDAGs::global_selection`. Logical rewrites are
+candidate supplied to `candidate_selection::global_selection`. Logical rewrites are
 lowered recursively. Summary candidates participate only after the deployment
 has bound their complete `SummaryExpr` DAG; there is no optimistic generic
 summary fallback. Choosing between a maintained summary and raw recomputation

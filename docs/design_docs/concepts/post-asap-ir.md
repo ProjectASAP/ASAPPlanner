@@ -69,7 +69,7 @@ Exact work is represented by the ordinary operators, unchanged:
 
 - A sub-DAG the planner does not rewrite keeps its `NonASAPOp` nodes. Plan
   assembly marks such a sub-DAG with an exact `ResultGuarantee`
-  (`asap_aware_mapping::replacement::retain_exact`); a sub-DAG with no ASAP
+  (`asap_logical_optimizer::pass1::replacement::retain_exact`); a sub-DAG with no ASAP
   operator and no guarantee is a logical rewrite candidate that has not been
   assessed yet (`is_logical_rewrite`).
 - `BinaryOp` combines independently planned operands. Summary planning may set

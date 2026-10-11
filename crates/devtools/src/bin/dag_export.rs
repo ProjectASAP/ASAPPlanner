@@ -12,7 +12,7 @@
 // `--epsilon <f64>` is optional and applies to every query in the run: it
 // lowers with `AccuracyTarget::Epsilon(<f64>)` instead of the default
 // `AccuracyTarget::Exact`. Without it, every `AggIntent` lowers exact and
-// `asap_aware_mapping::ASAPStrategies` never has a genuine sketch
+// `asap_logical_optimizer::ASAPStrategies` never has a genuine sketch
 // alternative to report — so no node ever picks up a `SketchApproximation`
 // note. Pass it to actually exercise that path, e.g.:
 //   cargo run -p asap-lower --bin dag_export -- \
@@ -23,10 +23,10 @@
 // below).
 //
 // `--post-asap` is optional and off by default. When passed, this binary
-// additionally runs `asap_aware_mapping::replacement::search_workload` (this
+// additionally runs `asap_logical_optimizer::pass1::replacement::search_workload` (this
 // binary took no strategies of its own — `default_strategies()` already
 // includes `AvgToSumOverCountStrategy` as of #282) over every lowered query
-// and ranks each discovered `TargetSubDAGCandidates` via `CandidateLogicalASAPDAGs::cost_sorted`. The
+// and ranks each discovered `TargetSubDAGCandidates` via `candidate_selection::cost_sorted`. The
 // best-ranked
 // candidate per group feeds two additive outputs:
 //
@@ -86,12 +86,13 @@ use asap_aware_mapping::physical_operator_statistics::ComparisonScope;
 use asap_aware_mapping::physical_plan_cost_model::{
     PhysicalEvidenceSnapshot, PhysicalPlanCostModel, PlannerPhysicalPlanProvider,
 };
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
 use asap_aware_mapping::query_physical_lowering::PhysicalNodeRequest;
-use asap_aware_mapping::replacement::{
+use asap_logical_optimizer::pass1::replacement::{
     default_strategies_with_evidence, is_logical_rewrite, search_workload, search_workload_with,
     Replacement, ReplacementSubDAG,
 };
-use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
+use asap_logical_optimizer::{AccuracyEvidenceProvider, PropagationStats};
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
     self, DAGDecision, DAGNote, ExportDAG, NamedDAG, PostAsapSubstitution, TargetRejection,
@@ -318,7 +319,7 @@ impl ExportPhysicalProvider<'_> {
 impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
     fn capture_evidence_snapshot(
         &self,
-        _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+        _target: &asap_logical_optimizer::pass1::replacement::TargetSubDAG<'_>,
     ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError> {
         Ok(PhysicalEvidenceSnapshot {
             version: self.evidence_version.into(),
@@ -369,7 +370,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
         &self,
         snapshot: &PhysicalEvidenceSnapshot,
         _summary: &Rc<OperatorNode>,
-        _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+        _target: &asap_logical_optimizer::pass1::replacement::TargetSubDAG<'_>,
     ) -> Result<PhysicalDAG, AnalyticalCostError> {
         if snapshot.scope != self.target.scope.resolve()? {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
@@ -393,7 +394,7 @@ impl ExportPlannerCostModel<'_> {
     fn bound<'a>(
         &'a self,
         candidate: &ReplacementSubDAG,
-        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+        target: &asap_logical_optimizer::pass1::replacement::TargetSubDAG<'_>,
     ) -> Option<(ExportPhysicalProvider<'a>, &'a ResourceCalibration)> {
         let mut targets = self
             .document
@@ -430,7 +431,7 @@ impl ExportPlannerCostModel<'_> {
         candidate: &ReplacementSubDAG,
         target: &Rc<OperatorNode>,
     ) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(target);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(target);
         let Some((provider, calibration)) = self.bound(candidate, &target) else {
             return winner_cost_annotations();
         };
@@ -649,7 +650,7 @@ impl CostModel for ExportPlannerCostModel<'_> {
     fn candidate_cost(
         &self,
         candidate: &ReplacementSubDAG,
-        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+        target: &asap_logical_optimizer::pass1::replacement::TargetSubDAG<'_>,
     ) -> Option<Cost> {
         let (provider, calibration) = self.bound(candidate, target)?;
         let cost = PhysicalPlanCostModel::new(&provider, calibration.clone())
@@ -671,7 +672,7 @@ impl CostModel for ExportPlannerCostModel<'_> {
     fn estimate_cost(
         &self,
         candidate: &ReplacementSubDAG,
-        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+        target: &asap_logical_optimizer::pass1::replacement::TargetSubDAG<'_>,
     ) -> f64 {
         self.candidate_cost(candidate, target)
             .map_or(f64::NAN, |cost| cost.0)
@@ -966,7 +967,7 @@ fn parse_args_from(argv: impl Iterator<Item = String>) -> ParsedArgs {
 /// defensive only).
 fn annotate_with_explanations(
     dag: &mut ExportDAG,
-    explanations: &[asap_aware_mapping::ReplacementExplanation],
+    explanations: &[asap_logical_optimizer::ReplacementExplanation],
     matched: &mut [bool],
 ) {
     for (i, explanation) in explanations.iter().enumerate() {
@@ -1011,10 +1012,10 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
                 .to_string()
         }
         "SharedSubDAGStrategy" => match winner.candidate.provenance {
-            asap_aware_mapping::replacement::ReplacementProvenance::CseShare => {
+            asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseShare => {
                 "Builds the repeated sub-DAG once and shares it across consumers.".to_string()
             }
-            asap_aware_mapping::replacement::ReplacementProvenance::CseRecompute => {
+            asap_logical_optimizer::pass1::replacement::ReplacementProvenance::CseRecompute => {
                 "Recomputes the sub-DAG per consumer because that has the lower estimated cost."
                     .to_string()
             }
@@ -1210,11 +1211,11 @@ fn assign_workload_node_ids(dags: &mut [&mut ExportDAG]) {
     }
 }
 
-/// Run `asap_aware_mapping::replacement::search_workload` (its own
+/// Run `asap_logical_optimizer::pass1::replacement::search_workload` (its own
 /// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
 /// #282 — is exactly the strategy set this binary wants; no custom list
 /// needed) over every lowered query, rank each discovered `TargetSubDAGCandidates` via
-/// `CandidateLogicalASAPDAGs::global_selection`, and build both `--post-asap` outputs from the
+/// `candidate_selection::global_selection`, and build both `--post-asap` outputs from the
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_dag` can never disagree about
 /// which candidate won for a given target.
@@ -1241,7 +1242,7 @@ fn run_post_asap_with_progress(
     } else {
         search_workload(roots)
     };
-    let selection = space.global_selection(cost_model);
+    let selection = global_selection(&space, cost_model);
 
     // A group's top candidate can be `retain_exact`'s own conservative
     // fallback — the *whole target* itself, unbound, carrying only an exact
@@ -1438,7 +1439,7 @@ fn run_post_asap_with_progress(
     // winner's own `Replacement::Rewrite` — logged as an FYI rather than a
     // warning, since telling the two cases apart precisely would mean
     // reimplementing `search`'s own private descendant-discovery walk
-    // (`discover_new_descendant_targets` in `asap_aware_mapping::replacement`,
+    // (`discover_new_descendant_targets` in `asap_logical_optimizer::pass1::replacement`,
     // not exposed) a second time here just to double-check something
     // `post_dag`'s own construction already handled correctly.
     for (winner, matched) in winners.iter().zip(&matched) {
@@ -1529,7 +1530,7 @@ async fn main() {
     if progress {
         eprintln!("[2/4] Pre-ASAP DAG generation is running…");
     }
-    let explanations = asap_aware_mapping::explain_replacements(
+    let explanations = asap_logical_optimizer::explain_replacements(
         lowered_queries
             .iter()
             .map(|(name, _, qe)| (name.clone(), qe.clone()))
@@ -1746,7 +1747,7 @@ mod tests {
     ) -> PhysicalDAG {
         let model = ExportPlannerCostModel { document };
         let root = Rc::clone(query);
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&root);
         let (provider, _) = model.bound(candidate, &target).unwrap();
         let snapshot = provider.capture_evidence_snapshot(&target).unwrap();
         let evidence =
@@ -1762,7 +1763,7 @@ mod tests {
         let raw = fixture_raw_dag(&query, &candidate, &document);
         let candidate_dag = cheap_candidate_dag();
         let root = Rc::clone(&query);
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&root);
         assert!(ExportPlannerCostModel {
             document: &document
         }
@@ -1925,7 +1926,7 @@ mod tests {
         let raw = fixture_raw_dag(&query, &candidate, &document);
         let candidate_dag = cheap_candidate_dag();
         let root = Rc::clone(&query);
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&root);
         assert!(ExportPlannerCostModel {
             document: &document
         }
@@ -2357,7 +2358,7 @@ mod tests {
         assert!(parsed.targets[0].candidates[0].matches(&candidate));
         let model = ExportPlannerCostModel { document: &parsed };
         let target_rc = Rc::clone(&query);
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&target_rc);
         let (provider, calibration) = model.bound(&candidate, &target).expect("exact binding");
         let estimate = PhysicalPlanCostModel::new(&provider, calibration.clone())
             .unwrap()
@@ -2418,7 +2419,7 @@ mod tests {
         // Identical repeats hit the result cache; distinct evaluations still execute.
         let (query, candidate, document) = cost_fixture();
         let target_rc = query;
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&target_rc);
         let no_cache = ExportPlannerCostModel {
             document: &document,
         }
@@ -2505,7 +2506,7 @@ mod tests {
     fn duplicate_target_candidate_and_query_evidence_each_fail_closed() {
         let (query, candidate, document) = cost_fixture();
         let target_rc = query;
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&target_rc);
 
         let mut duplicate_target = document.clone();
         duplicate_target
@@ -2547,7 +2548,7 @@ mod tests {
     fn incomplete_or_unused_json_evidence_fails_closed() {
         let (query, candidate, document) = cost_fixture();
         let target_rc = query;
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&target_rc);
 
         let mut missing = document.clone();
         match &mut missing.targets[0].candidates[0] {
@@ -2588,7 +2589,7 @@ mod tests {
         let document = parse_planner_cost_document(&serde_json::to_string(&document).unwrap())
             .expect("invalid physical semantics are checked by the estimator");
         let target_rc = query;
-        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        let target = asap_logical_optimizer::pass1::replacement::TargetSubDAG::new(&target_rc);
         assert!(ExportPlannerCostModel {
             document: &document
         }
@@ -2664,7 +2665,7 @@ mod tests {
         let model = ExportPlannerCostModel {
             document: &document,
         };
-        let selection = space.global_selection(&model);
+        let selection = global_selection(&space, &model);
         let chosen = selection
             .target_selections()
             .find(|selected| *selected.target == query)
@@ -2771,13 +2772,15 @@ mod tests {
         let selected = ReplacementSubDAG {
             replacement: Replacement::SubDAG(Rc::clone(&selected_query)),
             strategy: "same-strategy",
-            provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
+            provenance:
+                asap_logical_optimizer::pass1::replacement::ReplacementProvenance::LogicalRewrite,
             rationale: String::new(),
         };
         let other = ReplacementSubDAG {
             replacement: Replacement::SubDAG(other_query),
             strategy: "same-strategy",
-            provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
+            provenance:
+                asap_logical_optimizer::pass1::replacement::ReplacementProvenance::LogicalRewrite,
             rationale: String::new(),
         };
         let selector = CandidatePhysicalEvidence::Rewrite {
@@ -2834,10 +2837,10 @@ mod tests {
         let a = lower_promql(query, AccuracyTarget::Exact).unwrap();
         let b = lower_promql(query, AccuracyTarget::Exact).unwrap();
         let explanations =
-            asap_aware_mapping::explain_replacements(vec![("a", a.clone()), ("b", b.clone())]);
-        assert!(explanations
-            .iter()
-            .any(|e| { e.kind == asap_aware_mapping::ExplanationKind::CommonSubexpressionReuse }));
+            asap_logical_optimizer::explain_replacements(vec![("a", a.clone()), ("b", b.clone())]);
+        assert!(explanations.iter().any(|e| {
+            e.kind == asap_logical_optimizer::ExplanationKind::CommonSubexpressionReuse
+        }));
 
         let mut matched = vec![false; explanations.len()];
         let mut dag_a = dag_export::export(&a);
@@ -2855,10 +2858,10 @@ mod tests {
             AccuracyTarget::Epsilon(0.01),
         )
         .unwrap();
-        let explanations = asap_aware_mapping::explain_replacements(vec![("target", target)]);
+        let explanations = asap_logical_optimizer::explain_replacements(vec![("target", target)]);
         let explanation = explanations
             .iter()
-            .find(|e| e.kind == asap_aware_mapping::ExplanationKind::SketchApproximation)
+            .find(|e| e.kind == asap_logical_optimizer::ExplanationKind::SketchApproximation)
             .unwrap();
 
         let unrelated =

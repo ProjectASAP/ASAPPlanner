@@ -18,4 +18,5 @@ regex = "1"
 [dev-dependencies]
 rmp-serde = "1"
 asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-logical-optimizer = { path = "../logical-optimizer" }
 asap-frontend-promql = { path = "../frontend-promql" }

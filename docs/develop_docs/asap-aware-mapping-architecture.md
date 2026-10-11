@@ -16,7 +16,8 @@ defined in [mapping contracts](asap-aware-mapping-contracts.md).
 
 Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are
 illustrative; they do not ship with this crate. Samples that use real public
-types and functions follow the APIs exported by `asap-aware-mapping`.
+types and functions follow the APIs exported by `asap-logical-optimizer`
+(Stage 1 candidate search) and `asap-aware-mapping` (cost models and selection).
 
 If you only need to find the right extension point, start with the [extension map](extend-asap-aware-mapping.md#7-current-extension-map). If you are implementing a strategy, read this mental model, the [mapping contracts](asap-aware-mapping-contracts.md), and the [extension guide](extend-asap-aware-mapping.md).
 
@@ -109,7 +110,7 @@ flowchart TB
 
   subgraph RANKING[Optional ranked view]
     CM(["CostModel<br/>selection-time preferences and costs"]):::choose
-    SORT["CandidateLogicalASAPDAGs::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
+    SORT["candidate_selection::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
     CM -.-> SORT
     RANKED["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
     SPACE --> SORT -->|"reorder only; preserve every candidate"| RANKED
@@ -220,7 +221,7 @@ The default context-free registry contains five `ReplacementStrategy` implementa
 `AvgToSumOverCountStrategy` alias) in its rewrite slot. The evidence-aware registry supplies the accuracy evidence provider to
 summary and Hydra construction. Search derives `RollupStrategy` after CSE from
 the actual sibling set. See the
-[registry definitions](../../crates/asap-aware-mapping/src/replacement.rs).
+[registry definitions](../../crates/logical-optimizer/src/pass1/replacement.rs).
 
 The important rule is:
 
@@ -238,7 +239,7 @@ rejection reasons. This
 compact representation preserves independent choices without enumerating a flat
 list of `2^N` complete plans for `N` replaceable targets.
 
-`CandidateLogicalASAPDAGs::cost_sorted` ranks each target's existing candidates with the
+`candidate_selection::cost_sorted` ranks each target's existing candidates with the
 supplied `CostModel`. It returns the same candidates in preferred order, with
 costs aligned by index; ranking does not select or remove a candidate.
 
@@ -257,7 +258,7 @@ order. Constructing all candidates before taking the first costs more than
 constructing only one, but it keeps the strategy
 contract consistent and preserves the full choice set for other callers.
 
-`CandidateLogicalASAPDAGs::global_selection` optionally coordinates cross-target sharing and
+`candidate_selection::global_selection` optionally coordinates cross-target sharing and
 composition choices. `GlobalSelection::assemble_selected_dag` constructs the selected
 semantic DAG. These APIs do not decide materialization or establish physical
 deployment feasibility. Recurrence-aware variants require the corresponding

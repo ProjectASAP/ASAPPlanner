@@ -17,7 +17,7 @@ use crate::physical_operator_statistics::ComparisonScope;
 use crate::query_physical_lowering::{
     lower_query_physical_dag, PhysicalNodeEvidenceProvider, PhysicalNodeRequest,
 };
-use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
+use asap_logical_optimizer::pass1::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 
 /// One immutable generation of deployment evidence for a planner target.
 ///
@@ -356,6 +356,7 @@ impl CostModel for PhysicalPlanCostModel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan_selection::candidate_selection::global_selection;
     use std::cell::Cell;
     use std::collections::HashMap;
 
@@ -371,7 +372,7 @@ mod tests {
     use crate::physical_operator_statistics::{
         EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
     };
-    use crate::replacement::ReplacementStrategy;
+    use asap_logical_optimizer::pass1::replacement::ReplacementStrategy;
 
     fn edge(rows: u64, bytes: u64) -> EdgeStatistics {
         EdgeStatistics { rows, bytes }
@@ -691,7 +692,8 @@ mod tests {
             cost_per_retained_byte: 0.0,
             version: "unused-base-v1".into(),
         };
-        let candidates = crate::replacement::ASAPStrategies::default().replacements(&target);
+        let candidates = asap_logical_optimizer::pass1::replacement::ASAPStrategies::default()
+            .replacements(&target);
         provider.storage_io = Some(profile.clone());
         let model = PhysicalPlanCostModel::new(&provider, base.clone()).unwrap();
         let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
@@ -721,7 +723,8 @@ mod tests {
     fn missing_storage_profile_remains_unestimated() {
         let root = query();
         let target = TargetSubDAG::new(&root);
-        let candidates = crate::replacement::ASAPStrategies::default().replacements(&target);
+        let candidates = asap_logical_optimizer::pass1::replacement::ASAPStrategies::default()
+            .replacements(&target);
         let provider = TestProvider::new(true, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
         let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
@@ -816,12 +819,12 @@ mod tests {
             cost_per_retained_byte: 0.0,
             version: "handoff-only-v1".into(),
         };
-        let space = crate::replacement::search_workload_with(
+        let space = asap_logical_optimizer::pass1::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
-            &crate::replacement::default_strategies(),
+            &asap_logical_optimizer::pass1::replacement::default_strategies(),
         );
         let model = PhysicalPlanCostModel::new(&provider, zero_base.clone()).unwrap();
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(selected
             .for_target(&space.roots[0].1)
             .unwrap()
@@ -836,8 +839,7 @@ mod tests {
                 .calibration
                 .cost_per_network_byte = coefficient;
             let model = PhysicalPlanCostModel::new(&provider, zero_base.clone()).unwrap();
-            assert!(space
-                .global_selection(&model)
+            assert!(global_selection(&space, &model)
                 .for_target(&space.roots[0].1)
                 .unwrap()
                 .chosen
@@ -845,8 +847,7 @@ mod tests {
         }
         provider.handoffs = None;
         let model = PhysicalPlanCostModel::new(&provider, zero_base).unwrap();
-        assert!(space
-            .global_selection(&model)
+        assert!(global_selection(&space, &model)
             .for_target(&space.roots[0].1)
             .unwrap()
             .chosen
@@ -856,15 +857,15 @@ mod tests {
     #[test]
     fn global_selection_uses_complete_physical_comparison() {
         let root = query();
-        let space = crate::replacement::search_workload_with(
+        let space = asap_logical_optimizer::pass1::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
-            &crate::replacement::default_strategies(),
+            &asap_logical_optimizer::pass1::replacement::default_strategies(),
         );
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(true, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(
             selected.for_target(&planned_root).unwrap().chosen.is_some(),
             "a fully bound build-once summary cheaper than ten raw scans must be selected"
@@ -922,9 +923,9 @@ mod tests {
                 self.0.summary_physical_dag(snapshot, summary, target)
             }
         }
-        let space = crate::replacement::search_workload_with(
+        let space = asap_logical_optimizer::pass1::replacement::search_workload_with(
             vec![("q", query())],
-            &crate::replacement::default_strategies(),
+            &asap_logical_optimizer::pass1::replacement::default_strategies(),
         );
         let provider = AlmostResident(TestProvider::new(true, WORKING_SET));
         let model = PhysicalPlanCostModel::new(
@@ -937,7 +938,7 @@ mod tests {
             },
         )
         .unwrap();
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(
             selected
                 .for_target(&space.roots[0].1)
@@ -967,15 +968,15 @@ mod tests {
     #[test]
     fn missing_summary_evidence_keeps_the_raw_target() {
         let root = query();
-        let space = crate::replacement::search_workload_with(
+        let space = asap_logical_optimizer::pass1::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
-            &crate::replacement::default_strategies(),
+            &asap_logical_optimizer::pass1::replacement::default_strategies(),
         );
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(false, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(
             selected.for_target(&planned_root).unwrap().chosen.is_none(),
             "missing physical summary evidence must not fall back to a structural estimate"
@@ -1018,8 +1019,8 @@ mod tests {
         }
 
         let root = query();
-        let candidates =
-            crate::replacement::ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
+        let candidates = asap_logical_optimizer::pass1::replacement::ASAPStrategies::default()
+            .replacements(&TargetSubDAG::new(&root));
         let provider = WrongScope(TestProvider::new(true, 800));
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
         assert_eq!(
@@ -1064,8 +1065,8 @@ mod tests {
         }
 
         let root = query();
-        let candidates =
-            crate::replacement::ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
+        let candidates = asap_logical_optimizer::pass1::replacement::ASAPStrategies::default()
+            .replacements(&TargetSubDAG::new(&root));
         let model = PhysicalPlanCostModel::new(&BlankVersionProvider, calibration()).unwrap();
         assert_eq!(
             model.candidate_cost(&candidates[0], &TargetSubDAG::new(&root)),
@@ -1076,23 +1077,23 @@ mod tests {
     #[test]
     fn complete_candidate_that_costs_more_than_raw_is_not_selected() {
         let root = query();
-        let space = crate::replacement::search_workload_with(
+        let space = asap_logical_optimizer::pass1::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
-            &crate::replacement::default_strategies(),
+            &asap_logical_optimizer::pass1::replacement::default_strategies(),
         );
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(true, 100_000);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
-        let selected = space.global_selection(&model);
+        let selected = global_selection(&space, &model);
         assert!(selected.for_target(&planned_root).unwrap().chosen.is_none());
     }
 
     #[test]
     fn sibling_candidates_share_one_scope_and_raw_baseline() {
         let root = query();
-        let candidates =
-            crate::replacement::ASAPStrategies::default().replacements(&TargetSubDAG::new(&root));
+        let candidates = asap_logical_optimizer::pass1::replacement::ASAPStrategies::default()
+            .replacements(&TargetSubDAG::new(&root));
         assert!(candidates.len() >= 2);
         let provider = TestProvider::new(true, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();

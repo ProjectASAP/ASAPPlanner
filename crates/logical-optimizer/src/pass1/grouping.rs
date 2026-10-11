@@ -15,7 +15,7 @@
 //! CMS state and a Hydra-backed state cannot be accepted as compatible inputs
 //! to a downstream `SummaryMerge`. [`with_grouping`] updates both atomically.
 //!
-//! ## Legality vs. cost (same split [`crate::replacement::realizations_for_intent`]
+//! ## Legality vs. cost (same split [`crate::pass1::replacement::realizations_for_intent`]
 //! already draws)
 //!
 //! This module only answers "is `SharedMultiSubpopulation` valid here at
@@ -41,19 +41,19 @@
 //! An earlier draft of this module (written against the very first draft of
 //! #251) reused a `CostModel`-wrapping adapter that "steered" a
 //! whole-recursive-bind decision procedure toward a specific `SketchKind`,
-//! the same pattern [`crate::replacement::ASAPStrategies`]'s own module
+//! the same pattern [`crate::pass1::replacement::ASAPStrategies`]'s own module
 //! docs explain was deliberately deleted from this crate as an anti-pattern:
 //! forcing a choice via a whole-DAG `CostModel` adapter had a real bug where
 //! the forced choice could leak into a target's own nested aggregates. This
-//! module never needs that: [`crate::replacement::realizations_for_intent`]
+//! module never needs that: [`crate::pass1::replacement::realizations_for_intent`]
 //! already returns every ranked candidate `Realization` directly, so
 //! [`build_candidate`](HydraGroupingStrategy::build_candidate) just finds the
 //! one whose `Realization::Sketch(kind)` has `kind.algorithm()` matching
 //! the Hydra-eligible `sketch_kind` it's building a candidate for, and
 //! passes that exact,
 //! already-decided `Realization` to
-//! [`crate::replacement::construct_summary`] — the same first-class,
-//! one-candidate-at-a-time primitive [`crate::replacement::ASAPStrategies`]
+//! [`crate::pass1::replacement::construct_summary`] — the same first-class,
+//! one-candidate-at-a-time primitive [`crate::pass1::replacement::ASAPStrategies`]
 //! itself calls once per candidate. No adapter, no steering, no risk of a
 //! forced choice leaking into nested aggregates.
 //!
@@ -86,7 +86,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
 };
-use crate::replacement::{
+use crate::pass1::replacement::{
     accuracy_target, bindable_intent, construct_summary_with, describe_intent,
     realizations_for_intent, summary_candidates, CandidatePlanningInputs, Proposals, Realization,
     RejectedCandidate, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
@@ -112,7 +112,7 @@ pub fn has_subpopulations(reduction: &Reduction) -> bool {
 }
 
 /// Wraps the `GroupingStrategy` axis (issue #256) as a
-/// [`ReplacementStrategy`]: for a target [`ASAPStrategies`](crate::replacement::ASAPStrategies)
+/// [`ReplacementStrategy`]: for a target `ASAPStrategies`
 /// already has an opinion on, offers an additional
 /// `GroupingStrategy::SharedMultiSubpopulation` candidate wherever the
 /// legality conditions in the module docs above hold — alongside, not
@@ -129,7 +129,7 @@ pub struct HydraGroupingStrategy<'a> {
 
 impl Default for HydraGroupingStrategy<'static> {
     /// The built-in accuracy models, the same default
-    /// [`crate::replacement::ASAPStrategies`] uses.
+    /// [`crate::pass1::replacement::ASAPStrategies`] uses.
     fn default() -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs::with_default_accuracy(),
@@ -187,7 +187,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// Find the already-ranked candidate [`Realization::Sketch`] matching
     /// `sketch_kind` among [`realizations_for_intent`]'s exhaustive list for
     /// `intent`, bind `root` to that exact, already-decided candidate via
-    /// [`crate::replacement::construct_summary_with`] (no steering/forcing — see
+    /// [`crate::pass1::replacement::construct_summary_with`] (no steering/forcing — see
     /// the module docs' "No `ForceSketchKind`-style steering"), then swap the
     /// resulting `SummaryAgg`'s `grouping` field from the default
     /// `PerSubpopulationInstance` to
@@ -281,7 +281,7 @@ impl<'a> HydraGroupingStrategy<'a> {
         Some(ReplacementSubDAG {
             strategy: "HydraGroupingStrategy",
             replacement: Replacement::SubDAG(patched),
-            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
+            provenance: crate::pass1::replacement::ReplacementProvenance::SummaryRealization,
             rationale: format!(
                 "{} realizes as a shared {hydra_kind:?} structure over {sketch_kind:?} \
                  serving every subpopulation of this grouped aggregate, instead of one \
@@ -690,7 +690,7 @@ mod tests {
             .iter()
             .all(|r| matches!(r.error, AccuracyError::UnsupportedComposition { .. })));
 
-        let space = crate::replacement::search_workload_with(
+        let space = crate::pass1::replacement::search_workload_with(
             vec![("q", Rc::clone(&q))],
             &[Box::new(strategy)],
         );

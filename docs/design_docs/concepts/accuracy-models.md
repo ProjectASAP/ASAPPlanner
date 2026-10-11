@@ -319,6 +319,6 @@ not require a new selection rule for every sketch. Deployment extensions to
 `AccuracyModel` remain possible, but carry the same obligation to justify
 metrics, assumptions and propagation.
 
-For implementation details, see the [accuracy module](../../../crates/asap-aware-mapping/src/accuracy/mod.rs),
+For implementation details, see the [accuracy module](../../../crates/logical-optimizer/src/accuracy/mod.rs),
 [guarantee representation](../../../crates/types/src/ir/properties/guarantee.rs), and
 [accuracy propagation companion](../../develop_docs/end-to-end-accuracy-guarantees.md).

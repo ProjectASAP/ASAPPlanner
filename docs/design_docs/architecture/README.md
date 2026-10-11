@@ -79,7 +79,7 @@ serving, and operational feedback. Their physical planning can reorder
 candidates because it has evidence that the reusable Planner does not, but it
 must not silently change Planner-owned semantics.
 
-`CandidateLogicalASAPDAGs::global_selection` optionally coordinates structural choices across
+`candidate_selection::global_selection` optionally coordinates structural choices across
 targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic DAG.
 Those APIs do not establish physical feasibility or a
 materialization decision. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)

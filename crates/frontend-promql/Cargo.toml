@@ -17,6 +17,7 @@ promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "9
 
 [dev-dependencies]
 asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-logical-optimizer = { path = "../logical-optimizer" }
 
 # Corpus tests live in domain folders (observability) but must still be declared
 # as test targets — Cargo only auto-discovers `.rs` files directly in `tests/`.

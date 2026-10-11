@@ -76,7 +76,7 @@ counts as a bound decision, not a rewrite.
 Use `Replacement::ExactComposition` when an exact operation refers to a child
 target whose realization must remain undecided. Selection coordinates the
 parent/child pair; DAG assembly constructs and validates the composed DAG.
-See [exact_composition.rs](../../crates/asap-aware-mapping/src/exact_composition.rs).
+See [exact_composition.rs](../../crates/logical-optimizer/src/pass1/exact_composition.rs).
 
 Examples:
 
@@ -205,7 +205,7 @@ see [code architecture §3](asap-aware-mapping-architecture.md#3-how-the-current
 
 `CostModel` covers deployment-specific preference and cost decisions. It is consulted only at selection time (`cost_sorted`, `global_selection` and their `_with_recurrence` variants), never during candidate generation: sketch parameters come from the analytical estimators (`accuracy::estimators::size_params`), and extension intents stay pass-through.
 
-The crate cannot hardcode real deployment costs: `asap-aware-mapping` uses `asap-types` and pinned `asap_sketchlib` mapping
+The crate cannot hardcode real deployment costs: `asap-aware-mapping` uses `asap-types` and the `asap_sketchlib` mapping
 bounds, but does not execute workloads or own deployment measurements. Most hooks therefore provide the crate's built-in static behavior as a default. Override only the decisions your deployment needs to change.
 
 | Hook | Use it to | Default? |
@@ -242,7 +242,7 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
   fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision;
   ```
 
-- **`estimate_cost`** — attach a comparable numeric cost to an already-constructed replacement. `CandidateLogicalASAPDAGs::cost_sorted` calls it for every candidate and keeps the returned values aligned with the ranked candidates. The trait default returns `f64::NAN` deliberately; override it when a custom model's callers need displayable or otherwise consumable numeric costs. `DefaultCostModel` provides real values derived from its CSE cost hooks.
+- **`estimate_cost`** — attach a comparable numeric cost to an already-constructed replacement. `candidate_selection::cost_sorted` calls it for every candidate and keeps the returned values aligned with the ranked candidates. The trait default returns `f64::NAN` deliberately; override it when a custom model's callers need displayable or otherwise consumable numeric costs. `DefaultCostModel` provides real values derived from its CSE cost hooks.
 
   ```rust
   fn estimate_cost(
@@ -283,7 +283,7 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 
 `search_workload(roots)` runs the shared-sub-DAG pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubDAGStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
-`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubDAGStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `ASAPStrategies` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
+`candidate_selection::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubDAGStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `ASAPStrategies` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
 `search_workload_with_targets` checks explicit per-root targets, while retaining
 direct DDSketch ratios with missing domain evidence and no root guarantee for

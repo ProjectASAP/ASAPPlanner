@@ -450,7 +450,9 @@ fn composed_provenance(
 pub(super) fn exact_operation_rule(operation: &ExactOperation) -> Option<CompositionOperator> {
     let ExactOperation::Aggregate { measures, .. } = operation;
     match measures.as_slice() {
-        [intent] => crate::function_rules::function_rules(intent).map(|rules| rules.accuracy),
+        [intent] => {
+            crate::pass1::function_rules::function_rules(intent).map(|rules| rules.accuracy)
+        }
         // The remaining functions are exact over exact samples, but have
         // no definition-backed rule over approximate values yet.
         _ => None,

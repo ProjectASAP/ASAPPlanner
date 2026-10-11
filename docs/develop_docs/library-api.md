@@ -22,14 +22,17 @@ artifact, while preserving the checks required by its intended consumer.
 
 ## Dependencies
 
-Inside this workspace, depend on the frontend you need, `asap-aware-mapping`,
-and `asap-types`. External users can use Git dependencies pinned to a compatible
-revision; use the same revision across these crates. For the example below:
+Inside this workspace, depend on the frontend you need,
+`asap-logical-optimizer` (Stage 1 candidate search), `asap-aware-mapping`
+(cost models and selection) and `asap-types`. External users can use Git
+dependencies pinned to a compatible revision; use the same revision across
+these crates. For the example below:
 
 ```toml
 [dependencies]
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
+asap-logical-optimizer = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 ```
 
@@ -168,8 +171,8 @@ search_workload_with_targets<'s, Id>(
     accuracy_model: &dyn AccuracyModel,
 ) -> CandidateLogicalASAPDAGs<Id>
 
-CandidateLogicalASAPDAGs::cost_sorted(&self, cost_model: &dyn CostModel)
-    -> Vec<RankedTargetSubDAGCandidates<'_>>
+candidate_selection::cost_sorted<'a, Id>(space: &'a CandidateLogicalASAPDAGs<Id>, cost_model: &dyn CostModel)
+    -> Vec<RankedTargetSubDAGCandidates<'a>>
 ```
 
 | Argument | Choices / meaning | Required? |
@@ -203,9 +206,10 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_aware_mapping::{
-    default_strategies, search_workload_with_targets,
-    DefaultAccuracyModel, DefaultCostModel,
+use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
+use asap_aware_mapping::DefaultCostModel;
+use asap_logical_optimizer::{
+    default_strategies, search_workload_with_targets, DefaultAccuracyModel,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -243,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &strategies,
         &DefaultAccuracyModel,
     );
-    for group in space.cost_sorted(&cost_model) {
+    for group in cost_sorted(&space, &cost_model) {
         for (candidate, cost) in group.candidates.iter().zip(&group.costs) {
             println!("candidate={candidate:?}, reported_cost={cost:?}");
         }
@@ -252,13 +256,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-| API (`asap_aware_mapping`, unless qualified) | Inputs | Output and limits |
+| API (`asap_logical_optimizer`; `candidate_selection` is `asap_aware_mapping::plan_selection::candidate_selection`) | Inputs | Output and limits |
 | --- | --- | --- |
 | `search_workload` | `(query_id, Rc<OperatorNode>)` roots | `CandidateLogicalASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `CandidateLogicalASAPDAGs`; callers choose context-free replacement strategies |
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
-| `CandidateLogicalASAPDAGs::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
-| `CandidateLogicalASAPDAGs::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
+| `candidate_selection::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
+| `candidate_selection::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `ASAPStrategies::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
 
 `cost_sorted` is a ranking view, not a request to discard all but the first
@@ -351,9 +355,11 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_aware_mapping::{
-    search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
-    ReplacementStrategy, ASAPStrategies, SharedSubDAGStrategy,
+use asap_aware_mapping::plan_selection::candidate_selection::cost_sorted;
+use asap_aware_mapping::DefaultCostModel;
+use asap_logical_optimizer::{
+    search_workload_with_targets, DefaultAccuracyModel, ReplacementStrategy,
+    ASAPStrategies, SharedSubDAGStrategy,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -392,7 +398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let space = search_workload_with_targets(
         vec![("q1", root, Some(accuracy))], &strategies, &DefaultAccuracyModel,
     );
-    println!("{:#?}", space.cost_sorted(&model));
+    println!("{:#?}", cost_sorted(&space, &model));
     Ok(())
 }
 ```
@@ -404,7 +410,8 @@ not waive semantic or accuracy requirements.
 ### Model and evidence options
 
 Traits permit custom implementations; the following are concrete built-in options.
-Module-qualified paths below are relative to `asap_aware_mapping`.
+Cost models are in `asap_aware_mapping` (module-qualified paths below are
+relative to it); accuracy models and evidence are in `asap_logical_optimizer`.
 
 | Parameter | Available value / constructor | Meaning |
 | --- | --- | --- |
@@ -440,7 +447,7 @@ accuracy guarantees.
 ### Example: configure all sketch-strategy providers
 
 ```rust
-use asap_aware_mapping::{
+use asap_logical_optimizer::{
     DefaultAccuracyModel, EqualSplitAllocator,
     NoAccuracyEvidence, ReplacementStrategy, ASAPStrategies,
 };
@@ -485,7 +492,7 @@ Accuracy models, allocators and evidence are consumed during generation; the cos
 model is consumed only at selection (`cost_sorted`, `global_selection` and their
 `_with_recurrence` variants). Sketch parameters come from the analytical
 estimators, not the cost model. For evidence-aware defaults, use
-`asap_aware_mapping::replacement::default_strategies_with_evidence`.
+`asap_logical_optimizer::pass1::replacement::default_strategies_with_evidence`.
 For custom accuracy/allocation/evidence on sketches,
 `ASAPStrategies::new_with_planning_inputs_and_evidence` exposes these providers.
 Keep each provider's evidence scope and freshness valid for the query population.
@@ -550,10 +557,10 @@ Plain `global_selection()` does not decide materialization or establish
 physical deployment feasibility. Stage 2 materialization (#509) will own
 materialization; downstream still owns physical commitment.
 
-| Method on `CandidateLogicalASAPDAGs` / `GlobalSelection` | Behavior |
+| Function or method | Behavior |
 | --- | --- |
-| `CandidateLogicalASAPDAGs::global_selection(&model)` | Compatible structural selection across targets; no recurrence or materialization planning implied |
-| `CandidateLogicalASAPDAGs::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no materialization commitments implied |
+| `candidate_selection::global_selection(&space, &model)` | Compatible structural selection across targets; no recurrence or materialization planning implied |
+| `candidate_selection::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no materialization commitments implied |
 | `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<OperatorNode>>, RealizationError>`; constructs untimed semantic IR, not stored summary data |
 
 Use a target associated with the searched space; DAG assembly can return `None`
@@ -565,7 +572,8 @@ for checking complete physical alternatives and deployment constraints.
 ### API definition and example
 
 ```text
-CandidateLogicalASAPDAGs::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
+candidate_selection::global_selection<'a, Id>(space: &'a CandidateLogicalASAPDAGs<Id>, cost_model: &dyn CostModel)
+    -> CostedGlobalSelection<'a>  // derefs to GlobalSelection
 GlobalSelection::assemble_selected_dag(&self, target: &Rc<OperatorNode>)
     -> Result<Option<Rc<OperatorNode>>, RealizationError>
 ```
@@ -580,7 +588,9 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_aware_mapping::{search_workload, DefaultCostModel};
+use asap_aware_mapping::plan_selection::candidate_selection::global_selection;
+use asap_aware_mapping::DefaultCostModel;
+use asap_logical_optimizer::search_workload;
 use asap_types::types::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -610,7 +620,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let root = lower_promql_workload(&workload, 0)?.remove(0);
     let space = search_workload(vec![("q1", root)]);
-    let selection = space.global_selection(&DefaultCostModel);
+    let selection = global_selection(&space, &DefaultCostModel);
     // Search may canonicalize roots; use the root returned by CandidateLogicalASAPDAGs.
     if let Some(summary) = selection.assemble_selected_dag(&space.roots[0].1)? {
         let dag = asap_types::dag_export::export_summary(&summary);
@@ -643,7 +653,7 @@ cargo doc -p asap-aware-mapping -p asap-types --no-deps
 ## Source references
 
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
-- [Search, ranking and selection](../../crates/asap-aware-mapping/src/replacement.rs)
+- [Search, ranking and selection](../../crates/logical-optimizer/src/pass1/replacement.rs)
 - [Cost models](../../crates/asap-aware-mapping/src/cost_model.rs)
 - [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

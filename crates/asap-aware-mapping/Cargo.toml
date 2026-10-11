@@ -3,13 +3,11 @@ name = "asap-aware-mapping"
 version = "0.1.0"
 edition = "2021"
 
-# The cost-aware optimizer layer (L4 decisions) over the L3 intent algebra:
-# selects and sizes the summary family for each intent. Consumes and produces
-# asap-types (L3 intent algebra + L4 sketch-bound IR) — never depends on a
-# front end.
+# #509 Stage 2, Stage 3 and the planner facade over the Stage 1 candidates of
+# asap-logical-optimizer. Never depends on a front end.
 [dependencies]
-asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }
+asap-logical-optimizer = { path = "../logical-optimizer" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
