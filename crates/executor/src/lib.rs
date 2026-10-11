@@ -13,6 +13,7 @@ pub use traits::*;
 
 pub use expressions::arithmetic;
 pub mod capability;
+pub use capability::capabilities;
 pub use summary_kernels::factory;
 
 /// The exact Planner contract used by these kernels.

@@ -14,7 +14,10 @@ use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_physical_optimizer::implementation::physical_candidates::PhysicalCandidate;
-use asap_plan_selection::{plan_stages, PlanningModels, Selection};
+#[path = "../executor_models/mod.rs"]
+mod executor_models;
+
+use asap_plan_selection::{plan_stages, Selection};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
@@ -28,6 +31,7 @@ use asap_types::workload::{
     QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
     RepeatedDemand, RepeatingEntry, RepetitionInterval, RootDemand, TimeSelection, TimestampMs,
 };
+use executor_models::executor_models;
 
 pub type Payload = Operator<PhysicalASAPNodeId>;
 
@@ -344,7 +348,7 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         roots.into_iter().enumerate().collect(),
         &demand,
         workload.data_workload.as_ref().expect("data workload"),
-        PlanningModels::builtin(),
+        executor_models(),
         MAX_CANDIDATES,
     )
     .expect("plans");

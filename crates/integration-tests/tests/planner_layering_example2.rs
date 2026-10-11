@@ -1,10 +1,11 @@
 //! #509 Example 2 status: one UnivMon over `src_ip` for distinct, entropy and
 //! L2. Records what lowers, plans through `plan_stages` and executes exactly.
+mod executor_models;
 mod physical_common;
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_optimizer::pass1::replacement::Realization;
-use asap_plan_selection::{plan_stages, PlanningModels};
+use asap_plan_selection::plan_stages;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, Schema, SketchAlgorithm};
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
@@ -13,6 +14,7 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Evidence, EvidenceSource, Predictability, QueryRecurrence, Rate,
     RootDemand,
 };
+use executor_models::executor_models;
 use std::rc::Rc;
 
 const WINDOW: &str = "ts >= now() - INTERVAL '1 minute'";
@@ -138,7 +140,7 @@ async fn example2_plans_through_the_stage_pipeline() {
             .collect(),
         &demand,
         &data,
-        PlanningModels::builtin(),
+        executor_models(),
         0,
     )
     .expect("Example 2 plans");
