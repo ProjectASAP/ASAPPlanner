@@ -188,12 +188,12 @@ configuration or candidate is needed.
 
 ## Evidence and trust boundaries
 
-`AccuracyEvidenceProvider` supplies estimator contracts, quantile input domains
-and propagation evidence. The evidence must cover the population to which the
+The planner has no accuracy-evidence input today: the provider that supplied
+estimator contracts and quantile input domains was removed with the legacy
+search, its only reader. Any future evidence must cover the population to which the
 claimed guarantee applies: sources, filters, grouping, evaluation windows and
 all merged panes. Evidence for a narrower population cannot silently certify
-a wider one. The workload-backed provider checks freshness before exposing
-its supported data characteristics.
+a wider one.
 
 Source contracts are assertions that the source or deployment must establish
 and enforce. They are not inferred from observed cardinality or sampled value
@@ -207,24 +207,12 @@ certification. If a model uses an empirical accuracy calibration, the contract
 must identify its confidence level and scope rather than silently promoting
 an observation into a guarantee.
 
-### Example: bounded Classic HLL
+### HLL confidence
 
-A deployment supplies `EstimatorContract::ClassicHll` for the complete aggregate
-expression. It asserts the classic estimator, independent uniform bucket
-hashing and an enforced maximum distinct population per evaluation, including
-all merged panes. Planner combines this contract with the query or allocated
-local target, selects a supported precision, derives the guarantee and uses
-the normal propagation and selection checks.
-
-The current model supports maxima from 1 to 4096 and precisions from 4 to 18,
-and certifies only configurations that remain in the linear-counting branch.
-It bounds collisions across every integer cardinality in the declared domain
-and bounds overestimation deterministically. It is not an RSE-to-normal
-conversion, nor does it cover HIP/MLE or arbitrary unbounded populations.
-
-Missing evidence leaves generic HLL confidence unknown. Invalid or infeasible
-contracts cannot authorize the result. The contract does not certify another
-estimator, another expression or an unsupported shared-grid grouping.
+Generic HLL has no modeled confidence: its failure probability is unknown, so
+it can meet `Epsilon` but not `EpsilonDelta`. The bounded classic-HLL contract
+that certified a confidence was reachable only through the removed evidence
+provider and was removed with it.
 
 ## Sharing across consumers
 

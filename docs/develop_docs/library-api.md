@@ -247,7 +247,6 @@ unranked and carry no accuracy certificate; Stage 3 checks accuracy.
 | `accuracy` / `with_accuracy(&dyn AccuracyModel)` | `asap_plan_selection::DefaultAccuracyModel` | Each estimate's guarantee (`local_guarantee`) and whether it meets the query's target (`satisfies`); Stage 3 rejects an estimate whose family has no model |
 | `calibration` / `with_calibration(Stage3Calibration)` | `Stage3Calibration::ILLUSTRATIVE` | Weights that turn modeled resources into cost; illustrative, not measured |
 | `capabilities` / `with_capabilities(&DeploymentCapabilities)` | Unrestricted | What the deployment can build, read out and keep; candidates needing more are rejected |
-| `evidence` / `with_evidence(&dyn AccuracyEvidenceProvider)` | `NoAccuracyEvidence` | Planning-time accuracy evidence; the stage pipeline does not read it yet |
 
 ## Workload inputs and defaults
 
