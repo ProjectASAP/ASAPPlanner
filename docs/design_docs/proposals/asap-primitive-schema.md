@@ -370,6 +370,7 @@ Any other shape stays in `definition`:
 
 - A column is named by its table and name, `(table, name)`, **as the `SummaryAgg` reads it** (in the schema of its child). Directly above a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions.
 - A `Project` gives its columns new names and replaces their table with its own qualifier (none by default): after `region AS r`, the column is `(none, r)`, so the condition becomes `r ∈ {us}`. Since the `definition` contains the same `Project`, two states that rename the same way still compare equal.
+- Only a `Project` may rename. Any other operator whose output names a column differently from its input (allowed for every operator, e.g. a `Filter` with an explicit schema) stays in `definition`, and so do the conditions at and below it. Removing it would drop the rename: if a `Filter` calls the `tier` column `region`, its `tier = 'eu'` would read as `region ∈ {eu}` and look disjoint from another state's `region ∈ {us}`, though a row with `region = 'us', tier = 'eu'` is in both.
 - If two columns the `SummaryAgg` reads have the same `(table, name)` (for example `Project [a AS k, b AS k]`), a condition on `k` cannot tell them apart and stays in `definition`.
 - PromQL labels have no table, so a label is named by its name alone.
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
