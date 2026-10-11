@@ -1,7 +1,7 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use super::*;
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::schema::GroupingStrategy;
+use asap_types::ir::schema::{GroupingStrategy, HydraKind, HydraParams};
 
 pub mod cardinality;
 pub mod cms;
@@ -64,7 +64,37 @@ pub(super) fn local_guarantee(
         FieldDataType::ExactAggregate(kind, _) => {
             Some(ResultGuarantee::exact(format!("ExactAggregate({kind:?})")))
         }
-        FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
+        FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
+            sketch_guarantee(kind.algorithm(), kind.params(), query)
+        }
+        FieldDataType::Sketch(
+            kind,
+            GroupingStrategy::SharedMultiSubpopulation {
+                kind: HydraKind::HydraCms,
+                params:
+                    HydraParams::HydraCms {
+                        shared_rows,
+                        shared_columns,
+                        ..
+                    },
+            },
+        ) => {
+            // Groups that share a grid cell add their weight: at most
+            // e·N/shared_columns per row, and the minimum over rows exceeds
+            // it with probability e^-shared_rows. N is the whole input's
+            // weight, not one group's, so this bounds error relative to it.
+            let inner = sketch_guarantee(kind.algorithm(), kind.params(), query)?;
+            let stats = crate::accuracy::PropagationStats {
+                hydra_shared_grid_collision_bound: Some(
+                    std::f64::consts::E / f64::from(*shared_columns),
+                ),
+                hydra_shared_grid_failure_probability: Some((-f64::from(*shared_rows)).exp()),
+                ..Default::default()
+            };
+            Some(crate::pass1::grouping::hydra_guarantee(&inner, &stats))
+        }
+        // No accuracy model for the other shared groupings.
+        FieldDataType::Sketch(..) => None,
         // No error model is registered for these families.
         FieldDataType::Sample(..) | FieldDataType::Wavelet(..) | FieldDataType::StatModel(..) => {
             None
