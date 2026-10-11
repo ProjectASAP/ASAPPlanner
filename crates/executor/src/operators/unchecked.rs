@@ -155,7 +155,10 @@ impl TryFrom<UncheckedOperator> for Operator {
                 value,
                 time,
                 groups,
-            } => Operator::summary_build(input(0)?, family, value, time, groups)?,
+            } => match value {
+                Some(value) => Operator::summary_build(input(0)?, family, value, time, groups)?,
+                None => Operator::unit_count_build(input(0)?, family, groups)?,
+            },
             Kind::KeyedSummaryBuild {
                 family,
                 value,

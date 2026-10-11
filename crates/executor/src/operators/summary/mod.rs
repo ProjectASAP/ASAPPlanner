@@ -168,6 +168,32 @@ impl Operator {
         {
             return Err(invalid("counter summary requires a timestamp column"));
         }
+        Self::grouped_build(input, family, Some(value), time, groups)
+    }
+    /// An exact count where every row adds one, whatever its values (SQL
+    /// `COUNT(*)`); the rows need no value column.
+    pub fn unit_count_build(
+        input: SchemaRef,
+        family: SummaryFamilyType,
+        groups: Vec<usize>,
+    ) -> Result<Self, Error> {
+        crate::values::validate_family(&family)?;
+        validate_groups(&input, &groups)?;
+        if !matches!(
+            family,
+            SummaryFamilyType::ExactAggregate(planner_types::ir::schema::ExactKind::Count, _)
+        ) {
+            return Err(invalid("a unit-weight build needs an exact count"));
+        }
+        Self::grouped_build(input, family, None, None, groups)
+    }
+    fn grouped_build(
+        input: SchemaRef,
+        family: SummaryFamilyType,
+        value: Option<usize>,
+        time: Option<usize>,
+        groups: Vec<usize>,
+    ) -> Result<Self, Error> {
         crate::capability::validate_summary_kernel(
             &family,
             &SummaryUpdate::column(ColumnRef::SampleValue),
@@ -439,7 +465,7 @@ pub(super) fn execute_merge<'a>(
 async fn build_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
-    value: usize,
+    value: Option<usize>,
     time: Option<usize>,
     groups: &[usize],
     emit_empty_global: bool,
@@ -496,7 +522,10 @@ async fn build_summary(
                 states.get_mut(&key).expect("inserted group");
             // SQL aggregates ignore NULL samples while retaining the group.
             // A missing counter sample also contributes no observation.
-            let value = &row[value];
+            let value = match value {
+                Some(value) => &row[value],
+                None => &Value::Float64(1.0),
+            };
             if matches!(value, Value::Null) {
                 continue;
             }
