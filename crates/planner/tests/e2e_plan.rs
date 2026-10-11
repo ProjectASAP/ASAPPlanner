@@ -140,7 +140,7 @@ async fn facade_plans_match_exhaustive_stage_pipeline_selection() {
     let exhaustive = enumeration
         .candidates
         .iter()
-        .filter_map(|c| c.physical.as_ref())
+        .flat_map(|c| c.physical.iter())
         .find(|p| p.id == enumeration.selection.selected)
         .expect("selected candidate");
 

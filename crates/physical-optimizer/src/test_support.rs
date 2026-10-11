@@ -11,20 +11,30 @@ use asap_types::workload::{
 };
 
 pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+    lower_promql_all(&[(query, accuracy)]).pop().unwrap()
+}
+
+/// One root per query, lowered as one workload.
+pub(crate) fn lower_promql_all(queries: &[(&str, AccuracyTarget)]) -> Vec<Rc<OperatorNode>> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
-            query_batch: Some(vec![BatchEntry {
-                query: Query(query.into()),
-                requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy),
-                    ..Default::default()
-                },
-                predictability: Predictability::Unknown,
-                invocations: 1,
-                execute_at: None,
-                time_selection: TimeSelection::default(),
-            }]),
+            query_batch: Some(
+                queries
+                    .iter()
+                    .map(|(query, accuracy)| BatchEntry {
+                        query: Query((*query).into()),
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                            ..Default::default()
+                        },
+                        predictability: Predictability::Unknown,
+                        invocations: 1,
+                        execute_at: None,
+                        time_selection: TimeSelection::default(),
+                    })
+                    .collect(),
+            ),
             repeating_queries: None,
         },
         data_workload: Some(DataWorkload {
@@ -35,8 +45,5 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
             ..Default::default()
         }),
     };
-    asap_frontend_promql::lower_promql_workload(&workload, 0)
-        .unwrap()
-        .pop()
-        .unwrap()
+    asap_frontend_promql::lower_promql_workload(&workload, 0).unwrap()
 }
