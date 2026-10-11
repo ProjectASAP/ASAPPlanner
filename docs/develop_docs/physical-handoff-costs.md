@@ -12,8 +12,7 @@ is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
 collapsed into the generic CPU/byte resource container.
 
 The physical-plan adapter accepts an optional `PhysicalHandoffProfile` in the
-immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json` accepts
-the same profile in a top-level `boundaries` field. With no profile, these
+immutable `PhysicalEvidenceSnapshot`. With no profile, these
 dimensions remain unestimated and the existing resource objective is preserved.
 
 The profile's `plans` list binds handoffs to complete physical alternatives.
@@ -95,6 +94,5 @@ Verification:
 
 ```sh
 cargo test -p asap-plan-selection --test physical_handoff_cost
-cargo test -p asap-devtools --bin dag_export handoff_bytes_export_and_change_plan_selection
 python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
 ```
