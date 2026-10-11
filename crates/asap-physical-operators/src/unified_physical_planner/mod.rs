@@ -150,7 +150,6 @@ fn compile_internal(
             },
         )
     });
-    let literals = BTreeMap::<NodeId, (f64, bool)>::new();
     for edge in edges {
         dependencies
             .entry(edge.consumer as u64)
@@ -207,6 +206,20 @@ fn compile_internal(
             for &input in dependencies.get(&id).into_iter().flatten() {
                 pending.push((input, false));
             }
+        }
+    }
+    // The PromQL fallback reads raw series slots, so a binding below a node it
+    // evaluates is never read. (A binding below another bound input is just
+    // superseded by it, as in `cut`.)
+    let mut below_fallback = BTreeSet::new();
+    let mut stack = ordered
+        .iter()
+        .filter(|id| !sources.contains_key(id) && fallback.contains_key(id))
+        .flat_map(|id| dependencies.get(id).into_iter().flatten().copied())
+        .collect::<Vec<_>>();
+    while let Some(id) = stack.pop() {
+        if below_fallback.insert(id) {
+            stack.extend(dependencies.get(&id).into_iter().flatten().copied());
         }
     }
     let mut dag = CompiledPhysicalDAG::new(roots.to_vec());
@@ -457,36 +470,6 @@ fn compile_internal(
                 );
                 let query_time = node.output_state.timing
                     == planner_types::post_asap::ExecutionTiming::QueryTime;
-                if let Some(&(value, left)) = literals.get(&id) {
-                    let [input] = schemas.as_slice() else {
-                        return Err(invalid("scalar binary requires one row input"));
-                    };
-                    if !query_time {
-                        return Err(invalid("scalar literal binary must run at query time"));
-                    }
-                    let scalar =
-                        Operator::scalar(crate::values::Value::Float64(value), DataType::Float64)?;
-                    let (sides, scalars, operands) = if left {
-                        (
-                            [scalar.schema(), input.clone()],
-                            [true, false],
-                            vec![auxiliary, inputs[0]],
-                        )
-                    } else {
-                        (
-                            [input.clone(), scalar.schema()],
-                            [false, true],
-                            vec![inputs[0], auxiliary],
-                        )
-                    };
-                    let [l, r] = sides;
-                    let binary = Operator::series_binary(l, r, operator.clone(), scalars)
-                        .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                    dag.add(auxiliary, vec![], scalar)?;
-                    dag.add(id, operands, binary.with_output_schema(output)?)?;
-                    auxiliary -= 1;
-                    continue;
-                }
                 let label_map = |schema: &SchemaRef| {
                     schema
                         .fields
@@ -586,6 +569,11 @@ fn compile_internal(
                 dag.add(id, inputs, operator)?;
             }
         }
+    }
+    if let Some(id) = sources.keys().find(|id| below_fallback.contains(id)) {
+        return Err(invalid(format!(
+            "input binding {id} is below a PromQL fallback node, which never reads it"
+        )));
     }
     dag.validate()?;
     Ok(dag)
