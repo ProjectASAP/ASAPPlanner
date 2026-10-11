@@ -14,9 +14,7 @@ use asap_physical_operators::{
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::PhysicalASAPDAG;
-use planner_types::{
-    post_asap::execution_data_state::lift_plain, types::AccuracyTarget, workload::*,
-};
+use planner_types::{types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc};
 
 /// Bare selectors look back one ingestion interval: 60s.
@@ -476,30 +474,47 @@ fn raw_series_contract_is_explicit() {
         &[root],
     );
     assert!(wrong.is_err());
-    // A consumed bare selector is raw range rows for its consumer; it is not
-    // turned into instant selection.
+    // A consumed bare selector is still instant selection: its consumer reads
+    // the latest sample per series within the lookback, not the raw rows.
     let selector = lower("m");
-    let _schema = lift_plain(&selector.schema.clone());
     let consumed = planner_types::ir::OperatorNode::new_shared(
         planner_types::ir::Operator::NonASAP(planner_types::ir::NonASAPOp::Limit {
-            n: Some(1),
+            n: Some(10),
             offset: 0,
             partition_by: Default::default(),
             child: selector.clone(),
         }),
     )
     .unwrap();
-    let consumed = fallback_dag(consumed.clone());
-    let raw = promql_fallback::raw_series(&selector).unwrap().remove(0).1;
-    assert!(compile(
-        &consumed,
-        BTreeMap::from([(
-            promql_fallback::raw_series_input(consumed.roots[0] as u64, 0),
-            InputContract::bounded(raw)
-        )]),
-        &consumed.roots.iter().map(|r| *r as u64).collect::<Vec<_>>()
+    let consumed_dag = fallback_dag(consumed.clone());
+    let samples: &[Sample] = &[("a", 0, 1.), ("a", 30, 2.)];
+    let rows = evaluate_dag(&consumed, &consumed_dag, &[("m", samples)], 60).unwrap();
+    assert_eq!(rows, vec![(labels("__name__=m,job=a"), 60_000, 2.)]);
+    // A binding below the fallback root is never read, so it is rejected.
+    let below = consumed_dag
+        .nodes
+        .iter()
+        .map(|node| node.id as u64)
+        .find(|id| *id != consumed_dag.roots[0] as u64)
+        .unwrap();
+    let raw = promql_fallback::raw_series(&consumed).unwrap().remove(0).1;
+    let unused = compile(
+        &consumed_dag,
+        BTreeMap::from([
+            (
+                promql_fallback::raw_series_input(consumed_dag.roots[0] as u64, 0),
+                InputContract::bounded(raw.clone()),
+            ),
+            (below, InputContract::bounded(raw)),
+        ]),
+        &[consumed_dag.roots[0] as u64],
     )
-    .is_ok());
+    .err()
+    .unwrap();
+    assert!(
+        unused.to_string().contains("below a PromQL fallback node"),
+        "{unused}"
+    );
     // Implicit subquery resolution belongs to the deployment's evaluation interval.
     assert!(compile_query("max_over_time(m[5m:])").is_err());
 }
@@ -1557,13 +1572,14 @@ fn logical_nonfinite_quantile_parameter_round_trips() {
     assert!(result[0].2.is_nan());
 }
 
-/// The proposal's pointwise projections preserve names only for unary minus.
+/// Pointwise projections drop the metric name, unary minus included
+/// (Prometheus 3).
 #[test]
 fn pointwise_projection_names_and_dynamic_parameters() {
     let samples = [("job=a", 300, -2.5)];
     assert_eq!(
         labeled("-m", &[("m", &samples)], 300),
-        [("__name__=m,job=a".into(), 2.5)]
+        [("job=a".into(), 2.5)]
     );
     assert_eq!(
         labeled("abs(m)", &[("m", &samples)], 300),

@@ -104,9 +104,13 @@ pub fn data_state(node: &OperatorNode) -> Option<ExecutionDataState> {
 }
 
 /// Whether the sub-DAG below `node` contains a node that can only run at
-/// query time (a evaluation), which forces every consumer above it to query
-/// time as well.
-fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode, bool>) -> bool {
+/// query time (an evaluation, or a summary state `assignment` recomputes at
+/// query time), which forces every consumer above it to query time as well.
+fn forces_query_time(
+    node: &OperatorNode,
+    assignment: &LifecycleAssignment,
+    seen: &mut HashMap<*const OperatorNode, bool>,
+) -> bool {
     let key = node as *const OperatorNode;
     if let Some(&cached) = seen.get(&key) {
         return cached;
@@ -115,6 +119,11 @@ fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode
         _ if node.timing == Some(ExecutionTiming::QueryTime) => true,
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => true,
+        Operator::ASAP(ASAPOp::SummaryAgg { .. })
+            if assignment.summary_timings.get(&key) == Some(&ExecutionTiming::QueryTime) =>
+        {
+            true
+        }
         Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. })
             if node
                 .schema
@@ -128,7 +137,7 @@ fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode
         _ => node
             .children()
             .iter()
-            .any(|child| forces_query_time(child, seen)),
+            .any(|child| forces_query_time(child, assignment, seen)),
     };
     seen.insert(key, forced);
     forced
@@ -216,7 +225,7 @@ fn own_timing(
         | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => ExecutionTiming::QueryTime,
         Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => ExecutionTiming::IngestionTime,
         Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
-            if forces_query_time(child, forced) {
+            if forces_query_time(child, assignment, forced) {
                 ExecutionTiming::QueryTime
             } else {
                 assignment.summary_timing(node)
@@ -786,6 +795,21 @@ mod tests {
     fn exact_accumulator_state_may_feed_another_summary_agg() {
         let inner = agg(scan(), exact_sum());
         assert!(apply(&estimate(agg(inner, kll()))).is_ok());
+    }
+
+    /// A state recomputed at query time moves the summary that reads it to
+    /// query time too, as an evaluation below it would.
+    #[test]
+    fn query_time_state_moves_its_consuming_summary_to_query_time() {
+        let inner = agg(scan(), exact_sum());
+        let outer = agg(Rc::clone(&inner), kll());
+        let mut assignment = LifecycleAssignment::default_maintained();
+        assignment.set(&inner, ExecutionTiming::QueryTime);
+        let root =
+            apply_lifecycle_timings(&estimate(outer), &assignment, &mut TimingMemo::new()).unwrap();
+        let outer = child(&root);
+        assert_eq!(outer.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(child(&outer).timing, Some(ExecutionTiming::QueryTime));
     }
 
     #[test]

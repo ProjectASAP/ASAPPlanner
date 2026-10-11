@@ -130,6 +130,8 @@ pub enum PhysicalASAPDAGValidationError {
         producer: PhysicalASAPNodeId,
         consumer: PhysicalASAPNodeId,
     },
+    #[error("incoming edges of node {consumer:?} do not match its operator's inputs")]
+    EdgeRoleMismatch { consumer: PhysicalASAPNodeId },
     #[error("physical ASAP DAG has no query roots")]
     NoRoots,
     #[error("physical ASAP DAG contains a cycle")]
@@ -227,6 +229,31 @@ impl PhysicalASAPDAG {
             if !nodes.contains_key(root) {
                 return Err(PhysicalASAPDAGValidationError::MissingRoot(*root));
             }
+        }
+        // Each node's incoming edges are exactly its operator's inputs, with
+        // the role of each input's position, so a swapped `Left`/`Right`
+        // cannot reorder the inputs of a binary operator.
+        let mut expected: HashMap<PhysicalASAPNodeId, Vec<(PhysicalASAPNodeId, EdgeRole)>> = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, edge_roles(&node.payload)))
+            .collect();
+        for edge in &self.edges {
+            let inputs = expected.get_mut(&edge.consumer).ok_or(
+                PhysicalASAPDAGValidationError::MissingEdgeEndpoint(edge.consumer),
+            )?;
+            let position = inputs
+                .iter()
+                .position(|input| *input == (edge.producer, edge.role))
+                .ok_or(PhysicalASAPDAGValidationError::EdgeRoleMismatch {
+                    consumer: edge.consumer,
+                })?;
+            inputs.swap_remove(position);
+        }
+        if let Some((consumer, _)) = expected.iter().find(|(_, inputs)| !inputs.is_empty()) {
+            return Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch {
+                consumer: *consumer,
+            });
         }
         let mut children: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
         for edge in &self.edges {
@@ -418,8 +445,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
         edges,
         roots,
     };
-    dag.validate()
-        .expect("compiler emits a valid physical ASAP DAG");
+    dag.validate()?;
     Ok(PhysicalASAPDAGCompilation {
         dag,
         node_ids: PhysicalASAPNodeIdentityMap { nodes_by_id },
