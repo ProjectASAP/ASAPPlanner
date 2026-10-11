@@ -31,26 +31,40 @@ pub enum ResolveError {
     NoSampleValue { available: Vec<String> },
     #[error("ColumnRef::Wildcard cannot be resolved to a single ColumnId")]
     WildcardNotPositional,
+    #[error("column `{name}` matches several unqualified columns")]
+    Ambiguous { name: String },
 }
 
 /// Resolve a single [`ColumnRef`] to a positional [`ColumnId`].
 pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, ResolveError> {
     match col {
-        ColumnRef::Named(name) => schema
-            .column_id(name)
-            .ok_or_else(|| ResolveError::NotFound {
+        // A bare name must be unique: after a join `k` could be `a.k` or `b.k`.
+        ColumnRef::Named(name) => match schema.fields.iter().filter(|c| &c.name == name).count() {
+            0 => Err(ResolveError::NotFound {
                 name: name.clone(),
                 available: schema.fields.iter().map(|c| c.name.clone()).collect(),
             }),
+            1 => Ok(schema.column_id(name).expect("one field has this name")),
+            _ => Err(ResolveError::Ambiguous { name: name.clone() }),
+        },
         // Prefer the (table, name) match; fall back to the bare name for
-        // schemas whose columns carry no qualifier.
-        ColumnRef::Qualified { table, name } => schema
-            .column_id_qualified(table, name)
-            .or_else(|| schema.column_id(name))
-            .ok_or_else(|| ResolveError::NotFound {
-                name: format!("{table}.{name}"),
-                available: schema.fields.iter().map(|c| c.name.clone()).collect(),
-            }),
+        // schemas whose columns carry no qualifier, but only when that name
+        // is unique: after a join `b.k` must not bind to `a.k`.
+        ColumnRef::Qualified { table, name } => {
+            if let Some(id) = schema.column_id_qualified(table, name) {
+                return Ok(id);
+            }
+            match schema.fields.iter().filter(|c| &c.name == name).count() {
+                0 => Err(ResolveError::NotFound {
+                    name: format!("{table}.{name}"),
+                    available: schema.fields.iter().map(|c| c.name.clone()).collect(),
+                }),
+                1 => Ok(schema.column_id(name).expect("one field has this name")),
+                _ => Err(ResolveError::Ambiguous {
+                    name: format!("{table}.{name}"),
+                }),
+            }
+        }
         ColumnRef::SampleValue => schema
             .column_id("value")
             .or_else(|| {

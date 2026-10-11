@@ -8,7 +8,7 @@ use asap_types::pre_asap::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarVal
 
 use crate::unified::error::SqlError as LoweringError;
 
-use super::types::{arrow_to_dtype, scalar_value_to_asap};
+use super::types::{cast_target, scalar_value_to_asap};
 use super::SqlLowerer;
 
 pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
@@ -108,6 +108,11 @@ impl SqlLowerer<'_> {
 
             // SQL LIKE / ILIKE (dedicated expr node from the SQL parser)
             Expr::Like(like) => {
+                if like.escape_char.is_some() {
+                    return Err(LoweringError::UnsupportedFeature(
+                        "LIKE with an ESCAPE character".into(),
+                    ));
+                }
                 let op = match (like.negated, like.case_insensitive) {
                     (false, false) => CompareOpKind::Like,
                     (true, false) => CompareOpKind::NotLike,
@@ -150,7 +155,7 @@ impl SqlLowerer<'_> {
             // does: type coercion turns `latency < 100` on a DOUBLE column into
             // `latency < CAST(100 AS DOUBLE)`, which lowers as `latency < 100.0`.
             Expr::Cast(c)
-                if matches!(c.expr.as_ref(), Expr::Literal(..))
+                if matches!(c.expr.as_ref(), Expr::Literal(v, _) if !v.is_null())
                     && (c.field.data_type().is_integer() || c.field.data_type().is_floating()) =>
             {
                 let Expr::Literal(sv, _) = c.expr.as_ref() else {
@@ -160,21 +165,21 @@ impl SqlLowerer<'_> {
                     Ok(folded) => scalar_value_to_asap(&folded).map(Unresolved::Literal),
                     Err(_) => Ok(Unresolved::Cast {
                         expr: bx(&c.expr)?,
-                        to: arrow_to_dtype(c.field.data_type())?,
+                        to: cast_target(c.field.data_type())?,
                         try_cast: false,
                     }),
                 }
             }
             Expr::Cast(c) => Ok(Unresolved::Cast {
                 expr: bx(&c.expr)?,
-                to: arrow_to_dtype(c.field.data_type())?,
+                to: cast_target(c.field.data_type())?,
                 try_cast: false,
             }),
 
             // TRY_CAST returns NULL on conversion failure; preserve that semantic.
             Expr::TryCast(c) => Ok(Unresolved::Cast {
                 expr: bx(&c.expr)?,
-                to: arrow_to_dtype(c.field.data_type())?,
+                to: cast_target(c.field.data_type())?,
                 try_cast: true,
             }),
 

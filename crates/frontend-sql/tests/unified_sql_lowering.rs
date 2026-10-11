@@ -18,7 +18,7 @@ use asap_frontend_sql::{
 use asap_types::ir::{ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::pre_asap::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, GroupKeys, JoinKind, Reduction, ScalarValue, Source,
+    AggIntent, ColumnRef, CompareOpKind, GroupKeys, JoinKind, Reduction, ScalarValue, Source,
     WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
@@ -2122,22 +2122,24 @@ async fn arg_min_lowers_to_its_own_extension_kind() {
 #[tokio::test]
 async fn arg_max_payload_preserves_both_column_names() {
     // Core never resolves an `Extension`'s payload, so both columns are kept
-    // as validated bare-column `ColumnRef`s in `payload`, not run through
-    // positional `ColumnId` binding -- see `lower_arg_selector`'s doc.
+    // as validated column `ColumnRef`s (with their qualifier) in `payload`,
+    // not run through positional `ColumnId` binding -- see
+    // `lower_arg_selector`'s doc.
     let qe = lower_clickhouse("SELECT argMax(service, latency) AS m FROM metrics").await;
     let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     let AggIntent::Extension { payload, .. } = &measures[0] else {
         panic!("expected an Extension intent, got {:?}", measures[0]);
     };
-    let named = |key: &str| {
-        payload
-            .get(key)
-            .and_then(|c| c.get("Named"))
-            .and_then(|n| n.as_str())
-            .map(str::to_string)
-    };
-    assert_eq!(named("arg_col"), Some("service".to_string()));
-    assert_eq!(named("val_col"), Some("latency".to_string()));
+    let column = |key: &str| serde_json::from_value::<ColumnRef>(payload[key].clone()).unwrap();
+    for (key, name) in [("arg_col", "service"), ("val_col", "latency")] {
+        assert_eq!(
+            column(key),
+            ColumnRef::Qualified {
+                table: "metrics".into(),
+                name: name.into()
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -2900,4 +2902,229 @@ async fn measure_filter_inside_a_rollup_is_rejected() {
     .await
     .unwrap_err();
     assert!(matches!(err, LoweringError::UnsupportedFeature(_)), "{err}");
+}
+
+async fn lower_err(sql: &str) -> String {
+    lower_sql(sql, &catalog(), AccuracyTarget::Exact)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("expected {sql:?} to be rejected"))
+        .to_string()
+}
+
+/// After a join the `Project` drops table qualifiers, so `h.service` must not
+/// fall back to the first bare `service` (`m.service`): the reference is
+/// ambiguous and rejected rather than sorting by the wrong column.
+#[tokio::test]
+async fn qualified_order_by_after_a_join_does_not_bind_the_wrong_column() {
+    let err = lower_err(
+        "SELECT m.service, h.service FROM metrics m JOIN hosts h ON m.service = h.service \
+         ORDER BY h.service",
+    )
+    .await;
+    assert!(err.contains("several unqualified columns"), "{err}");
+}
+
+/// `WITHIN GROUP (ORDER BY x DESC)` reads the percentile from the top, as
+/// DataFusion does: `0.9` descending is the `0.1` quantile.
+#[tokio::test]
+async fn descending_percentile_reads_from_the_top() {
+    for (order, expected) in [("ASC", 0.9), ("DESC", 0.1)] {
+        let qe = lower(&format!(
+            "SELECT approx_percentile_cont(0.9) WITHIN GROUP (ORDER BY latency {order}) \
+             FROM metrics"
+        ))
+        .await;
+        let (_, measures) = find_aggregate(&qe).expect("aggregate");
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - expected).abs() < 1e-12),
+            "{order}: {measures:?}"
+        );
+    }
+}
+
+/// A cast of `NULL` is not folded: the untyped null literal would lose the
+/// column type.
+#[tokio::test]
+async fn typed_null_keeps_its_type() {
+    let qe =
+        lower("SELECT CAST(NULL AS BIGINT) AS k UNION ALL SELECT bytes AS k FROM metrics").await;
+    assert_eq!(
+        qe.schema.fields[0].dtype,
+        FieldDataType::Plain(DataType::Int64),
+        "{qe:#?}"
+    );
+}
+
+/// A `LIMIT`/`OFFSET` expression is rejected, not dropped.
+#[tokio::test]
+async fn non_literal_limit_and_offset_are_rejected() {
+    for sql in [
+        "SELECT service FROM metrics LIMIT 1 + 1",
+        "SELECT service FROM metrics LIMIT 5 OFFSET 1 + 1",
+    ] {
+        let err = lower_err(sql).await;
+        assert!(err.contains("LIMIT/OFFSET"), "{sql}: {err}");
+    }
+}
+
+/// A cast that can change values is computed as a derived column; a widening
+/// cast still reads the bare column.
+#[tokio::test]
+async fn value_changing_casts_in_reducer_arguments_are_kept() {
+    for sql in [
+        "SELECT sum(CAST(latency AS BIGINT)) FROM metrics",
+        "SELECT min(CAST(service AS BIGINT)) FROM metrics",
+        // A float sum, not an integer one.
+        "SELECT sum(CAST(bytes AS DOUBLE)) FROM metrics",
+    ] {
+        let qe = lower(sql).await;
+        let (names, materialized) = reducer_input_names(&qe);
+        assert!(materialized, "{sql}: {names:?}");
+        assert!(
+            !names.iter().any(|n| n == "latency" || n == "service"),
+            "{sql}: {names:?}"
+        );
+    }
+    // `AVG` returns a float either way, so it reads the column itself.
+    let qe = lower("SELECT avg(CAST(bytes AS DOUBLE)) FROM metrics").await;
+    let (names, materialized) = reducer_input_names(&qe);
+    assert!(!materialized, "{names:?}");
+    assert_eq!(names, ["bytes"]);
+}
+
+/// Window modifiers the IR cannot carry are rejected, not dropped.
+#[tokio::test]
+async fn window_modifiers_are_rejected() {
+    for sql in [
+        "SELECT sum(bytes) FILTER (WHERE latency > 0) OVER (PARTITION BY service) FROM metrics",
+        "SELECT count(DISTINCT bytes) OVER (PARTITION BY service) FROM metrics",
+        "SELECT first_value(bytes) IGNORE NULLS OVER (ORDER BY ts) FROM metrics",
+    ] {
+        let err = lower_err(sql).await;
+        assert!(err.contains("on a window function"), "{sql}: {err}");
+    }
+}
+
+/// `LIKE ... ESCAPE` is rejected: the comparison has no escape character.
+#[tokio::test]
+async fn like_with_escape_is_rejected() {
+    let err = lower_err("SELECT * FROM metrics WHERE service LIKE 'x!%' ESCAPE '!'").await;
+    assert!(err.contains("ESCAPE"), "{err}");
+}
+
+/// A qualified reducer argument over a self-join reads its own side:
+/// metrics ++ metrics → a.bytes = col 3, b.bytes = col 7 (4 cols/side).
+#[tokio::test]
+async fn qualified_reducer_argument_over_a_join_reads_its_own_side() {
+    for (sql, side) in [
+        (
+            "SELECT SUM(b.bytes) FROM metrics a JOIN metrics b ON a.service = b.service",
+            7,
+        ),
+        (
+            "SELECT MAX(a.bytes) FROM metrics a JOIN metrics b ON a.service = b.service",
+            3,
+        ),
+    ] {
+        let qe = lower(sql).await;
+        let NonASAPOp::Aggregate { measures, .. } =
+            op(find_aggregate_node(&qe).expect("expected an Aggregate"))
+        else {
+            unreachable!()
+        };
+        let cols: Vec<_> = measures.iter().flat_map(|a| a.input_cols()).collect();
+        assert_eq!(cols, [side], "{sql}");
+    }
+}
+
+/// DataFusion 54 compares `ROW_NUMBER()` (UInt64) with an Int64 literal
+/// through `Decimal128(20, 0)`; canonical integers are all Int64, so the
+/// widening cast lowers as a no-op.
+#[tokio::test]
+async fn unsigned_signed_comparison_through_decimal_lowers() {
+    lower(
+        "SELECT service, rn FROM (SELECT service, ROW_NUMBER() OVER (ORDER BY bytes) AS rn \
+         FROM metrics) t WHERE rn <= 5",
+    )
+    .await;
+}
+
+/// The duration check runs on the typed plan before type coercion, which
+/// would otherwise fail first with an unrelated coercion error.
+#[tokio::test]
+async fn duration_in_a_case_branch_is_rejected_as_a_duration() {
+    let catalog = SqlCatalog::new().with_table("t", Schema::new(vec![col("d", DataType::Date)]));
+    let err = asap_frontend_sql::lower_sql(
+        "SELECT CASE WHEN true THEN INTERVAL '1 day' ELSE d - d END FROM t",
+        &catalog,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unsupported duration type"), "{err}");
+}
+
+/// Only an integer widens to `Decimal128(_, 0)` as a no-op; a user cast of a
+/// float to `DECIMAL(p, 0)` rounds, so it is rejected rather than dropped.
+#[tokio::test]
+async fn decimal_casts_of_non_integers_are_rejected() {
+    let err = lower_err("SELECT CAST(latency AS DECIMAL(10,0)) FROM metrics").await;
+    assert!(err.contains("Decimal128"), "{err}");
+    lower("SELECT CAST(bytes AS DECIMAL(10,0)) AS b FROM metrics WHERE bytes > 0").await;
+}
+
+/// Type coercion wraps a user cast in a reducer argument
+/// (`avg(CAST(f AS BIGINT))` becomes `CAST(CAST(f AS Int64) AS Float64)`);
+/// the inner cast truncates, so the argument is a derived column.
+#[tokio::test]
+async fn a_cast_under_a_coercion_cast_is_kept() {
+    for sql in [
+        "SELECT avg(CAST(latency AS BIGINT)) FROM metrics",
+        "SELECT median(CAST(latency AS BIGINT)) FROM metrics",
+    ] {
+        let qe = lower(sql).await;
+        let (names, materialized) = reducer_input_names(&qe);
+        assert!(materialized, "{sql}: {names:?}");
+        assert!(!names.iter().any(|n| n == "latency"), "{sql}: {names:?}");
+    }
+}
+
+/// The canonical types are 64-bit, so a cast to a narrower width (whose
+/// range check or 32-bit rounding would be lost) is rejected.
+#[tokio::test]
+async fn casts_to_narrow_widths_are_rejected() {
+    for sql in [
+        "SELECT CAST(bytes AS INT) FROM metrics",
+        "SELECT CAST(bytes AS SMALLINT) FROM metrics",
+        "SELECT TRY_CAST(latency AS REAL) FROM metrics",
+    ] {
+        let err = lower_err(sql).await;
+        assert!(err.contains("64-bit"), "{sql}: {err}");
+    }
+}
+
+/// A rolled-up grouping key is NULL in the coarser levels, so it is nullable
+/// in the combined output even when the column itself is not.
+#[tokio::test]
+async fn rolled_up_keys_are_nullable() {
+    let qe = lower("SELECT service, SUM(latency) FROM metrics GROUP BY ROLLUP(service)").await;
+    let service = qe
+        .schema
+        .fields
+        .iter()
+        .find(|f| f.name.ends_with("service"))
+        .expect("service column");
+    assert!(service.nullable, "{:?}", qe.schema);
+}
+
+/// DataFusion 54 types `CAST(x AS VARCHAR)` as `Utf8View`.
+#[tokio::test]
+async fn a_cast_to_varchar_lowers_to_utf8() {
+    let qe = lower("SELECT CAST(bytes AS VARCHAR) AS s FROM metrics").await;
+    assert_eq!(
+        qe.schema.fields[0].dtype,
+        FieldDataType::Plain(DataType::Utf8)
+    );
 }

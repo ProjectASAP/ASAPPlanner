@@ -49,9 +49,9 @@ pub(super) fn scalar_value_to_asap(sv: &DfScalarValue) -> Result<ScalarValue, Lo
         DfScalarValue::UInt32(Some(v)) => Ok(ScalarValue::Int64(*v as i64)),
         DfScalarValue::Float64(Some(v)) => Ok(ScalarValue::Float64(*v)),
         DfScalarValue::Float32(Some(v)) => Ok(ScalarValue::Float64(*v as f64)),
-        DfScalarValue::Utf8(Some(s)) | DfScalarValue::LargeUtf8(Some(s)) => {
-            Ok(ScalarValue::Utf8(s.clone()))
-        }
+        DfScalarValue::Utf8(Some(s))
+        | DfScalarValue::LargeUtf8(Some(s))
+        | DfScalarValue::Utf8View(Some(s)) => Ok(ScalarValue::Utf8(s.clone())),
         DfScalarValue::Boolean(Some(b)) => Ok(ScalarValue::Boolean(*b)),
         // All three of DataFusion's interval scalars land on one canonical
         // shape; the narrower two simply leave the fields they do not carry
@@ -78,6 +78,26 @@ pub(super) fn scalar_value_to_asap(sv: &DfScalarValue) -> Result<ScalarValue, Lo
     }
 }
 
+/// The canonical target of a `CAST` / `TRY_CAST` over a non-literal. A
+/// narrower integer or float width (`INT`, `SMALLINT`, `TINYINT`, `REAL`) is
+/// rejected: the canonical types are 64-bit, so the cast's range check and
+/// 32-bit rounding would be lost.
+pub(super) fn cast_target(dt: &ArrowDataType) -> Result<DataType, LoweringError> {
+    if matches!(
+        dt,
+        ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Float16
+            | ArrowDataType::Float32
+    ) {
+        return Err(LoweringError::UnsupportedFeature(format!(
+            "CAST to {dt}: the canonical types are 64-bit"
+        )));
+    }
+    arrow_to_dtype(dt)
+}
+
 /// Arrow → the canonical `DataType` (used for `CAST` targets). Deliberately narrow.
 pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringError> {
     match dt {
@@ -87,7 +107,9 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
         | ArrowDataType::Int16
         | ArrowDataType::Int8 => Ok(DataType::Int64),
         ArrowDataType::Float64 | ArrowDataType::Float32 => Ok(DataType::Float64),
-        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(DataType::Utf8),
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+            Ok(DataType::Utf8)
+        }
         ArrowDataType::Boolean => Ok(DataType::Bool),
         ArrowDataType::Timestamp(_, _) => Ok(DataType::Timestamp),
         ArrowDataType::Date32 | ArrowDataType::Date64 => Ok(DataType::Date),

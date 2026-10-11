@@ -198,8 +198,6 @@ impl<'a> SqlLowerer<'a> {
         let plan = state.statement_to_plan(statement).await?;
         let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
         let plan = rewriter.analyze(plan, &ctx.state().options())?;
-        let plan = datafusion::optimizer::analyzer::type_coercion::TypeCoercion::new()
-            .analyze(plan, &ctx.state().options())?;
         // Output schemas omit predicate and nested-expression types. Check the
         // typed SQL plan before lowering erases fixed-duration units.
         plan.apply_with_subqueries(|node| {
@@ -232,6 +230,9 @@ impl<'a> SqlLowerer<'a> {
                 })
             })
         })?;
+        let plan = datafusion::optimizer::analyzer::type_coercion::TypeCoercion::new()
+            .analyze(plan, &ctx.state().options())?;
+        let plan = drop_integer_decimal_widening(plan)?;
         let _guard = AccuracyGuard::install(accuracy.clone());
         self.lower_plan(&plan)
     }
@@ -633,6 +634,19 @@ impl<'a> SqlLowerer<'a> {
                 "expected a window function in Window plan node".into(),
             ));
         };
+        // The window IR has no slot for these modifiers; dropping them would
+        // compute a different function.
+        if wf.params.filter.is_some()
+            || wf.params.distinct
+            || matches!(
+                wf.params.null_treatment,
+                Some(logical_expr::expr::NullTreatment::IgnoreNulls)
+            )
+        {
+            return Err(LoweringError::UnsupportedFeature(
+                "FILTER, DISTINCT or IGNORE NULLS on a window function".into(),
+            ));
+        }
         let func = lower_window_func_kind(&wf.fun)?;
         let mut args = wf
             .params
@@ -828,7 +842,7 @@ impl<'a> SqlLowerer<'a> {
         let aggr_expr = agg
             .aggr_expr
             .iter()
-            .map(|e| derived.rewrite_agg(e))
+            .map(|e| derived.rewrite_agg(e, agg.input.schema()))
             .collect::<Result<Vec<_>, LoweringError>>()?;
         // A measure filter reads the aggregate's input rows, so the columns
         // it names must survive any derived-column `Project` inserted below.
@@ -1094,7 +1108,7 @@ impl<'a> SqlLowerer<'a> {
         let aggr_expr = agg
             .aggr_expr
             .iter()
-            .map(|e| derived.rewrite_agg(e))
+            .map(|e| derived.rewrite_agg(e, agg.input.schema()))
             .collect::<Result<Vec<_>, LoweringError>>()?;
         let measures = aggr_expr
             .iter()
@@ -1188,9 +1202,9 @@ impl<'a> SqlLowerer<'a> {
         // Count-ranked `LIMIT k` over a `Sort` is promoted to the heavy-hitter
         // `TopK` by the shared `canonicalize` pass (issue #34), not here.
         Ok(Unresolved::Limit {
-            // No (literal) fetch is offset-only.
-            n: eval_fetch(&limit.fetch),
-            offset: eval_fetch(&limit.skip).unwrap_or(0),
+            // No fetch is offset-only.
+            n: eval_fetch(&limit.fetch)?,
+            offset: eval_fetch(&limit.skip)?.unwrap_or(0),
             partition_by: GroupKeys::none(),
             child: Rc::new(self.lower_plan(&limit.input)?),
         })
@@ -1805,7 +1819,14 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                     col: col(&agg_fn.params.args)?,
                     q: match fixed_q {
                         Some(q) => q,
-                        None => extract_percentile_q(&agg_fn.params.args)?,
+                        // `WITHIN GROUP (ORDER BY x DESC)` reads the
+                        // percentile from the top, as DataFusion does.
+                        None => match agg_fn.params.order_by.first() {
+                            Some(sort) if !sort.asc => {
+                                1.0 - extract_percentile_q(&agg_fn.params.args)?
+                            }
+                            _ => extract_percentile_q(&agg_fn.params.args)?,
+                        },
                     },
                     accuracy: current_accuracy(),
                 },
@@ -2179,7 +2200,7 @@ impl<'l> DerivedCols<'l> {
 
     /// Repoint a reducer's argument at a derived column when it is an
     /// expression; otherwise carry its plain input column through.
-    fn rewrite_agg(&mut self, expr: &Expr) -> Result<Expr, LoweringError> {
+    fn rewrite_agg(&mut self, expr: &Expr, input: &DFSchema) -> Result<Expr, LoweringError> {
         let Expr::AggregateFunction(agg_fn) = unalias(expr) else {
             return Ok(expr.clone());
         };
@@ -2214,7 +2235,31 @@ impl<'l> DerivedCols<'l> {
         for argument in agg_fn.params.args.iter().skip(1) {
             self.passthrough(argument)?;
         }
-        match agg_col_name(&agg_fn.params.args) {
+        // A cast that can change values (`CAST(f AS BIGINT)` truncates,
+        // `CAST(s AS BIGINT)` parses) or the result type (`SUM(CAST(i AS
+        // DOUBLE))` is a float sum) is computed as a derived column; only
+        // widening casts that leave the reducer's result unchanged read the
+        // bare column, e.g. the int-to-float cast coercion puts under `AVG`.
+        let float_result = matches!(
+            asap_sql_function_catalog::lookup_native(&agg_fn.func.name().to_lowercase()),
+            Some(
+                AggSemantic::Avg
+                    | AggSemantic::StdDev { .. }
+                    | AggSemantic::Variance { .. }
+                    | AggSemantic::Quantile { .. }
+            )
+        );
+        // Only a cast directly over a column qualifies: type coercion can wrap
+        // a user cast (`avg(CAST(f AS BIGINT))` becomes
+        // `CAST(CAST(f AS Int64) AS Float64)`), and the inner one truncates.
+        let widening = match unalias(arg) {
+            Expr::Cast(c) => {
+                matches!(unalias(&c.expr), Expr::Column(_))
+                    && is_widening_cast(c, input, float_result)
+            }
+            _ => true,
+        };
+        match agg_col_name(&agg_fn.params.args).filter(|_| widening) {
             Some(name) => {
                 self.push(name, self.lowerer.lower_expr(arg)?);
                 Ok(expr.clone())
@@ -2251,6 +2296,21 @@ impl<'l> DerivedCols<'l> {
     }
 }
 
+/// Whether `cast` only widens a numeric column within its canonical type
+/// (a wider integer, a wider float) — or, when the reducer's result is a float
+/// regardless (`float_result`), from integer to float — so the reducer can
+/// read the column itself.
+fn is_widening_cast(cast: &logical_expr::Cast, input: &DFSchema, float_result: bool) -> bool {
+    let Ok(from) = cast.expr.get_type(input) else {
+        return false;
+    };
+    let to = cast.field.data_type();
+    let wider = to.primitive_width() >= from.primitive_width();
+    (from.is_integer() && to.is_integer() && wider)
+        || (from.is_floating() && to.is_floating() && wider)
+        || (float_result && from.is_integer() && to.is_floating())
+}
+
 /// The first aggregate argument's column name (bare / aliased / cast column),
 /// or `None` for `*` / a non-column expression.
 fn agg_col_name(args: &[Expr]) -> Option<String> {
@@ -2269,9 +2329,17 @@ fn agg_col_name(args: &[Expr]) -> Option<String> {
 /// variance/quantile/count-distinct). Errors if the argument is not a column:
 /// the canonical `AggIntent` reduces a column, not an arbitrary expression
 /// (`SUM(a*b)`), so silently picking a probe column would compute the wrong
-/// result.
+/// result. The qualifier is kept so `SUM(b.x)` over a join reads `b.x`.
 fn reducer_col(name: &str, args: &[Expr]) -> Result<ColumnRef, LoweringError> {
-    agg_col_name(args).map(ColumnRef::Named).ok_or_else(|| {
+    fn col_ref(e: &Expr) -> Option<ColumnRef> {
+        match e {
+            Expr::Column(_) => expr_to_group_ref(e).ok(),
+            Expr::Alias(a) => col_ref(&a.expr),
+            Expr::Cast(c) => col_ref(&c.expr),
+            _ => None,
+        }
+    }
+    args.first().and_then(col_ref).ok_or_else(|| {
         LoweringError::UnsupportedAggregate(format!("{name} over a non-column expression"))
     })
 }
@@ -2328,13 +2396,19 @@ fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
 
 // ── LogicalPlan navigation helpers ──────────────────────────────────────────────
 
-fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
-    expr_opt.as_ref().and_then(|e| match e.as_ref() {
-        Expr::Literal(DfScalarValue::Int64(Some(v)), _) if *v >= 0 => Some(*v as usize),
-        Expr::Literal(DfScalarValue::UInt64(Some(v)), _) => Some(*v as usize),
-        Expr::Literal(DfScalarValue::Int32(Some(v)), _) if *v >= 0 => Some(*v as usize),
-        _ => None,
-    })
+fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Result<Option<usize>, LoweringError> {
+    let Some(e) = expr_opt else {
+        return Ok(None);
+    };
+    match e.as_ref() {
+        Expr::Literal(DfScalarValue::Int64(Some(v)), _) if *v >= 0 => Ok(Some(*v as usize)),
+        Expr::Literal(DfScalarValue::UInt64(Some(v)), _) => Ok(Some(*v as usize)),
+        Expr::Literal(DfScalarValue::Int32(Some(v)), _) if *v >= 0 => Ok(Some(*v as usize)),
+        Expr::Literal(v, _) if v.is_null() => Ok(None),
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "LIMIT/OFFSET must be a non-negative integer literal, got {other}"
+        ))),
+    }
 }
 
 /// Map a DataFusion window-function definition to the canonical
@@ -2458,6 +2532,36 @@ fn lower_window_frame(
 // the other source; it needs a live ClickHouse instance, which is handled
 // separately by the dev-only `tools/clickhouse/extract_functions.py` script,
 // deliberately not wired into this test or into CI.)
+/// DataFusion 54 compares unsigned with signed integers (`ROW_NUMBER() <= 5`)
+/// by casting both sides to `Decimal128(20, 0)`. Canonical integers are all
+/// Int64, so a `Decimal128(_, 0)` cast of an integer is dropped. Any other
+/// decimal cast (`CAST(1.5 AS DECIMAL(10, 0))` rounds) stays and is rejected.
+fn drop_integer_decimal_widening(plan: LogicalPlan) -> datafusion::common::Result<LogicalPlan> {
+    plan.transform_up_with_subqueries(|node| {
+        let mut schema = DFSchema::empty();
+        for input in node.inputs() {
+            schema.merge(input.schema());
+        }
+        let rewritten = node.map_expressions(|expr| {
+            expr.transform_up(|e| match &e {
+                Expr::Cast(c)
+                    if matches!(c.field.data_type(), ArrowDataType::Decimal128(_, 0))
+                        && c.expr.get_type(&schema).is_ok_and(|t| t.is_integer()) =>
+                {
+                    Ok(Transformed::yes(c.expr.as_ref().clone()))
+                }
+                _ => Ok(Transformed::no(e)),
+            })
+        })?;
+        if rewritten.transformed {
+            rewritten.map_data(|plan| plan.recompute_schema())
+        } else {
+            Ok(rewritten)
+        }
+    })
+    .map(|t| t.data)
+}
+
 #[cfg(test)]
 mod catalog_drift {
     use super::*;
