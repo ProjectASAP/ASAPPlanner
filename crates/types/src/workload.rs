@@ -42,6 +42,8 @@ pub enum SqlDialect {
 pub enum QueryLanguage {
     #[serde(rename = "promql")]
     PromQL,
+    #[serde(rename = "metricsql")]
+    MetricsQL,
     #[serde(rename = "sql")]
     SQL(SqlDialect),
     #[serde(rename = "datafusion")]
@@ -608,7 +610,12 @@ impl PlanningWorkload {
         if let Some(data) = &self.data_workload {
             data.validate()?;
         }
-        if matches!(self.query_workload.language, QueryLanguage::PromQL) {
+        // Both read the latest sample of a bare selector within the ingestion
+        // interval.
+        if matches!(
+            self.query_workload.language,
+            QueryLanguage::PromQL | QueryLanguage::MetricsQL
+        ) {
             let data = self
                 .data_workload
                 .as_ref()
@@ -675,9 +682,9 @@ fn validate_rate(rate: Rate) -> Result<Rate, WorkloadError> {
 pub enum WorkloadError {
     #[error("data_ingestion_interval evidence is unavailable at planning time")]
     UnavailableDataIngestionInterval,
-    #[error("a PromQL workload requires data_workload")]
+    #[error("a PromQL or MetricsQL workload requires data_workload")]
     MissingPromqlDataWorkload,
-    #[error("a PromQL workload requires data_ingestion_interval")]
+    #[error("a PromQL or MetricsQL workload requires data_ingestion_interval")]
     MissingDataIngestionInterval,
     #[error("data_ingestion_interval must be greater than zero")]
     ZeroDataIngestionInterval,
@@ -870,6 +877,7 @@ mod tests {
     fn query_language_wire_names_do_not_split_acronyms() {
         let cases = [
             (QueryLanguage::PromQL, serde_json::json!("promql")),
+            (QueryLanguage::MetricsQL, serde_json::json!("metricsql")),
             (
                 QueryLanguage::SQL(SqlDialect::DataFusionSQL),
                 serde_json::json!({"sql": "datafusion_sql"}),

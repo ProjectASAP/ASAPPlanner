@@ -1210,9 +1210,19 @@ fn generic_topk_grouping_lowers_to_sort_partition_by() {
     // reducing → the grouping rides on `Sort.partition_by`, and the windowed
     // reduction beneath stays label-preserving (`by: []`). No `Partition` node.
     let q = lower("topk by (host) (5, avg_over_time(cpu[5m]))");
-    let NonASAPOp::Limit { child, .. } = q.expect_non_asap() else {
+    let NonASAPOp::Limit {
+        partition_by: limit_partition,
+        child,
+        ..
+    } = q.expect_non_asap()
+    else {
         panic!("expected Limit, got {q:?}");
     };
+    assert_eq!(
+        limit_partition,
+        &vec![2],
+        "k series per host, not k in total"
+    );
     let NonASAPOp::Sort {
         partition_by,
         child,
@@ -1237,12 +1247,20 @@ fn topk_over_bare_selector_by_label_ranks_per_group() {
     //   Limit{3} → Sort{value desc, partition_by:[job]} → Scan
     let q = lower("topk(3, http_requests_total) by (job)");
     let NonASAPOp::Limit {
-        n: Some(n), child, ..
+        n: Some(n),
+        partition_by: limit_partition,
+        child,
+        ..
     } = q.expect_non_asap()
     else {
         panic!("expected Limit, got {q:?}");
     };
     assert_eq!(*n, 3);
+    assert_eq!(
+        limit_partition,
+        &vec![2],
+        "3 series per job, not 3 in total"
+    );
     let NonASAPOp::Sort {
         keys,
         partition_by,

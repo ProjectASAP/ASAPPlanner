@@ -324,14 +324,15 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
         // identity and `-<literal>` to a negated `NumberLiteral`. A scalar
         // operand was dispatched to `lower_scalar` above (→ `Negative`), so this
-        // is a vector projection. Unary negation retains the metric name.
+        // is a vector projection. Like other value-changing operations,
+        // Prometheus drops the metric name on vector negation.
         Expr::Unary(u) => Ok(Unresolved::PromqlMap {
             child: Rc::new(walk(&u.expr)?),
             sample: Scalar::Negative {
                 expr: Box::new(Scalar::Column(ColumnRef::SampleValue)),
                 semantics: ExprSemantics::Promql,
             },
-            drop_metric_name: false,
+            drop_metric_name: true,
         }),
         Expr::Subquery(sq) => {
             let subquery = Unresolved::PromqlSubquery {
@@ -776,27 +777,30 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
     })
 }
 
-/// Generic `topk`/`bottomk`: `Limit{k} → Sort{value, partition_by: keys}` over
-/// `child` — an order-by-value ranking, not a heavy-hitter intent.
+/// Generic `topk`/`bottomk`: `Limit{k, partition_by: keys} → Sort{value,
+/// partition_by: keys}` over `child` — an order-by-value ranking, not a
+/// heavy-hitter intent. Both carry the keys: `topk by (job)` keeps `k` series
+/// per `job`.
 fn ranked_by_value(
     keys: Vec<ColumnRef>,
     k: u64,
     descending: bool,
     child: Unresolved,
 ) -> Unresolved {
+    let partition_by: GroupKeys<ColumnRef> = keys.into();
     let sorted = Unresolved::Sort {
         keys: vec![UnresolvedSortKey {
             expr: Scalar::Column(ColumnRef::SampleValue),
             ascending: !descending,
             nulls_first: false,
         }],
-        partition_by: keys.into(),
+        partition_by: partition_by.clone(),
         child: Rc::new(child),
     };
     Unresolved::Limit {
         n: Some(k as usize),
         offset: 0,
-        partition_by: GroupKeys::none(),
+        partition_by,
         child: Rc::new(sorted),
     }
 }
@@ -1236,14 +1240,43 @@ fn walk_math(call: &Call) -> Result<Unresolved> {
     if call.func.name == "round" && args.len() == 1 {
         args.push(Scalar::Literal(ScalarValue::Float64(1.0)));
     }
+    let mut child = walk(arg(call, 0)?)?;
+    if call.func.name == "clamp" {
+        child = clamp_bounds_filter(&args[1], &args[2], child);
+    }
     Ok(Unresolved::PromqlMap {
-        child: Rc::new(walk(arg(call, 0)?)?),
+        child: Rc::new(child),
         sample: Scalar::FunctionCall {
             name: format!("promql_{}", call.func.name),
             args,
         },
         drop_metric_name: true,
     })
+}
+
+/// `clamp(v, min, max)` returns no series when `max < min` (Prometheus
+/// `funcClamp`), and a projection cannot drop rows, so the series pass a
+/// `Filter { NOT (max < min) }` first. Written as a negation so NaN bounds
+/// still pass. Constant bounds in order need no filter.
+fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresolved {
+    if let (
+        Scalar::Literal(ScalarValue::Float64(min)),
+        Scalar::Literal(ScalarValue::Float64(max)),
+    ) = (min, max)
+    {
+        if max.partial_cmp(min) != Some(std::cmp::Ordering::Less) {
+            return child;
+        }
+    }
+    Unresolved::Filter {
+        pred: UnresolvedPredicate(Scalar::Not(Box::new(Scalar::Compare {
+            left: Box::new(max.clone()),
+            op: CompareOpKind::Lt,
+            right: Box::new(min.clone()),
+            semantics: PROMQL,
+        }))),
+        child: Rc::new(child),
+    }
 }
 
 /// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`

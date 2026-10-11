@@ -11,6 +11,7 @@ use asap_types::pre_asap::{
     PromQLVectorSetOpKind, Reduction, ScalarValue, Source,
 };
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
 use metricsql_parser::functions::{AggregateFunction, BuiltinFunction, RollupFunction};
 use metricsql_parser::label::{LabelFilter, LabelFilterOp, NAME_LABEL};
@@ -22,6 +23,10 @@ pub use metricsql_parser::ast::Expr as MetricsqlExpr;
 pub enum MetricsqlError {
     #[error("MetricsQL parse error: {0}")]
     Parse(String),
+    #[error("expected a MetricsQL workload, got {0}")]
+    WrongLanguage(String),
+    #[error("invalid MetricsQL workload: {0}")]
+    InvalidWorkload(#[from] WorkloadError),
     #[error("unsupported MetricsQL feature: {0}")]
     UnsupportedFeature(String),
     #[error("MetricsQL column resolution failed: {0}")]
@@ -36,20 +41,57 @@ pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
     Ok(parse_metricsql(query)?.to_string())
 }
 
+/// Lower every MetricsQL workload entry, as `lower_promql_query_workload`
+/// does for PromQL: a bare instant selector reads the latest sample within
+/// the workload's `data_ingestion_interval`, valid at `now_ms`.
+pub fn lower_metricsql_query_workload(
+    workload: &PlanningWorkload,
+    now_ms: u64,
+) -> Result<Vec<asap_types::ir::QueryRoot>, MetricsqlError> {
+    if !matches!(workload.query_workload.language, QueryLanguage::MetricsQL) {
+        return Err(MetricsqlError::WrongLanguage(format!(
+            "{:?}",
+            workload.query_workload.language
+        )));
+    }
+    workload.validate()?;
+    let &DurationMs(interval_ms) = workload
+        .data_workload
+        .as_ref()
+        .expect("validated MetricsQL workload has data_workload")
+        .data_ingestion_interval
+        .value_at(now_ms)
+        .ok_or(WorkloadError::UnavailableDataIngestionInterval)?;
+    workload
+        .query_workload
+        .entries()
+        .map(|entry| {
+            lower_metricsql_query(
+                &entry.query.0,
+                entry.requirements.accuracy.target(),
+                Duration::from_millis(interval_ms),
+            )
+        })
+        .collect()
+}
+
 pub fn lower_metricsql(
     query: &str,
     accuracy: AccuracyTarget,
+    ingestion_interval: Duration,
 ) -> Result<Rc<OperatorNode>, MetricsqlError> {
-    match lower_metricsql_query(query, accuracy)? {
+    match lower_metricsql_query(query, accuracy, ingestion_interval)? {
         asap_types::ir::QueryRoot::Operator(node) => Ok(node),
         _ => Err(unsupported("scalar root: use lower_metricsql_query")),
     }
 }
 
-/// Lower scalar constants without fabricating a relational operator.
+/// Lower scalar constants without fabricating a relational operator. A bare
+/// instant selector looks back `ingestion_interval` for its latest sample.
 pub fn lower_metricsql_query(
     query: &str,
     accuracy: AccuracyTarget,
+    ingestion_interval: Duration,
 ) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
     let ast = parse_metricsql(query)?;
     if let Expr::NumberLiteral(number) = &ast {
@@ -57,7 +99,11 @@ pub fn lower_metricsql_query(
             asap_types::ir::ScalarExpr::literal_f64(number.value),
         ));
     }
-    let unresolved = Lowerer { accuracy }.lower(&ast)?;
+    let unresolved = Lowerer {
+        accuracy,
+        ingestion_interval,
+    }
+    .lower(&ast)?;
     resolve_root(&unresolved)
         .map(asap_types::ir::QueryRoot::Operator)
         .map_err(|e| MetricsqlError::Resolve(e.to_string()))
@@ -65,12 +111,18 @@ pub fn lower_metricsql_query(
 
 struct Lowerer {
     accuracy: AccuracyTarget,
+    ingestion_interval: Duration,
 }
 
 impl Lowerer {
     fn lower(&self, expr: &Expr) -> Result<U, MetricsqlError> {
         match expr {
-            Expr::MetricExpression(e) => self.metric(e),
+            // An instant selector: the latest sample within the interval.
+            Expr::MetricExpression(e) => Ok(U::TimeRange {
+                range: self.ingestion_interval,
+                kind: TimeRangeKind::Instant,
+                child: Rc::new(self.metric(e)?),
+            }),
             Expr::Rollup(e) => self.rollup(e),
             Expr::Function(e) => self.function(e),
             Expr::Aggregation(e) => self.aggregate(e),
@@ -124,13 +176,16 @@ impl Lowerer {
         if rollup.for_subquery() {
             return Err(unsupported("subquery step or inherited step"));
         }
-        let child = self.lower(&rollup.expr)?;
         match &rollup.window {
-            None => Ok(child),
+            None => self.lower(&rollup.expr),
+            // `m[5m]` reads the range itself, not the instant lookback.
             Some(window) => Ok(U::TimeRange {
                 range: duration(window)?,
                 kind: TimeRangeKind::Range,
-                child: Rc::new(child),
+                child: Rc::new(match rollup.expr.as_ref() {
+                    Expr::MetricExpression(e) => self.metric(e)?,
+                    other => self.lower(other)?,
+                }),
             }),
         }
     }
@@ -200,10 +255,19 @@ impl Lowerer {
             }
         };
         let child = self.lower(child)?;
-        if rollup == RollupFunction::DefaultRollup && !matches!(child, U::TimeRange { .. }) {
-            return Err(unsupported(
-                "default_rollup without an explicit range requires an evaluation step",
-            ));
+        // MetricsQL's implicit window is the evaluation step, which is not
+        // known here, so every rollup needs an explicit range.
+        if !matches!(
+            child,
+            U::TimeRange {
+                kind: TimeRangeKind::Range,
+                ..
+            }
+        ) {
+            return Err(unsupported(format!(
+                "{} without an explicit range requires an evaluation step",
+                function.name()
+            )));
         }
         Ok(aggregate(Reduction::PerEntity, intent, child))
     }
@@ -229,8 +293,8 @@ impl Lowerer {
             AggregateFunction::Avg => AggIntent::Avg { col: None },
             AggregateFunction::Min => AggIntent::Min { col: None },
             AggregateFunction::Max => AggIntent::Max { col: None },
-            AggregateFunction::Count => AggIntent::Cardinality {
-                cols: vec![],
+            // `count(v)` counts series, not distinct sample values.
+            AggregateFunction::Count => AggIntent::Count {
                 accuracy: self.accuracy.clone(),
             },
             AggregateFunction::StdDev => AggIntent::StdDev {
