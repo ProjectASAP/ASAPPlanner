@@ -111843,1754 +111843,1754 @@
       "P1": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 86.40100000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.640099999999999,
+        "unit": "cost_per_second"
       },
       "P10": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 80.40100000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.0401,
+        "unit": "cost_per_second"
       },
       "P13": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 195.401,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.540100000000002,
+        "unit": "cost_per_second"
       },
       "P14": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 192.401,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.2401,
+        "unit": "cost_per_second"
       },
       "P16": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 565.401,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 56.54010000000001,
+        "unit": "cost_per_second"
       },
       "P17": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 85.40110000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.540109999999999,
+        "unit": "cost_per_second"
       },
       "P18": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 82.40110000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.24011,
+        "unit": "cost_per_second"
       },
       "P2": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 83.40100000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.3401,
+        "unit": "cost_per_second"
       },
       "P21": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 197.4011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.74011,
+        "unit": "cost_per_second"
       },
       "P22": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 194.4011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.44011,
+        "unit": "cost_per_second"
       },
       "P24": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 567.4011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 56.74011000000001,
+        "unit": "cost_per_second"
       },
       "P25": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 82.40110000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.24011,
+        "unit": "cost_per_second"
       },
       "P26": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 79.40110000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 7.940110000000001,
+        "unit": "cost_per_second"
       },
       "P29": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 194.4011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.44011,
+        "unit": "cost_per_second"
       },
       "P30": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "10": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "11": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 191.4011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.140110000000004,
+        "unit": "cost_per_second"
       },
       "P32": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 564.4011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 56.44011000000001,
+        "unit": "cost_per_second"
       },
       "P33": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 59.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.9201,
+        "unit": "cost_per_second"
       },
       "P34": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 56.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.6201,
+        "unit": "cost_per_second"
       },
       "P37": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 171.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 17.1201,
+        "unit": "cost_per_second"
       },
       "P38": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 168.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 16.8201,
+        "unit": "cost_per_second"
       },
       "P40": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 541.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 54.12010000000001,
+        "unit": "cost_per_second"
       },
       "P41": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 56.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.6201,
+        "unit": "cost_per_second"
       },
       "P42": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 53.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.3201,
+        "unit": "cost_per_second"
       },
       "P45": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 168.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 16.8201,
+        "unit": "cost_per_second"
       },
       "P46": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 165.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 16.520100000000003,
+        "unit": "cost_per_second"
       },
       "P48": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 538.201,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 53.82010000000001,
+        "unit": "cost_per_second"
       },
       "P49": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 58.201100000000004,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.82011,
+        "unit": "cost_per_second"
       },
       "P5": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 198.401,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.8401,
+        "unit": "cost_per_second"
       },
       "P50": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 55.201100000000004,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.52011,
+        "unit": "cost_per_second"
       },
       "P53": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 170.20110000000003,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 17.02011,
+        "unit": "cost_per_second"
       },
       "P54": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 167.20110000000003,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 16.720110000000002,
+        "unit": "cost_per_second"
       },
       "P56": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 540.2011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 54.02011000000001,
+        "unit": "cost_per_second"
       },
       "P57": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 55.201100000000004,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.52011,
+        "unit": "cost_per_second"
       },
       "P58": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 52.201100000000004,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 5.22011,
+        "unit": "cost_per_second"
       },
       "P6": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 195.401,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 19.5401,
+        "unit": "cost_per_second"
       },
       "P61": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 167.20110000000003,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 16.720110000000002,
+        "unit": "cost_per_second"
       },
       "P62": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 126.0,
-            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126"
+            "cost": 12.600000000000001,
+            "detail": "build CountSketchWithHeap into 100 states: 1000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 164.20110000000003,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 16.42011,
+        "unit": "cost_per_second"
       },
       "P64": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 1.0,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1"
+            "cost": 0.1,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators"
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 537.2011,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 53.720110000000005,
+        "unit": "cost_per_second"
       },
       "P8": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 504.0,
-            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126"
+            "cost": 50.400000000000006,
+            "detail": "build CountSketchWithHeap into 100 states: 4000000 rows x depth 126; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 0.001,
-            "detail": "estimate 1000 rows from 100 states"
+            "cost": 0.0001,
+            "detail": "estimate 1000 rows from 100 states; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 568.401,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 56.84010000000001,
+        "unit": "cost_per_second"
       },
       "P9": {
         "per_node": {
           "0": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "1": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "2": {
-            "cost": 4.0,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
+            "cost": 0.4,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000 evaluations/s"
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators"
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000 evaluations/s"
           },
           "4": {
-            "cost": 2.0,
-            "detail": "hash aggregate 1000000 rows into 100 groups"
+            "cost": 0.2,
+            "detail": "hash aggregate 1000000 rows into 100 groups; x 0.1000 evaluations/s"
           },
           "5": {
-            "cost": 23.2,
-            "detail": "scan 4000000 samples"
+            "cost": 2.32,
+            "detail": "scan 4000000 samples; x 0.1000 evaluations/s"
           },
           "6": {
-            "cost": 4.0,
-            "detail": "time range 60s: pass 4000000 rows"
+            "cost": 0.4,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000 evaluations/s"
           },
           "7": {
-            "cost": 8.0,
-            "detail": "hash aggregate 4000000 rows into 1000000 groups"
+            "cost": 0.8,
+            "detail": "hash aggregate 4000000 rows into 1000000 groups; x 0.1000 evaluations/s"
           },
           "8": {
-            "cost": 14.0,
-            "detail": "sort 1000000 rows in 100 partitions"
+            "cost": 1.4000000000000001,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000 evaluations/s"
           },
           "9": {
-            "cost": 0.001,
-            "detail": "limit to 1000 rows"
+            "cost": 0.0001,
+            "detail": "limit to 1000 rows; x 0.1000 evaluations/s"
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 83.40100000000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics, calibration illustrative-v2)",
+        "total": 8.3401,
+        "unit": "cost_per_second"
       }
     },
     "rejected": [
@@ -113716,197 +113716,197 @@
       },
       {
         "id": "P1",
-        "reason": "costlier: 86.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 8.640 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P2",
-        "reason": "costlier: 83.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 8.340 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P5",
-        "reason": "costlier: 198.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.840 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P6",
-        "reason": "costlier: 195.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.540 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P8",
-        "reason": "costlier: 568.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 56.840 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P9",
-        "reason": "costlier: 83.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 8.340 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P10",
-        "reason": "costlier: 80.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 8.040 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P13",
-        "reason": "costlier: 195.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.540 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P14",
-        "reason": "costlier: 192.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.240 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P16",
-        "reason": "costlier: 565.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 56.540 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P17",
-        "reason": "costlier: 85.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 8.540 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P18",
-        "reason": "costlier: 82.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 8.240 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P21",
-        "reason": "costlier: 197.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.740 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P22",
-        "reason": "costlier: 194.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.440 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P24",
-        "reason": "costlier: 567.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 56.740 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P25",
-        "reason": "costlier: 82.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 8.240 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P26",
-        "reason": "costlier: 79.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 7.940 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P29",
-        "reason": "costlier: 194.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.440 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P30",
-        "reason": "costlier: 191.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 19.140 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P32",
-        "reason": "costlier: 564.401 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 56.440 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P33",
-        "reason": "costlier: 59.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 5.920 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P34",
-        "reason": "costlier: 56.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 5.620 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P37",
-        "reason": "costlier: 171.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 17.120 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P38",
-        "reason": "costlier: 168.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 16.820 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P40",
-        "reason": "costlier: 541.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 54.120 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P41",
-        "reason": "costlier: 56.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 5.620 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P42",
-        "reason": "costlier: 53.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 5.320 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P45",
-        "reason": "costlier: 168.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 16.820 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P46",
-        "reason": "costlier: 165.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 16.520 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P48",
-        "reason": "costlier: 538.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 53.820 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P49",
-        "reason": "costlier: 58.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 5.820 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P50",
-        "reason": "costlier: 55.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 5.520 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P53",
-        "reason": "costlier: 170.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 17.020 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P54",
-        "reason": "costlier: 167.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 16.720 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P56",
-        "reason": "costlier: 540.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 54.020 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P57",
-        "reason": "costlier: 55.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 5.520 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P61",
-        "reason": "costlier: 167.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 16.720 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P62",
-        "reason": "costlier: 164.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 16.420 vs 5.220 cost_per_second",
         "valid": true
       },
       {
         "id": "P64",
-        "reason": "costlier: 537.201 vs 52.201 cpu_ms_per_workload_evaluation",
+        "reason": "costlier: 53.720 vs 5.220 cost_per_second",
         "valid": true
       }
     ],
