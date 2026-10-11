@@ -327,53 +327,13 @@ fn stage1_b_pass1_offers_exact_and_kll() {
 
 // ── Pattern B: window composition ────────────────────────────────────────
 
-/// Each Pass 1 option gets three window forms: none, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows.
-#[test]
-#[ignore = "needs Pass 2 window composition (#580): sliding windows; the tumbling part passes in stage1_b_window_composition_adds_tumbling_per_option"]
-fn stage1_b_window_composition_adds_sliding_and_tumbling_per_option() {
-    let run = run_b();
-    let summaries: BTreeSet<_> = options(&run, 0)
-        .into_iter()
-        .filter(|o| o != "exact")
-        .collect();
-    let found: BTreeSet<_> = run
-        .logical
-        .iter()
-        .flat_map(windowed_builds)
-        .map(|(_, a, f, _)| (format!("{a:?}"), f))
-        .collect();
-    let forms = [
-        WindowForm::None,
-        WindowForm::Sliding {
-            length_ms: PATTERN_B_WINDOW_MS,
-            slide_ms: PATTERN_B_INTERVAL_MS,
-        },
-        WindowForm::Tumbling {
-            length_ms: PATTERN_B_INTERVAL_MS,
-        },
-    ];
-    for option in &summaries {
-        for form in forms {
-            assert!(found.contains(&(option.clone(), form)), "{option} {form:?}");
-        }
-    }
-}
-
-/// Window parameters are legal: L divides W, s divides L and the evaluation interval, a tumbling length divides both.
+/// Window parameters are legal: a tumbling length divides the window and the evaluation interval.
 #[test]
 fn stage1_b_window_parameters_are_legal() {
     let (w, every) = (PATTERN_B_WINDOW_MS, PATTERN_B_INTERVAL_MS);
     for c in &run_b().logical {
         for (_, _, form, _) in windowed_builds(c) {
             match form {
-                WindowForm::Sliding {
-                    length_ms,
-                    slide_ms,
-                } => {
-                    assert_eq!(w % length_ms, 0, "{}: L | W", c.id);
-                    assert_eq!(length_ms % slide_ms, 0, "{}: s | L", c.id);
-                    assert_eq!(every % slide_ms, 0, "{}: s | interval", c.id);
-                }
                 WindowForm::Tumbling { length_ms } => {
                     assert_eq!(w % length_ms, 0, "{}: length | W", c.id);
                     assert_eq!(every % length_ms, 0, "{}: length | interval", c.id);
@@ -387,47 +347,13 @@ fn stage1_b_window_parameters_are_legal() {
     }
 }
 
-/// A sliding window with L = W reads one completed window (no merge); tumbling windows merge W / length of them.
-#[test]
-#[ignore = "needs Pass 2 window composition (#580): sliding windows (the form without a merge); tumbling merges pass in stage1_b_tumbling_merges_five_panes_before_the_estimate"]
-fn stage1_b_merge_only_where_the_window_form_needs_it() {
-    let run = run_b();
-    let mut seen = BTreeSet::new();
-    for c in &run.logical {
-        for (build, _, form, _) in windowed_builds(c) {
-            let merged = estimates_of(&c.dag, build).iter().any(|(e, _)| {
-                c.dag.producers(*e).into_iter().any(|p| {
-                    matches!(
-                        c.dag.payload(p),
-                        Operator::ASAP(ASAPOp::SummaryMerge { .. })
-                    )
-                })
-            });
-            assert_eq!(
-                merged,
-                needs_merge(form, PATTERN_B_WINDOW_MS),
-                "{}: {form:?}",
-                c.id
-            );
-            if form != WindowForm::None {
-                seen.insert(merged);
-            }
-        }
-    }
-    assert_eq!(
-        seen,
-        BTreeSet::from([false, true]),
-        "both a sliding and a tumbling candidate"
-    );
-}
-
 /// A window form that merges is used only with a summary whose states merge (KLL, DDSketch).
 #[test]
 fn stage1_window_merges_use_mergeable_summaries() {
-    for (run, window) in [(run_a(), 5 * YEAR_MS), (run_b(), PATTERN_B_WINDOW_MS)] {
+    for run in [run_a(), run_b()] {
         for c in &run.logical {
             for (_, algorithm, form, _) in windowed_builds(c) {
-                if needs_merge(form, window) {
+                if needs_merge(form) {
                     assert!(
                         matches!(algorithm, SketchAlgorithm::Kll | SketchAlgorithm::DDSketch),
                         "{}: {algorithm:?} {form:?}",
@@ -557,7 +483,8 @@ fn stage3_b_selects_cheapest_valid() {
 /// finds no tumbling candidate inaccurate. Rebuilding all five panes at
 /// every evaluation takes 310 ms of query-time work, over the 200 ms latency
 /// bound (S6); with the panes maintained at ingestion time, only the merge
-/// and the estimate remain and the candidate is valid and priced.
+/// and the estimate remain and the candidate is valid and priced. Panes
+/// kept at query time (B3) need a capability the executor lacks.
 #[test]
 fn stage3_b_tumbling_candidates_are_valid() {
     let run = run_b();
@@ -574,6 +501,14 @@ fn stage3_b_tumbling_candidates_are_valid() {
         }
         tumbling += 1;
         match p.stage2.materialization.as_str() {
+            m if m.starts_with("query time, kept") => assert!(
+                invalid
+                    .get(p.id.as_str())
+                    .is_some_and(|r| r.contains("cannot keep query-time state")),
+                "{}: {:?}",
+                p.id,
+                invalid.get(p.id.as_str())
+            ),
             "" => assert!(
                 invalid
                     .get(p.id.as_str())
@@ -593,7 +528,7 @@ fn stage3_b_tumbling_candidates_are_valid() {
             }
         }
     }
-    assert_eq!(tumbling, 4);
+    assert_eq!(tumbling, 6);
 }
 
 // ── Pattern B: runtime ───────────────────────────────────────────────────

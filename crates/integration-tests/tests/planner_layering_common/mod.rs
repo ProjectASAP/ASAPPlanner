@@ -210,10 +210,9 @@ pub fn run_promql(workload: &PlanningWorkload) -> Run {
 }
 
 /// Whether `form` answers a query window by merging several summaries.
-pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
+pub fn needs_merge(form: WindowForm) -> bool {
     match form {
         WindowForm::None => false,
-        WindowForm::Sliding { length_ms, .. } => length_ms < query_window_ms,
         WindowForm::Tumbling { .. } | WindowForm::ExponentialHistogram { .. } => true,
     }
 }
@@ -701,8 +700,6 @@ pub fn lookback_ms(workload: &PlanningWorkload, query: usize) -> u64 {
 pub enum WindowForm {
     /// Rebuilt from the query window's raw samples (no window summary).
     None,
-    /// Windows of `length_ms` starting every `slide_ms`.
-    Sliding { length_ms: u64, slide_ms: u64 },
     /// Back-to-back windows of `length_ms`.
     Tumbling { length_ms: u64 },
     /// EH buckets covering `horizon_ms` of history.
@@ -712,8 +709,8 @@ pub enum WindowForm {
 /// A build merged by a `SummaryMerge` is a tumbling pane, of the width its
 /// `TimeRange` input reads (#580: pane `i` is `TimeRange(w)` over
 /// `TimeShift(i·w)` over the scan); any other build is rebuilt from its
-/// query window. Sliding windows and Exponential Histograms are not planned
-/// yet.
+/// query window. Exponential Histograms are not planned yet; a sliding form
+/// is superseded by tumbling panes (Q63).
 pub fn window_form(dag: &impl ExportedDag, build: PhysicalASAPNodeId) -> WindowForm {
     let merged = dag
         .consumers(build)
@@ -750,13 +747,14 @@ pub enum Materialization {
     NotMaterialized,
 }
 
-/// Stage 2 runs a node at ingestion time or at query time, recomputed at
-/// each evaluation; it does not keep query-time output yet (Example 4 B3),
-/// so `QueryTimeKept` does not occur.
+/// Stage 2 runs a node at ingestion time or at query time; a query-time
+/// node is recomputed at each evaluation unless the export marks it kept
+/// across evaluations (Example 4 B3).
 pub fn materialization(p: &Physical, node: PhysicalASAPNodeId) -> Materialization {
     let n = p.dag.nodes.iter().find(|n| n.id == node).expect("node");
     match n.output_state.timing {
         ExecutionTiming::IngestionTime => Materialization::IngestionTime,
+        ExecutionTiming::QueryTime if n.kept => Materialization::QueryTimeKept,
         ExecutionTiming::QueryTime => Materialization::NotMaterialized,
     }
 }
@@ -766,10 +764,12 @@ pub fn materialization(p: &Physical, node: PhysicalASAPNodeId) -> Materializatio
 /// (`stage3-cost-model.md`): ingestion-time work read at query time through
 /// a merge of `N` panes of width `w` keeps `(N + 1) · w`; read directly, the
 /// window being built and the completed one, `2 · window`. Taken over every
-/// query-time reader the node's ingestion-time work feeds. `None` for a
-/// query-time node.
+/// query-time reader the node's ingestion-time work feeds. A kept pane of a
+/// merge of `N` panes of width `w` stays until the window no longer covers
+/// it: `N · w`, the newest pane built from raw data and `N − 1` kept. `None`
+/// for a node recomputed at each evaluation.
 pub fn retention_ms(p: &Physical, node: PhysicalASAPNodeId) -> Option<u64> {
-    if !runs_at_ingestion(p, node) {
+    if materialization(p, node) == Materialization::NotMaterialized {
         return None;
     }
     // The longest raw range an ingestion-time node reads.
@@ -785,6 +785,20 @@ pub fn retention_ms(p: &Physical, node: PhysicalASAPNodeId) -> Option<u64> {
             .max()
             .unwrap_or(0)
     };
+    if materialization(p, node) == Materialization::QueryTimeKept {
+        return p
+            .dag
+            .consumers(node)
+            .into_iter()
+            .filter(|&c| {
+                matches!(
+                    p.dag.payload(c),
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                )
+            })
+            .map(|merge| p.dag.producers(merge).len() as u64 * window(node))
+            .max();
+    }
     let mut kept = 0;
     let mut stack = vec![node];
     let mut seen = HashSet::new();

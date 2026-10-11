@@ -217,6 +217,18 @@ class StagePipelineTests(unittest.TestCase):
             if "source" not in node["data"]:
                 self.assertNotIn("cost", node["data"]["label"])
 
+    def test_kept_nodes_say_so_in_their_timing(self):
+        """A query-time node kept across evaluations (B3) reads "query time, kept"; no other node does."""
+        dag = json.loads(json.dumps(self.doc["stage2_physical_asap"]["candidates"][0]["dag"]))
+        kept = dag["nodes"][0]
+        self.assertEqual(kept["output_state"]["timing"], "query_time")
+        kept["kept"] = True
+        lane = self.js.call("stageLaneElements", "stage2", "Physical", dag, {"physical": True})
+        labels = {n["data"]["stageNode"]["id"]: n["data"]["label"]
+                  for n in lane[1:] if "source" not in n["data"]}
+        self.assertIn("⏱ query time, kept", labels[kept["id"]].split("\n"))
+        self.assertFalse(any("kept" in label for id, label in labels.items() if id != kept["id"]))
+
     def test_summary_nodes_print_their_configuration(self):
         """A summary node names its family's parameters and whether it keeps one state per group or one shared state."""
         per_group = {
