@@ -142,7 +142,17 @@ pub fn enumerate_local_logical_candidates<Id>(
                 }
                 if let Some(NonASAPOp::Aggregate { measures, .. }) = node.non_asap() {
                     if let [intent] = measures.as_slice() {
-                        let alternatives = local_realizations_for_intent(intent)?;
+                        let mut alternatives = local_realizations_for_intent(intent)?;
+                        // A SQL `COUNT(*)` group's rows all hash its key, so
+                        // a per-group sketch is a counter with extra memory;
+                        // only the shared Hydra grid (added below) helps.
+                        if matches!(intent, AggIntent::Count { .. })
+                            && node.children().iter().all(|child| {
+                                child.schema.closed && !child.schema.has_promql_series_identity()
+                            })
+                        {
+                            alternatives.retain(|a| !matches!(a, Realization::Sketch(_)));
+                        }
                         let mut target = LocalLogicalTarget {
                             absorbs: vec![None; alternatives.len()],
                             windows: vec![WindowForm::Whole; alternatives.len()],
@@ -1123,6 +1133,71 @@ mod tests {
         assert!(hydra("count (m)", approximate.clone()).is_empty());
         assert!(hydra("count without (job) (m)", approximate).is_empty());
         assert!(hydra("count by (job) (m)", AccuracyTarget::Exact).is_empty());
+    }
+
+    /// A SQL `COUNT(*)` group's rows all hash its key, so Pass 1 offers no
+    /// per-group sketch: pass-through, the exact `Count` and HydraCms. A
+    /// PromQL count keeps Count-Min, Count Sketch and UnivMon.
+    #[test]
+    fn sql_count_star_offers_no_per_group_sketch() {
+        let approximate = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.1,
+            delta: 0.01,
+        };
+        let offered = |root: Rc<OperatorNode>| {
+            let inventory = enumerate_local_logical_candidates(
+                vec![(0, QueryRoot::Operator(root))],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            let target = &inventory.targets[0];
+            target
+                .alternatives
+                .iter()
+                .zip(&target.groupings)
+                .map(|(a, g)| {
+                    let family = match a {
+                        Realization::PassThrough => "PassThrough".to_string(),
+                        Realization::ExactAggregate { kind, .. } => format!("{kind:?}"),
+                        Realization::Sketch(kind) => format!("{:?}", kind.algorithm()),
+                        other => format!("{other:?}"),
+                    };
+                    match *g == GroupingStrategy::default() {
+                        true => family,
+                        false => format!("Hydra{family}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut schema = Schema::new(vec![
+            asap_types::ir::schema::Field::plain("ts", DataType::Timestamp, false),
+            asap_types::ir::schema::Field::plain("src_ip", DataType::Utf8, false),
+        ]);
+        schema.closed = true;
+        let rows = crate::test_support::scan_from(
+            Source::Table {
+                table_ref: "flows".into(),
+            },
+            schema,
+        );
+        let count = AggIntent::Count {
+            accuracy: approximate.clone(),
+        };
+        assert_eq!(
+            offered(crate::test_support::agg(vec![1], count, rows)),
+            ["PassThrough", "Count", "HydraCms"]
+        );
+        for query in ["count by (job) (m)", "count_over_time(m[1m])"] {
+            let root = lower_promql(query, approximate.clone());
+            let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+            let families = offered(root);
+            for sketch in ["Cms", "CountSketch", "UnivMon"] {
+                assert!(
+                    families.iter().any(|f| f == sketch),
+                    "{query}: {families:?}"
+                );
+            }
+        }
     }
 
     /// Approximate requests must retain the exact execution alternative too.
