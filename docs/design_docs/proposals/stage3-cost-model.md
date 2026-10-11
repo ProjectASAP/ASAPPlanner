@@ -165,7 +165,9 @@ ingested every 15 s (λ = 66 667 rows/s). Every node runs at query time, since
 Stage 2 does not choose ingestion time yet. Both roots have the same 10-s
 interval, so every node, shared or not, has `r = 0.1`/s.
 
-P58, the selected plan (all exact, the input shared by both queries):
+P60, the selected plan (Q1 exact; Q2 Count-Min + heap over an exact
+`sum_over_time` accumulator, valid because `http_requests_total` is declared a
+counter; the input shared by both queries):
 
 | Node | Reached by | Work per evaluation | Per evaluation | r (/s) | Per second |
 |---|---|---|---|---|---|
@@ -177,15 +179,15 @@ P58, the selected plan (all exact, the input shared by both queries):
 | Finalize | Q1 | 100 accumulators | 0.0001 | 0.1 | 0.00001 |
 | Sum accumulator (`sum_over_time`) | Q2 | 4 000 000 rows into 1 000 000 states | 4.0 | 0.1 | 0.40 |
 | Finalize | Q2 | 1 000 000 accumulators | 1.0 | 0.1 | 0.10 |
-| Sort by `job` | Q2 | 1 000 000 rows in 100 partitions | 14.0 | 0.1 | 1.40 |
-| Limit 10 per `job` | Q2 | 1 000 rows | 0.001 | 0.1 | 0.0001 |
-| **Total** | | | **52.201** | | **5.220** |
+| Count-Min + heap by `job` | Q2 | 1 000 000 rows × depth 8 into 100 states | 8.0 | 0.1 | 0.80 |
+| Top-10 estimate | Q2 | 1 000 rows from 100 states | 0.001 | 0.1 | 0.0001 |
+| **Total** | | | **46.201** | | **4.620** |
 
-The runner-up is P42 at 5.320 per second; the same choices with separate
-inputs (P26) cost 7.940, because the scan and range are charged twice.
+The runner-up is P44 at 4.720 per second; the same choices with separate
+inputs (P28) cost 7.340, because the scan and range are charged twice.
 
-Before per-second pricing, P58 cost 52.201 CPU-ms per workload evaluation. Now
-it costs 52.201 × 0.1 = 5.220 per second. Every other candidate scales by the
+Before per-second pricing, P60 cost 46.201 CPU-ms per workload evaluation. Now
+it costs 46.201 × 0.1 = 4.620 per second. Every other candidate scales by the
 same factor, so the ranking is unchanged. With uniform recurrence and no
 ingestion-time nodes the new unit is a rescaling. It changes the ranking once
 recurrences differ, or once Stage 2 offers ingestion-time candidates that pay

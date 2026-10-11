@@ -8,11 +8,12 @@
 //! [`share_common_sub_dags`]. A target that sharing merges is one target in
 //! the shared form, so its queries take the same alternative.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::workload::MetricType;
 
 use crate::pass1::logical_candidates::{
     enumerate_local_logical_candidates, LocalLogicalCandidates, LogicalCandidateError,
@@ -30,16 +31,17 @@ pub struct SharingVariant<Id> {
 /// variant first, then the shared one when sharing merges at least one node.
 pub fn stage1_logical_candidates<Id: Clone>(
     roots: Vec<(Id, QueryRoot)>,
+    metric_types: &BTreeMap<String, MetricType>,
 ) -> Result<Vec<SharingVariant<Id>>, LogicalCandidateError> {
     let shared = share_identical_expressions(&roots);
     let mut variants = vec![SharingVariant {
         shared: false,
-        inventory: enumerate_local_logical_candidates(roots)?,
+        inventory: enumerate_local_logical_candidates(roots, metric_types)?,
     }];
     if let Some(roots) = shared {
         variants.push(SharingVariant {
             shared: true,
-            inventory: enumerate_local_logical_candidates(roots)?,
+            inventory: enumerate_local_logical_candidates(roots, metric_types)?,
         });
     }
     Ok(variants)
@@ -103,10 +105,13 @@ mod tests {
     /// shared variant, with the same targets in each.
     #[test]
     fn identical_input_adds_a_shared_variant() {
-        let variants = stage1_logical_candidates(roots(&[
-            "sum by (job) (rate(m[1m]))",
-            "topk by (job) (10, sum_over_time(m[1m]))",
-        ]))
+        let variants = stage1_logical_candidates(
+            roots(&[
+                "sum by (job) (rate(m[1m]))",
+                "topk by (job) (10, sum_over_time(m[1m]))",
+            ]),
+            &BTreeMap::new(),
+        )
         .unwrap();
         assert_eq!(
             variants.iter().map(|v| v.shared).collect::<Vec<_>>(),
@@ -134,8 +139,11 @@ mod tests {
     /// Queries with nothing in common have no shared variant.
     #[test]
     fn nothing_identical_adds_no_variant() {
-        let variants =
-            stage1_logical_candidates(roots(&["sum(rate(a[1m]))", "sum(rate(b[1m]))"])).unwrap();
+        let variants = stage1_logical_candidates(
+            roots(&["sum(rate(a[1m]))", "sum(rate(b[1m]))"]),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(variants.len(), 1);
         assert!(!variants[0].shared);
     }
