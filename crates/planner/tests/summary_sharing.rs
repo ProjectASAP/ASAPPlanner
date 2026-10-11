@@ -5,7 +5,6 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, OperatorNode};
 use std::rc::Rc;
 
-use asap_aware_mapping::pass::{PlanOutput, QueryPlan};
 use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
 use asap_logical_optimizer::accuracy::{
@@ -19,6 +18,7 @@ use asap_logical_optimizer::{
 use asap_plan_selection::candidate_selection::global_selection;
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{CostModel, DefaultCostModel};
+use asap_planner::pass::{PlanOutput, QueryPlan};
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::ir::operator::agg_intent::default_quantile;
 use asap_types::ir::operator::AggIntent;

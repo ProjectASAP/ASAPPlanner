@@ -88,7 +88,7 @@ fn tally(corpus: &str) -> Tally {
 }
 
 /// Every query that lowers, additionally run through the pre-ASAP →
-/// post-ASAP `asap-aware-mapping` binding pass (issue #98), at an
+/// post-ASAP `asap-logical-optimizer` binding pass (issue #98), at an
 /// approximate accuracy target so the sketch-selection boundary actually
 /// fires (an `Exact` target would only ever exercise the exact-accumulator
 /// arm).

@@ -10,7 +10,7 @@ const FORBIDDEN_MODULES: &[&str] = &["cost_model", "recurrence"];
 const FORBIDDEN_CRATES: &[&str] = &[
     "asap-physical-optimizer",
     "asap-plan-selection",
-    "asap-aware-mapping",
+    "asap-planner",
     "asap-physical-operators",
 ];
 

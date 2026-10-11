@@ -314,16 +314,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asap-aware-mapping"
-version = "0.1.0"
-dependencies = [
- "asap-logical-optimizer",
- "asap-plan-selection",
- "asap-types",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
@@ -458,7 +448,6 @@ dependencies = [
 name = "asap-planner"
 version = "0.1.0"
 dependencies = [
- "asap-aware-mapping",
  "asap-frontend-metricsql",
  "asap-frontend-promql",
  "asap-frontend-sql",

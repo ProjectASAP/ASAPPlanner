@@ -47,7 +47,7 @@
 //! out of [`export`]. It exists so a *higher* layer — one that depends on
 //! `asap_types`, never the reverse — can annotate an already-exported DAG
 //! after the fact without this module needing to know anything about that
-//! layer's concepts. Concretely: `asap-aware-mapping`'s `explanation` module
+//! layer's concepts. Concretely: `asap-logical-optimizer`'s `explanation` module
 //! (issue #257) computes `structural_hash` over the same nodes this module
 //! does (via the identical function). The devtools exporter uses that hash
 //! to narrow candidates, then compares its target with
@@ -118,7 +118,7 @@ pub struct DAGNode {
     /// Arbitrary reporting-layer annotations for this node — e.g. why a
     /// replacement exists here. `asap_types` never populates this itself
     /// (it has no notion of a "replacement" at all — see the module doc's
-    /// layering note); a higher layer that does (`asap-aware-mapping`, via
+    /// layering note); a higher layer that does (`asap-logical-optimizer`, via
     /// the `dag_export` devtools binary) fills it in after the fact by
     /// matching [`DAGNode::hash`] and confirming structural equality. Empty
     /// by default, so every existing [`export`] caller and test is unaffected.
@@ -134,7 +134,7 @@ pub struct DAGNode {
 /// One reporting-layer annotation attached to a [`DAGNode`] by a higher
 /// layer than `asap_types` — see [`DAGNode::notes`]. `asap_types` defines
 /// this shape (so the field has a concrete, serializable type) but never
-/// constructs one: `asap_types` is a lower crate that `asap-aware-mapping`
+/// constructs one: `asap_types` is a lower crate that `asap-logical-optimizer`
 /// depends on, never the reverse, so this type is deliberately generic and
 /// crate-agnostic rather than naming anything from that higher layer (e.g.
 /// its `ExplanationKind`/`ReplacementExplanation`).
@@ -222,7 +222,7 @@ pub struct NamedDAG {
     /// Concrete post-ASAP replacement sites discovered for this query — see
     /// [`TargetReplacement`]. Always empty coming out of anything in this
     /// module (same layering rule as [`DAGNode::notes`]: `asap_types` never
-    /// runs `asap-aware-mapping`'s search itself); a higher layer populates
+    /// runs `asap-logical-optimizer`'s search itself); a higher layer populates
     /// this after the fact, e.g. the `dag_export` devtools binary's
     /// `--post-asap` flag. Omitted from the JSON entirely when empty, so
     /// every existing producer/consumer of `NamedDAG` (in particular every
@@ -290,7 +290,7 @@ pub struct WorkloadDAG {
 // ── Post-ASAP replacement export — a layering-seam-shaped feature ──────────
 //
 // [`TargetReplacement`] is the generic, crate-agnostic "one replacement
-// site, before and after" shape a higher layer (`asap-aware-mapping`, via
+// site, before and after" shape a higher layer (`asap-logical-optimizer`, via
 // the `dag_export` devtools binary's `--post-asap` flag) populates after
 // running its own search — the exact same layering rule [`DAGNode::notes`]'s
 // doc above already states: this module never runs
@@ -299,7 +299,7 @@ pub struct WorkloadDAG {
 // `ReplacementProvenance` or a cost model even is. It only defines shapes
 // concrete and serializable enough for a higher layer to fill in, and for
 // `tools/dag-viewer` to render without needing to know anything about
-// `asap-aware-mapping`'s own vocabulary.
+// `asap-logical-optimizer`'s own vocabulary.
 
 /// One flattened node of a [`SummaryDAG`] — the same node as a
 /// [`DAGNode`], in the shape the summary-maintenance consumers read:

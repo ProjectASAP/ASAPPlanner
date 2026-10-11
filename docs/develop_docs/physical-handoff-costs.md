@@ -94,7 +94,7 @@ a separate follow-up integration point.
 Verification:
 
 ```sh
-cargo test -p asap-aware-mapping --test physical_handoff_cost
+cargo test -p asap-plan-selection --test physical_handoff_cost
 cargo test -p asap-devtools --bin dag_export handoff_bytes_export_and_change_plan_selection
 python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
 ```

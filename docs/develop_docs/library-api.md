@@ -23,7 +23,7 @@ artifact, while preserving the checks required by its intended consumer.
 ## Dependencies
 
 Inside this workspace, depend on the frontend you need,
-`asap-logical-optimizer` (Stage 1 candidate search), `asap-aware-mapping`
+`asap-logical-optimizer` (Stage 1 candidate search), `asap-plan-selection`
 (cost models and selection) and `asap-types`. External users can use Git
 dependencies pinned to a compatible revision; use the same revision across
 these crates. For the example below:
@@ -31,7 +31,7 @@ these crates. For the example below:
 ```toml
 [dependencies]
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
-asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
+asap-plan-selection = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 asap-logical-optimizer = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2492c42c9f5b34760706a5162aa586d3025" }
 ```
@@ -410,8 +410,8 @@ not waive semantic or accuracy requirements.
 ### Model and evidence options
 
 Traits permit custom implementations; the following are concrete built-in options.
-Cost models are in `asap_aware_mapping` (module-qualified paths below are
-relative to it); accuracy models and evidence are in `asap_logical_optimizer`.
+Cost models are in `asap_plan_selection` (module-qualified paths below are
+relative to `asap_plan_selection::cost`); accuracy models and evidence are in `asap_logical_optimizer`.
 
 | Parameter | Available value / constructor | Meaning |
 | --- | --- | --- |
@@ -647,7 +647,7 @@ cost/guarantee evidence needed downstream instead of exporting only a bare DAG.
 For public symbol details, build local API documentation with:
 
 ```sh
-cargo doc -p asap-aware-mapping -p asap-types --no-deps
+cargo doc -p asap-logical-optimizer -p asap-plan-selection -p asap-types --no-deps
 ```
 
 ## Source references
