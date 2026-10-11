@@ -158,7 +158,11 @@ fn of_summary_agg(node: &OperatorNode) -> SummaryCoverage {
     let mut base = child;
     while let Some(op) = base.non_asap() {
         let passes = match op {
-            NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } => true,
+            // A rename outside a `Project` would be dropped with the node
+            // when everything is lifted out of it, so such a node stays.
+            NonASAPOp::Project { .. } => true,
+            _ if base.operator.output_schema().ok().as_ref() != Some(&base.schema) => false,
+            NonASAPOp::Filter { .. } => true,
             NonASAPOp::TimeRange { kind, .. } => *kind == TimeRangeKind::Range,
             NonASAPOp::TimeShift { shift, .. } => shift.at.is_none(),
             _ => false,

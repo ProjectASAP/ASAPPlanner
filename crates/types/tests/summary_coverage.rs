@@ -471,6 +471,32 @@ fn ambiguous_column_names_do_not_lift() {
     );
 }
 
+/// A rename outside a `Project` stays in the definition: here B's `Filter`
+/// swaps the names of `region` and `tier`, so B's `tier = 'eu'` must not
+/// read as `region = 'eu'` and look disjoint from A's `region = 'us'`.
+#[test]
+fn renaming_filters_stay_in_the_definition() {
+    let scan = || {
+        table_with(vec![
+            Field::plain("job", DataType::Utf8, false),
+            Field::plain("region", DataType::Utf8, false),
+            Field::plain("tier", DataType::Utf8, false),
+            Field::plain("latency", DataType::Float64, false),
+        ])
+    };
+    let us = kll(filter(scan(), eq(1, "us")), "latency");
+    let swapped = filter(scan(), eq(2, "eu"));
+    let mut schema = swapped.schema.clone();
+    schema.fields[1].name = "tier".into();
+    schema.fields[2].name = "region".into();
+    let swapped = OperatorNode::with_schema(swapped.operator.clone(), schema);
+    let eu_tier = kll(Rc::new(swapped), "latency");
+    assert_eq!(
+        rejected(vec![us, eu_tier]),
+        CoverageError::DefinitionMismatch
+    );
+}
+
 /// `latency = 1` and `latency = 1.0` select the same rows of a Float64 column.
 #[test]
 fn literals_of_different_types_are_not_proven_different() {

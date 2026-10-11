@@ -3,7 +3,6 @@
 //! every traversal needs (output category and schema, accuracy guarantee,
 //! execution timing).
 
-use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -101,33 +100,6 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
-    /// Cache for [`Self::coverage`], derived from `operator`.
-    #[serde(skip)]
-    coverage_cache: CoverageCache,
-}
-
-/// A lazily filled [`SummaryCoverage`]. It is not part of a node's value:
-/// equality ignores it, serialization skips it, and a clone starts empty so
-/// a clone whose operator is then edited cannot read a stale entry.
-#[derive(Default)]
-struct CoverageCache(OnceCell<Option<SummaryCoverage>>);
-
-impl Clone for CoverageCache {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
-impl PartialEq for CoverageCache {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl std::fmt::Debug for CoverageCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CoverageCache")
-    }
 }
 
 impl OperatorNode {
@@ -152,7 +124,6 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
-            coverage_cache: CoverageCache::default(),
         }
     }
 
@@ -174,26 +145,18 @@ impl OperatorNode {
     }
 
     /// What this summary state covers; `None` for a node that is not a
-    /// `SummaryAgg` or a valid `SummaryMerge`. Derived on first use.
-    pub fn coverage(&self) -> Option<&SummaryCoverage> {
-        self.coverage_cache
-            .0
-            .get_or_init(|| SummaryCoverage::derive(self).ok())
-            .as_ref()
+    /// `SummaryAgg` or a valid `SummaryMerge`. Derived on each call, since
+    /// the public fields can be edited in place.
+    pub fn coverage(&self) -> Option<SummaryCoverage> {
+        SummaryCoverage::derive(self).ok()
     }
 
     /// A `SummaryMerge` is valid only over inputs with the same definition
     /// and disjoint selections.
-    /// The derived coverage is cached, so a merge built by `new` is not
-    /// derived again by `coverage()` or `validate_structure`.
     fn check_merge(&self) -> Result<(), SchemaDerivationError> {
-        if !matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. }))
-            || matches!(self.coverage_cache.0.get(), Some(Some(_)))
-        {
-            return Ok(());
+        if matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. })) {
+            SummaryCoverage::derive(self)?;
         }
-        let coverage = SummaryCoverage::derive(self)?;
-        let _ = self.coverage_cache.0.set(Some(coverage));
         Ok(())
     }
 
