@@ -7,14 +7,14 @@ use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
 use asap_types::workload::resources::CacheProfile;
 
-use crate::analytical_cost::{
+use crate::cost::analytical_cost::{
     estimate_physical_dag_comparison, AnalyticalCostError,
     EvidenceBackedPhysicalDAG as PhysicalDAG, PhysicalDAGComparisonEstimate,
     PhysicalDAGEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
 };
-use crate::cost_model::{Cost, CostModel, DefaultCostModel};
-use crate::physical_operator_statistics::ComparisonScope;
-use crate::query_physical_lowering::{
+use crate::cost::cost_model::{Cost, CostModel, DefaultCostModel};
+use crate::cost::physical_operator_statistics::ComparisonScope;
+use crate::cost::query_physical_lowering::{
     lower_query_physical_dag, PhysicalNodeEvidenceProvider, PhysicalNodeRequest,
 };
 use asap_logical_optimizer::pass1::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
@@ -30,8 +30,8 @@ pub struct PhysicalEvidenceSnapshot {
     pub version: String,
     pub scope: ComparisonScope,
     pub cache_profile: CacheProfile,
-    pub storage_io: Option<crate::storage_io::StorageIoProfile>,
-    pub handoffs: Option<crate::physical_handoff_cost::PhysicalHandoffProfile>,
+    pub storage_io: Option<crate::cost::storage_io::StorageIoProfile>,
+    pub handoffs: Option<crate::cost::physical_handoff_cost::PhysicalHandoffProfile>,
 }
 
 /// Deployment evidence needed to price one planner alternative.
@@ -70,12 +70,12 @@ pub struct PhysicalPlanComparison {
     pub raw_cost: Cost,
     pub candidate_cost: Cost,
     pub storage_io: Option<(
-        crate::storage_io::StorageEstimate,
-        crate::storage_io::StorageEstimate,
+        crate::cost::storage_io::StorageEstimate,
+        crate::cost::storage_io::StorageEstimate,
     )>,
     pub handoffs: Option<(
-        crate::physical_handoff_cost::PhysicalHandoffEstimate,
-        crate::physical_handoff_cost::PhysicalHandoffEstimate,
+        crate::cost::physical_handoff_cost::PhysicalHandoffEstimate,
+        crate::cost::physical_handoff_cost::PhysicalHandoffEstimate,
     )>,
 }
 
@@ -219,13 +219,13 @@ impl<'a> PhysicalPlanCostModel<'a> {
             .as_ref()
             .map(|profile| {
                 Ok((
-                    crate::storage_io::estimate_storage_io(
+                    crate::cost::storage_io::estimate_storage_io(
                         &raw,
                         scope,
                         profile,
                         &snapshot.version,
                     )?,
-                    crate::storage_io::estimate_storage_io(
+                    crate::cost::storage_io::estimate_storage_io(
                         &replacement,
                         scope,
                         profile,
@@ -239,13 +239,13 @@ impl<'a> PhysicalPlanCostModel<'a> {
             .as_ref()
             .map(|profile| {
                 Ok((
-                    crate::physical_handoff_cost::estimate_physical_handoffs(
+                    crate::cost::physical_handoff_cost::estimate_physical_handoffs(
                         &raw,
                         scope,
                         profile,
                         &snapshot.version,
                     )?,
-                    crate::physical_handoff_cost::estimate_physical_handoffs(
+                    crate::cost::physical_handoff_cost::estimate_physical_handoffs(
                         &replacement,
                         scope,
                         profile,
@@ -356,7 +356,7 @@ impl CostModel for PhysicalPlanCostModel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan_selection::candidate_selection::global_selection;
+    use crate::candidate_selection::global_selection;
     use std::cell::Cell;
     use std::collections::HashMap;
 
@@ -368,8 +368,8 @@ mod tests {
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
 
-    use crate::analytical_cost::{ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator};
-    use crate::physical_operator_statistics::{
+    use crate::cost::analytical_cost::{ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator};
+    use crate::cost::physical_operator_statistics::{
         EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
     };
     use asap_logical_optimizer::pass1::replacement::ReplacementStrategy;
@@ -456,10 +456,10 @@ mod tests {
     }
 
     struct TestProvider {
-        storage_io: Option<crate::storage_io::StorageIoProfile>,
+        storage_io: Option<crate::cost::storage_io::StorageIoProfile>,
         summary_available: bool,
         candidate_scan_bytes: u64,
-        handoffs: Option<crate::physical_handoff_cost::PhysicalHandoffProfile>,
+        handoffs: Option<crate::cost::physical_handoff_cost::PhysicalHandoffProfile>,
         snapshot_calls: Cell<u64>,
         raw_evidence_calls: Cell<u64>,
     }
@@ -636,7 +636,7 @@ mod tests {
     // zero, or invalid supplemental calibration.
     #[test]
     fn storage_only_objective_requires_positive_valid_storage_calibration() {
-        use crate::storage_io::*;
+        use crate::cost::storage_io::*;
         let root = query();
         let target = TargetSubDAG::new(&root);
         let mut provider = TestProvider::new(true, 800);
@@ -756,7 +756,7 @@ mod tests {
     // Explicit byte pricing can rank complete plans without pricing CPU or scans.
     #[test]
     fn handoff_only_objective_ranks_complete_plans() {
-        use crate::physical_handoff_cost::*;
+        use crate::cost::physical_handoff_cost::*;
         let root = query();
         let target = TargetSubDAG::new(&root);
         let mut provider = TestProvider::new(true, 800);
@@ -875,7 +875,7 @@ mod tests {
     // Ranking must retain the uncovered byte of a nearly resident buffer cache.
     #[test]
     fn tiny_buffer_misses_still_affect_global_selection() {
-        use crate::analytical_cost::{CacheCapacityEvidence, CacheEvidence};
+        use crate::cost::analytical_cost::{CacheCapacityEvidence, CacheEvidence};
         const WORKING_SET: u64 = 1_u64 << 63;
         struct AlmostResident(TestProvider);
         impl PlannerPhysicalPlanProvider for AlmostResident {

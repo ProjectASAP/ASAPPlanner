@@ -14,10 +14,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_aware_mapping::PlanningModels;
+use asap_plan_selection::PlanningModels;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
+use asap_types::ir::schema::state_type::{GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::schema::{GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -220,7 +220,7 @@ mod stages {
             .map(|entry| Some(entry.requirements.accuracy.target()))
             .collect();
         let candidates: Vec<_> = physical.iter().map(|p| p.stage2.clone()).collect();
-        let selection = asap_aware_mapping::plan_selection::stage3_select(
+        let selection = asap_plan_selection::stage3_select(
             &candidates,
             &targets,
             workload.data_workload.as_ref().expect("data workload"),

@@ -1,14 +1,14 @@
 # Consuming offline sketch measurements
 
 This document is for developers integrating sketch-bench with the planner. The
-Rust schema is `asap_aware_mapping::empirical_cost::EvidenceArtifact`; its JSON
+Rust schema is `asap_plan_selection::cost::empirical_cost::EvidenceArtifact`; its JSON
 schema version is `1`. Required artifact-level `benchmark_version` and
 `model_version` identify the producer and cost interpretation independently of
 the serialization schema. Producers export offline benchmark measurements using
 this contract; benchmark tooling is delivered separately from the core provider.
 
 The checked-in [JSON Schema](offline-sketch-evidence.schema.json) describes the
-wire format. `crates/asap-aware-mapping/tests/data/offline-evidence-synthetic.json`
+wire format. `crates/plan-selection/tests/data/offline-evidence-synthetic.json`
 is an explicitly fabricated format fixture, never benchmark evidence. Runtime
 validation additionally checks cross-field constraints and matching context.
 
@@ -102,9 +102,11 @@ parameters solely because one dataset had low observed error.
 
 ## Query-matched offline recommendations
 
-`empirical_comparison::recommend_offline` consumes the companion
-[`OfflineComparisonEvidence` JSON format](offline-comparison-evidence.schema.json).
-This combines the sketch artifact with explicit query bindings and a separately
+The companion
+[`OfflineComparisonEvidence` JSON format](offline-comparison-evidence.schema.json)
+has no planner consumer: its former consumer,
+`empirical_comparison::recommend_offline`, had no callers and was deleted under
+#572. The contract below describes the format only. It combines the sketch artifact with explicit query bindings and a separately
 identified exact implementation measured on the same machine, OS, runtime and
 input distribution. Its `disjoint_live_state_v1` timing contract requires
 construction, ingestion, exact preparation and read CPU to be timed separately

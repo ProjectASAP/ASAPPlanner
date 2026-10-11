@@ -4,13 +4,13 @@ use std::rc::Rc;
 
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 
-use crate::analytical_cost::{
+use crate::cost::analytical_cost::{
     validate_operator_semantics, AnalyticalCostError, EvidenceBackedPhysicalDAG,
     ExecutionMultiplicity, HashJoinBuildSide, PhysicalDAGNode, PhysicalNodeEvidence,
     PhysicalOperator, PromqlBinaryOperandMode, PromqlBinaryOperation, PromqlPresenceKind,
     PromqlSeriesSampleKind, PromqlVectorCardinality,
 };
-use crate::physical_operator_statistics::{
+use crate::cost::physical_operator_statistics::{
     ComparisonScope, EdgeStatistics, OperatorStatistics, ScanSelection,
 };
 
@@ -1260,10 +1260,10 @@ fn fixed_state_per_series_intent(intent: &asap_types::ir::operator::AggIntent) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analytical_cost::{
+    use crate::cost::analytical_cost::{
         estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDAGEstimateRequest,
     };
-    use crate::physical_operator_statistics::{
+    use crate::cost::physical_operator_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, PartitionStatistics,
         PromqlEdgeStatistics, PromqlUnaryEdgeStatistics, PromqlValueKind, UnaryEdgeStatistics,
     };
@@ -1718,7 +1718,7 @@ mod tests {
             })
         };
         let shared_scope = scope(vec![scan_selection]);
-        let no_cache = crate::analytical_cost::CacheProfile::no_cache();
+        let no_cache = crate::cost::analytical_cost::CacheProfile::no_cache();
         let shared_dag = lower_query_physical_dag(&root, &shared_scope, &shared_provider).unwrap();
         assert_eq!(shared_dag.nodes.len(), 2);
         assert_eq!(
@@ -2593,7 +2593,7 @@ mod tests {
                         inputs: [left_edge, right_edge],
                         output: output_edge,
                         promql: Some(
-                            crate::physical_operator_statistics::PromqlBinaryEdgeStatistics {
+                            crate::cost::physical_operator_statistics::PromqlBinaryEdgeStatistics {
                                 inputs: [left_promql, right_promql],
                                 output: output_promql,
                             },
