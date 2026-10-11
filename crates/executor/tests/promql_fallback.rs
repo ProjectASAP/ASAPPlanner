@@ -2,7 +2,7 @@
 //! The deployment supplies only its selector's raw series; expected values are
 //! hand-computed with Prometheus semantics.
 mod common;
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     physical_planner::{compile, promql_fallback, promql_rows, CompiledPhysicalDAG, InputContract},
     runtime::{Limits, RunContext, Scope},

@@ -1,5 +1,5 @@
 //! Scan acceptance uses the public connector contract and Planner physical DAGs.
-use asap_physical_operators::dag::{
+use asap_executor::dag::{
     planner::bind_with_data_sources,
     scan::{DataSources, MemorySource, RawSource},
     values::{Batch, SchemaRef, Value},
@@ -188,8 +188,8 @@ struct CountingSource {
     fail: bool,
 }
 impl RawSource for CountingSource {
-    fn boundedness(&self) -> asap_physical_operators::plan::Boundedness {
-        asap_physical_operators::plan::Boundedness::Bounded
+    fn boundedness(&self) -> asap_executor::plan::Boundedness {
+        asap_executor::plan::Boundedness::Bounded
     }
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
@@ -366,7 +366,7 @@ fn empty_sources_and_three_valued_predicates() {
 // A physical candidate can be compiled once without readers and rebound per run.
 #[test]
 fn compile_without_readers_and_rebind_inputs() {
-    use asap_physical_operators::{
+    use asap_executor::{
         operators::Operator,
         physical_planner::{compile, InputContract, Source},
     };
@@ -402,7 +402,7 @@ fn compile_without_readers_and_rebind_inputs() {
 // Input boundedness must be proved during compilation, before readers exist.
 #[test]
 fn compilation_rejects_unknown_boundedness_for_sort() {
-    use asap_physical_operators::{
+    use asap_executor::{
         physical_planner::{compile, InputContract},
         plan::{Boundedness, Emission, PlanProperties},
     };

@@ -1,5 +1,5 @@
 //! Binary computation must be fully compiled before deployment binds values.
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
@@ -97,14 +97,14 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhys
 fn evaluate(
     left: Vec<Vec<Value>>,
     right: Vec<Vec<Value>>,
-) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
+) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
     evaluate_with(program(), left, right)
 }
 fn evaluate_with(
     physical_dag: CompiledPhysicalDAG,
     left: Vec<Vec<Value>>,
     right: Vec<Vec<Value>>,
-) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
+) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
     let sources = [left, right]
         .into_iter()
         .enumerate()
@@ -164,11 +164,11 @@ fn duplicate_matching_identity_is_rejected() {
 // Scalar broadcasting and comparison filtering keep the vector operand's value.
 #[test]
 fn scalar_broadcast_and_bool_comparison_are_distinct() {
-    use asap_physical_operators::physical_planner::promql_values;
+    use asap_executor::physical_planner::promql_values;
     use planner_types::ir::scalar::CompareOpKind;
     for return_bool in [false, true] {
         let physical_dag = promql_values::compile_binary(
-            &asap_physical_operators::expressions::binary::BinaryOperator::from_logical(
+            &asap_executor::expressions::binary::BinaryOperator::from_logical(
                 &BinaryOperator {
                     kind: BinaryOpKind::Compare(CompareOpKind::Lt),
                     vector_match: None,
@@ -291,8 +291,8 @@ fn binary_obeys_memory_and_cancellation() {
         });
         assert!(matches!(
             (cancel, result),
-            (true, Err(asap_physical_operators::Error::Cancelled))
-                | (false, Err(asap_physical_operators::Error::MemoryLimit))
+            (true, Err(asap_executor::Error::Cancelled))
+                | (false, Err(asap_executor::Error::MemoryLimit))
         ));
     }
 }
@@ -330,9 +330,7 @@ fn label_map_bool_comparison_drops_the_name() {
 // Stored temporal evaluations drop metric names before filter comparisons and set matching.
 #[test]
 fn stored_series_evaluations_support_filters_and_sets() {
-    use asap_physical_operators::{
-        physical_planner::compile, summary_kernels::exact::ExactAccumulator,
-    };
+    use asap_executor::{physical_planner::compile, summary_kernels::exact::ExactAccumulator};
     use planner_types::ir::operator::PromQLVectorSetOpKind;
     use planner_types::ir::properties::*;
     use planner_types::ir::scalar::CompareOpKind;

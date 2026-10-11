@@ -1,4 +1,4 @@
-use asap_physical_operators::{
+use asap_executor::{
     operators::Operator,
     physical_planner::{CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},

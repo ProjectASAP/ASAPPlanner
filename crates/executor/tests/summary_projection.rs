@@ -1,5 +1,5 @@
 //! Opaque state travels through a retained physical projection without scalar decoding.
-use asap_physical_operators::{
+use asap_executor::{
     expressions::Expression,
     factory::create_planner_accumulator,
     operators::Operator,
