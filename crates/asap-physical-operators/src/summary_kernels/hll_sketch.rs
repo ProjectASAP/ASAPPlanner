@@ -1,7 +1,7 @@
 //! HyperLogLog distinct-count summary over `asap_sketchlib::HllSketch`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{HllSketch, HllVariant};
-use planner_types::post_asap::SketchStatistic;
+use planner_types::ir::schema::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct HllSketchAccumulator {

@@ -121,7 +121,7 @@ required: the result cache is filled by evaluations in this horizon. Buffer
 residency is a steady-state capacity/working-set model; it does not model
 cold-start warming or access order.
 
-`asap_types::resources` is the single definition site for `CacheProfile`,
+`asap_types::workload::resources` is the single definition site for `CacheProfile`,
 `CacheEvidence`, and `CacheCapacityEvidence` (implemented in `resources/cache.rs`).
 These schemas describe cache assumptions, not additive CPU or byte consumption.
 The mapping module re-exports the same types for existing import paths, while

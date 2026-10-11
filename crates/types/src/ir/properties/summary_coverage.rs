@@ -17,12 +17,12 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
-use super::asap::ASAPOp;
-use super::node::{Operator, OperatorNode};
-use super::non_asap::{NonASAPOp, TimeRangeKind};
-use super::scalar::{Predicate, ScalarExpr};
-use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-use crate::pre_asap::schema::{ColumnId, Schema};
+use crate::ir::operator::asap::ASAPOp;
+use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
+use crate::ir::scalar::{CompareOpKind, ScalarValue};
+use crate::ir::scalar::{Predicate, ScalarExpr};
+use crate::ir::schema::{ColumnId, Schema};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummaryCoverage {

@@ -13,12 +13,20 @@
 
 #![allow(dead_code)]
 
-use serde::{Deserialize, Serialize};
+pub mod aggregate_schema;
+pub mod error;
+pub mod state_type;
 
-use crate::post_asap::sketch::{
-    ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchKind,
-    StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+pub use aggregate_schema::aggregate_output_schema;
+pub use error::SchemaDerivationError;
+pub use state_type::{
+    default_hydra_params, hydra_kind_for, EntityIdentity, ExactKind, ExactParams, GroupingStrategy,
+    HydraKind, HydraParams, NonNegativeWeightProof, SamplingKind, SamplingParams, SketchAlgorithm,
+    SketchCategory, SketchKind, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
+    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
 };
+
+use serde::{Deserialize, Serialize};
 
 /// Zero-based position of a column in a particular operator's input or output.
 ///

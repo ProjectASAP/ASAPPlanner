@@ -149,13 +149,13 @@
 //! same structural child, so adding the edge preserves the reference DAG's
 //! parent-before-child topological ordering.
 
-use asap_types::ir::non_asap::any_measure_filtered;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
 use std::cmp::Ordering;
 use std::rc::Rc;
 
-use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{
@@ -392,9 +392,9 @@ mod tests {
     use super::*;
     use crate::cost_model::{CostModel, DefaultCostModel};
     use asap_types::ir::cse::share_common_sub_dags;
-    use asap_types::ir::operator_properties::{GroupKeys, Source};
-    use asap_types::post_asap::SketchAlgorithm;
-    use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
+    use asap_types::ir::operator::operator_properties::{GroupKeys, Source};
+    use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 
     /// `[ts(0), value(1), job(2)]`.
     /// A unique-keyed scan (`[ts]`) so `share_common_sub_dags` is actually

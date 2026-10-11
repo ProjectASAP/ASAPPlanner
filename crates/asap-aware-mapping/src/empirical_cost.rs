@@ -2,8 +2,8 @@
 //! configuration and environment; they are neither runtime feedback nor proofs
 //! of an accuracy guarantee. CPU quantities are nanoseconds, never CPU operations.
 
-use asap_types::post_asap::{SketchAlgorithm, SketchParams};
-use asap_types::pre_asap::AggIntent;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
 
 use crate::cost_model::{CostModel, DefaultCostModel};
@@ -15,7 +15,7 @@ pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const EVIDENCE_MODEL_VERSION: &str = "empirical-update-cpu-v1";
 
 pub use crate::empirical_resources::ResourceMeasurements;
-pub use asap_types::resources::Measurement;
+pub use asap_types::workload::resources::Measurement;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -522,8 +522,8 @@ mod tests {
                 repetitions: 3,
             },
             metrics: ResourceMeasurements {
-                resources: asap_types::resources::MeasuredResources {
-                    cpu: asap_types::resources::MeasuredCpu {
+                resources: asap_types::workload::resources::MeasuredResources {
+                    cpu: asap_types::workload::resources::MeasuredCpu {
                         update_cpu_ns: Some(Measurement {
                             value: cost,
                             stddev: Some(1.0),

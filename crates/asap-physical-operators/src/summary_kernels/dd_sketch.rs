@@ -1,7 +1,7 @@
 //! DDSketch quantile summary over `asap_sketchlib::DdSketch`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::DdSketch;
-use planner_types::post_asap::SketchStatistic;
+use planner_types::ir::schema::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct DDSketchAccumulator {
@@ -55,7 +55,7 @@ impl AggregateCore for DDSketchAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use planner_types::pre_asap::ColumnRef;
+    use planner_types::ir::scalar::ColumnRef;
 
     fn bare_count() -> SketchStatistic {
         SketchStatistic::PointCount {

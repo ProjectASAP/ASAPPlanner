@@ -2,10 +2,13 @@
 use crate::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_types::ir::non_asap::any_measure_filtered;
+use asap_types::ir::operator::maintained_population::*;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
+use asap_types::ir::operator::{AggIntent, Reduction, Source};
+use asap_types::ir::properties::ResultGuarantee;
+use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
+use asap_types::ir::schema::DataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
-use asap_types::post_asap::{maintained_population::*, ResultGuarantee};
-use asap_types::pre_asap::{AggIntent, CompareOpKind, DataType, Reduction, ScalarValue, Source};
 use std::rc::Rc;
 
 fn strip_projection(mut root: &OperatorNode) -> &OperatorNode {
@@ -331,9 +334,7 @@ mod tests {
     use crate::test_support::lower_promql;
     use asap_types::ir::cse::share_common_sub_dags;
     use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
-    use asap_types::ir::timing::{
-        apply_materialization_timings, MaterializationAssignment, TimingMemo,
-    };
+    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
 
     /// Time `root` under the default materialization assignment (which runs the
     /// data-state / population-contract validation) and export it.
@@ -475,7 +476,7 @@ mod tests {
         let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
             .candidate(&root)
             .unwrap();
-        use asap_types::post_asap::ExecutionTiming;
+        use asap_types::ir::properties::ExecutionTiming;
         let with_timings = |population: ExecutionTiming, evaluation: ExecutionTiming| {
             let mut node = (*candidate).clone();
             node.timing = Some(evaluation);

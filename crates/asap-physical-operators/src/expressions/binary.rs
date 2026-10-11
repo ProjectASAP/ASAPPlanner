@@ -1,7 +1,6 @@
 //! Execution configuration for a binary kernel, including comparison evaluation mode.
-use planner_types::pre_asap::{
-    ArithmeticOpKind, CompareOpKind, PromQLVectorSetOpKind, VectorMatch,
-};
+use planner_types::ir::operator::{PromQLVectorSetOpKind, VectorMatch};
+use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind};
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BinaryOpKind {
     Arithmetic(ArithmeticOpKind),
@@ -18,7 +17,7 @@ pub struct BinaryOperator {
 }
 impl BinaryOperator {
     pub fn from_logical(operator: &planner_types::ir::BinaryOperator, return_bool: bool) -> Self {
-        use planner_types::pre_asap::BinaryOpKind as L;
+        use planner_types::ir::operator::BinaryOpKind as L;
         Self {
             kind: match &operator.kind {
                 L::Arithmetic(op) => BinaryOpKind::Arithmetic(op.clone()),

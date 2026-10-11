@@ -3,8 +3,8 @@
 //! computes selection, range functions, subqueries, matching and aggregation.
 use super::*;
 use crate::operators::SubquerySteps;
-use planner_types::post_asap::execution_data_state::lift_plain;
-use planner_types::pre_asap::{AtModifier, VectorMatchKind};
+use planner_types::ir::operator::{AtModifier, VectorMatchKind};
+use planner_types::physical::execution_data_state::lift_plain;
 
 /// Input slot for the raw series read by the `selector`th selector (in
 /// [`raw_series`] order) of Fallback node `node`. The node's own ID names its
@@ -92,7 +92,7 @@ fn millis(duration: &std::time::Duration) -> Result<i64, Error> {
 }
 
 /// A fixed `@` time. `start()`/`end()` depend on the deployment's range query.
-fn at(shift: &planner_types::pre_asap::TimeShift) -> Result<Option<i64>, Error> {
+fn at(shift: &planner_types::ir::operator::TimeShift) -> Result<Option<i64>, Error> {
     match shift.at {
         None => Ok(None),
         Some(AtModifier::Timestamp(at)) => Ok(Some(at)),
@@ -196,13 +196,13 @@ impl Lowering {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
                 let (replacement, source_regex) = match value {
-                    ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(value)) => {
+                    ScalarExpr::Literal(planner_types::ir::scalar::ScalarValue::Utf8(value)) => {
                         (value.clone(), None)
                     }
                     ScalarExpr::FunctionCall { name, args } if name == "label_replace" => {
-                        let [ScalarExpr::Column(source), ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                        let [ScalarExpr::Column(source), ScalarExpr::Literal(planner_types::ir::scalar::ScalarValue::Utf8(
                             pattern,
-                        )), ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                        )), ScalarExpr::Literal(planner_types::ir::scalar::ScalarValue::Utf8(
                             replacement,
                         ))] = args.as_slice()
                         else {
@@ -239,7 +239,7 @@ impl Lowering {
                 )
             }
             NonASAPOp::Aggregate {
-                reduction: planner_types::pre_asap::Reduction::PerEntity,
+                reduction: planner_types::ir::operator::Reduction::PerEntity,
                 measures,
                 having: None,
                 child,
@@ -258,7 +258,7 @@ impl Lowering {
                 Ok(self.add(Operator::series_without_name(input)?, vec![step]))
             }
             NonASAPOp::Aggregate {
-                reduction: planner_types::pre_asap::Reduction::Reduce(keys),
+                reduction: planner_types::ir::operator::Reduction::Reduce(keys),
                 measures,
                 having: None,
                 child,
@@ -276,7 +276,7 @@ impl Lowering {
                 child,
                 qualifier,
             } => {
-                let value = planner_types::pre_asap::column_resolution::resolve_column_ref(
+                let value = planner_types::ir::scalar::column_resolution::resolve_column_ref(
                     &ColumnRef::SampleValue,
                     &child.schema,
                 )
@@ -307,7 +307,7 @@ impl Lowering {
                         computed = Some(col);
                     } else {
                         let expected = if !keep_name
-                            && field.name == planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                            && field.name == planner_types::ir::schema::PROMQL_SERIES_IDENTITY
                         {
                             ScalarExpr::FunctionCall {
                                 name: "promql_drop_metric_name".into(),
@@ -331,7 +331,7 @@ impl Lowering {
                 self.sample_scalar_operation(&computed.expr, child, value, expression)
             }
             NonASAPOp::Filter { pred, child } => {
-                let value = planner_types::pre_asap::column_resolution::resolve_column_ref(
+                let value = planner_types::ir::scalar::column_resolution::resolve_column_ref(
                     &ColumnRef::SampleValue,
                     &child.schema,
                 )
@@ -426,7 +426,8 @@ impl Lowering {
                 continue;
             }
             if let ScalarExpr::FunctionCall { name, args } = &mut col.expr {
-                if planner_types::pre_asap::scalar_type_rules::promql_function_arity(name).is_none()
+                if planner_types::ir::scalar::scalar_type_rules::promql_function_arity(name)
+                    .is_none()
                     || args.first() != Some(&ScalarExpr::Column(value))
                 {
                     return Err(invalid("unsupported pointwise function"));
@@ -441,9 +442,9 @@ impl Lowering {
                     let join = Operator::relational_join(
                         left,
                         right,
-                        planner_types::pre_asap::JoinKind::Inner,
+                        planner_types::ir::operator::JoinKind::Inner,
                         &planner_types::ir::Predicate(ScalarExpr::Literal(
-                            planner_types::pre_asap::ScalarValue::Boolean(true),
+                            planner_types::ir::scalar::ScalarValue::Boolean(true),
                         )),
                         Arc::new(schema),
                     )?;
@@ -454,7 +455,7 @@ impl Lowering {
                     let predicate = ScalarExpr::Not(Box::new(ScalarExpr::Compare {
                         left: Box::new(args[1].clone()),
                         right: Box::new(args[2].clone()),
-                        op: planner_types::pre_asap::CompareOpKind::Gt,
+                        op: planner_types::ir::scalar::CompareOpKind::Gt,
                         semantics: planner_types::ir::ExprSemantics::Promql,
                     }));
                     let schema = self.schema(&input);
@@ -530,7 +531,7 @@ impl Lowering {
 
     fn scalar_value(&mut self, expr: &ScalarExpr) -> Result<Input, Error> {
         match expr {
-            ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Float64(value)) => Ok(self
+            ScalarExpr::Literal(planner_types::ir::scalar::ScalarValue::Float64(value)) => Ok(self
                 .add(
                     Operator::scalar(crate::values::Value::Float64(*value), DataType::Float64)?,
                     vec![],
@@ -559,7 +560,7 @@ impl Lowering {
                     self.schema(&value),
                     self.schema(&minus),
                     kernel(crate::expressions::binary::BinaryOpKind::Arithmetic(
-                        planner_types::pre_asap::ArithmeticOpKind::Mul,
+                        planner_types::ir::scalar::ArithmeticOpKind::Mul,
                     )),
                     [true, true],
                 )?;
@@ -619,7 +620,7 @@ impl Lowering {
         // Each step evaluates a per-series selection or range function.
         let (inner, selected) = match child.expect_non_asap() {
             NonASAPOp::Aggregate {
-                reduction: planner_types::pre_asap::Reduction::PerEntity,
+                reduction: planner_types::ir::operator::Reduction::PerEntity,
                 measures,
                 having: None,
                 child: selected,
@@ -831,7 +832,7 @@ fn scalar_binary(
             operand: None,
             branches,
             else_expr,
-        } if matches!(else_expr.as_deref(), Some(ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Float64(v))) if *v == 0.0) =>
+        } if matches!(else_expr.as_deref(), Some(ScalarExpr::Literal(planner_types::ir::scalar::ScalarValue::Float64(v))) if *v == 0.0) =>
         {
             let [(
                 ScalarExpr::Compare {
@@ -840,7 +841,7 @@ fn scalar_binary(
                     op,
                     semantics: planner_types::ir::ExprSemantics::Promql,
                 },
-                ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Float64(v)),
+                ScalarExpr::Literal(planner_types::ir::scalar::ScalarValue::Float64(v)),
             )] = branches.as_slice()
             else {
                 return Err(invalid("unsupported scalar case"));

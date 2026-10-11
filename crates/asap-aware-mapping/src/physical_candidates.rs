@@ -11,17 +11,17 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
 };
+use asap_types::ir::properties::ExecutionDataStateError;
+use asap_types::ir::scalar::resolve_column_ref;
+use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
     OperatorNode, ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
 };
-use asap_types::post_asap::ExecutionDataStateError;
-use asap_types::pre_asap::column_resolution::resolve_column_ref;
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::{AggIntent, Reduction};
 use thiserror::Error;
 
 /// One Stage 2 candidate, derived from exactly one Stage 1 candidate.
@@ -158,8 +158,8 @@ mod tests {
     use crate::test_support::lower_promql;
     use asap_types::ir::physical_export::PhysicalASAPNodeId;
     use asap_types::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
+    use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::QueryRoot;
-    use asap_types::post_asap::ExecutionTiming;
     use asap_types::types::AccuracyTarget;
 
     /// Exact `topk by (job)` becomes Limit(Sort) partitioned by `job`, and a

@@ -779,15 +779,16 @@ mod tests {
     // ── decide (structural fallback) ─────────────────────────────────────
 
     use crate::cost_model::CseCandidate;
-    use asap_types::ir::operator_properties::{Reduction, Source};
+    use asap_types::ir::operator::operator_properties::{Reduction, Source};
+    use asap_types::ir::properties::ResultGuarantee;
+    use asap_types::ir::scalar::ColumnRef;
+    use asap_types::ir::schema::DataType;
+    use asap_types::ir::schema::{
+        ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, Schema,
+    };
     use asap_types::ir::{
         ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr,
     };
-    use asap_types::post_asap::{
-        ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, ResultGuarantee, Schema,
-    };
-    use asap_types::pre_asap::expr_ir::ColumnRef;
-    use asap_types::pre_asap::schema::DataType;
 
     use std::rc::Rc;
 
@@ -820,7 +821,7 @@ mod tests {
                 asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                     child: kept,
                     family: family.clone(),
-                    input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Named(
+                    input: asap_types::ir::schema::SummaryUpdate::column(ColumnRef::Named(
                         "value".into(),
                     )),
                     reduction: Reduction::by(vec![]),
@@ -916,9 +917,9 @@ mod tests {
 
         fn rank_candidates(
             &self,
-            _intent: &asap_types::pre_asap::agg_intent::AggIntent,
-            candidates: &[asap_types::post_asap::SketchAlgorithm],
-        ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
+            _intent: &asap_types::ir::operator::agg_intent::AggIntent,
+            candidates: &[asap_types::ir::schema::SketchAlgorithm],
+        ) -> Vec<asap_types::ir::schema::SketchAlgorithm> {
             candidates.to_vec()
         }
         fn maintenance_cost_per_update(&self, _candidate: &CseCandidate) -> Cost {
@@ -1129,14 +1130,14 @@ mod tests {
     // ── multiple roots sharing a sub-DAG, via CandidateLogicalASAPDAGs ──────────────────
 
     use crate::replacement::search_workload;
-    use asap_types::ir::operator_properties::Reduction as QueryReduction;
-    use asap_types::pre_asap::agg_intent::AggIntent;
-    use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
+    use asap_types::ir::operator::agg_intent::AggIntent;
+    use asap_types::ir::operator::operator_properties::Reduction as QueryReduction;
+    use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
 
     /// Like `scan()`, plus a "job" label column to group by — CSE's
     /// sharing legality gate requires a provable unique key
     /// (`Schema::has_unique_key`), and an *ungrouped* aggregate's empty
-    /// `by` reports none (see `asap_types::pre_asap::cse`'s own "Legality"
+    /// `by` reports none (see `asap_types::ir::cse`'s own "Legality"
     /// module docs); grouping by a label column gives `sum_agg()` below a
     /// real one, matching the pattern
     /// `replacement.rs`'s own CSE fixtures already use (`metric_scan`/`agg`
@@ -1437,7 +1438,7 @@ mod tests {
 
     /// Issue #287 review (lower-priority item): a parent referencing the
     /// same shared child twice (`BinaryOp{lhs: X, rhs: X}`, the same shape
-    /// `pre_asap::cse`'s own within-one-query sharing collapses onto one
+    /// `ir::cse`'s own within-one-query sharing collapses onto one
     /// `Rc`) must credit that child with 2 contributions per repeating
     /// root, matching how `TargetSubDAGCandidates::consumer_count` already counts that
     /// exact structural occurrence twice — not 1, which a plain
@@ -1449,7 +1450,7 @@ mod tests {
                 operator: BinaryOperator {
                     checked_relative_division: false,
                     checked_finite_division: false,
-                    kind: asap_types::ir::operator_properties::BinaryOpKind::Compare(
+                    kind: asap_types::ir::operator::operator_properties::BinaryOpKind::Compare(
                         CompareOpKind::Eq,
                     ),
                     vector_match: None,

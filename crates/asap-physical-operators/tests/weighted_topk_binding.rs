@@ -16,8 +16,11 @@ use asap_physical_operators::dag::{
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::properties::*;
+use planner_types::ir::schema::DataType;
+use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
-use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget};
+use planner_types::types::AccuracyTarget;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 struct Evidence;
 impl AccuracyEvidenceProvider for Evidence {
@@ -246,9 +249,9 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
     );
     let input = SummaryUpdate {
         item: Some(SummaryInputExpr::Column(
-            planner_types::pre_asap::ColumnRef::Named("service".into()),
+            planner_types::ir::scalar::ColumnRef::Named("service".into()),
         )),
-        weight: SummaryInputExpr::Column(planner_types::pre_asap::ColumnRef::SampleValue),
+        weight: SummaryInputExpr::Column(planner_types::ir::scalar::ColumnRef::SampleValue),
         weight_domain: WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
         },
@@ -293,13 +296,11 @@ fn check_direct_rate_topk(dynamic: bool) {
                 ..
             }) => {
                 schema.closed = true;
-                schema
-                    .fields
-                    .push(planner_types::pre_asap::schema::Field::plain(
-                        "service",
-                        DataType::Utf8,
-                        false,
-                    ));
+                schema.fields.push(planner_types::ir::schema::Field::plain(
+                    "service",
+                    DataType::Utf8,
+                    false,
+                ));
             }
             _ => panic!("unexpected input shape: {node:?}"),
         }

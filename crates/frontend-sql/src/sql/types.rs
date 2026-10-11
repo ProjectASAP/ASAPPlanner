@@ -9,8 +9,8 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion::common::ScalarValue as DfScalarValue;
 
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::ScalarValue;
+use asap_types::ir::scalar::ScalarValue;
+use asap_types::ir::schema::{DataType, Field, Schema};
 
 use crate::error::SqlError as LoweringError;
 
@@ -364,9 +364,10 @@ mod bottom_map_tests {
     use super::*;
     #[test]
     fn empty_map_bottom_types_roundtrip_without_string_defaults() {
-        let (map, nullable) = asap_types::pre_asap::scalar_type_rules::MapScalarFunction::Construct
-            .output_type(&[])
-            .unwrap();
+        let (map, nullable) =
+            asap_types::ir::scalar::scalar_type_rules::MapScalarFunction::Construct
+                .output_type(&[])
+                .unwrap();
         assert!(!nullable);
         let arrow = dtype_to_arrow(&map);
         assert_eq!(arrow_to_dtype(&arrow).unwrap(), map);

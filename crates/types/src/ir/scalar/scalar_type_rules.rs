@@ -1,6 +1,6 @@
 //! Shared type and nullability rules used to validate scalar expressions.
 //! These rules do not evaluate expressions or define physical representations.
-use super::schema::DataType;
+use crate::ir::schema::DataType;
 
 /// Names are resolved once against this closed builtin set; unknown functions
 /// remain outside these type rules. Map access keeps the first duplicate key

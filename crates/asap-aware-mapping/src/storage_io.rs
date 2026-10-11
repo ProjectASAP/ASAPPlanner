@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 // Keep the original public import path while sharing the sole type definition.
-pub use asap_types::resources::StorageResources;
+pub use asap_types::workload::resources::StorageResources;
 
 use crate::analytical_cost::{
     estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDAG, ExecutionMultiplicity,

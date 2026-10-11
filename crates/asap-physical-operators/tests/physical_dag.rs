@@ -12,17 +12,15 @@ use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::ir::schema::DataType;
+use planner_types::ir::schema::{ExactKind, ExactParams, Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::ScalarExpr;
-use planner_types::{
-    post_asap::{ExactKind, ExactParams, Field, FieldDataType},
-    pre_asap::DataType,
-};
 use std::sync::Arc;
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
-    Arc::new(planner_types::pre_asap::Schema {
+    Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: fields
@@ -307,7 +305,7 @@ fn binding_rejects_unsupported_operations() {
         sum.schema(),
         0,
         asap_physical_operators::operators::SummaryEvaluation::Sketch(
-            planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 }
+            planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 }
         )
     )
     .is_err());
@@ -317,7 +315,7 @@ fn binding_rejects_unsupported_operations() {
 // KLL is one family example: precomputation changes input sources, not operators.
 #[test]
 fn kll_raw_partial_and_precomputed_are_native_dags() {
-    use planner_types::post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams};
 
     let input = schema(&[("value", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
@@ -409,7 +407,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
                 state.clone(),
                 0,
                 asap_physical_operators::operators::SummaryEvaluation::Sketch(
-                    planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 },
+                    planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 },
                 ),
             )
             .unwrap(),
@@ -432,7 +430,7 @@ fn exact_state_and_family_validation() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
     acc.update(None, 7., 0);
-    let schema = Arc::new(planner_types::pre_asap::Schema {
+    let schema = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
@@ -494,10 +492,8 @@ fn exact_state_and_family_validation() {
 #[test]
 fn bind_post_asap_before_execution() {
     use asap_physical_operators::dag::planner::bind;
-    use planner_types::{
-        post_asap::ExecutionDataState,
-        pre_asap::{ArithmeticOpKind, ScalarValue},
-    };
+    use planner_types::ir::properties::ExecutionDataState;
+    use planner_types::ir::scalar::{ArithmeticOpKind, ScalarValue};
     use std::collections::BTreeMap;
     let schema = schema(&[("value", DataType::Float64, false)]);
     let node = |id, payload| PhysicalASAPDAGNode {
@@ -513,7 +509,7 @@ fn bind_post_asap_before_execution() {
                 0,
                 PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
                     rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
-                        planner_types::pre_asap::ScalarValue::Float64(1.),
+                        planner_types::ir::scalar::ScalarValue::Float64(1.),
                     )]],
                     schema: (*schema).clone(),
                 }),
@@ -607,7 +603,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
 #[test]
 fn source_batches_must_match_the_bound_schema() {
     use asap_physical_operators::dag::{self, PhysicalOperator};
-    use planner_types::post_asap::ExecutionDataState;
+    use planner_types::ir::properties::ExecutionDataState;
     use std::{cell::Cell, collections::BTreeMap, rc::Rc};
     struct WrongSource {
         schema: SchemaRef,
@@ -645,7 +641,7 @@ fn source_batches_must_match_the_bound_schema() {
             id: 0,
             payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
                 rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
-                    planner_types::pre_asap::ScalarValue::Float64(1.),
+                    planner_types::ir::scalar::ScalarValue::Float64(1.),
                 )]],
                 schema: (*expected).clone(),
             }),
@@ -713,10 +709,10 @@ fn extrema_preserve_numeric_values_in_the_presence_of_nan() {
 #[test]
 fn planner_semijoin_sort_limit_contract_at_both_phases() {
     use asap_physical_operators::dag::planner::{bind, Source};
-    use planner_types::{
-        post_asap::*,
-        pre_asap::{CompareOpKind, GroupKeys, JoinKind},
-    };
+    use planner_types::ir::operator::{GroupKeys, JoinKind};
+    use planner_types::ir::properties::*;
+    use planner_types::ir::scalar::CompareOpKind;
+    use planner_types::ir::schema::*;
     use std::collections::BTreeMap;
     let rows_schema = schema(&[
         ("group", DataType::Utf8, false),
@@ -750,7 +746,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
                 0,
                 PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
                     rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
-                        planner_types::pre_asap::ScalarValue::Float64(0.),
+                        planner_types::ir::scalar::ScalarValue::Float64(0.),
                     )]],
                     schema: (*rows_schema).clone(),
                 }),
@@ -760,7 +756,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
                 1,
                 PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
                     rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
-                        planner_types::pre_asap::ScalarValue::Float64(0.),
+                        planner_types::ir::scalar::ScalarValue::Float64(0.),
                     )]],
                     schema: (*keys_schema).clone(),
                 }),
@@ -875,7 +871,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
 #[test]
 fn planner_expressions_preserve_collection_and_nullable_types() {
     use asap_physical_operators::dag::expressions::CompiledExpression;
-    use planner_types::pre_asap::{CompareOpKind, ScalarValue};
+    use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 
     let input_schema = schema(&[(
         "items",
@@ -951,8 +947,9 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
 // Outer, semi and anti joins share Planner predicates and preserve SQL null behavior.
 #[test]
 fn native_relational_join_kinds_preserve_unmatched_rows() {
+    use planner_types::ir::operator::JoinKind;
+    use planner_types::ir::scalar::CompareOpKind;
     use planner_types::ir::Predicate;
-    use planner_types::pre_asap::{CompareOpKind, JoinKind};
 
     let input = schema(&[("key", DataType::Int64, true)]);
     let predicate = Predicate(ScalarExpr::Compare {
@@ -1033,7 +1030,7 @@ fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scop
     }
 }
 fn assert_weighted_rate_topk(count_sketch: bool) {
-    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
 
     let raw = schema(&[
         ("service", DataType::Utf8, false),
@@ -1065,7 +1062,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     }
     let rates = Operator::window(
         raw.clone(),
-        planner_types::pre_asap::AggIntent::Rate,
+        planner_types::ir::operator::AggIntent::Rate,
         3,
         4,
         vec![0, 1, 2],
@@ -1159,15 +1156,14 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
-    use planner_types::post_asap::ExecutionDataState;
+    use planner_types::ir::properties::ExecutionDataState;
 
-    use planner_types::pre_asap::{
-        aggregate_output_schema, AggIntent, GroupKeys, Reduction as IrReduction, Schema as IrSchema,
-    };
+    use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as IrReduction};
+    use planner_types::ir::schema::{aggregate_output_schema, Schema as IrSchema};
 
     let grouped = IrSchema::new(vec![
-        planner_types::pre_asap::Field::plain("job", DataType::Utf8, false),
-        planner_types::pre_asap::Field::plain("sum", DataType::Float64, false),
+        planner_types::ir::schema::Field::plain("job", DataType::Utf8, false),
+        planner_types::ir::schema::Field::plain("sum", DataType::Float64, false),
     ]);
     let output = aggregate_output_schema(
         &grouped,
@@ -1269,10 +1265,10 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     use asap_physical_operators::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
-    use planner_types::{
-        post_asap::*,
-        pre_asap::{CompareOpKind, JoinKind},
-    };
+    use planner_types::ir::operator::JoinKind;
+    use planner_types::ir::properties::*;
+    use planner_types::ir::scalar::CompareOpKind;
+    use planner_types::ir::schema::*;
     use std::collections::BTreeMap;
     let schema = schema(&[("key", DataType::Utf8, false)]);
     for certified in [false, true] {
@@ -1381,10 +1377,10 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
     use asap_physical_operators::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
-    use planner_types::{
-        post_asap::*,
-        pre_asap::{ArithmeticOpKind, BinaryOpKind},
-    };
+    use planner_types::ir::operator::BinaryOpKind;
+    use planner_types::ir::properties::*;
+    use planner_types::ir::scalar::ArithmeticOpKind;
+    use planner_types::ir::schema::*;
     use std::collections::BTreeMap;
     let input = schema(&[
         ("population", DataType::Utf8, false),

@@ -1,7 +1,7 @@
 //! Count-Min Sketch frequency summary over `asap_sketchlib::CountMinSketch`.
 use crate::{AggregateCore, KernelError, KeyByLabelValues};
 use asap_sketchlib::CountMinSketch;
-use planner_types::post_asap::SketchStatistic;
+use planner_types::ir::schema::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct CountMinSketchAccumulator {
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn bare_count_reads_total_weight() {
         let bare_count = SketchStatistic::PointCount {
-            key: planner_types::pre_asap::ColumnRef::SampleValue,
+            key: planner_types::ir::scalar::ColumnRef::SampleValue,
             value: None,
         };
         let mut state = CountMinSketchAccumulator::new(2, 1);

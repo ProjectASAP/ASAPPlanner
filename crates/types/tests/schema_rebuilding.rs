@@ -1,10 +1,9 @@
+use asap_types::ir::operator::{AggIntent, Reduction, Source};
+use asap_types::ir::properties::{ExecutionTiming, ResultGuarantee};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
-    ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, ResultGuarantee, SummaryUpdate,
-};
-use asap_types::pre_asap::{
-    AggIntent, ColumnRef, DataType, Field, FieldDataType, Reduction, Schema, Source,
-};
 use std::rc::Rc;
 
 fn scan(key_type: DataType, name: &str) -> Rc<OperatorNode> {
@@ -122,7 +121,7 @@ fn validation_rejects_structural_overrides_for_both_categories() {
 /// Passthrough rewrites derive metadata and arity, but cannot guess alias positions.
 #[test]
 fn rebuilding_updates_metadata_and_requires_new_aliases_after_arity_changes() {
-    use asap_types::pre_asap::GroupKeys;
+    use asap_types::ir::operator::GroupKeys;
     let input = scan(DataType::Timestamp, "key");
     let original = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Limit {
         n: Some(10),
@@ -159,8 +158,8 @@ fn rebuilding_updates_metadata_and_requires_new_aliases_after_arity_changes() {
 /// Maintaining membership and finalizing values preserve identity/time metadata.
 #[test]
 fn summary_transitions_preserve_structural_metadata() {
-    use asap_types::post_asap::maintained_population::{MaintainedPopulation, PopulationInput};
-    use asap_types::pre_asap::GroupKeys;
+    use asap_types::ir::operator::maintained_population::{MaintainedPopulation, PopulationInput};
+    use asap_types::ir::operator::GroupKeys;
     let mut schema = scan(DataType::Timestamp, "key").schema.clone();
     schema.closed = true;
     schema.time_index = Some(0);

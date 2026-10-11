@@ -30,13 +30,13 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::node::{Operator, OperatorNode};
-use super::non_asap::NonASAPOp;
-use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
-use crate::ir::operator_properties::{JoinKind, Reduction};
+use crate::ir::operator::agg_intent::{topk, AggIntent};
+use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::non_asap::NonASAPOp;
+use crate::ir::operator::operator_properties::{JoinKind, Reduction};
+use crate::ir::scalar::{CompareOpKind, ScalarValue};
+use crate::ir::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::ir::SchemaDerivationError;
-use crate::pre_asap::agg_intent::{topk, AggIntent};
-use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
 use crate::types::AccuracyTarget;
 
 /// Rewrite the DAG under `root` into its canonical form (bottom-up).
@@ -367,12 +367,12 @@ fn contains_scalar_subquery(expr: &ScalarExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator_properties::WindowFuncKind;
-    use crate::ir::operator_properties::{
+    use crate::ir::operator::operator_properties::WindowFuncKind;
+    use crate::ir::operator::operator_properties::{
         ConcatDiscriminatorKey, GroupKeys, Source, WindowFrame, WindowFrameBound,
         WindowFrameOffset, WindowFrameUnits,
     };
-    use crate::pre_asap::schema::{DataType, Field, Schema};
+    use crate::ir::schema::{DataType, Field, Schema};
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
         Rc::new(OperatorNode::new(Operator::NonASAP(op)).expect("fixture derives a schema"))

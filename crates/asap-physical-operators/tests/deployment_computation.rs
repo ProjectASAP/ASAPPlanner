@@ -10,8 +10,9 @@ use asap_physical_operators::{
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
-use planner_types::{post_asap::*, types::AccuracyTarget, workload::*};
+use planner_types::{types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
 fn lower(query: &str) -> Rc<planner_types::ir::OperatorNode> {
@@ -84,7 +85,7 @@ fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(u64, Arc<Schema>, String)> {
                     let n = dag.nodes.iter().find(|n| n.id == id)?;
                     if let PhysicalASAPOperatorPayload::NonASAP(
                         planner_types::ir::NonASAPOp::Scan {
-                            source: planner_types::pre_asap::Source::TimeSeries { metric },
+                            source: planner_types::ir::operator::Source::TimeSeries { metric },
                             ..
                         },
                     ) = &n.payload
@@ -331,7 +332,7 @@ fn exact_count_finalizes_to_declared_float_value() {
 /// `dag` with its Binary operator replaced by `kind`.
 fn with_kind(
     mut dag: PhysicalASAPDAG,
-    kind: planner_types::pre_asap::BinaryOpKind,
+    kind: planner_types::ir::operator::BinaryOpKind,
     bool_result: bool,
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
@@ -374,7 +375,8 @@ fn grouped_comparisons_filter_or_return_bool() {
 // drops the metric name; a filter keeps the surviving left value.
 #[test]
 fn per_series_comparisons_filter_or_return_bool() {
-    use planner_types::pre_asap::{BinaryOpKind::*, CompareOpKind::*};
+    use planner_types::ir::operator::BinaryOpKind::*;
+    use planner_types::ir::scalar::CompareOpKind::*;
 
     let samples = counter("a", "api", 10., 10.)
         .chain(counter("a", "db", 10., 10.))
@@ -536,7 +538,7 @@ fn per_series_scalar_arithmetic_rejects_label_sets_equal_without_the_name() {
 
 fn with_vector_match(
     mut dag: PhysicalASAPDAG,
-    kind: planner_types::pre_asap::VectorMatchKind,
+    kind: planner_types::ir::operator::VectorMatchKind,
     labels: &[&str],
 ) -> PhysicalASAPDAG {
     for node in &mut dag.nodes {
@@ -545,7 +547,7 @@ fn with_vector_match(
             ..
         }) = &mut node.payload
         {
-            operator.vector_match = Some(planner_types::pre_asap::VectorMatch {
+            operator.vector_match = Some(planner_types::ir::operator::VectorMatch {
                 kind: kind.clone(),
                 labels: labels.iter().map(|l| l.to_string()).collect(),
                 grouping: None,
@@ -559,7 +561,7 @@ fn with_vector_match(
 // the result's labels; a duplicate match group on either side is an error.
 #[test]
 fn per_series_vector_matching_follows_on_and_ignoring() {
-    use planner_types::pre_asap::VectorMatchKind;
+    use planner_types::ir::operator::VectorMatchKind;
     let samples = counter("a", "api", 10., 10.)
         .chain(counter("b", "api", 5., 5.))
         .chain(counter("b", "db", 5., 5.))

@@ -5,9 +5,11 @@
 //! aggregate result; a PromQL per-series range reduction preserves labels
 //! and produces a Float64 sample value. This module derives schemas, not
 //! aggregate values or summary candidates.
-use super::operator_properties::*;
-use super::SchemaDerivationError;
-use crate::pre_asap::{AggIntent, ColumnId, ColumnRef, DataType, Field, FieldDataType, Schema};
+use crate::ir::operator::operator_properties::*;
+use crate::ir::operator::AggIntent;
+use crate::ir::scalar::ColumnRef;
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+use crate::ir::SchemaDerivationError;
 /// Output schema of a *per-series* window/range reduction (`rate`/`increase`,
 /// or an `*_over_time` reducer under a time `Window`). Such a reduction emits
 /// one value per series, so every label column of `input` is preserved and only
@@ -20,7 +22,7 @@ fn per_series_reduction_schema(
     let vi = if let Some(index) = agg.input_cols().first() {
         *index
     } else {
-        crate::pre_asap::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, input)
+        crate::ir::scalar::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, input)
             .map_err(|error| SchemaDerivationError::InvalidSampleColumn(error.to_string()))?
     };
     if !matches!(
@@ -101,10 +103,12 @@ pub fn aggregate_output_schema(
             ))?;
         out_cols.push(c.clone());
     }
-    let value_col_idx =
-        crate::pre_asap::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema)
-            .ok()
-            .or_else(|| (0..in_schema.fields.len()).find(|i| !by.contains(i)));
+    let value_col_idx = crate::ir::scalar::column_resolution::resolve_column_ref(
+        &ColumnRef::SampleValue,
+        in_schema,
+    )
+    .ok()
+    .or_else(|| (0..in_schema.fields.len()).find(|i| !by.contains(i)));
     let probe = value_col_idx
         .and_then(|i| in_schema.fields.get(i))
         .cloned()
@@ -200,7 +204,7 @@ fn without_output_schema(
     let mut out_cols: Vec<Field> = Vec::new();
     for (i, col) in in_schema.fields.iter().enumerate() {
         let is_time = in_schema.time_index == Some(i);
-        let is_value = crate::pre_asap::column_resolution::resolve_column_ref(
+        let is_value = crate::ir::scalar::column_resolution::resolve_column_ref(
             &ColumnRef::SampleValue,
             in_schema,
         )

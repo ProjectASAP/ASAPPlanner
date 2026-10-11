@@ -22,16 +22,16 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{
     maintained, maintained_post_asap_dag, post_asap_dag, timed,
 };
-use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::operator::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
-use asap_types::post_asap::{
-    CompositionOperator, EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
-    Schema, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr,
-    SummaryUpdate,
+use asap_types::ir::properties::CompositionOperator;
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::DataType;
+use asap_types::ir::schema::{
+    EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Schema,
+    SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::schema::DataType;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::types::AccuracyTarget;
 
 /// This crate has no "bind me one tree" public API any more —
@@ -115,7 +115,7 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
         };
         assert_eq!(
             root.timing,
-            Some(asap_types::post_asap::ExecutionTiming::QueryTime)
+            Some(asap_types::ir::properties::ExecutionTiming::QueryTime)
         );
         assert!(n.is_some_and(|n| n > 0) && *offset == 0);
         let Some(NonASAPOp::Sort { child, .. }) = sort.non_asap() else {
@@ -123,7 +123,7 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
         };
         assert_eq!(
             sort.timing,
-            Some(asap_types::post_asap::ExecutionTiming::QueryTime)
+            Some(asap_types::ir::properties::ExecutionTiming::QueryTime)
         );
         let Some(ASAPOp::FinalizeExactAccumulator { child: state }) = child.asap() else {
             panic!(
@@ -298,7 +298,7 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
         .unwrap();
     assert_eq!(
         node.output_state.timing,
-        asap_types::post_asap::ExecutionTiming::QueryTime
+        asap_types::ir::properties::ExecutionTiming::QueryTime
     );
     let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { input, .. }) = &node.payload else {
         unreachable!()
@@ -478,8 +478,8 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         ));
         let dag = post_asap_dag(&plan);
         for phase in [
-            asap_types::post_asap::ExecutionTiming::IngestionTime,
-            asap_types::post_asap::ExecutionTiming::QueryTime,
+            asap_types::ir::properties::ExecutionTiming::IngestionTime,
+            asap_types::ir::properties::ExecutionTiming::QueryTime,
         ] {
             let phases = dag.nodes.iter().map(|node| (node.id, phase)).collect();
             let placed = dag.with_execution_phases(&phases).unwrap();
@@ -491,8 +491,8 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         let guarantee = plan.guarantee.as_ref().unwrap();
         assert!(guarantee.failure_probability.evaluate().unwrap() <= 0.01);
         assert!(guarantee.provenance.iter().any(|source| matches!(source,
-            asap_types::post_asap::GuaranteeSource::ChildGuarantee { guarantee, .. }
-            if guarantee.metric == asap_types::post_asap::ErrorMetric::Frequency)));
+            asap_types::ir::properties::GuaranteeSource::ChildGuarantee { guarantee, .. }
+            if guarantee.metric == asap_types::ir::properties::ErrorMetric::Frequency)));
     }
 }
 
@@ -725,7 +725,7 @@ fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
         panic!("expected temporal input")
     };
     let Some(NonASAPOp::Scan {
-        source: asap_types::pre_asap::Source::TimeSeries { metric },
+        source: asap_types::ir::operator::Source::TimeSeries { metric },
         predicates,
         ..
     }) = child.non_asap()
@@ -1037,7 +1037,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     assert_eq!(by.keys(), &[2]);
     assert!(matches!(
         measures.as_slice(),
-        [asap_types::pre_asap::AggIntent::Count {
+        [asap_types::ir::operator::AggIntent::Count {
             accuracy: AccuracyTarget::Exact
         }]
     ));
@@ -1080,7 +1080,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     };
     assert_eq!(
         child.timing,
-        Some(asap_types::post_asap::ExecutionTiming::IngestionTime)
+        Some(asap_types::ir::properties::ExecutionTiming::IngestionTime)
     );
     assert!(matches!(
         source.asap(),
@@ -1105,7 +1105,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
 
 #[test]
 fn physical_node_owns_phase_independently_of_binary_payload() {
-    use asap_types::post_asap::ExecutionTiming;
+    use asap_types::ir::properties::ExecutionTiming;
     for (query, expected) in [
         (
             // One selector: both operands cover the same series.
@@ -1252,7 +1252,7 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
             };
             matches!(
                 measures.as_slice(),
-                [asap_types::pre_asap::agg_intent::AggIntent::Quantile { q, .. }] if *q == 0.9
+                [asap_types::ir::operator::agg_intent::AggIntent::Quantile { q, .. }] if *q == 0.9
             )
             .then(|| QuantileInputDomain {
                 lower: -1.0,

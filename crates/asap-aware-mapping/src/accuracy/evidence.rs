@@ -172,8 +172,8 @@ mod tests {
         let fresh = provider.propagation_stats(
             &CompositionOperator::ExactSum,
             &FieldDataType::ExactAggregate(
-                asap_types::post_asap::ExactKind::Sum,
-                asap_types::post_asap::ExactParams::Sum,
+                asap_types::ir::schema::ExactKind::Sum,
+                asap_types::ir::schema::ExactParams::Sum,
             ),
             None,
         );
@@ -187,8 +187,8 @@ mod tests {
         .propagation_stats(
             &CompositionOperator::ExactSum,
             &FieldDataType::ExactAggregate(
-                asap_types::post_asap::ExactKind::Sum,
-                asap_types::post_asap::ExactParams::Sum,
+                asap_types::ir::schema::ExactKind::Sum,
+                asap_types::ir::schema::ExactParams::Sum,
             ),
             None,
         );

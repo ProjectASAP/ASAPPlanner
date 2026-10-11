@@ -3,13 +3,10 @@
 //! [`ExecutionTiming`] says when a node's value is produced (ingestion vs.
 //! query time); [`ExecutionDataState`] pairs it with the [`DataPrimitive`]
 //! the edge carries (raw values vs. summary state). The rules that assign
-//! and check them over a DAG live in [`crate::ir::timing`], which reports
+//! and check them over a DAG live in [`crate::ir::properties::timing`], which reports
 //! violations as [`ExecutionDataStateError`].
 
 use thiserror::Error;
-
-use crate::ir::SchemaDerivationError;
-use crate::pre_asap::schema::Schema;
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -144,21 +141,6 @@ pub enum ExecutionDataStateError {
         "{operator} node has no execution timing; apply materialization timings before export"
     )]
     UntimedNode { operator: &'static str },
-}
-
-/// `schema` as a summary-planning node output: fields and time axis kept,
-/// unique keys dropped, closed.
-pub fn lift_plain(schema: &Schema) -> Schema {
-    Schema::lifted(schema.fields.clone(), schema.time_index)
-}
-
-/// Why an exact operator's output schema could not be derived.
-#[derive(Debug, Error)]
-pub enum ExactOperationSchemaError {
-    #[error("exact operator input carries summary state, not plain columns")]
-    NonPlainInput,
-    #[error("schema derivation failed: {0}")]
-    Schema(#[from] SchemaDerivationError),
 }
 
 #[cfg(test)]

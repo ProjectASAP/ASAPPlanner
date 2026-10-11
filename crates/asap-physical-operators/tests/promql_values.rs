@@ -8,7 +8,8 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::{AggIntent, ColumnRef, GroupKeys};
+use planner_types::ir::operator::{AggIntent, GroupKeys};
+use planner_types::ir::scalar::ColumnRef;
 
 use std::collections::BTreeMap;
 
@@ -216,7 +217,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         runtime::{Input, OutputStream},
         values::SchemaRef,
     };
-    use planner_types::pre_asap::ArithmeticOpKind;
+    use planner_types::ir::scalar::ArithmeticOpKind;
     struct Counted {
         source: Operator,
         starts: std::rc::Rc<std::cell::Cell<usize>>,
@@ -325,7 +326,7 @@ fn compiled_constant_needs_no_deployment_source() {
 // arithmetic or bool comparisons remove the metric name.
 #[test]
 fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
-    use planner_types::pre_asap::{ArithmeticOpKind, CompareOpKind};
+    use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind};
     for left_scalar in [false, true] {
         for names in [["a", "a"], ["a", "b"]] {
             for (kind, return_bool) in [
@@ -400,7 +401,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
 #[test]
 fn exact_state_evaluations_recover_and_finalize_panes() {
     use asap_physical_operators::factory::create_planner_accumulator;
-    use planner_types::post_asap::*;
+    use planner_types::ir::schema::*;
     use std::sync::Arc;
     for (kind, params, expected) in [
         (ExactKind::Sum, ExactParams::Sum, 12.),
@@ -450,7 +451,7 @@ fn exact_state_evaluations_recover_and_finalize_panes() {
 #[test]
 fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
     use asap_physical_operators::factory::create_planner_accumulator;
-    use planner_types::post_asap::*;
+    use planner_types::ir::schema::*;
     use std::sync::Arc;
     for (kind, params, expected) in [
         (ExactKind::Rate, ExactParams::Rate, 1.),

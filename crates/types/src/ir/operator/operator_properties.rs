@@ -3,8 +3,9 @@
 //! For example, `Aggregate.by` uses [`GroupKeys`], a join chooses [`JoinKind`],
 //! and a SQL window carries [`WindowFrame`]. These types describe what an
 //! operator does. Derived node metadata (schema, guarantee, timing) lives on
-//! [`super::OperatorNode`], not in this module.
-use crate::pre_asap::{ArithmeticOpKind, ColumnId, ColumnRef, CompareOpKind, ScalarValue};
+//! [`crate::ir::OperatorNode`], not in this module.
+use crate::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
+use crate::ir::schema::ColumnId;
 use serde::{Deserialize, Serialize};
 /// The column-reference type an operator parameter is generic over:
 /// positional [`ColumnId`] once bound, name-based [`ColumnRef`] before.

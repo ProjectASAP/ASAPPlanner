@@ -20,11 +20,12 @@ pub use evidence::{
     QuantileInputDomain, WorkloadAccuracyEvidence,
 };
 
-use asap_types::ir::OperatorNode;
-use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
-    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic,
+use asap_types::ir::properties::{
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
+    ResultGuarantee,
 };
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
 use crate::exact_composition::ExactOperation;

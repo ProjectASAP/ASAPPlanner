@@ -2,8 +2,8 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql_root;
+use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, ScalarExpr};
-use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
 /// PromQL exposes its evaluation time as Unix seconds, whereas SQL exposes

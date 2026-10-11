@@ -42,8 +42,8 @@ mod tests {
     #[test]
     fn local_guarantee_inverts_frequency_sizing() {
         use crate::replacement::default_size_params;
-        use asap_types::post_asap::{GroupingStrategy, SketchKind};
-        let c = asap_types::pre_asap::agg_intent::default_cardinality();
+        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
+        let c = asap_types::ir::operator::agg_intent::default_cardinality();
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = DefaultAccuracyModel
             .local_guarantee(
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn heap_evaluation_retains_frequency_metric() {
-        use asap_types::post_asap::{GroupingStrategy, SketchKind};
+        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let cms_heap = SketchParams::CmsWithHeap {
             width: 272,
             depth: 5,

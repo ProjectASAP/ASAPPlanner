@@ -54,7 +54,7 @@ pub fn lower_query_physical_dag(
 ) -> Result<EvidenceBackedPhysicalDAG, AnalyticalCostError> {
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{GroupKeys, RelationalSetOpKind};
+    use asap_types::ir::operator::{GroupKeys, RelationalSetOpKind};
 
     scope.validate()?;
 
@@ -194,7 +194,7 @@ pub fn lower_query_physical_dag(
             expr: &ScalarExpr,
         ) -> Result<String, AnalyticalCostError> {
             match expr {
-                ScalarExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
+                ScalarExpr::Literal(asap_types::ir::scalar::ScalarValue::Float64(_))
                 | ScalarExpr::EvalTimestamp => self.lower_promql_scalar_leaf(query, occurrence),
                 ScalarExpr::PromqlScalarFromVector(vector) => self.lower_promql_unary(
                     query,
@@ -327,12 +327,12 @@ pub fn lower_query_physical_dag(
                     ..
                 } => {
                     if having.is_some()
-                        || asap_types::ir::non_asap::any_measure_filtered(filters)
+                        || asap_types::ir::operator::non_asap::any_measure_filtered(filters)
                         || measures.is_empty()
                     {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
-                    if matches!(reduction, asap_types::pre_asap::Reduction::PerEntity) {
+                    if matches!(reduction, asap_types::ir::operator::Reduction::PerEntity) {
                         if measures.len() != 1 {
                             return Err(AnalyticalCostError::UnsupportedQueryOperator);
                         }
@@ -358,7 +358,7 @@ pub fn lower_query_physical_dag(
                         };
                         return self.lower_promql_unary(query, occurrence, operator, child);
                     }
-                    let asap_types::pre_asap::Reduction::Reduce(grouping) = reduction else {
+                    let asap_types::ir::operator::Reduction::Reduce(grouping) = reduction else {
                         unreachable!("per-entity reduction returned above")
                     };
                     if grouping.is_without() || !supports_hash_aggregate(reduction, measures) {
@@ -499,9 +499,9 @@ pub fn lower_query_physical_dag(
                     if order_by.is_empty()
                         || !matches!(
                             func,
-                            asap_types::pre_asap::WindowFuncKind::RowNumber
-                                | asap_types::pre_asap::WindowFuncKind::Rank
-                                | asap_types::pre_asap::WindowFuncKind::DenseRank
+                            asap_types::ir::operator::WindowFuncKind::RowNumber
+                                | asap_types::ir::operator::WindowFuncKind::Rank
+                                | asap_types::ir::operator::WindowFuncKind::DenseRank
                         )
                     {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
@@ -575,21 +575,21 @@ pub fn lower_query_physical_dag(
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
                     let kind = match kind {
-                        asap_types::pre_asap::SampleKind::LimitK(k) => {
+                        asap_types::ir::operator::SampleKind::LimitK(k) => {
                             let k = u64::try_from(*k).map_err(|_| AnalyticalCostError::Overflow)?;
                             if k == 0 {
                                 return Err(AnalyticalCostError::MissingOrZero("limitk"));
                             }
                             PromqlSeriesSampleKind::LimitK { k }
                         }
-                        asap_types::pre_asap::SampleKind::LimitRatio(ratio)
+                        asap_types::ir::operator::SampleKind::LimitRatio(ratio)
                             if ratio.is_finite() && (-1.0..=1.0).contains(ratio) =>
                         {
                             PromqlSeriesSampleKind::LimitRatio {
                                 ratio_bits: ratio.to_bits(),
                             }
                         }
-                        asap_types::pre_asap::SampleKind::LimitRatio(_) => {
+                        asap_types::ir::operator::SampleKind::LimitRatio(_) => {
                             return Err(AnalyticalCostError::UnsupportedQueryOperator)
                         }
                     };
@@ -737,7 +737,7 @@ pub fn lower_query_physical_dag(
                     right,
                 } => {
                     let equality_key_count =
-                        if matches!(kind, asap_types::pre_asap::JoinKind::Cross) {
+                        if matches!(kind, asap_types::ir::operator::JoinKind::Cross) {
                             None
                         } else {
                             hash_join_key_count(&pred.0, left, right)
@@ -972,7 +972,7 @@ fn require_operator_statistics(
 
 fn bind_scan_coverage(
     node_id: &str,
-    source: &asap_types::pre_asap::Source,
+    source: &asap_types::ir::operator::Source,
     predicates: &[asap_types::ir::Predicate],
     scope: &ComparisonScope,
 ) -> Result<ScanSelection, AnalyticalCostError> {
@@ -995,10 +995,11 @@ fn bind_scan_coverage(
 
 fn bind_info_coverage(
     node_id: &str,
-    selector: &[asap_types::pre_asap::InfoMatcher],
+    selector: &[asap_types::ir::operator::InfoMatcher],
     scope: &ComparisonScope,
 ) -> Result<ScanSelection, AnalyticalCostError> {
-    use asap_types::pre_asap::{CompareOpKind, Source};
+    use asap_types::ir::operator::Source;
+    use asap_types::ir::scalar::CompareOpKind;
 
     let mut metric: Option<&str> = None;
     for matcher in selector
@@ -1042,9 +1043,9 @@ fn duration_millis(
 }
 
 fn promql_binary_operation(
-    operation: &asap_types::pre_asap::BinaryOpKind,
+    operation: &asap_types::ir::operator::BinaryOpKind,
 ) -> PromqlBinaryOperation {
-    use asap_types::pre_asap::{BinaryOpKind, PromQLVectorSetOpKind};
+    use asap_types::ir::operator::{BinaryOpKind, PromQLVectorSetOpKind};
     match operation {
         BinaryOpKind::Set(PromQLVectorSetOpKind::And) => PromqlBinaryOperation::And,
         BinaryOpKind::Set(PromQLVectorSetOpKind::Or) => PromqlBinaryOperation::Or,
@@ -1056,9 +1057,9 @@ fn promql_binary_operation(
 }
 
 fn promql_vector_cardinality(
-    vector_match: Option<&asap_types::pre_asap::VectorMatch>,
+    vector_match: Option<&asap_types::ir::operator::VectorMatch>,
 ) -> PromqlVectorCardinality {
-    use asap_types::pre_asap::GroupSide;
+    use asap_types::ir::operator::GroupSide;
     match vector_match.and_then(|matching| matching.grouping.as_ref()) {
         Some(grouping) if grouping.side == GroupSide::Left => PromqlVectorCardinality::ManyToOne,
         Some(_) => PromqlVectorCardinality::OneToMany,
@@ -1071,7 +1072,7 @@ fn hash_join_key_count(
     left: &OperatorNode,
     right: &OperatorNode,
 ) -> Option<u64> {
-    use asap_types::pre_asap::CompareOpKind;
+    use asap_types::ir::scalar::CompareOpKind;
 
     let left_width = left.schema.fields.len();
     let total_width = left_width.saturating_add(right.schema.fields.len());
@@ -1183,10 +1184,10 @@ fn scalar_operation_count(expr: &ScalarExpr) -> Result<u64, AnalyticalCostError>
 }
 
 fn supports_hash_aggregate(
-    reduction: &asap_types::pre_asap::Reduction,
-    measures: &[asap_types::pre_asap::AggIntent],
+    reduction: &asap_types::ir::operator::Reduction,
+    measures: &[asap_types::ir::operator::AggIntent],
 ) -> bool {
-    use asap_types::pre_asap::{AggIntent, Reduction};
+    use asap_types::ir::operator::{AggIntent, Reduction};
 
     matches!(reduction, Reduction::Reduce(_))
         && !measures.is_empty()
@@ -1207,19 +1208,20 @@ fn supports_hash_aggregate(
         })
 }
 
-fn presence_intent(intent: &asap_types::pre_asap::AggIntent) -> bool {
+fn presence_intent(intent: &asap_types::ir::operator::AggIntent) -> bool {
     matches!(
         intent,
-        asap_types::pre_asap::AggIntent::Absent | asap_types::pre_asap::AggIntent::AbsentOverTime
+        asap_types::ir::operator::AggIntent::Absent
+            | asap_types::ir::operator::AggIntent::AbsentOverTime
     )
 }
 
-fn present_over_time_intent(intent: &asap_types::pre_asap::AggIntent) -> bool {
-    matches!(intent, asap_types::pre_asap::AggIntent::PresentOverTime)
+fn present_over_time_intent(intent: &asap_types::ir::operator::AggIntent) -> bool {
+    matches!(intent, asap_types::ir::operator::AggIntent::PresentOverTime)
 }
 
-fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bool {
-    use asap_types::pre_asap::AggIntent;
+fn fixed_state_per_series_intent(intent: &asap_types::ir::operator::AggIntent) -> bool {
+    use asap_types::ir::operator::AggIntent;
     matches!(
         intent,
         AggIntent::Rate
@@ -1401,7 +1403,10 @@ mod tests {
         }
     }
 
-    fn coverage(source: asap_types::pre_asap::Source, predicates: Vec<Predicate>) -> ScanSelection {
+    fn coverage(
+        source: asap_types::ir::operator::Source,
+        predicates: Vec<Predicate>,
+    ) -> ScanSelection {
         ScanSelection {
             source,
             source_snapshot_id: "snapshot-1".into(),
@@ -1412,7 +1417,8 @@ mod tests {
 
     #[test]
     fn info_scan_selection_includes_symbolic_selector_matchers() {
-        use asap_types::pre_asap::{CompareOpKind, InfoMatcher, Source};
+        use asap_types::ir::operator::{InfoMatcher, Source};
+        use asap_types::ir::scalar::CompareOpKind;
 
         let selector = vec![InfoMatcher {
             label: "cluster".into(),
@@ -1448,7 +1454,8 @@ mod tests {
     // Correlation can be costed as an exact hash aggregate using provider-supplied state size.
     #[test]
     fn correlation_lowers_to_physical_hash_aggregate() {
-        use asap_types::pre_asap::{AggIntent, DataType, Field, Reduction, Schema, Source};
+        use asap_types::ir::operator::{AggIntent, Reduction, Source};
+        use asap_types::ir::schema::{DataType, Field, Schema};
         let source = Source::Table {
             table_ref: "pairs".into(),
         };
@@ -1501,8 +1508,8 @@ mod tests {
 
     #[test]
     fn query_lowering_recurses_and_fuses_global_sort_limit() {
-        use asap_types::pre_asap::{AggIntent, GroupKeys, Reduction, Source};
-        use asap_types::pre_asap::{DataType, Field, Schema};
+        use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
+        use asap_types::ir::schema::{DataType, Field, Schema};
         use std::rc::Rc;
 
         let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
@@ -1510,7 +1517,7 @@ mod tests {
                 table_ref: "events".into(),
             },
             predicates: vec![Predicate(ScalarExpr::Literal(
-                asap_types::pre_asap::ScalarValue::Boolean(true),
+                asap_types::ir::scalar::ScalarValue::Boolean(true),
             ))],
             schema: Schema::new(vec![
                 Field::plain("service", DataType::Utf8, false),
@@ -1551,7 +1558,7 @@ mod tests {
                 table_ref: "events".into(),
             },
             vec![Predicate(ScalarExpr::Literal(
-                asap_types::pre_asap::ScalarValue::Boolean(true),
+                asap_types::ir::scalar::ScalarValue::Boolean(true),
             ))],
         );
         let scope = scope(vec![scan_coverage]);
@@ -1643,8 +1650,9 @@ mod tests {
 
     #[test]
     fn query_lowering_shares_only_provider_identified_physical_nodes() {
-        use asap_types::pre_asap::{CompareOpKind, DataType, Field, Schema};
-        use asap_types::pre_asap::{JoinKind, Source};
+        use asap_types::ir::operator::{JoinKind, Source};
+        use asap_types::ir::scalar::CompareOpKind;
+        use asap_types::ir::schema::{DataType, Field, Schema};
         use std::rc::Rc;
 
         let shared = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
@@ -1811,8 +1819,9 @@ mod tests {
 
     #[test]
     fn query_lowering_covers_relational_unary_operators() {
-        use asap_types::pre_asap::{DataType, Field, ScalarValue, Schema};
-        use asap_types::pre_asap::{GroupKeys, Source, TimeShift, WindowFuncKind};
+        use asap_types::ir::operator::{GroupKeys, Source, TimeShift, WindowFuncKind};
+        use asap_types::ir::scalar::ScalarValue;
+        use asap_types::ir::schema::{DataType, Field, Schema};
 
         let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
@@ -1996,8 +2005,8 @@ mod tests {
 
     #[test]
     fn query_lowering_maps_concat_and_union_all_but_rejects_distinct_set_ops() {
-        use asap_types::pre_asap::{DataType, Field, Schema};
-        use asap_types::pre_asap::{RelationalSetOpKind, Source};
+        use asap_types::ir::operator::{RelationalSetOpKind, Source};
+        use asap_types::ir::schema::{DataType, Field, Schema};
 
         let scan = |name: &str| {
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
@@ -2084,8 +2093,8 @@ mod tests {
 
     #[test]
     fn query_lowering_fails_closed_for_missing_or_inconsistent_statistics() {
-        use asap_types::pre_asap::Source;
-        use asap_types::pre_asap::{DataType, Field, Schema};
+        use asap_types::ir::operator::Source;
+        use asap_types::ir::schema::{DataType, Field, Schema};
 
         let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
@@ -2202,8 +2211,9 @@ mod tests {
 
     #[test]
     fn query_lowering_accepts_a_consistently_empty_edge() {
-        use asap_types::pre_asap::{DataType, Field, ScalarValue, Schema};
-        use asap_types::pre_asap::{GroupKeys, Source};
+        use asap_types::ir::operator::{GroupKeys, Source};
+        use asap_types::ir::scalar::ScalarValue;
+        use asap_types::ir::schema::{DataType, Field, Schema};
 
         let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
@@ -2266,8 +2276,8 @@ mod tests {
 
     #[test]
     fn query_lowering_rejects_aggregates_without_a_hash_implementation() {
-        use asap_types::pre_asap::{AggIntent, GroupKeys, Reduction, Source, WindowFuncKind};
-        use asap_types::pre_asap::{DataType, Field, Schema};
+        use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source, WindowFuncKind};
+        use asap_types::ir::schema::{DataType, Field, Schema};
         use asap_types::types::AccuracyTarget;
 
         let scan = || {
@@ -2323,7 +2333,7 @@ mod tests {
         .unwrap();
         let shifted =
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
-                shift: asap_types::pre_asap::TimeShift {
+                shift: asap_types::ir::operator::TimeShift {
                     offset_ms: 60_000,
                     at: None,
                 },
@@ -2352,7 +2362,7 @@ mod tests {
 
     #[test]
     fn scalar_work_counts_every_local_predicate_operation() {
-        use asap_types::pre_asap::{CompareOpKind, ScalarValue};
+        use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
 
         let comparison = || ScalarExpr::Compare {
             left: Box::new(ScalarExpr::Column(0)),
@@ -2367,7 +2377,8 @@ mod tests {
 
     #[test]
     fn promql_presence_is_lowered_with_a_per_step_output_bound() {
-        use asap_types::pre_asap::{AggIntent, DataType, Field, Reduction, Schema, Source};
+        use asap_types::ir::operator::{AggIntent, Reduction, Source};
+        use asap_types::ir::schema::{DataType, Field, Schema};
 
         let source = Source::TimeSeries {
             metric: "missing".into(),
@@ -2436,7 +2447,8 @@ mod tests {
 
     #[test]
     fn promql_range_and_subquery_preserve_internal_steps() {
-        use asap_types::pre_asap::{DataType, Field, Schema, Source};
+        use asap_types::ir::operator::Source;
+        use asap_types::ir::schema::{DataType, Field, Schema};
         use std::time::Duration;
 
         let source = Source::TimeSeries { metric: "m".into() };
@@ -2517,10 +2529,11 @@ mod tests {
 
     #[test]
     fn promql_binary_lowering_keeps_operation_and_matching_cardinality() {
-        use asap_types::pre_asap::{
-            ArithmeticOpKind, BinaryOpKind, DataType, Field, GroupSide, Schema, Source,
-            VectorGrouping, VectorMatch, VectorMatchKind,
+        use asap_types::ir::operator::{
+            BinaryOpKind, GroupSide, Source, VectorGrouping, VectorMatch, VectorMatchKind,
         };
+        use asap_types::ir::scalar::ArithmeticOpKind;
+        use asap_types::ir::schema::{DataType, Field, Schema};
 
         let left_source = Source::TimeSeries { metric: "a".into() };
         let right_source = Source::TimeSeries { metric: "b".into() };
@@ -2608,10 +2621,9 @@ mod tests {
 
     #[test]
     fn promql_relabel_sample_and_per_series_lower_as_a_complete_chain() {
-        use asap_types::pre_asap::{
-            AggIntent, DataType, Field, GroupKeys, Reduction, SampleKind, ScalarValue, Schema,
-            Source,
-        };
+        use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, SampleKind, Source};
+        use asap_types::ir::scalar::ScalarValue;
+        use asap_types::ir::schema::{DataType, Field, Schema};
 
         let source = Source::TimeSeries {
             metric: "requests".into(),

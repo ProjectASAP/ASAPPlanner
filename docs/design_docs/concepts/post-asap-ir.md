@@ -22,7 +22,7 @@ model or downstream runtime supports it.
 
 ## ASAP operators
 
-Every variant of [`ASAPOp`](../../../crates/types/src/ir/asap.rs) operates
+Every variant of [`ASAPOp`](../../../crates/types/src/ir/operator/asap.rs) operates
 over summary state rather than raw data. The summary family, kind/algorithm and
 parameters are committed in the node; the state itself is typed by the
 `FieldDataType` of the output field that carries it (`ExactAggregate`,
@@ -104,7 +104,7 @@ not definitions of the operator.
 The logical DAG carries no timing: `OperatorNode::timing` is `None` on every
 front-end node and every candidate, and `map_children` clears it. Summary
 materialization chooses a timing per summary state and records it in a
-[`MaterializationAssignment`](../../../crates/types/src/ir/timing.rs) (ingestion-time
+[`MaterializationAssignment`](../../../crates/types/src/ir/properties/timing.rs) (ingestion-time
 maintenance or query-time computation per `SummaryAgg`). The default is
 `all_query_time()`; until Stage 2 materialization (#509) decides otherwise, the
 planner times every `SummaryAgg` at query time.

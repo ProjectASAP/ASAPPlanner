@@ -3,7 +3,7 @@
 //! (issue #179) → [`resolve_root`].
 //!
 //! Emits the shared front-end tree (`UnresolvedOp` / `UnresolvedScalar`,
-//! name-based [`ColumnRef`](asap_types::pre_asap::ColumnRef)s) directly, rather
+//! name-based [`ColumnRef`](asap_types::ir::scalar::ColumnRef)s) directly, rather
 //! than a separate per-language relational tree; `resolve_root` binds it into
 //! the unified [`OperatorNode`] IR, deriving every schema on the way.
 //! Depends on DataFusion only — never on the PromQL parser.

@@ -7,8 +7,8 @@
 
 use thiserror::Error;
 
-use super::expr_ir::ColumnRef;
-use super::schema::{ColumnId, DataType, FieldDataType, Schema};
+use crate::ir::scalar::ColumnRef;
+use crate::ir::schema::{ColumnId, DataType, FieldDataType, Schema};
 
 /// Errors returned by the resolution helpers.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -109,7 +109,7 @@ pub fn resolve_group_keys_promql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::schema::Field;
+    use crate::ir::schema::Field;
 
     /// The conventional PromQL leaf shape: `(ts: Timestamp, value: Float64)`.
     fn ts_value_schema() -> Schema {

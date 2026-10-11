@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::schema::{GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::post_asap::sketch::{GroupingStrategy, HydraKind, SketchAlgorithm};
-use asap_types::pre_asap::schema::FieldDataType;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence,
@@ -265,7 +265,7 @@ mod stages {
             .expect("node")
             .output_state
             .timing
-            == asap_types::post_asap::ExecutionTiming::IngestionTime
+            == asap_types::ir::properties::ExecutionTiming::IngestionTime
     }
 }
 

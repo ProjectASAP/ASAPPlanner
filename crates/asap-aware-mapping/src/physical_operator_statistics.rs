@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use asap_types::ir::operator_properties::{InfoMatcher, Source};
+use asap_types::ir::operator::operator_properties::{InfoMatcher, Source};
 use asap_types::ir::Predicate;
 
 use asap_types::workload::{

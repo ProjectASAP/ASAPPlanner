@@ -15,8 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ir::operator_properties::DataModel;
-use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType};
+use crate::ir::operator::operator_properties::DataModel;
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType};
 use crate::types::AccuracyTarget;
 
 /// "What to compute" — the vocabulary the planner pivots on.
@@ -392,7 +392,7 @@ impl AggIntent<ColumnId> {
     /// malformed selectors fail instead of acquiring a fabricated output type.
     pub fn arg_selector_columns(
         &self,
-        schema: &super::schema::Schema,
+        schema: &crate::ir::schema::Schema,
     ) -> Result<Option<(ColumnId, ColumnId)>, String> {
         let Self::Extension { ext_kind, payload } = self else {
             return Ok(None);
@@ -407,14 +407,14 @@ impl AggIntent<ColumnId> {
             return Err("arg selector requires arg_col and val_col only".into());
         }
         let resolve = |field: &str| -> Result<ColumnId, String> {
-            let reference: super::expr_ir::ColumnRef = serde_json::from_value(
+            let reference: crate::ir::scalar::ColumnRef = serde_json::from_value(
                 fields
                     .get(field)
                     .ok_or_else(|| format!("missing arg selector {field}"))?
                     .clone(),
             )
             .map_err(|e| e.to_string())?;
-            super::column_resolution::resolve_column_ref(&reference, schema)
+            crate::ir::scalar::column_resolution::resolve_column_ref(&reference, schema)
                 .map_err(|e| e.to_string())
         };
         Ok(Some((resolve("arg_col")?, resolve("val_col")?)))
@@ -738,7 +738,7 @@ pub fn default_quantile(q: f64) -> AggIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::schema::{DataType, Field};
+    use crate::ir::schema::{DataType, Field};
 
     fn c(name: &str, dtype: DataType) -> Field {
         Field::plain(name, dtype, false)
@@ -966,7 +966,8 @@ mod tests {
 #[cfg(test)]
 mod arg_selector_contract_tests {
     use super::*;
-    use crate::pre_asap::{ColumnRef, Schema};
+    use crate::ir::scalar::ColumnRef;
+    use crate::ir::schema::Schema;
     #[test]
     fn arg_selector_rejects_missing_or_unresolved_arguments() {
         let schema = Schema::new(vec![Field::plain("value", DataType::Float64, false)]);

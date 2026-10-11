@@ -1,6 +1,6 @@
 //! Query results are either an operator result or a standalone scalar expression.
 //! The root discriminator is not an operator and never creates a dag node.
-use super::{OperatorNode, ScalarExpr};
+use crate::ir::{OperatorNode, ScalarExpr};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18,7 +18,7 @@ impl QueryRoot {
         match self {
             Self::Operator(node) => node.validate_structure(),
             Self::Scalar(expr) => {
-                expr.scalar_type(&crate::pre_asap::Schema::default())?;
+                expr.scalar_type(&crate::ir::schema::Schema::default())?;
                 for node in expr.operator_refs() {
                     node.validate_structure()?;
                 }

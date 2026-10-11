@@ -9,7 +9,9 @@
 //! observability domain (metric label sets are open-ended). A registry-backed
 //! `SchemaCatalog` is future work; only the catalog impl swaps when it lands.
 
-use asap_types::pre_asap::{AggIntent, ColumnRef, DataType, Field, GroupKeys, Reduction, Schema};
+use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, Schema};
 
 use crate::unresolved::{UnresolvedOp, UnresolvedScalar};
 
@@ -128,7 +130,7 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
 /// (never the operators referenced from scalar positions: those are bound in
 /// their own scope).
 fn leftmost_scan_name(tree: &UnresolvedOp) -> Option<&str> {
-    use asap_types::pre_asap::Source;
+    use asap_types::ir::operator::Source;
     use UnresolvedOp as U;
     match tree {
         U::Scan { source, .. } => Some(match source {
@@ -319,7 +321,7 @@ pub fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
 mod tests {
     use std::rc::Rc;
 
-    use asap_types::pre_asap::{AggIntent, Reduction, Source};
+    use asap_types::ir::operator::{AggIntent, Reduction, Source};
 
     use super::*;
     use crate::unresolved::UnresolvedSortKey;

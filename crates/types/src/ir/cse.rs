@@ -55,7 +55,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use super::node::{Operator, OperatorNode};
+use super::operator::node::{Operator, OperatorNode};
 
 /// [`structural_hash`]'s memoization cache: an already-hashed node's `Rc`
 /// pointer to its hash. A fresh cache is always correct; what matters is
@@ -277,17 +277,17 @@ pub fn share_common_sub_dags<Id>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::asap::ASAPOp;
-    use crate::ir::operator_properties::{BinaryOpKind, GroupKeys, Reduction, Source};
-    use crate::ir::ScalarExpr;
-    use crate::ir::{BinaryOperator, NonASAPOp};
-    use crate::post_asap::guarantee::ResultGuarantee;
-    use crate::post_asap::sketch::{
+    use crate::ir::operator::AggIntent;
+    use crate::ir::operator::{BinaryOpKind, GroupKeys, Reduction, Source};
+    use crate::ir::properties::ResultGuarantee;
+    use crate::ir::scalar::{ColumnRef, CompareOpKind};
+    use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
+    use crate::ir::schema::{
         GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     };
-    use crate::pre_asap::agg_intent::AggIntent;
-    use crate::pre_asap::expr_ir::{ColumnRef, CompareOpKind};
-    use crate::pre_asap::schema::{DataType, Field, FieldDataType, Schema};
+    use crate::ir::ASAPOp;
+    use crate::ir::ScalarExpr;
+    use crate::ir::{BinaryOperator, NonASAPOp};
 
     use crate::types::AccuracyTarget;
 
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn evaluations_share_their_producer_but_not_each_other() {
-        use crate::post_asap::sketch::SketchStatistic;
+        use crate::ir::schema::SketchStatistic;
         let evaluation = |q: f64| {
             Rc::new(OperatorNode::with_schema(
                 Operator::ASAP(ASAPOp::SummaryEstimate {

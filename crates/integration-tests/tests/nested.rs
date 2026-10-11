@@ -13,12 +13,13 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
+use asap_types::ir::operator::{
+    AggIntent, AtModifier, BinaryOpKind, GroupKeys, PromQLVectorSetOpKind, Reduction, Source,
+    TimeShift, VectorMatch, VectorMatchKind,
+};
+use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::{
     BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
-};
-use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, GroupKeys,
-    PromQLVectorSetOpKind, Reduction, ScalarValue, Source, TimeShift, VectorMatch, VectorMatchKind,
 };
 use asap_types::types::AccuracyTarget;
 

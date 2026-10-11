@@ -705,7 +705,7 @@ pub(super) fn propagate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::pre_asap::AggIntent;
+    use asap_types::ir::operator::AggIntent;
     fn abs(bound: f64, delta: f64) -> ResultGuarantee {
         ResultGuarantee {
             metric: ErrorMetric::AbsoluteValue,
@@ -1030,7 +1030,7 @@ mod tests {
     #[test]
     fn counter_functions_have_distinct_definition_rules() {
         let operation = |intent| ExactOperation::Aggregate {
-            reduction: asap_types::pre_asap::Reduction::PerEntity,
+            reduction: asap_types::ir::operator::Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
             filters: vec![],

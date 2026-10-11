@@ -7,11 +7,9 @@ use crate::{
     Error,
 };
 use futures::{stream, StreamExt};
+use planner_types::ir::operator::Source;
+use planner_types::ir::schema::{DataType, FieldDataType as SummaryFamilyType};
 use planner_types::ir::{NonASAPOp, OperatorNode};
-use planner_types::{
-    post_asap::FieldDataType as SummaryFamilyType,
-    pre_asap::{DataType, Source},
-};
 use std::sync::Arc;
 
 /// A bound data source. Metadata must be stable for the lifetime of the binding.

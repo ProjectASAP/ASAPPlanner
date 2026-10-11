@@ -15,14 +15,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use asap_types::ir::operator_properties::ConcatDiscriminatorKey;
+use asap_types::ir::operator::operator_properties::ConcatDiscriminatorKey;
+use asap_types::ir::operator::{
+    AggIntent, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind, SampleKind,
+    Source, TimeShift, WindowFrame, WindowFuncKind,
+};
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::BinaryOperator;
 use asap_types::ir::{ExprSemantics, TimeRangeKind};
-use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, ColumnRef, CompareOpKind, DataType, GroupKeys, InfoMatcher,
-    JoinKind, Reduction, RelationalSetOpKind, SampleKind, ScalarValue, Schema, Source, TimeShift,
-    WindowFrame, WindowFuncKind,
-};
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -221,7 +222,7 @@ pub enum UnresolvedOp {
     PromqlScalarOp {
         child: Rc<UnresolvedOp>,
         scalar: UnresolvedScalar,
-        op: asap_types::pre_asap::BinaryOpKind,
+        op: asap_types::ir::operator::BinaryOpKind,
         scalar_left: bool,
         return_bool: bool,
     },

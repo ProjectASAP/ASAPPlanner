@@ -1,6 +1,6 @@
 //! Physical scalar/vector contracts preserve complete label sets across native computation.
 use super::*;
-use planner_types::post_asap::FieldDataType as SummaryFamilyType;
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
 
 pub fn scalar_schema() -> SchemaRef {
     crate::operators::vector_binary::value_schema(true)
@@ -16,7 +16,7 @@ pub fn matrix_schema() -> SchemaRef {
 pub fn compile_scalar(value: f64) -> Result<CompiledPhysicalDAG, Error> {
     let operator = Operator::scalar(
         crate::values::Value::Float64(value),
-        planner_types::pre_asap::DataType::Float64,
+        planner_types::ir::schema::DataType::Float64,
     )?
     .with_output_schema(scalar_schema())?;
     CompiledPhysicalDAG::from_operators(
@@ -226,7 +226,7 @@ pub fn compile_exact_evaluation(
     lookback_ms: u64,
     preserve_metric_name: bool,
 ) -> Result<CompiledPhysicalDAG, Error> {
-    use planner_types::post_asap::ExactKind;
+    use planner_types::ir::schema::ExactKind;
     let statistic = match &family {
         SummaryFamilyType::ExactAggregate(kind, _) => match kind {
             ExactKind::Sum => crate::Statistic::Sum,
