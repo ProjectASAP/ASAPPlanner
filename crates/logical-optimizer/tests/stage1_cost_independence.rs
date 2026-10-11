@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 const FORBIDDEN_MODULES: &[&str] = &["cost_model", "recurrence"];
 
 /// Crates Stage 1 must not depend on: later stages, the facade and the executor.
-const FORBIDDEN_CRATES: &[&str] = &["asap-aware-mapping", "asap-physical-operators"];
+const FORBIDDEN_CRATES: &[&str] = &[
+    "asap-physical-optimizer",
+    "asap-aware-mapping",
+    "asap-physical-operators",
+];
 
 /// Every `.rs` file under `dir`.
 fn rust_files(dir: &Path) -> Vec<PathBuf> {
