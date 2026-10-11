@@ -18,21 +18,21 @@
     "name": "3a · historical p99 batch",
     "example": "planner-layering-3a",
     "file": "out/example3a.json",
-    "story": "An ad hoc batch of five p99 reports over 1–5 years, run once. Each query gets a KLL, and sharing the input scan across all five is cheapest. Pass 2 also offers five 1-year KLL segments shared by all five reports, but the cost model charges each segment's time shift and range for every row of the 5-year scan, so it costs more."
+    "story": "An ad hoc batch of five p99 reports over 1–5 years, run once. Each query gets a KLL, and Pass 2 offers five 1-year KLL segments shared by all five reports. The segments win: each row of the 5-year scan lands in one segment, a time shift is free and a time range pays only for the rows it keeps, so they cost less than sharing only the input scan."
   },
   {
     "id": "example3b",
     "name": "3b · live p99 panel",
     "example": "planner-layering-3b",
     "file": "out/example3b.json",
-    "story": "p99 over the last 5 min every minute, 1M series sampled every 15 s, raw data kept by the deployment. A per-series KLL built at query time wins: keeping 1-min KLL panes from ingestion time costs 768 cost/s of memory, and rebuilding the panes at query time breaks the 200 ms bound."
+    "story": "p99 over the last 5 min every minute, 1M series sampled every 15 s, raw data kept by the deployment. A per-series KLL built at query time wins: keeping 1-min KLL panes from ingestion time costs 768 cost/s of memory, and rebuilding the panes at query time meets the 200 ms bound but costs slightly more."
   },
   {
     "id": "example4a",
     "name": "4a · monthly p99 reports",
     "example": "planner-layering-4a",
     "file": "out/example4a.json",
-    "story": "Example 3a repeated monthly and known in advance. The same shared-input KLL plan wins; its cost is now amortized over the month between runs. The shared 1-year segments may now be maintained at ingestion time, but keeping a million per-series KLLs per segment costs far more."
+    "story": "Example 3a repeated monthly and known in advance. The same shared 1-year segments win, built at query time; their cost is now amortized over the month between runs. They may now be maintained at ingestion time, but keeping a million per-series KLLs per segment costs far more."
   },
   {
     "id": "example4b",
