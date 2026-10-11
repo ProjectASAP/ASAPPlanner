@@ -17,7 +17,7 @@ use asap_physical_optimizer::implementation::physical_candidates::PhysicalCandid
 #[path = "../executor_models/mod.rs"]
 mod executor_models;
 
-use asap_plan_selection::{plan_stages, Selection};
+use asap_plan_selection::{plan_stages, PlanningModels, Selection};
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
@@ -332,6 +332,15 @@ fn export(roots: &[QueryRoot]) -> (FlatDag, Vec<PhysicalASAPNodeId>) {
 /// library's `plan_stages`, with each entry's demand (accuracy, recurrence,
 /// predictability).
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
+    run_stages_with(workload, roots, executor_models())
+}
+
+/// [`run_stages`] with the deployment inputs `models`.
+pub fn run_stages_with(
+    workload: &PlanningWorkload,
+    roots: Vec<QueryRoot>,
+    models: PlanningModels<'_>,
+) -> Run {
     let (dag, query_roots) = export(&roots);
     let stage0 = Logical {
         id: "S0".into(),
@@ -348,7 +357,7 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         roots.into_iter().enumerate().collect(),
         &demand,
         workload.data_workload.as_ref().expect("data workload"),
-        executor_models(),
+        models,
         MAX_CANDIDATES,
     )
     .expect("plans");
