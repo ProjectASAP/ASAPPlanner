@@ -45,17 +45,16 @@ mod tests {
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = asap_types::ir::operator::agg_intent::default_cardinality();
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
-        let g = DefaultAccuracyModel
-            .local_guarantee(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::Cms, params),
-                    GroupingStrategy::default(),
-                ),
-                &SketchStatistic::Cardinality,
-            )
-            .unwrap();
+        let g = local_guarantee(
+            &FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::Cms, params),
+                GroupingStrategy::default(),
+            ),
+            &SketchStatistic::Cardinality,
+        )
+        .unwrap();
         assert_eq!(g.metric, ErrorMetric::Frequency);
-        assert!(DefaultAccuracyModel.satisfies(
+        assert!(satisfies(
             &g,
             &AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -96,16 +95,15 @@ mod tests {
                 },
                 false => GroupingStrategy::default(),
             };
-            DefaultAccuracyModel
-                .local_guarantee(
-                    &FieldDataType::Sketch(SketchKind::new(SketchAlgorithm::Cms, params), grouping),
-                    &group_count,
-                )
-                .unwrap()
+            local_guarantee(
+                &FieldDataType::Sketch(SketchKind::new(SketchAlgorithm::Cms, params), grouping),
+                &group_count,
+            )
+            .unwrap()
         };
-        assert!(DefaultAccuracyModel.satisfies(&guarantee(0.01, 0.01, false), &target));
-        assert!(!DefaultAccuracyModel.satisfies(&guarantee(0.01, 0.01, true), &target));
-        assert!(DefaultAccuracyModel.satisfies(&guarantee(0.005, 0.005, true), &target));
+        assert!(satisfies(&guarantee(0.01, 0.01, false), &target));
+        assert!(!satisfies(&guarantee(0.01, 0.01, true), &target));
+        assert!(satisfies(&guarantee(0.005, 0.005, true), &target));
     }
 
     #[test]
@@ -116,15 +114,14 @@ mod tests {
             depth: 5,
             heap_size: 10,
         };
-        let topk_frequency = DefaultAccuracyModel
-            .local_guarantee(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
-                    GroupingStrategy::default(),
-                ),
-                &SketchStatistic::TopK { k: 10 },
-            )
-            .expect("heap sketch still provides per-key frequency intervals");
+        let topk_frequency = local_guarantee(
+            &FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
+                GroupingStrategy::default(),
+            ),
+            &SketchStatistic::TopK { k: 10 },
+        )
+        .expect("heap sketch still provides per-key frequency intervals");
         assert_eq!(topk_frequency.metric, ErrorMetric::Frequency);
     }
 }
