@@ -1,5 +1,11 @@
 # Evidence-dependent candidates
 
+> **Historical:** this document describes the legacy replacement search
+> (`ReplacementStrategy`, `CandidateLogicalASAPDAGs`, `global_selection`), which
+> was removed (#630, #635). The #509 stage pipeline replaced it; see
+> [planner layering](../proposals/planner-layering.md) and the
+> [library API](../../develop_docs/library-api.md).
+
 Audience: ASAPPlanner library integrators, especially ASAPQuery-backend.
 
 `CandidateLogicalASAPDAGs` is a space of constructible logical alternatives, not a list of

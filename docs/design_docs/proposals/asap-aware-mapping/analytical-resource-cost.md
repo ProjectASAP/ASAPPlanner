@@ -2,7 +2,9 @@
 
 > Status: implemented model with explicit support limits. The
 > [analytical estimator](../../../../crates/plan-selection/src/cost/analytical_cost.rs)
-> and physical-plan adapter implement supported evidenced comparisons.
+> prices Stage 3's candidates. The physical-plan adapter
+> (`PhysicalPlanCostModel`) described below was removed with the legacy cost
+> model (#622).
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
 > proposed extensions are not implied by the implemented formulas.
 

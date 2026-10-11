@@ -2,6 +2,17 @@
 
 ## Overview
 
+> **Status:** the candidate-space output and the ranking and selection
+> workflows this document describes (`CandidateLogicalASAPDAGs`, `cost_sorted`,
+> `global_selection`, `CostModel`) were removed with the legacy search (#630,
+> #635). ASAPPlanner now runs the #509 stage pipeline and returns the selected
+> plan: `asap_planner::e2e_plan` returns a `PlanOutput`, and
+> `asap_plan_selection::plan_stages` a `StagePipelineRun` with Stage 1's
+> alternatives and the selection report. See the
+> [library API](../../develop_docs/library-api.md) for the current workflow.
+> The input sections below still describe the current `PlanningWorkload`; the
+> output and workflow sections are kept as a historical record.
+
 This document is for library integrators such as ASAPQuery-backend, not users
 submitting queries through a backend.
 
@@ -17,7 +28,7 @@ Post-ASAP alternatives for the workload.
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | No implicit default. Set `None` when unavailable for non-PromQL workloads; PromQL requires `Some(DataWorkload)` with a nonzero ingestion interval. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; `now_ms` and, when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering; `now_ms` is required for PromQL lowering |
-| Planning models | Candidate cost/ranking and accuracy composition/checking | Used by the relevant APIs; built-in `DefaultCostModel` and `DefaultAccuracyModel` are available |
+| Planning models | Accuracy checking, cost calibration and deployment capabilities (`PlanningModels`) | `PlanningModels::builtin()` uses `DefaultAccuracyModel`, an illustrative calibration and unrestricted capabilities |
 | External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization depends on them; absence is not proof |
 
 Frontend lowering and candidate search are stages within this workflow, not
@@ -277,8 +288,8 @@ latter cannot be fabricated by one.
 
 | Input | Where it enters / default | Why it matters |
 |---|---|---|
-| Accuracy model | Target-aware search takes an `AccuracyModel`; `DefaultAccuracyModel` is available. Default strategies also use it for candidate construction. | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
-| Cost model | Candidate strategies and `cost_sorted`/`global_selection` use a `CostModel`; `DefaultCostModel` is available. | Ranks or selects candidates. The built-in model is not a measured deployment cost for every physical implementation. |
+| Accuracy model | `PlanningModels.accuracy`; `DefaultAccuracyModel` by default. Stage 3 checks each summary estimate with it. | Derives each estimate's guarantee and checks it against the requested accuracy. The model does not itself provide missing data-domain facts. |
+| Cost calibration | `PlanningModels.calibration`; `Stage3Calibration::ILLUSTRATIVE` by default. | Stage 3 prices candidates analytically; the built-in calibration is not a measured deployment cost. |
 | Accuracy/domain evidence | `AccuracyEvidenceProvider`; default strategies use `NoAccuracyEvidence` when no provider is supplied. | Input ranges, nonempty populations, Top-K intervals, and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
 | Measured cost evidence | Supplied through a deployment-specific cost model or physical-evidence provider when cost-based physical comparison is needed. | CPU, memory, and I/O estimates must be comparable before claiming a summary beats raw recomputation. |
 | Runtime capabilities | Checked by deployment-specific providers. | Prevents choosing a maintenance/window operation the intended executor cannot implement. |
@@ -297,7 +308,7 @@ the applicable strategy, accuracy target, and helper; missing evidence is not
 a blanket reason to discard unrelated candidates. For the direct DDSketch
 ratio above, search retains a candidate without a proven root guarantee when
 domain evidence is missing; automatic `global_selection` does not choose it.
-See the [candidate-search reference](../../develop_docs/library-api.md#generate-and-rank-candidates)
+See the [candidate-search reference](../../develop_docs/library-api.md)
 for this backend-selection path.
 
 ---
@@ -414,16 +425,16 @@ the result for one query root.
 |:---:|
 | **Input:** [CandidateLogicalASAPDAGs](asap-aware-plan-search.md) + cost model |
 | ↓ |
-| **Select:** [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) chooses compatible alternatives |
+| **Select:** [global_selection](../../develop_docs/library-api.md) chooses compatible alternatives |
 | ↓ |
-| **Assemble:** [assemble_selected_dag(root)](../../develop_docs/library-api.md#api-definition-and-example) connects those choices for each query root |
+| **Assemble:** [assemble_selected_dag(root)](../../develop_docs/library-api.md) connects those choices for each query root |
 | ↓ |
 | **Output:** one selected logical [Post-ASAP DAG](../concepts/post-asap-ir.md) per query root |
 
 Each output DAG specifies the chosen operators, parameters, and accuracy
 guarantees. Its root is an `Rc<OperatorNode>` (the same IR as the input,
 with some nodes now ASAP operators) and carries no execution timing yet; the
-[API reference](../../develop_docs/library-api.md#api-definition-and-example)
+[API reference](../../develop_docs/library-api.md)
 describes the function signatures and return handling.
 
 This path selects how to compute the query, not whether summary state is

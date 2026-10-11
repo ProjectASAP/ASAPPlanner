@@ -1,9 +1,10 @@
 # Storage operation estimates
 
-The physical-plan ranking adapter accepts an optional `StorageIoProfile` in
-its immutable `PhysicalEvidenceSnapshot`.
-Omitting the profile preserves the existing CPU/memory/scan-byte objective;
-operation counts are unestimated, not inferred to be zero.
+`asap_plan_selection::cost::storage_io::estimate_storage_io` prices a
+deployment-supplied `StorageIoProfile` for one physical DAG. Stage 3 does not
+read it: the physical-plan ranking adapter that did (`PhysicalPlanCostModel`)
+was removed with the legacy cost model. Without a profile, operation counts are
+unestimated, not inferred to be zero.
 
 A supplied profile must cover every reachable physical node, with an explicit
 empty `accesses` list for nodes doing no storage I/O. Entries bind the complete

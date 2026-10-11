@@ -1,5 +1,8 @@
 # Target candidate and DAG assembly API migration (#456)
 
+> **Historical:** the legacy search and selection APIs these renames concern
+> were removed (#630, #635). Kept as a migration record.
+
 This source-only rename follows the input/output/workflow design in #445.
 Candidate generation, ordering, accuracy checks, selection, and runtime behavior
 are unchanged. #453 separately defines the integration API surface.
