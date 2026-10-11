@@ -31,7 +31,7 @@
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic).
-//! [`cost_sorted`](crate::candidate_selection::cost_sorted)
+//! `cost_sorted`
 //! (via [`asap_logical_optimizer::pass1::replacement`]'s own `cse_preference`) and
 //! [`DefaultCostModel::estimate_cost`] are this crate's own callers.
 
@@ -251,7 +251,7 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 
 /// A CSE-detected, legality-gated shared sub-DAG with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
-/// [`cost_sorted`](crate::candidate_selection::cost_sorted)
+/// `cost_sorted`
 /// (via [`asap_logical_optimizer::pass1::replacement`]'s own `cse_preference`) the first time it
 /// needs a representative bound node for a sub-DAG that
 /// [`asap_types::ir::cse::share_common_sub_dags`] already collapsed
@@ -619,7 +619,7 @@ pub trait CostModel {
     /// [`ReplacementSubDAG`] candidate at `target` — a real `f64`, not just a
     /// relative rank, meant for a caller that wants to *display* "candidate A
     /// costs ≈ X, candidate B costs ≈ Y" (e.g. a DAG-visualization view built
-    /// on [`cost_sorted`](crate::candidate_selection::cost_sorted)),
+    /// on `cost_sorted`),
     /// not just order candidates against each other — that ordering job
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
     /// [`ASAPStrategies`](asap_logical_optimizer::pass1::replacement::ASAPStrategies)
@@ -768,25 +768,6 @@ fn hydra_grid_cells(params: &HydraParams) -> f64 {
     }
 }
 
-/// Apply [`CostModel::rank_candidates`] and enforce its permutation-only
-/// contract at the boundary where planner code consumes the result.
-pub(crate) fn validated_candidate_ranking(
-    cost_model: &dyn CostModel,
-    intent: &AggIntent,
-    candidates: &[SketchAlgorithm],
-) -> Vec<SketchAlgorithm> {
-    let ranked = cost_model.rank_candidates(intent, candidates);
-    let mut expected = candidates.to_vec();
-    let mut actual = ranked.clone();
-    expected.sort();
-    actual.sort();
-    assert_eq!(
-        actual, expected,
-        "CostModel::rank_candidates must return a permutation of its input; candidate generation is exhaustive and cost models may not add, remove, or duplicate candidates"
-    );
-    ranked
-}
-
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
 /// order.
 ///
@@ -910,70 +891,6 @@ mod tests {
             DefaultCostModel.rank_candidates(&intent, candidates),
             candidates.to_vec()
         );
-    }
-
-    struct AlwaysPreferLast;
-
-    impl CostModel for AlwaysPreferLast {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            let mut v = candidates.to_vec();
-            v.reverse();
-            v
-        }
-    }
-
-    #[test]
-    fn custom_cost_model_can_reorder_candidates() {
-        let intent = default_cardinality();
-        let candidates = summary_candidates(&intent);
-        let ranked = validated_candidate_ranking(&AlwaysPreferLast, &intent, candidates);
-        assert_eq!(ranked.first(), candidates.last());
-    }
-
-    struct DropsLast;
-
-    impl CostModel for DropsLast {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            candidates[..candidates.len() - 1].to_vec()
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "must return a permutation of its input")]
-    fn candidate_ranking_rejects_filtering() {
-        let intent = default_cardinality();
-        let candidates = summary_candidates(&intent);
-        validated_candidate_ranking(&DropsLast, &intent, candidates);
-    }
-
-    struct DuplicatesFirst;
-
-    impl CostModel for DuplicatesFirst {
-        fn rank_candidates(
-            &self,
-            _intent: &AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            let mut ranked = candidates.to_vec();
-            ranked.push(candidates[0].clone());
-            ranked
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "must return a permutation of its input")]
-    fn candidate_ranking_rejects_additions_and_duplicates() {
-        let intent = default_cardinality();
-        let candidates = summary_candidates(&intent);
-        validated_candidate_ranking(&DuplicatesFirst, &intent, candidates);
     }
 
     // ── Recurring-cost formulas (issue #171) ─────────────────────────────
