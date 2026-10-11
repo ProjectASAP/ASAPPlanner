@@ -270,10 +270,22 @@ impl ASAPOp {
                 {
                     dtype = DataType::Float64;
                 }
+                // A filtered quantile is NULL for a group without a matching
+                // row, as the filtered aggregate it realizes is.
+                let nullable = matches!(query, SketchStatistic::Quantile { .. })
+                    && built_summary(summary_input).is_some_and(|built| {
+                        matches!(
+                            built.asap(),
+                            Some(SummaryAgg {
+                                filter: Some(_),
+                                ..
+                            })
+                        )
+                    });
                 let mut schema = input.clone();
                 for field in &mut schema.fields {
                     if !field.is_plain() {
-                        *field = Field::plain(name, dtype.clone(), false);
+                        *field = Field::plain(name, dtype.clone(), nullable);
                     }
                 }
                 schema
@@ -281,18 +293,13 @@ impl ASAPOp {
             FinalizeExactAccumulator { child } => {
                 // A merge's inputs have identical schemas (tumbling panes),
                 // so its first input names the finalized value.
-                let mut built = child;
-                while let Some(SummaryMerge { children }) = built.asap() {
-                    match children.first() {
-                        Some(first) => built = first,
-                        None => break,
-                    }
-                }
+                let built = built_summary(child).unwrap_or(child);
                 let value_result = if let Some(ASAPOp::SummaryAgg {
                     child: source,
                     family: FieldDataType::ExactAggregate(kind, _),
                     input,
                     reduction,
+                    filter,
                     ..
                 }) = built.asap()
                 {
@@ -329,7 +336,9 @@ impl ASAPOp {
                                     reduction: reduction.clone(),
                                     measures: vec![measure],
                                     output_names: vec![],
-                                    filters: vec![],
+                                    // A filtered SUM/MIN/MAX is NULL for a
+                                    // group without a matching row.
+                                    filters: filter.iter().map(|f| Some(f.clone())).collect(),
                                     having: None,
                                 }
                                 .output_schema()
@@ -727,4 +736,15 @@ fn source_kind(node: &OperatorNode) -> OperatorResultKind {
             other => other,
         },
     }
+}
+
+/// The `SummaryAgg` that builds `state`, through any merges. A merge's
+/// inputs have identical schemas (tumbling panes), so its first input
+/// stands for all of them.
+fn built_summary(state: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
+    let mut built = state;
+    while let Some(ASAPOp::SummaryMerge { children }) = built.asap() {
+        built = children.first()?;
+    }
+    Some(built)
 }

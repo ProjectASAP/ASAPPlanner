@@ -434,6 +434,62 @@ async fn sql_hydra_count_dp_equals_exhaustive() {
     assert_dp_matches_exhaustive(&inventory, &workload, 18);
 }
 
+/// Filtered single-measure aggregates (`FILTER (WHERE …)`) get the same
+/// alternatives as unfiltered ones, each a filtered summary, and the DP
+/// still selects the exhaustive minimum.
+#[tokio::test]
+async fn sql_filtered_aggregates_dp_equals_exhaustive() {
+    let accuracy = AccuracyTarget::Epsilon(0.1);
+    let queries = [
+        "SELECT l_orderkey, COUNT(*) FILTER (WHERE l_extendedprice > 100) FROM lineitem GROUP BY l_orderkey",
+        "SELECT approx_percentile_cont(l_extendedprice, 0.99) FILTER (WHERE l_orderkey = 7) FROM lineitem",
+    ];
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: Some(queries.iter().map(|q| batch(q, accuracy.clone())).collect()),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::AtRest,
+            ..Default::default()
+        }),
+    };
+    let catalog = SqlCatalog::new().with_table(
+        "lineitem",
+        Schema::new(vec![
+            Field::plain("l_orderkey", DataType::Int64, false),
+            Field::plain("l_extendedprice", DataType::Float64, false),
+        ]),
+    );
+    let mut roots = Vec::new();
+    for (index, query) in queries.iter().enumerate() {
+        let root = lower_sql_dialect(query, &catalog, SqlDialect::DataFusionSQL, accuracy.clone())
+            .await
+            .expect("lowers");
+        roots.push((index, QueryRoot::Operator(root)));
+    }
+    let inventory = stage1_logical_candidates(roots, &Default::default(), &[]).expect("Stage 1");
+    // (pass-through, Count acc, CMS, CountSketch, UnivMon, HydraCms) × (pass-through, KLL, DDSketch).
+    assert_dp_matches_exhaustive(&inventory, &workload, 18);
+    // Every filtered alternative builds through Stages 1 and 2.
+    let exhaustive = select_exhaustive(
+        &inventory,
+        &targets(&workload),
+        &workload.data_workload.clone().unwrap_or_default(),
+        PlanningModels::builtin(),
+        MAX_ENUMERATED_CANDIDATES,
+    )
+    .expect("exhaustive selection");
+    let unbuilt: Vec<_> = exhaustive
+        .selection
+        .rejected
+        .iter()
+        .filter(|r| r.reason.starts_with("Stage "))
+        .collect();
+    assert!(unbuilt.is_empty(), "{unbuilt:#?}");
+}
+
 /// PromQL queries, each with its own ε (δ = 0.001).
 fn promql_with(queries: &[(&str, f64)]) -> PlanningWorkload {
     let mut workload = promql(&[], 1_000);
