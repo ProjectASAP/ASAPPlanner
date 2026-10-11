@@ -30,8 +30,6 @@ struct ResolvedCacheProfile {
     integer_executions: Option<u64>,
     cpu_execution_factor: f64,
     scan_execution_factor: f64,
-    result_hit_ratio: f64,
-    buffer_hit_ratio: f64,
     buffer_miss_bytes: u64,
     buffer_working_set_bytes: u64,
 }
@@ -51,8 +49,6 @@ fn resolve_cache_profile(
             integer_executions: Some(evaluation_count),
             cpu_execution_factor: evaluation_count as f64,
             scan_execution_factor: evaluation_count as f64,
-            result_hit_ratio: 0.0,
-            buffer_hit_ratio: 0.0,
             buffer_miss_bytes: 1,
             buffer_working_set_bytes: 1,
         });
@@ -114,8 +110,6 @@ fn resolve_cache_profile(
     let result_miss_ratio =
         invalidation + miss_fraction(evidence.result_cache)? * (1.0 - invalidation);
     let buffer_miss_ratio = miss_fraction(evidence.buffer_cache)?;
-    let result_hit_ratio = 1.0 - result_miss_ratio;
-    let buffer_hit_ratio = 1.0 - buffer_miss_ratio;
     let cpu_execution_factor = evidence.distinct_evaluations as f64
         + evidence.repeated_identical_evaluations as f64 * result_miss_ratio;
     Ok(ResolvedCacheProfile {
@@ -130,24 +124,12 @@ fn resolve_cache_profile(
         },
         cpu_execution_factor,
         scan_execution_factor: cpu_execution_factor * buffer_miss_ratio,
-        result_hit_ratio,
-        buffer_hit_ratio,
         buffer_miss_bytes: evidence
             .buffer_cache
             .working_set_bytes
             .saturating_sub(evidence.buffer_cache.capacity_bytes),
         buffer_working_set_bytes: evidence.buffer_cache.working_set_bytes,
     })
-}
-
-/// Derive cache hit ratios from the shared assumptions for this workload.
-pub fn cache_hit_ratios(
-    profile: &CacheProfile,
-    evaluation_count: u64,
-    data_arrival: DataArrival,
-) -> Result<(f64, f64), AnalyticalCostError> {
-    let resolved = resolve_cache_profile(profile, evaluation_count, data_arrival)?;
-    Ok((resolved.result_hit_ratio, resolved.buffer_hit_ratio))
 }
 
 /// Conversion from physical dimensions to one deployment-specific objective.
@@ -3686,10 +3668,6 @@ mod tests {
         fn accepts_shared(_: &asap_types::workload::resources::CacheProfile) {}
         accepts_shared(&legacy);
         assert_eq!(central, legacy);
-        assert_eq!(
-            cache_hit_ratios(&central, 6, DataArrival::AtRest).unwrap(),
-            (1.0, 0.5)
-        );
     }
 
     #[test]
@@ -3778,13 +3756,13 @@ mod tests {
         };
         evidence.distinct_evaluations = 1;
         assert!(matches!(
-            cache_hit_ratios(&profile, 6, DataArrival::AtRest),
+            resolve_cache_profile(&profile, 6, DataArrival::AtRest),
             Err(AnalyticalCostError::InvalidCacheEvidence(_))
         ));
 
         let profile = cache_profile(100, 100);
         assert!(matches!(
-            cache_hit_ratios(&profile, 6, DataArrival::ContinuouslyIngesting),
+            resolve_cache_profile(&profile, 6, DataArrival::ContinuouslyIngesting),
             Err(AnalyticalCostError::InvalidCacheEvidence(_))
         ));
     }
@@ -3837,14 +3815,14 @@ mod tests {
         };
         inputs.distinct_evaluations = 0;
         inputs.repeated_identical_evaluations = 6;
-        assert!(cache_hit_ratios(&cache, 6, DataArrival::AtRest).is_err());
+        assert!(resolve_cache_profile(&cache, 6, DataArrival::AtRest).is_err());
         for ratio in [f64::NAN, f64::INFINITY, -1.0, 0.5] {
             let mut cache = cache_profile(100, 0);
             let CacheProfile::Evidence(inputs) = &mut cache else {
                 unreachable!()
             };
             inputs.result_invalidation_ratio = Some(ratio);
-            assert!(cache_hit_ratios(&cache, 6, DataArrival::AtRest).is_err());
+            assert!(resolve_cache_profile(&cache, 6, DataArrival::AtRest).is_err());
         }
     }
 
@@ -3990,10 +3968,6 @@ mod tests {
         inputs.result_invalidation_ratio = Some(0.5);
         let estimate =
             estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &profile).unwrap();
-        assert_eq!(
-            cache_hit_ratios(&profile, 6, scope.data_arrival).unwrap(),
-            (0.5, 0.5)
-        );
         assert_eq!(estimate.cpu_ops(), 400.0);
         assert_eq!(estimate.scan_bytes(), 2_000);
     }
