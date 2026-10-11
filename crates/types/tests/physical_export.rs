@@ -1,12 +1,15 @@
 //! A timed plan exports as a PhysicalASAPDAG that keeps timing.
 use asap_types::ir::physical_export::{
-    compile_physical_asap_dag, PhysicalASAPDAGDocument, PhysicalASAPDAGValidationError,
+    compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAGDocument,
+    PhysicalASAPDAGValidationError,
 };
 use asap_types::ir::{
     apply_lifecycle_timings, ASAPOp, LifecycleAssignment, NonASAPOp, Operator, OperatorNode,
     TimingMemo,
 };
-use asap_types::post_asap::{ExactKind, ExactParams, ExecutionTiming, SummaryUpdate};
+use asap_types::post_asap::{
+    ExactKind, ExactParams, ExecutionDataStateError, ExecutionTiming, SummaryUpdate,
+};
 use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Reduction, Schema, Source};
 use std::rc::Rc;
 
@@ -112,4 +115,62 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
     dag.validate().unwrap();
     assert_eq!(dag.roots.len(), 2);
     assert_eq!(dag.nodes.len(), 4, "scan and summary are exported once");
+}
+
+/// The roles of a binary operator's edges must match its inputs: swapping
+/// `Left` and `Right` would reorder the operands of `a - b`.
+#[test]
+fn swapped_edge_roles_are_rejected() {
+    use asap_types::ir::physical_export::EdgeRole;
+    use asap_types::ir::{Predicate, ScalarExpr};
+    use asap_types::pre_asap::{JoinKind, ScalarValue};
+    let scan = |table: &str| {
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: table.into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Field::plain("k", DataType::Utf8, false)]),
+        }))
+        .unwrap()
+    };
+    let join = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Join {
+        kind: JoinKind::Cross,
+        pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+        left: scan("a"),
+        right: scan("b"),
+    }))
+    .unwrap();
+    let timed = apply_lifecycle_timings(
+        &join,
+        &LifecycleAssignment::default_maintained(),
+        &mut TimingMemo::new(),
+    )
+    .unwrap();
+    let mut dag = compile_physical_asap_dag(&timed).unwrap();
+    dag.validate().unwrap();
+    for edge in &mut dag.edges {
+        edge.role = match edge.role {
+            EdgeRole::Left => EdgeRole::Right,
+            EdgeRole::Right => EdgeRole::Left,
+            other => other,
+        };
+    }
+    assert_eq!(
+        dag.validate(),
+        Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch {
+            consumer: dag.roots[0]
+        })
+    );
+}
+
+/// An export that fails validation is an error, not a panic.
+#[test]
+fn an_empty_batch_is_an_error() {
+    assert!(matches!(
+        compile_physical_asap_workload(&[]),
+        Err(ExecutionDataStateError::InvalidPhysicalDAG(
+            PhysicalASAPDAGValidationError::NoRoots
+        ))
+    ));
 }

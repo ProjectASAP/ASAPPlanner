@@ -223,6 +223,10 @@ pub enum ExecutionDataStateError {
     /// `SummaryDelete`, `SummaryJoin`, `Extension`) in an executable plan.
     #[error("{operator} is a reserved operator with no execution contract yet")]
     UnimplementedOperator { operator: &'static str },
+    /// The exported physical DAG failed its own validation, e.g. an empty
+    /// batch or a hand-timed plan the timing pass would have rejected.
+    #[error("invalid physical ASAP DAG: {0}")]
+    InvalidPhysicalDAG(#[from] crate::ir::physical_export::PhysicalASAPDAGValidationError),
 }
 
 /// The data_state assigned to every node of a validated plan, keyed by

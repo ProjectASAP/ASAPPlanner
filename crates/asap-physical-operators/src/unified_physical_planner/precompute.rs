@@ -82,16 +82,29 @@ pub fn raw_sample_row(
 }
 
 /// Input contract of a precompute boundary: raw sample rows for a raw time
-/// series scan, otherwise the stored population of its summary state.
-pub fn boundary_schema(node: &PhysicalASAPDAGNode) -> Result<SchemaRef, Error> {
+/// series scan (or a `TimeRange`, optionally over a `TimeShift`, of one),
+/// otherwise the stored population of its summary state.
+pub fn boundary_schema(
+    node: &PhysicalASAPDAGNode,
+    nodes: &BTreeMap<u64, &PhysicalASAPDAGNode>,
+) -> Result<SchemaRef, Error> {
+    let mut scan = node;
+    if let Payload::NonASAP(NonASAPOp::TimeRange { child, .. }) = &scan.payload {
+        scan = nodes
+            .get(&(*child as u64))
+            .ok_or_else(|| invalid("missing precompute node"))?;
+        if let Payload::NonASAP(NonASAPOp::TimeShift { child, .. }) = &scan.payload {
+            scan = nodes
+                .get(&(*child as u64))
+                .ok_or_else(|| invalid("missing precompute node"))?;
+        }
+    }
     if !matches!(
-        &node.payload,
-        Payload::NonASAP(
-            NonASAPOp::Scan {
-                source: planner_types::pre_asap::Source::TimeSeries { .. },
-                ..
-            } | NonASAPOp::TimeRange { .. }
-        )
+        &scan.payload,
+        Payload::NonASAP(NonASAPOp::Scan {
+            source: planner_types::pre_asap::Source::TimeSeries { .. },
+            ..
+        })
     ) {
         return source_schema(&node.output_schema);
     }
@@ -222,7 +235,7 @@ pub fn compile(
     for id in ordered {
         let node = nodes[&id];
         if frontier.contains(&id) {
-            let schema = boundary_schema(node)?;
+            let schema = boundary_schema(node, &nodes)?;
             sources.insert(id, InputContract::bounded(schema.clone()));
             outputs.insert(id, schema);
             continue;
