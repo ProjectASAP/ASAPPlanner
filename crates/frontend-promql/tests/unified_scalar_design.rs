@@ -2,7 +2,7 @@
 #[path = "unified_support.rs"]
 mod support;
 use asap_types::ir::{NonASAPOp, QueryRoot, ScalarExpr};
-use asap_types::pre_asap::{ArithmeticOpKind, ScalarValue};
+use asap_types::pre_asap::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 
 fn root(query: &str) -> QueryRoot {
@@ -107,23 +107,50 @@ fn pointwise_functions_are_typed_scalar_projections() {
     }
 }
 
-/// Negation preserves the metric name and complete identity unlike multiplication.
+/// Negation drops the metric name, like Prometheus and like `up * 2` and
+/// `abs(up)`; the rest of the series identity and the time are kept.
 #[test]
-fn unary_minus_preserves_identity() {
+fn unary_minus_drops_the_metric_name() {
     let QueryRoot::Operator(node) = root("-up") else {
         panic!()
     };
     let NonASAPOp::Project { child, cols, .. } = node.expect_non_asap() else {
         panic!()
     };
-    assert_eq!(node.schema, child.schema);
+    assert!(node.schema.has_promql_series_identity());
+    assert_eq!(node.schema.time_index, child.schema.time_index);
     assert!(matches!(
         &cols[node.schema.column_id("value").unwrap()].expr,
         ScalarExpr::Negative { .. }
     ));
-    for (index, col) in cols.iter().enumerate() {
-        if index != node.schema.column_id("value").unwrap() {
-            assert_eq!(col.expr, ScalarExpr::Column(index));
+    assert!(cols.iter().any(|c| matches!(&c.expr, ScalarExpr::FunctionCall { name, .. } if name == "promql_drop_metric_name")));
+}
+
+/// `clamp` returns no series when `max < min`, so bounds that are not known
+/// to be in order filter the series first; ordered constant bounds do not.
+#[test]
+fn clamp_filters_out_inverted_bounds() {
+    for (query, filtered) in [
+        ("clamp(up, 0, 100)", false),
+        ("clamp(up, 5, 1)", true),
+        ("clamp(up, time() - 1, time())", true),
+    ] {
+        let QueryRoot::Operator(node) = root(query) else {
+            panic!()
+        };
+        let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
+            panic!("{query}: expected projection")
+        };
+        match child.expect_non_asap() {
+            NonASAPOp::Filter { pred, .. } => {
+                assert!(filtered, "{query}: unexpected filter");
+                assert!(
+                    matches!(&pred.0, ScalarExpr::Not(inner) if matches!(inner.as_ref(), ScalarExpr::Compare { op: CompareOpKind::Lt, .. })),
+                    "{query}: {pred:?}"
+                );
+            }
+            _ => assert!(!filtered, "{query}: expected a filter"),
         }
+        node.validate_structure().unwrap();
     }
 }
