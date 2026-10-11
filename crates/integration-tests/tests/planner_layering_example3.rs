@@ -158,13 +158,17 @@ fn stage1_a_keeps_five_independent_klls() {
     assert_eq!(sizes.len(), 1, "one ε, one KLL size: {sizes:?}");
 }
 
-/// The identical-expression rule shares only raw input (scan, range, shift), never a quantile or summary, and keeps the unshared variant.
+/// The identical-expression rule shares only raw input (scan, range, shift), never a quantile or summary, and keeps the unshared variant. (The shared-segment candidate shares its segments; see below.)
 #[test]
 fn stage1_a_identical_expression_rule_shares_only_raw_input() {
     let run = run_a();
     assert!(run.logical.iter().any(|c| c.shared_input));
     assert!(run.logical.iter().any(|c| !c.shared_input));
-    for c in &run.logical {
+    for c in run
+        .logical
+        .iter()
+        .filter(|c| !shares_segments(&c.dag, &c.query_roots))
+    {
         for id in cross_query_nodes(&c.dag, &c.query_roots) {
             let kind = relational(c.dag.payload(id));
             assert!(
@@ -176,24 +180,35 @@ fn stage1_a_identical_expression_rule_shares_only_raw_input() {
     }
 }
 
-/// One Exponential Histogram of KLLs over [T − 5y, T] serves all five queries, each through its own merge and p99 estimate.
+/// The windows' boundaries lie on a 1-year grid, so one set of five 1-year
+/// KLL segments over [T − 5y, T] serves all five queries (Q60, in place of
+/// the spec's Exponential Histogram): each query merges the segments its
+/// range covers and estimates p99 from its merge.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram"]
-fn stage1_a_window_composition_adds_one_eh_for_all_five() {
+fn stage1_a_shared_segments_serve_all_five() {
     let run = run_a();
-    let found = run.logical.iter().find(|c| {
-        windowed_builds(c).iter().any(|(_, a, form, readers)| {
-            *a == SketchAlgorithm::Kll
-                && matches!(form, WindowForm::ExponentialHistogram { horizon_ms } if *horizon_ms >= 5 * YEAR_MS)
-                && readers.len() == 5
-        })
-    });
-    let c = found.expect("a candidate with one EH of KLLs read by all five queries");
-    let (eh, ..) = windowed_builds(c)
-        .into_iter()
-        .find(|(_, _, form, _)| matches!(form, WindowForm::ExponentialHistogram { .. }))
-        .unwrap();
-    let estimates = estimates_of(&c.dag, eh);
+    let c = run
+        .logical
+        .iter()
+        .find(|c| shares_segments(&c.dag, &c.query_roots))
+        .expect("a candidate sharing window segments");
+    let segments = windowed_builds(c);
+    assert_eq!(segments.len(), 5, "{}", c.id);
+    for (_, algorithm, form, _) in &segments {
+        assert_eq!(*algorithm, SketchAlgorithm::Kll);
+        assert_eq!(*form, WindowForm::Tumbling { length_ms: YEAR_MS });
+    }
+    let read: BTreeSet<usize> = segments.iter().flat_map(|(.., r)| r.clone()).collect();
+    assert_eq!(read, (0..5).collect());
+    // Each query merges as many segments as its range has years.
+    for (q, (_, lookback, _)) in PATTERN_A.iter().enumerate() {
+        let covering = segments.iter().filter(|(.., r)| r.contains(&q)).count() as u64;
+        assert_eq!(covering, lookback / YEAR_MS, "q{}", q + 1);
+    }
+    let estimates: std::collections::BTreeMap<_, _> = segments
+        .iter()
+        .flat_map(|(build, ..)| estimates_of(&c.dag, *build))
+        .collect();
     assert_eq!(estimates.len(), 5, "one estimate per query");
     for (estimate, statistic) in estimates {
         assert_eq!(statistic, SketchStatistic::Quantile { q: 0.99 });
@@ -211,16 +226,14 @@ fn stage1_a_window_composition_adds_one_eh_for_all_five() {
     }
 }
 
-/// The shared EH candidate is added next to the independent KLL candidates, not instead of them.
+/// The shared-segment candidate is added next to the independent KLL candidates, not instead of them.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): Exponential Histogram"]
 fn stage1_a_keeps_independent_and_shared_window_summaries() {
     let run = run_a();
-    let shared = run.logical.iter().any(|c| {
-        windowed_builds(c).iter().any(|(_, _, f, r)| {
-            matches!(f, WindowForm::ExponentialHistogram { .. }) && r.len() == 5
-        })
-    });
+    let shared = run
+        .logical
+        .iter()
+        .any(|c| shares_segments(&c.dag, &c.query_roots));
     let independent = run.logical.iter().any(|c| {
         let builds = windowed_builds(c);
         builds.len() == 5
@@ -233,7 +246,7 @@ fn stage1_a_keeps_independent_and_shared_window_summaries() {
 
 /// Pass 2 adds a candidate for each way of grouping two queries onto one shared window summary.
 #[test]
-#[ignore = "needs Pass 2 window composition (#580): partial groupings"]
+#[ignore = "partial and pairwise groupings are not generated, only all-shared segments (Q62)"]
 fn stage1_a_window_composition_groups_every_pair() {
     let run = run_a();
     let groups: BTreeSet<_> = run
@@ -282,7 +295,11 @@ fn stage3_a_shared_scan_is_not_costlier() {
     };
     let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);
     let mut compared = 0;
-    for shared in run.logical.iter().filter(|c| c.shared_input) {
+    for shared in run
+        .logical
+        .iter()
+        .filter(|c| c.shared_input && !shares_segments(&c.dag, &c.query_roots))
+    {
         let separate = run
             .logical
             .iter()
