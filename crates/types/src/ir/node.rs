@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
-use super::summary_coverage::{CoverageError, SummaryCoverage};
+use super::summary_coverage::SummaryCoverage;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
@@ -100,8 +100,6 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
-    #[serde(default)]
-    pub coverage: Option<SummaryCoverage>,
 }
 
 impl OperatorNode {
@@ -110,7 +108,9 @@ impl OperatorNode {
     /// ASAP operator, ...).
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
-        Ok(Self::with_schema(operator, schema))
+        let node = Self::with_schema(operator, schema);
+        node.check_merge()?;
+        Ok(node)
     }
 
     /// Build a node with caller-supplied output names and qualifiers. For
@@ -124,7 +124,6 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
-            coverage: None,
         }
     }
 
@@ -145,23 +144,20 @@ impl OperatorNode {
         self
     }
 
-    /// Attach caller-established coverage. Required on summary nodes; see
-    /// [`Self::requires_coverage`].
-    pub fn with_coverage(
-        mut self,
-        coverage: SummaryCoverage,
-    ) -> Result<Self, SchemaDerivationError> {
-        coverage.validate()?;
-        if self.result_kind != OperatorResultKind::State {
-            return Err(CoverageError::NotState.into());
-        }
-        self.coverage = Some(coverage);
-        Ok(self)
+    /// What this summary state covers; `None` for a node that is not a
+    /// `SummaryAgg` or a valid `SummaryMerge`. Derived on each call, since
+    /// the public fields can be edited in place.
+    pub fn coverage(&self) -> Option<SummaryCoverage> {
+        SummaryCoverage::derive(self).ok()
     }
 
-    /// Summary nodes whose state can be composed must declare coverage.
-    pub fn requires_coverage(&self) -> bool {
-        matches!(self.asap(), Some(ASAPOp::SummaryAgg { .. }))
+    /// A `SummaryMerge` is valid only over inputs with the same definition
+    /// and disjoint selections.
+    fn check_merge(&self) -> Result<(), SchemaDerivationError> {
+        if matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. })) {
+            SummaryCoverage::derive(self)?;
+        }
+        Ok(())
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -315,14 +311,8 @@ impl OperatorNode {
                     "invalid time or identity column in schema".into(),
                 ));
             }
-            match &node.coverage {
-                Some(coverage) => {
-                    (*node.as_ref()).clone().with_coverage(coverage.clone())?;
-                }
-                None if node.requires_coverage() => return Err(CoverageError::Missing.into()),
-                None => {}
-            }
             node.operator.validate_inputs()?;
+            node.check_merge()?;
             if node.result_kind != node.operator.output_kind() {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
                     "retained result kind disagrees with operation".into(),

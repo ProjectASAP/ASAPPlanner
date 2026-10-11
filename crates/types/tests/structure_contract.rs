@@ -13,19 +13,6 @@ fn scan() -> Rc<OperatorNode> {
     }))
     .unwrap()
 }
-/// Tabular coverage for a whole-table summary.
-fn whole_table() -> asap_types::ir::summary_coverage::SummaryCoverage {
-    use asap_types::ir::summary_coverage::{CoverageRegion, SummaryCoverage};
-    SummaryCoverage {
-        source: Source::Table {
-            table_ref: "t".into(),
-        },
-        regions: vec![CoverageRegion {
-            time_ms: None,
-            population: Default::default(),
-        }],
-    }
-}
 /// Resolved filters cannot hide invalid scalar types or out-of-scope columns.
 #[test]
 fn invalid_predicates_are_rejected() {
@@ -116,8 +103,6 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
             grouping: GroupingStrategy::default(),
             filter: None,
         }))
-        .unwrap()
-        .with_coverage(whole_table())
         .unwrap(),
     );
     state.validate_structure().unwrap();
@@ -197,8 +182,6 @@ fn shared_construction_derives_both_operator_categories() {
             grouping: GroupingStrategy::default(),
             filter: None,
         }))
-        .unwrap()
-        .with_coverage(whole_table())
         .unwrap(),
     );
     assert_eq!(state.result_kind, OperatorResultKind::State);
