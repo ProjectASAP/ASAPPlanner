@@ -38,13 +38,13 @@ or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
 | `Rc<QueryExpr>` (pre-ASAP) | `Rc<OperatorNode>` holding `Operator::NonASAP(NonASAPOp)` |
 | `Rc<SummaryNode>` / `SummaryExpr` (post-ASAP) | The same `Rc<OperatorNode>`; summary steps are `Operator::ASAP(ASAPOp)` |
 | `SummaryExpr::KeepPreAsap(q)` | The non-ASAP sub-DAG itself; `retain_exact` only adds an exact `guarantee` |
-| `SummaryExpr::ValueOperation { .. }` over a evaluation | An ordinary `NonASAPOp` (`Project`, `Filter`, `Sort`, `Limit`, `Aggregate`) reading an ASAP node; `FinalizeExactAccumulator`, `MaintainPopulation`, `EvaluatePopulation` are `ASAPOp` variants |
+| `SummaryExpr::ValueOperation { .. }` over an evaluation | An ordinary `NonASAPOp` (`Project`, `Filter`, `Sort`, `Limit`, `Aggregate`) reading an ASAP node; `FinalizeExactAccumulator`, `MaintainPopulation`, `EvaluatePopulation` are `ASAPOp` variants |
 | `Replacement::Summary(..)` / `Replacement::Rewrite(..)` | `Replacement::SubDAG(Rc<OperatorNode>)`; `is_logical_rewrite` tells them apart |
 | `SummaryFamilyType` | `FieldDataType` (its non-`Plain` variants) |
 | Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_lifecycle_timings` writes it from a `LifecycleAssignment` |
 | `UnresolvedQueryExpr` + `asap_types::pre_asap::resolve_root` | `UnresolvedOp` / `UnresolvedScalar` + `asap_frontend_common::resolve_root` |
 | `pre_asap::canonicalize`, `pre_asap::cse::share_common_sub_dags` | `ir::canonicalize::canonicalize`, `ir::cse::share_common_sub_dags` |
-| `asap_types::post_asap::compile_post_asap_dag` (wire version 5, `Fallback`/`Binary`/`Value` payloads) | `asap_types::ir::export::compile_post_asap_dag` (wire version 7: one node per operator, `Relational` payloads, `ScalarRef` edges); input must be timed |
+| `asap_types::post_asap::compile_post_asap_dag` (wire version 5, `Fallback`/`Binary`/`Value` payloads) | `asap_types::ir::physical_export::compile_physical_asap_dag` (`PhysicalASAPDAG`, wire version 8: one node per operator, `Operator<NodeId>` payloads, `ScalarRef` edges); input must be timed |
 | Exported schema JSON `columns` | `fields` |
 
 Field and schema details: [Pre-ASAP IR](pre-asap-ir.md) and

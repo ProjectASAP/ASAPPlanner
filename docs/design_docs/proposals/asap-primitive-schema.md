@@ -1300,7 +1300,7 @@ pub enum PopulationStatistic {
     Sum, Count, Average,
 }
 /// A population kept in full (§5.4).
-pub struct MaintainedPopulation<N = QueryExpr> {
+pub struct MaintainedPopulation<N = OperatorNode> {
     /// Which rows or series the population contains.
     pub input: PopulationInput<N>,
     /// The largest `k` a `TopK` read may ask for.
@@ -1308,7 +1308,7 @@ pub struct MaintainedPopulation<N = QueryExpr> {
     /// Whether `Quantile` reads are supported.
     pub quantiles: bool,
 }
-pub enum PopulationInput<N = QueryExpr> {
+pub enum PopulationInput<N = OperatorNode> {
     /// The current value of each PromQL series (see `CurrentSeriesInput`).
     CurrentSeries(CurrentSeriesInput),
     /// Rows of a table. `input`: the table `Scan` node. `value_column`: the

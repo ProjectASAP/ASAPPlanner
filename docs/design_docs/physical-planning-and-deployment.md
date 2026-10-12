@@ -28,11 +28,10 @@ implementation library. Deployment systems such as ASAPQuery and asap-fusion
 own deployment compilation and operation. The lifecycle is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
-The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG (`QueryExpr`), the
+The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG, the
 language-independent query semantics before summary selection. Both are
-logical. Planning builds Post-ASAP `SummaryNode` DAGs; `compile_post_asap_dag`
-exports the selected DAG as a `PostAsapDAG`, which is the Physical Plan
-Compiler's input. Its per-node execution phase (ingestion or query time) is
+logical `OperatorNode` DAGs. `compile_physical_asap_dag` exports the selected
+DAG as a `PhysicalASAPDAG`, which is the Physical Plan Compiler's input. Its per-node execution phase (ingestion or query time) is
 decided by the selected summary maintenance lifecycle, as the layer contract
 below states.
 
@@ -139,7 +138,7 @@ readiness; those require runtime checks. Physical location, encoding, scheduling
 and retention are separate execution/deployment contracts.
 
 Persisted semantic identity, its wire format and any tenant or dataset binding
-belong to the deployment. Planner provides the typed `PostAsapDAG` that a
+belong to the deployment. Planner provides the typed `PhysicalASAPDAG` that a
 deployment canonicalizes; it does not define a stored-definition format.
 
 ### Running example
@@ -307,7 +306,7 @@ The **Physical Plan Compiler** consumes both computation semantics and maintenan
 requirements:
 
 ```text
-Logical Post-ASAP DAG (PostAsapDAG)
+Timed Post-ASAP DAG (PhysicalASAPDAG)
 + Summary Maintenance Lifecycle
 + physical capabilities
         ↓

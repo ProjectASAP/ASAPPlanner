@@ -219,17 +219,11 @@ def _semantic_label(node: dict, input_schema: object = None) -> str:
         lines.append(f"query: {_compact(detail.get('query'))}")
     elif kind == "SummaryDelete":
         lines.append(f"key: {_compact(detail.get('key'))}")
-    elif kind == "KeepPreAsap":
-        nested = detail.get("pre_asap_sub_dag")
-        nested_nodes = nested.get("nodes", []) if isinstance(nested, dict) else []
-        nested_root = nested.get("root") if isinstance(nested, dict) else None
-        root = next((item for item in nested_nodes if item.get("id") == nested_root), None)
-        lines.append(f"unchanged: {root.get('kind', 'pre-ASAP sub-DAG') if root else 'pre-ASAP sub-DAG'}")
     else:
         # Less common variants still show their own scalar IR fields. Avoid
-        # schema/sub-DAG blobs, which belong in the click-to-inspect panel.
+        # the schema blob, which belongs in the click-to-inspect panel.
         for key, value in detail.items():
-            if key not in {"schema", "pre_asap_sub_dag"} and value not in (None, [], {}):
+            if key != "schema" and value not in (None, [], {}):
                 lines.append(f"{key}: {_compact(value)}")
 
     return _bounded_lines(lines)
@@ -251,8 +245,6 @@ def prepare_workload(workload: dict) -> dict:
                 else None
             )
             node["label"] = _semantic_label(node, input_schema)
-            nested = (node.get("detail") or {}).get("pre_asap_sub_dag")
-            prepare_dag(nested)
 
     for query in prepared.get("queries", []):
         prepare_dag(query.get("dag"))

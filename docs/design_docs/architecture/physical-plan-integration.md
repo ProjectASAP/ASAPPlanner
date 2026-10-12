@@ -60,7 +60,7 @@ Examples include:
   supported join algorithm.
 - `SummaryAgg` may lower to an exact accumulator build, CMS build, KLL build,
   or another physical summary algorithm selected by the candidate.
-- `SummaryEstimate` must lower to a evaluation operator compatible with the
+- `SummaryEstimate` must lower to an evaluation operator compatible with the
   concrete summary state it consumes.
 - shared logical sub-DAGs become shared physical nodes only when they refer to
   the same physical identity and compatible evidence.
@@ -113,7 +113,7 @@ explicit physical realization:
 | `MaintainPopulation` / `EvaluatePopulation` | maintained-population update and its aggregate or TopK-prefix evaluation |
 | retained `NonASAPOp` sub-DAG | recursive lowering of the exact operators (see above) |
 | `BinaryOp` | binary evaluation preserving operand order, the node's execution timing and any typed finite/relative-division guard |
-| `Project` / `Filter` / `Sort` / `Limit` / `Aggregate` over a evaluation | concrete realization at the node's execution timing and data state |
+| `Project` / `Filter` / `Sort` / `Limit` / `Aggregate` over an evaluation | concrete realization at the node's execution timing and data state |
 | `Join` | concrete row-join algorithm preserving join kind and predicate |
 | `Join` with `JoinKind::Semi` | retain left rows matching explicit right-side keys; candidate pruning carries completeness evidence and ordinary TopK ranks the result |
 

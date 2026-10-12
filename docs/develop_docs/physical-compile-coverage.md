@@ -6,12 +6,12 @@ Audience: developers moving computation from ASAPQuery-backend into
 ## Contract
 
 Logical selection decides what to compute. The maintenance lifecycle sets node
-timing. `physical_planner::compile` turns a timed `PostAsapDAG` into physical
+timing. `physical_planner::compile` turns a timed `PhysicalASAPDAG` into physical
 operator DAGs. The backend owns ingestion, panes, storage, stored-state
 evaluation, external exact engines, pricing/selection, and execution scheduling.
 
 A backend lowering is *covered* when `compile` accepts the corresponding
-`PostAsapDAG` node and produces operators with the same result. The backend
+`PhysicalASAPDAG` node and produces operators with the same result. The backend
 should then pass the timed DAG and its input contracts to `compile`. It should
 not rebuild operator choices from PromQL text or construct operators itself.
 

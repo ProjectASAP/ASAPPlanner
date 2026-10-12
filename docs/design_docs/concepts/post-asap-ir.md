@@ -44,11 +44,14 @@ Implemented:
   population, including membership changes.
 - `EvaluatePopulation { child, evaluation }`: read an aggregate or TopK prefix from a
   maintained population.
+- `SummaryMerge { children }`: merge summary states with identical schemas
+  (same family, parameters and grouping) into the state of their union; its
+  coverage check rejects inputs whose selections overlap. The timing pass does
+  not place it yet (`ExecutionDataStateError::UnimplementedOperator`).
 
-Reserved (migrated but unimplemented; schema derivation, timing and export
-reject them with `UNIMPLEMENTED_ASAP_OP`):
+Reserved (migrated but unimplemented; schema derivation rejects them with
+`UNIMPLEMENTED_ASAP_OP` and the timing pass with `UnimplementedOperator`):
 
-- `SummaryMerge`: merge compatible summary states when the family supports merging.
 - `SummarySubtract`: subtract one summary state from another when supported by
   the selected representation.
 - `SummaryDelete`: delete a key from summary state when the representation supports
@@ -78,7 +81,7 @@ Exact work is represented by the ordinary operators, unchanged:
   its typed division guards (`checked_finite_division`,
   `checked_relative_division`); the operator's timing comes from the lifecycle
   assignment, not from the operator.
-- Aggregate, projection, filter, sort and limit over a evaluation are the ordinary
+- Aggregate, projection, filter, sort and limit over an evaluation are the ordinary
   `Aggregate`, `Project`, `Filter`, `Sort` and `Limit` operators reading an ASAP
   node. Exact-accumulator state may pass through the projection-like
   operators unchanged; a value consumer needs a `FinalizeExactAccumulator`
@@ -116,14 +119,14 @@ timing into every node, top-down:
 - a node of fixed kind takes its kind's timing — `SummaryEstimate` and
   `EvaluatePopulation` run at query time, `MaintainPopulation` at ingestion time;
 - a `SummaryAgg` takes the assignment's timing, unless something below it can
-  only exist at query time (a evaluation);
+  only exist at query time (an evaluation);
 - every other node runs when its consumer runs: everything that feeds a
-  maintained state runs at ingestion time, everything above a evaluation at
+  maintained state runs at ingestion time, everything above an evaluation at
   query time.
 
 The pass then validates every edge (rows or exact-accumulator state into a
-`SummaryAgg`, state into a evaluation, an ingestion-time `MaintainPopulation` under
-a `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a
+`SummaryAgg`, state into an evaluation, an ingestion-time `MaintainPopulation` under
+an `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a
 node reached from two consumers that need different timings;
 `split_shared_by_phase` copies such a sub-DAG for one side before the
 assignment is applied. `validate_default` and `planned_data_state` answer the
@@ -134,20 +137,19 @@ same questions for a candidate at planning time without keeping anything.
 The pre-ASAP DAG and the post-ASAP DAG are both logical: they describe what is
 computed, not which physical operators execute it. Planning builds and shares
 `OperatorNode` trees;
-[`asap_types::ir::export::compile_post_asap_dag`](../../../crates/types/src/ir/export.rs)
-converts a selected, timed tree into a `PostAsapDAG` with stable node IDs and
-typed edges, and `PostAsapDAGDocument` is its versioned wire envelope
-(`schema_version` = `POST_ASAP_DAG_WIRE_VERSION`, currently 6). Physical
-compilation consumes `PostAsapDAG` and produces a separate physical DAG.
+[`asap_types::ir::physical_export::compile_physical_asap_dag`](../../../crates/types/src/ir/physical_export.rs)
+converts a selected, timed tree into a `PhysicalASAPDAG` with stable node IDs
+and typed edges (`compile_physical_asap_workload` does the same for a batch,
+with one root per query), and `PhysicalASAPDAGDocument` is its versioned wire
+envelope (`schema_version` = `PHYSICAL_ASAP_DAG_WIRE_VERSION`, currently 8).
+Physical compilation consumes `PhysicalASAPDAG` and produces a separate
+physical DAG.
 
-Wire version 7 emits **one node per operator** — relational operators
-included — with children as edges and no embedded sub-DAGs:
+The DAG has **one node per operator** — relational operators included — with
+children as edges and no embedded sub-DAGs:
 
-- A non-ASAP node is a `Relational { operator: NonASAPOpKind }` payload:
-  the operator's own fields with scalar expressions mirrored as
-  `WireScalarExpr`, children removed. An ASAP node's payload is its variant
-  (`SummaryAgg`, `SummaryEstimate`, `FinalizeExactAccumulator`,
-  `MaintainPopulation`, `EvaluatePopulation`, …).
+- A node's payload is its `Operator<NodeId>`: the same `NonASAPOp` or `ASAPOp`
+  variant as in the IR, with each child replaced by its node ID.
 - Edges carry a role: `Input`, `Left`/`Right` for the two sides of a `Join`,
   `SetOp`, `BinaryOp`, `SummarySubtract` or `SummaryJoin`, and `ScalarRef`
   when the consumer reads the producer from inside one of its scalar
@@ -159,8 +161,8 @@ included — with children as edges and no embedded sub-DAGs:
   (`ExecutionDataStateError::UntimedNode`); it does not re-run data-state
   validation.
 
-Phase is stored on the `PostAsapDAG` node, independently of its payload.
-`PostAsapDAG::with_execution_phases` reassigns a phase to every node and
+Phase is stored on the `PhysicalASAPDAG` node, independently of its payload.
+`PhysicalASAPDAG::with_execution_phases` reassigns a phase to every node and
 updates its edges; ingestion work cannot depend on a future query result.
 Deployments must separately check that they have an implementation and a
 valid data source for the chosen placement.
