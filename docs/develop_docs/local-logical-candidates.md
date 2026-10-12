@@ -6,34 +6,90 @@ ASAP optimization in [planner layering](../design_docs/proposals/planner-layerin
 
 `enumerate_local_logical_candidates(roots)` returns a `LocalLogicalCandidates`
 inventory containing the original named roots and one `LocalLogicalTarget` per
-reachable single-measure aggregate. Discovery includes operator producers read by
+eligible aggregate measure. Discovery includes operator producers read by
 scalar roots and expressions. Pointer identity prevents repeated discovery of one
-shared producer. Inputs with assigned execution timing are rejected.
+shared producer. Inputs with assigned execution timing or ASAP operators are
+rejected: the input `LogicalDAG` contains no ASAP summary choices.
+
+## Eligibility
+
+A target is one measure of an `Aggregate` whose intent has a realization besides
+exact execution: an exact accumulator state, a summary family or a rewrite rule.
+Each measure of a multi-measure aggregate is its own target, identified by the
+aggregate node and the measure index. A measure with no such realization (for
+example `stddev`) is not a target and keeps exact execution.
 
 Each target retains its original operator, including grouping, filter and input
-context, and has an unranked list of existing `Realization` descriptors:
+context, and has an unranked list of `LocalCandidate` descriptors:
 
-- Exact execution of the original sub-DAG is always retained as `PassThrough`.
-- Mergeable exact intents also offer their exact accumulator kind and parameters.
-- Approximate-capable intents offer all declared specialized/universal sketch
-  algorithms with nominal dimensions from the built-in sizing contracts.
-- Exact accuracy requests do not acquire approximate alternatives. Distinct-tuple
-  counts do not acquire single-value UnivMon alternatives.
+- Each target has exactly one exact option, listed first. A mergeable exact
+  intent (`count`, `sum`, `min`, `max`, `rate`, `irate`, `increase`) offers
+  its exact accumulator kind and parameters (`ExactAccumulator`); `avg` offers
+  `AvgAsSumCount` (below). Plain exact execution of the original sub-DAG
+  (`Exact`) is offered only when the intent has no exact accumulator form or
+  that form is pruned. The plain form would duplicate "accumulator, not
+  materialized", which is the raw plan for such targets; Stage 2/3 decide
+  materialization and sharing.
+- Approximate-capable intents offer all declared specialized/universal summary
+  algorithms. Summary candidates are unsized: Pass 2 may share a summary and
+  tighten it to the strictest consumer, so it is sized for the accuracy
+  requirement later.
+- `avg` is rewritten as exact `sum` and `count` accumulator states
+  (`AvgAsSumCount`). `avg` carries no approximate accuracy requirement, so no
+  summary family applies to its components.
+
+A measure filter or `HAVING` does not limit a target to its exact option;
+the target keeps every candidate and records how the predicate is applied:
+
+- A measure's own filter is recorded as `LocalLogicalTarget.filter`; only
+  rows that pass it update the state (`SummaryAgg.filter`).
+- `HAVING` is recorded as `LocalLogicalTarget.having`. The SQL frontend lowers
+  `HAVING` to a `Filter` directly above the aggregate, so that `Filter` counts,
+  as does the aggregate's own `having`. A predicate that reads only `by(...)`
+  group keys is `HavingPlacement::BelowAggregate`: it is pushed below the
+  aggregate as a row predicate, like a measure filter. A predicate that reads
+  aggregate values is `HavingPlacement::AboveOutput`: it stays a `Filter`
+  above the finalize/estimate output, and approximate candidates of the
+  target carry `guarantee = None`, since membership near the threshold may
+  change. When several such filters read one shared aggregate,
+  `AboveOutput` wins.
 
 For example, an approximate single-column distinct count offers exact execution,
-HLL, Theta, KMV and UnivMon. These are candidate choices, not assessed accuracy
+HLL, Theta, KMV and UnivMon; an approximate `count` offers its exact `Count`
+accumulator, CMS, Count Sketch and UnivMon, but not plain `Exact`. These are candidate choices, not assessed accuracy
 certificates. Catalog order is stable and has no cost/preference meaning.
+
+## Pruning
+
+Every pruned candidate is recorded on its target with a `PruneReason`:
+
+- `RequiresExact`: an exact accuracy request does not acquire approximate
+  summaries.
+- `NullableAvgInput`: `count` counts rows, so `avg` over a possibly-null input
+  is not rewritten.
+
+When the exact accumulator form (`ExactAccumulator` or `AvgAsSumCount`) is
+pruned, it stays in the pruned list with its reason and plain `Exact` becomes
+the target's one exact option.
+
+Distinct-tuple counts do not acquire single-value UnivMon alternatives; that
+family is not declared for them, so it is not a pruned candidate.
+
+## Scope
 
 The API accepts no empirical cost or accuracy model, runtime capabilities, storage
 policy or materialization assignment. It does not rank, select, construct runtime
-state or claim physical feasibility. Pass 2 must compose and structurally validate
-replacement sub-DAGs and retain independent/shared alternatives before physical
-planning and complete workload selection. The descriptors are not executable
-plans, and callers must not execute the first choice as a selection policy.
+state or claim physical feasibility. Composing each candidate into a replacement
+sub-DAG, including applying measure filters and `HAVING` as recorded on the
+target, and validating its structure is still Pass 1 work, done later when
+candidates are realized (#575); Pass 2 then retains independent and shared
+alternatives before physical planning and complete workload selection. The
+descriptors are not
+executable plans, and callers must not execute the first choice as a selection
+policy.
 
-Multi-measure aggregates remain intact in the roots until an explicit semantic
-split is supported. Opaque deployment extensions retain exact execution here;
-additional local alternatives require an explicit logical rule rather than a cost
-model making a generation decision. The legacy ranked search remains available
-for the existing pipeline until its later cutover; this module supplies the new
-logical-only entry point without changing production selection prematurely.
+Opaque deployment extensions retain exact execution here; additional local
+alternatives require an explicit logical rule rather than a cost model making a
+generation decision. The legacy ranked search remains available for the existing
+pipeline until its later cutover; this module supplies the new logical-only entry
+point without changing production selection prematurely.
