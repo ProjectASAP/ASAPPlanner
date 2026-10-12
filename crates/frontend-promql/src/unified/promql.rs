@@ -24,7 +24,7 @@
 //! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
 //! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
 //! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
-//! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
+//! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | **rejected** — native histogram samples have no IR representation, and `histogram_fraction` over classic `_bucket` series is not lowered (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
 //! | `topk(k, <non-count expr>)` / `bottomk(k, <any expr>)` | `Sort{value} → Limit{k}` over the fully-lowered argument |
@@ -581,6 +581,23 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<Unresolved> {
     let (keys, without) = resolve_group(agg)?;
     let outer = outer_kind(agg)?;
 
+    // `topk`/`bottomk`/`limitk` with k < 1 return an empty vector in
+    // Prometheus: an empty `Limit` over the argument.
+    if matches!(
+        outer,
+        Outer::TopK { k: 0, .. }
+            | Outer::Sample {
+                kind: SampleKind::LimitK(0)
+            }
+    ) {
+        return Ok(Unresolved::Limit {
+            n: Some(0),
+            offset: 0,
+            partition_by: GroupKeys::none(),
+            child: Rc::new(walk(&agg.expr)?),
+        });
+    }
+
     // `without(...)` grouping is modelled only for the reducing aggregations
     // (sum/avg/count/…), whose grouping lives on an `Aggregate` node. `topk`/
     // `bottomk` (→ `Sort.partition_by`) and `limitk`/`limit_ratio` (→ `PromqlSeriesSample`)
@@ -812,10 +829,7 @@ fn ranked_by_value(
 /// becomes [`classic_histogram_quantile`]; a native histogram or raw samples
 /// become a `Quantile` over the whole argument.
 /// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
-/// `stdvar`/`fraction`) each extract one float per series, lowering to a
-/// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
-/// `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and the
-/// vector from arg 2; the rest take the vector at arg 0.
+/// `stdvar`) and `histogram_fraction` (native or classic buckets) are rejected.
 fn walk_histogram(call: &Call) -> Result<Unresolved> {
     if call.func.name == "histogram_quantiles" {
         return walk_histogram_quantiles(call);
@@ -840,6 +854,12 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
             accuracy: current_accuracy(),
         };
         return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
+    }
+    if call.func.name == "histogram_fraction" {
+        return Err(LoweringError::UnsupportedFeature(
+            "histogram_fraction is not lowered, over native histograms or classic `_bucket` series"
+                .into(),
+        ));
     }
     Err(LoweringError::UnsupportedFeature(
         "native histogram samples have no IR representation".into(),
@@ -893,7 +913,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let sketchable = histogram_arg_is_sketchable(vec_expr)?;
     let branches = (2..call.args.args.len())
         .map(|i| {
-            let phi = bounded_quantile_param(num_arg(call, i)?)?;
+            let phi = quantile_param(num_arg(call, i)?)?;
             let child = walk(vec_expr)?;
             // Each branch aliases its value column to "value" (not the
             // intent-keyed default) so `Concat` — which derives its schema
@@ -988,16 +1008,31 @@ fn is_time_fn(name: &str) -> bool {
     )
 }
 
-/// `timestamp(v)` and the calendar accessors → `Aggregate{[TimeFn(f)]}` over
-/// the argument vector, or over `PromqlVectorFromScalar(EvalTimestamp)` for the
-/// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
+/// `timestamp(<selector>)` → `Aggregate{[TimeFn(Timestamp)]}`; `timestamp` of
+/// any other expression → `PromqlMap{EvalTimestamp}`. The calendar accessors →
+/// `PromqlMap` over the argument vector, or over
+/// `PromqlVectorFromScalar(EvalTimestamp)` for the no-argument forms (`hour()`,
+/// `day_of_week()`, …). Issue #46.
 fn walk_time(call: &Call) -> Result<Unresolved> {
-    // timestamp() reads the selected sample's timestamp, not its value.
+    // timestamp() reads the selected sample's timestamp only for a plain
+    // (parenthesised) vector selector; any other argument yields new samples
+    // stamped at the evaluation time, as in Prometheus.
     if call.func.name == "timestamp" {
+        let mut v = arg(call, 0)?;
+        while let Expr::Paren(p) = v {
+            v = &p.expr;
+        }
+        if !matches!(v, Expr::VectorSelector(_)) {
+            return Ok(Unresolved::PromqlMap {
+                child: Rc::new(walk(v)?),
+                sample: Scalar::EvalTimestamp,
+                drop_metric_name: true,
+            });
+        }
         return Ok(outer_aggregate(
             vec![],
             AggIntent::TimeFn(TimeFunc::Timestamp),
-            walk(arg(call, 0)?)?,
+            walk(v)?,
         ));
     }
     let child = if call.args.args.is_empty() {
@@ -1173,12 +1208,8 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
             Ok(Unresolved::PromqlRelabel { dst, value, child })
         }
         "label_join" => {
-            // label_join(v, dst, sep, src_1, …, src_n) — needs ≥1 source label.
-            if call.args.args.len() < 4 {
-                return Err(LoweringError::MissingArgument(
-                    "label_join(v, dst, sep, src…) needs at least one source label".into(),
-                ));
-            }
+            // label_join(v, dst, sep, src_1, …, src_n). With no source labels
+            // the joined value is empty, which removes `dst` (Prometheus).
             let dst = str_arg(call, 1)?;
             let sep = str_arg(call, 2)?;
             let mut args = vec![Scalar::Literal(ScalarValue::Utf8(sep))];
@@ -2154,13 +2185,19 @@ fn num_expr(expr: &Expr) -> Result<f64> {
         // when every argument is itself a constant scalar — this is the only
         // form the intent algebra can hold (there is no scalar min/max node). A
         // non-constant argument (`min_of(step(), 1s)`) fails the recursive fold
-        // and propagates the error, so it stays rejected. `f64::min`/`max`
-        // ignore NaN, matching PromQL's `min`/`max` NaN semantics.
+        // and propagates the error, so it stays rejected. Like Go's
+        // `math.Min`/`Max`, any NaN argument makes the result NaN (`f64::min`/
+        // `max` would skip it).
         Expr::Call(c) if is_scalar_reducer_fn(c.func.name) => {
-            let reduce = if c.func.name == "min_of" {
-                f64::min
-            } else {
-                f64::max
+            let is_min = c.func.name == "min_of";
+            let reduce = |a: f64, b: f64| {
+                if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if is_min {
+                    a.min(b)
+                } else {
+                    a.max(b)
+                }
             };
             c.args
                 .args
@@ -2183,17 +2220,21 @@ fn is_scalar_reducer_fn(name: &str) -> bool {
     matches!(name, "min_of" | "max_of")
 }
 
-/// `topk`/`bottomk` count parameter — a non-negative integer. Rejects
-/// fractional / negative / non-finite values rather than silently truncating
-/// or saturating them via `as u64` (`topk(2.7, …)` ≠ `topk(2, …)`).
+/// `topk`/`bottomk`/`limitk` k parameter, as Prometheus reads it: truncated
+/// toward zero, with any `k < 1` selecting nothing (returned as 0). NaN and a
+/// k that overflows int64 are errors.
 fn count_param(agg: &AggregateExpr) -> Result<u64> {
+    // Prometheus's `maxInt64`: the largest float64 below 2^63.
+    const MAX_K: f64 = 9_223_372_036_854_774_784.0;
     let v = num_param(agg)?;
-    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= u64::MAX as f64 {
-        Ok(v as u64)
-    } else {
+    if v < 1.0 {
+        Ok(0)
+    } else if v.is_nan() || v >= MAX_K {
         Err(LoweringError::InvalidParameter(format!(
-            "topk/bottomk k must be a non-negative integer, got {v}"
+            "topk/bottomk/limitk k must be a number below 2^63, got {v}"
         )))
+    } else {
+        Ok(v as u64)
     }
 }
 
@@ -2215,17 +2256,6 @@ fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
 fn quantile_param(q: f64) -> Result<f64> {
     // Prometheus returns NaN/-Inf/+Inf for these parameters at execution time.
     Ok(q)
-}
-
-// The non-standard histogram_quantiles extension keeps its bounded label contract.
-fn bounded_quantile_param(q: f64) -> Result<f64> {
-    if q.is_finite() && (0.0..=1.0).contains(&q) {
-        Ok(q)
-    } else {
-        Err(LoweringError::InvalidParameter(format!(
-            "quantile φ must be in [0, 1], got {q}"
-        )))
-    }
 }
 
 fn binop(id: token::TokenId) -> Result<BinaryOpKind> {

@@ -1599,6 +1599,11 @@ fn native_histogram_accessors_are_explicit_gaps() {
 #[test]
 fn histogram_fraction_is_an_explicit_gap() {
     rejected("histogram_fraction(0, 0.2, v)");
+    // Over classic buckets the error names the unsupported function, not
+    // native histogram samples.
+    let e = rejected("histogram_fraction(0, 0.2, rate(m_bucket[5m]))").to_string();
+    assert!(e.contains("histogram_fraction"), "{e}");
+    assert!(e.contains("classic"), "{e}");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1729,6 +1734,32 @@ fn no_arg_calendar_function_reads_the_eval_time() {
     assert!(
         matches!(support::sample_expression(&query),ScalarExpr::FunctionCall { name,.. } if name=="promql_day_of_week")
     );
+}
+
+#[test]
+fn timestamp_of_a_non_selector_is_the_eval_time() {
+    // at_modifier.test: `timestamp(abs(metric @ 11))` returns each step's
+    // evaluation time, since `abs` builds new samples.
+    for q in ["timestamp(abs(metric @ 11))", "timestamp(-metric)"] {
+        let qe = ok(q);
+        assert!(
+            matches!(support::sample_expression(&qe), ScalarExpr::EvalTimestamp),
+            "{q}: {qe:?}"
+        );
+        assert!(!has(&qe, |i| *i == AggIntent::TimeFn(TimeFunc::Timestamp)));
+    }
+    // A plain selector — parenthesised, with `@` or `offset` — keeps the
+    // sample timestamp (`timestamp(metric @ 11)` is 10).
+    for q in [
+        "timestamp(metric @ 11)",
+        "timestamp(((metric)))",
+        "timestamp(metric offset 5m)",
+    ] {
+        assert!(
+            has(&ok(q), |i| *i == AggIntent::TimeFn(TimeFunc::Timestamp)),
+            "{q}"
+        );
+    }
 }
 
 #[test]
@@ -2058,6 +2089,25 @@ fn label_join_concatenates_source_labels() {
 }
 
 #[test]
+fn label_join_without_source_labels_empties_dst() {
+    // functions.test: `label_join(testmetric, "dst", ", ")` joins nothing, so
+    // `dst` is empty (removed) and the input is otherwise unchanged.
+    let qe = ok(r#"label_join(up, "dst", ", ")"#);
+    let NonASAPOp::PromqlRelabel { dst, value, .. } = qe.expect_non_asap() else {
+        panic!("expected a PromqlRelabel, got {qe:?}");
+    };
+    assert_eq!(dst, "dst");
+    let ScalarExpr::FunctionCall { name, args } = value else {
+        panic!("expected a label_join call, got {value:?}");
+    };
+    assert_eq!(name, "label_join");
+    assert!(
+        matches!(args.as_slice(), [ScalarExpr::Literal(ScalarValue::Utf8(sep))] if sep == ", "),
+        "only the separator: {args:?}"
+    );
+}
+
+#[test]
 fn label_replace_composes_under_an_aggregation() {
     // `sum by (host) (label_replace(up, "host", "$1", "instance", "(.+):.*"))` —
     // relabel first, then group by the synthesized label.
@@ -2185,16 +2235,17 @@ fn min_of_max_of_fold_constant_scalars() {
 }
 
 #[test]
-fn min_of_max_of_ignore_nan_like_the_min_max_aggregators() {
-    // A NaN argument is skipped (Prometheus `min`/`max` NaN semantics).
-    assert_eq!(
-        promql_scalar(&support::scalar_root("max_of(3, NaN)")),
-        Some(3.0)
-    );
-    assert_eq!(
-        promql_scalar(&support::scalar_root("min_of(NaN, 3)")),
-        Some(3.0)
-    );
+fn min_of_max_of_propagate_nan() {
+    // functions.test: any NaN argument yields NaN (Go's `math.Min`/`Max`).
+    for q in [
+        "min_of(NaN, 3)",
+        "min_of(3, NaN)",
+        "max_of(NaN, 3)",
+        "max_of(3, NaN)",
+    ] {
+        let v = promql_scalar(&support::scalar_root(q));
+        assert!(v.is_some_and(f64::is_nan), "{q} folded to {v:?}");
+    }
 }
 
 #[test]

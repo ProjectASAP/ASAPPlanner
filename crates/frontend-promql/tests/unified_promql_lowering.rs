@@ -980,10 +980,60 @@ fn without_grouping_lowers_to_the_exclusion_form() {
 // ── parameter validation (reject rather than silently truncate/garble) ──────────
 
 #[test]
-fn fractional_or_negative_topk_k_is_rejected() {
-    // `as u64` would silently truncate 2.7→2 / saturate -1→0.
-    assert!(lower_promql("topk(2.7, count_over_time(m[1m]))", AccuracyTarget::Exact).is_err());
-    assert!(lower_promql("bottomk(2.5, sum_over_time(m[1m]))", AccuracyTarget::Exact).is_err());
+fn fractional_topk_k_truncates_toward_zero() {
+    // Prometheus reads k as `int64(k)`: `topk(2.7, …)` is `topk(2, …)`.
+    let q = lower("topk(2.7, count_over_time(m[1m]))");
+    assert!(has_intent(&q, |i| matches!(
+        i,
+        AggIntent::TopK { k: 2, .. }
+    )));
+    let q = lower("bottomk(2.5, up)");
+    assert!(matches!(
+        q.expect_non_asap(),
+        NonASAPOp::Limit { n: Some(2), .. }
+    ));
+}
+
+#[test]
+fn topk_k_below_one_is_an_empty_limit() {
+    // limit.test: `limitk by (group) (0, …)` / `(-1, …)` return an empty vector;
+    // `topk`/`bottomk` share the same k handling (engine.go `k < 1`).
+    for q in [
+        "topk(0, up)",
+        "topk(0.5, count_over_time(m[1m]))",
+        "bottomk(-1, up)",
+        "limitk by (group) (0, http_requests)",
+        "limitk by (group) (-1, http_requests)",
+        "limitk(-Inf, http_requests)",
+    ] {
+        let root = lower(q);
+        let NonASAPOp::Limit {
+            n: Some(0), child, ..
+        } = root.expect_non_asap()
+        else {
+            panic!("{q}: expected an empty Limit, got {root:?}");
+        };
+        assert!(
+            !matches!(child.expect_non_asap(), NonASAPOp::Sort { .. }),
+            "{q}: nothing to rank"
+        );
+    }
+}
+
+#[test]
+fn nan_or_overflowing_topk_k_is_rejected() {
+    // engine.go: "Parameter value is NaN" / "Scalar value … overflows int64".
+    for q in [
+        "topk(NaN, up)",
+        "limitk(NaN, http_requests)",
+        "bottomk(1e19, up)",
+        "limitk(Inf, http_requests)",
+    ] {
+        assert!(
+            lower_promql(q, AccuracyTarget::Exact).is_err(),
+            "{q} should be rejected"
+        );
+    }
 }
 
 #[test]
@@ -1399,18 +1449,16 @@ fn histogram_quantiles_formats_small_quantiles_like_prometheus() {
 }
 
 #[test]
-fn histogram_quantiles_rejects_an_out_of_range_quantile() {
-    // Same rule as `histogram_quantile(φ, …)` — one bad φ fails the whole call.
-    for q in [
-        r#"histogram_quantiles(h_bucket, "q", -0.1)"#,
-        r#"histogram_quantiles(h_bucket, "q", 1.01)"#,
-        r#"histogram_quantiles(h_bucket, "q", 0.5, NaN)"#,
-    ] {
-        assert!(
-            lower_promql(q, AccuracyTarget::Exact).is_err(),
-            "{q} should be rejected"
-        );
-    }
+fn histogram_quantiles_accepts_an_out_of_range_quantile() {
+    // histograms.test: like `histogram_quantile(φ, …)`, φ outside [0, 1] or NaN
+    // yields -Inf / +Inf / NaN, and the label carries Prometheus's rendering.
+    let q = lower(r#"histogram_quantiles(h_bucket, "q", -0.1, 1.01, NaN)"#);
+    let branches = quantile_branches(&q);
+    let labels: Vec<&str> = branches.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(labels, ["-0.1", "1.01", "NaN"]);
+    assert!(matches!(branches[0].1, AggIntent::HistogramQuantile { q, .. } if q == -0.1));
+    assert!(matches!(branches[1].1, AggIntent::HistogramQuantile { q, .. } if q == 1.01));
+    assert!(matches!(branches[2].1, AggIntent::HistogramQuantile { q, .. } if q.is_nan()));
 }
 
 // ── TimeRange.kind: instant vs range selectors ──────────────────────────────────
