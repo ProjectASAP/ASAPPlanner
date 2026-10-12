@@ -11,6 +11,8 @@
 //!   time);
 //! - a `SummaryAgg` takes the assignment's timing (default: ingestion time),
 //!   unless something below it can only exist at query time;
+//! - a PromQL `BinaryOp` over per-series inputs that are not the same series
+//!   rows runs at query time, since maintenance cannot align them;
 //! - every other node runs when its consumer runs: everything that feeds a
 //!   maintained state runs at ingestion time, everything above a evaluation at
 //!   query time.
@@ -106,6 +108,8 @@ pub fn data_state(node: &OperatorNode) -> Option<ExecutionDataState> {
 /// Whether the sub-DAG below `node` contains a node that can only run at
 /// query time (an evaluation, or a summary state `assignment` recomputes at
 /// query time), which forces every consumer above it to query time as well.
+/// A PromQL `BinaryOp` whose inputs are not the same per-series rows also runs
+/// at query time.
 fn forces_query_time(
     node: &OperatorNode,
     assignment: &LifecycleAssignment,
