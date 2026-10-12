@@ -88,8 +88,8 @@ use asap_aware_mapping::physical_plan_cost_model::{
 };
 use asap_aware_mapping::query_physical_lowering::PhysicalNodeRequest;
 use asap_aware_mapping::replacement::{
-    default_strategies_with_evidence, is_logical_rewrite, search_workload, search_workload_with,
-    Replacement, ReplacementSubDAG,
+    default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
+    ReplacementSubDAG,
 };
 use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
@@ -226,10 +226,12 @@ impl CandidatePhysicalEvidence {
 
     fn matches(&self, candidate: &ReplacementSubDAG) -> bool {
         let actual = match (self, &candidate.replacement) {
-            (Self::Summary { .. }, Replacement::SubDAG(node)) if !is_logical_rewrite(node) => {
+            (Self::Summary { .. }, Replacement::SubDAG(node))
+                if !candidate.is_logical_rewrite() =>
+            {
                 serde_json::to_value(dag_export::export(node))
             }
-            (Self::Rewrite { .. }, Replacement::SubDAG(node)) if is_logical_rewrite(node) => {
+            (Self::Rewrite { .. }, Replacement::SubDAG(node)) if candidate.is_logical_rewrite() => {
                 serde_json::to_value(dag_export::export(node))
             }
             _ => return false,
@@ -1099,7 +1101,7 @@ fn target_replacement(
     let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
     let after = match &winner.candidate.replacement {
-        Replacement::SubDAG(node) if is_logical_rewrite(node) => {
+        Replacement::SubDAG(node) if winner.candidate.is_logical_rewrite() => {
             TargetReplacementAfter::Rewrite(dag_export::export(node))
         }
         Replacement::SubDAG(node) => TargetReplacementAfter::Summary(dag_export::export(node)),
@@ -1338,10 +1340,12 @@ fn run_post_asap_with_progress(
             benefit: Some(benefit),
         };
         Some(match &winners[i].candidate.replacement {
-            Replacement::SubDAG(rc) if is_logical_rewrite(rc) => PostAsapSubstitution::Rewrite {
-                replacement: Rc::clone(rc),
-                decision,
-            },
+            Replacement::SubDAG(rc) if winners[i].candidate.is_logical_rewrite() => {
+                PostAsapSubstitution::Rewrite {
+                    replacement: Rc::clone(rc),
+                    decision,
+                }
+            }
             Replacement::SubDAG(rc) => PostAsapSubstitution::Summary {
                 replacement: Rc::clone(rc),
                 decision,
@@ -2326,7 +2330,7 @@ mod tests {
                 target: query.clone(),
                 scope: test_scope(),
                 candidates: vec![match &candidate.replacement {
-                    Replacement::SubDAG(node) if !is_logical_rewrite(node) => {
+                    Replacement::SubDAG(_) if !candidate.is_logical_rewrite() => {
                         CandidatePhysicalEvidence::Summary {
                             plan,
                             query_nodes: query_evidence(&query),

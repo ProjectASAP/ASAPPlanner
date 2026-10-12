@@ -13,7 +13,7 @@ use asap_aware_mapping::accuracy::{
     QuantileInputDomain,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::replacement::{is_logical_rewrite, retain_exact, RealizationError};
+use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
     search_workload, search_workload_with_targets, ASAPStrategies, AccuracyModel, Replacement,
     ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
@@ -48,8 +48,9 @@ fn realize(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError
         // is not a binding, so it falls back to keeping the target.
         Some(ReplacementSubDAG {
             replacement: Replacement::SubDAG(node),
+            provenance,
             ..
-        }) if !is_logical_rewrite(&node) => Ok(node),
+        }) if !provenance.is_logical_rewrite() => Ok(node),
         _ => retain_exact(root),
     }
     .inspect(|node| {
@@ -1017,7 +1018,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     let Replacement::SubDAG(rewritten) = &candidate.replacement else {
         panic!("expected logical rewrite")
     };
-    assert!(is_logical_rewrite(rewritten), "expected logical rewrite");
+    assert!(candidate.is_logical_rewrite(), "expected logical rewrite");
 
     assert_eq!(rewritten.schema, original_schema);
     let Some(NonASAPOp::Project { child, .. }) = rewritten.non_asap() else {

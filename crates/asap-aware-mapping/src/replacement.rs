@@ -491,7 +491,8 @@ pub enum Replacement {
     /// realization of the target) or a pre-ASAP rewrite (a logical sub-DAG
     /// with no ASAP operator, structurally different from the target's own
     /// `root` — e.g. sharing vs. not sharing a sub-DAG — but semantically
-    /// equivalent to it). [`is_logical_rewrite`] tells the two apart.
+    /// equivalent to it). [`ReplacementSubDAG::is_logical_rewrite`] tells the
+    /// two apart.
     SubDAG(Rc<OperatorNode>),
     /// An exact operator composed over another target's *own* selected
     /// decision across an explicit update/evaluation boundary (issue #171):
@@ -504,13 +505,13 @@ pub enum Replacement {
     ExactComposition(ExactComposition),
 }
 
-/// Whether a [`Replacement::SubDAG`] is a pure logical rewrite: a sub-DAG
-/// with no ASAP operator and no guarantee established yet (the shape every
-/// front end emits and every rewrite strategy builds). A bound summary
-/// decision contains an ASAP operator, or is a kept pre-ASAP sub-DAG that
-/// already carries its exact guarantee.
-pub fn is_logical_rewrite(node: &OperatorNode) -> bool {
-    node.guarantee.is_none() && !node.contains_asap()
+impl ReplacementSubDAG {
+    /// Whether this candidate is a pure logical rewrite of its target rather
+    /// than a bound summary decision, as its [`ReplacementProvenance`]
+    /// records.
+    pub fn is_logical_rewrite(&self) -> bool {
+        matches!(self.replacement, Replacement::SubDAG(_)) && self.provenance.is_logical_rewrite()
+    }
 }
 
 /// One candidate replacement for a [`TargetSubDAG`], plus a human-readable
@@ -540,7 +541,7 @@ impl ReplacementSubDAG {
     pub fn has_missing_accuracy_evidence(&self) -> bool {
         matches!(
             &self.replacement,
-            Replacement::SubDAG(node) if !is_logical_rewrite(node) && has_missing_accuracy_evidence(node)
+            Replacement::SubDAG(node) if !self.is_logical_rewrite() && has_missing_accuracy_evidence(node)
         )
     }
 
@@ -554,7 +555,7 @@ impl ReplacementSubDAG {
             }
             // Any summary decision, including one rooted in a relational
             // operator above its evaluations, asks the deployment for support.
-            Replacement::SubDAG(node) if !is_logical_rewrite(node) => {
+            Replacement::SubDAG(node) if !self.is_logical_rewrite() => {
                 cost_model.summary_support_evidence(node)
             }
             Replacement::SubDAG(_) => Some(true),
@@ -594,6 +595,21 @@ pub enum ReplacementProvenance {
     /// commits it, because its evaluation must be validated and priced by
     /// deployment; otherwise it would silently replace the logical plan.
     RootPhysicalRealization,
+}
+
+impl ReplacementProvenance {
+    /// Whether a candidate of this origin is a pure logical rewrite of its
+    /// target (a structurally different, semantically equivalent sub-DAG
+    /// with no summary decision bound yet).
+    pub fn is_logical_rewrite(self) -> bool {
+        matches!(
+            self,
+            Self::LogicalRewrite
+                | Self::CseShare
+                | Self::CseRecompute
+                | Self::AccuracyReconciliation
+        )
+    }
 }
 
 /// A candidate a strategy considered for a target but refused to propose on
@@ -4004,7 +4020,7 @@ impl TargetSubDAGCandidates {
         let is_duplicate = self.candidates.iter().any(|existing| {
             match (&existing.replacement, &candidate.replacement) {
                 (Replacement::SubDAG(existing_rc), Replacement::SubDAG(rc))
-                    if is_logical_rewrite(existing_rc) && is_logical_rewrite(rc) =>
+                    if existing.is_logical_rewrite() && candidate.is_logical_rewrite() =>
                 {
                     is_duplicate_rewrite(existing_rc, rc, &self.target)
                 }
@@ -4144,7 +4160,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                         .flat_map(|g| &g.candidates)
                         .filter_map(|c| match &c.replacement {
                             Replacement::SubDAG(child)
-                                if !is_logical_rewrite(child) && operation.accepts_child(child) =>
+                                if !c.is_logical_rewrite() && operation.accepts_child(child) =>
                             {
                                 Some(Rc::clone(child))
                             }
@@ -4246,7 +4262,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
             if let Some(group) = self.groups.get(&ptr) {
                 for candidate in &group.candidates {
                     if let Replacement::SubDAG(rewritten) = &candidate.replacement {
-                        if is_logical_rewrite(rewritten) {
+                        if candidate.is_logical_rewrite() {
                             walk(rewritten, &mut reachable, &mut nodes, &mut counts);
                         }
                     }
@@ -5665,7 +5681,7 @@ fn composition_options<'a>(
                     let Replacement::SubDAG(summary) = &child_candidate.replacement else {
                         continue;
                     };
-                    if is_logical_rewrite(summary) || !composition.accepts_child(summary) {
+                    if child_candidate.is_logical_rewrite() || !composition.accepts_child(summary) {
                         continue;
                     }
                     let Some(prepared) = plans.iter().find(|p| {
@@ -6027,13 +6043,14 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                     *effective_uses.entry(Rc::as_ptr(source)).or_insert(0) += outgoing_multiplier;
                 }
                 _ => {
-                    let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
-                        Some(Replacement::SubDAG(rewrite)) if is_logical_rewrite(rewrite) => {
-                            rewrite
-                        }
-                        Some(Replacement::SubDAG(_) | Replacement::ExactComposition(_)) | None => {
-                            &group.target
-                        }
+                    let selected_rewrite = match chosen {
+                        Some(
+                            candidate @ ReplacementSubDAG {
+                                replacement: Replacement::SubDAG(rewrite),
+                                ..
+                            },
+                        ) if candidate.is_logical_rewrite() => rewrite,
+                        _ => &group.target,
                     };
                     for (child, edge_count) in direct_child_counts(selected_rewrite) {
                         *effective_uses.entry(child).or_insert(0) +=
@@ -6251,7 +6268,7 @@ fn reference_dag<Id>(space: &CandidateLogicalASAPDAGs<Id>) -> ReferenceDAG {
         record_possible_edges(*ptr, &group.target, &mut dag);
         for candidate in &group.candidates {
             if let Replacement::SubDAG(rewrite) = &candidate.replacement {
-                if !is_logical_rewrite(rewrite) {
+                if !candidate.is_logical_rewrite() {
                     continue;
                 }
                 if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
@@ -6571,7 +6588,7 @@ pub fn search_workload_with_targets<'s, Id>(
                 .candidates
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
-                    Replacement::SubDAG(node) if is_logical_rewrite(node) => true,
+                    Replacement::SubDAG(_) if candidate.is_logical_rewrite() => true,
                     Replacement::SubDAG(node) => node.guarantee.as_ref().map_or_else(
                         || !matches!(target, AccuracyTarget::Exact),
                         |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
@@ -6813,7 +6830,7 @@ fn search_cse_workload_with<'s, Id>(
 
             for candidate in &proposed {
                 if let Replacement::SubDAG(rc) = &candidate.replacement {
-                    if is_logical_rewrite(rc) {
+                    if candidate.is_logical_rewrite() {
                         discover_new_descendant_targets(rc, &mut order, &mut nodes, &mut counts);
                     }
                 }
@@ -6870,7 +6887,7 @@ fn add_effective_count_cse_candidates(
         }
         for candidate in &group.candidates {
             if let Replacement::SubDAG(rewrite) = &candidate.replacement {
-                if !is_logical_rewrite(rewrite) {
+                if !candidate.is_logical_rewrite() {
                     continue;
                 }
                 for (child, _) in direct_child_counts(rewrite) {

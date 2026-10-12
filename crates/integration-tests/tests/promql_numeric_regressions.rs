@@ -1,6 +1,5 @@
 //! Numeric regression fixtures: actual PromQL lowering plus numeric update/evaluation checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
-use asap_aware_mapping::replacement::is_logical_rewrite;
 use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::post_asap_dag;
@@ -17,7 +16,7 @@ fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
         .into_iter()
         .find_map(|r| match r.replacement {
             // A bound decision: a summary DAG or a kept (exact) sub-DAG.
-            Replacement::SubDAG(n) if !is_logical_rewrite(&n) => Some(n),
+            Replacement::SubDAG(n) if !r.provenance.is_logical_rewrite() => Some(n),
             _ => None,
         })
         .unwrap_or_else(|| asap_aware_mapping::replacement::retain_exact(&pre).unwrap())

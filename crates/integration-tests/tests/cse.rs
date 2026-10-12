@@ -24,7 +24,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::{is_logical_rewrite, search_workload, Replacement};
+use asap_aware_mapping::{search_workload, Replacement};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::ir::NonASAPOp;
 use asap_types::types::AccuracyTarget;
@@ -84,7 +84,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     );
 
     // A bound summary is a `Subtree` with an ASAP operator in it; a logical
-    // rewrite is a `Subtree` with none (`is_logical_rewrite`).
+    // rewrite is a `Subtree` with none (`ReplacementSubDAG::is_logical_rewrite`).
     let summary_count = group
         .candidates
         .iter()
@@ -93,7 +93,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     let rewrite_count = group
         .candidates
         .iter()
-        .filter(|c| matches!(&c.replacement, Replacement::SubDAG(n) if is_logical_rewrite(n)))
+        .filter(|c| c.is_logical_rewrite())
         .count();
     assert_eq!(summary_count, 1);
     assert_eq!(rewrite_count, 2);
@@ -104,11 +104,11 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // structurally-identical but independently-built `Rc`.
     let one_is_the_target = group.candidates.iter().any(|c| {
         matches!(&c.replacement, Replacement::SubDAG(rc)
-            if is_logical_rewrite(rc) && Rc::ptr_eq(rc, &group.target))
+            if c.is_logical_rewrite() && Rc::ptr_eq(rc, &group.target))
     });
     let one_is_not = group.candidates.iter().any(|c| {
         matches!(&c.replacement, Replacement::SubDAG(rc)
-            if is_logical_rewrite(rc) && !Rc::ptr_eq(rc, &group.target))
+            if c.is_logical_rewrite() && !Rc::ptr_eq(rc, &group.target))
     });
     assert!(one_is_the_target && one_is_not);
 }
