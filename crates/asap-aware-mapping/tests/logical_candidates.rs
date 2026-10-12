@@ -1,6 +1,6 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
 use asap_aware_mapping::logical_candidates::{
-    enumerate_local_logical_candidates, local_candidates_for_intent, HavingPlacement,
+    enumerate_local_logical_candidates, local_candidates_for_intent, HavingEntry, HavingPlacement,
     LocalCandidate, LogicalCandidateError, PruneReason,
 };
 use asap_types::{
@@ -182,8 +182,8 @@ fn scalar_root_producers_are_discovered_once() {
 
 /// #509 Example 1 Q1 is exact: each target's one exact option is its exact
 /// accumulator state (grouped sum, rate); no plain exact form and no summary.
-#[test]
-fn example_1_exact_q1_keeps_exact_accumulators_only() {
+/// One ImplicitExact PromQL query lowered through the workload frontend.
+fn implicit_exact_promql(query: &str) -> Vec<QueryRoot> {
     use asap_types::workload::{
         AccuracyRequirement, BatchEntry, PlanningWorkload, Query, QueryLanguage, QueryRequirements,
         QueryWorkload,
@@ -192,7 +192,7 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: Some(vec![BatchEntry {
-                query: Query("sum by (job) (rate(http_requests_total[1m]))".into()),
+                query: Query(query.into()),
                 requirements: QueryRequirements {
                     accuracy: AccuracyRequirement::ImplicitExact,
                     ..Default::default()
@@ -212,7 +212,12 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
             ..Default::default()
         }),
     };
-    let roots = asap_frontend_promql::lower_promql_query_workload(&workload, 0).unwrap();
+    asap_frontend_promql::lower_promql_query_workload(&workload, 0).unwrap()
+}
+
+#[test]
+fn example_1_exact_q1_keeps_exact_accumulators_only() {
+    let roots = implicit_exact_promql("sum by (job) (rate(http_requests_total[1m]))");
     let candidates =
         enumerate_local_logical_candidates(roots.into_iter().enumerate().collect()).unwrap();
     let found: Vec<_> = candidates
@@ -242,7 +247,7 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
 /// Physical annotations, ASAP operators and invalid probability requirements
 /// fail at the stage boundary.
 #[test]
-fn assigned_timing_asap_input_and_invalid_accuracy_are_rejected() {
+fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     let mut producer = (*aggregate(AggIntent::Count {
         accuracy: approximate(),
     }))
@@ -250,7 +255,17 @@ fn assigned_timing_asap_input_and_invalid_accuracy_are_rejected() {
     producer.timing = Some(asap_types::post_asap::ExecutionTiming::QueryTime);
     assert!(matches!(
         enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(producer)))]),
-        Err(LogicalCandidateError::AssignedTiming)
+        Err(LogicalCandidateError::AssignedPhysicalAnnotation)
+    ));
+    let mut stored = (*aggregate(AggIntent::Count {
+        accuracy: approximate(),
+    }))
+    .clone();
+    stored.materialization =
+        asap_types::post_asap::Materialization::MatAtQuery(asap_types::post_asap::Medium::Memory);
+    assert!(matches!(
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(stored)))]),
+        Err(LogicalCandidateError::AssignedPhysicalAnnotation)
     ));
     let summary = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan(false),
@@ -268,18 +283,54 @@ fn assigned_timing_asap_input_and_invalid_accuracy_are_rejected() {
         enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(summary))]),
         Err(LogicalCandidateError::ContainsAsap)
     ));
+    let epsilon_delta = |epsilon, delta| AccuracyTarget::EpsilonDelta { epsilon, delta };
     for target in [
         AccuracyTarget::Epsilon(f64::NAN),
-        AccuracyTarget::EpsilonDelta {
-            epsilon: 0.1,
-            delta: 0.0,
-        },
+        epsilon_delta(0.0, 0.01),
+        epsilon_delta(-0.1, 0.01),
+        epsilon_delta(1.0, 0.01),
+        epsilon_delta(f64::INFINITY, 0.01),
+        epsilon_delta(0.1, 0.0),
+        epsilon_delta(0.1, 1.0),
     ] {
-        assert!(matches!(
-            local_candidates_for_intent(&AggIntent::Count { accuracy: target }),
-            Err(LogicalCandidateError::InvalidAccuracy)
-        ));
+        assert!(
+            matches!(
+                local_candidates_for_intent(&AggIntent::Count {
+                    accuracy: target.clone()
+                }),
+                Err(LogicalCandidateError::InvalidAccuracy {
+                    root: None,
+                    measure: None
+                })
+            ),
+            "{target:?}"
+        );
     }
+    let invalid = aggregate_over(
+        scan(false),
+        vec![
+            AggIntent::Count {
+                accuracy: approximate(),
+            },
+            AggIntent::Count {
+                accuracy: epsilon_delta(1.5, 0.01),
+            },
+        ],
+        vec![],
+        None,
+    );
+    let error =
+        enumerate_local_logical_candidates(vec![("q", QueryRoot::Operator(invalid))]).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            LogicalCandidateError::InvalidAccuracy {
+                root: Some(root),
+                measure: Some(1)
+            } if root == "\"q\""
+        ),
+        "{error:?}"
+    );
 }
 
 /// Local TopK keeps both declared heap substrates without choosing an implementation.
@@ -396,7 +447,7 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
             target.measure
         );
         assert!(target.choices.pruned.is_empty());
-        assert_eq!(target.having, None);
+        assert!(target.having.is_empty());
     }
     assert_eq!(targets[0].filter, Some(always()));
     assert_eq!(targets[1].filter, None);
@@ -436,12 +487,19 @@ fn equals(column: usize, value: ScalarValue) -> Predicate {
 fn key_only_having_is_pushed_below_and_keeps_candidates() {
     let node = grouped_count(None);
     let root = having_filter(node.clone(), equals(0, ScalarValue::Utf8("a".into())));
-    let targets = enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))])
+    let targets = enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root.clone()))])
         .unwrap()
         .targets;
     assert_eq!(targets.len(), 1);
     assert!(Rc::ptr_eq(&targets[0].target, &node));
-    assert_eq!(targets[0].having, Some(HavingPlacement::BelowAggregate));
+    assert_eq!(
+        targets[0].having,
+        vec![HavingEntry {
+            filter: Some(root.clone()),
+            predicate: equals(0, ScalarValue::Utf8("a".into())),
+            placement: HavingPlacement::BelowAggregate,
+        }]
+    );
     assert_eq!(
         targets[0].choices.alternatives,
         alternatives(AggIntent::Count {
@@ -467,7 +525,8 @@ fn value_having_stays_above_output_and_keeps_candidates() {
     .targets;
     assert_eq!(targets.len(), 2);
     for target in &targets {
-        assert_eq!(target.having, Some(HavingPlacement::AboveOutput));
+        let placements: Vec<_> = target.having.iter().map(|entry| entry.placement).collect();
+        assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
         assert_eq!(
             target.choices.alternatives,
             alternatives(AggIntent::Count {
@@ -504,4 +563,114 @@ fn avg_rewrites_to_sum_and_count_states() {
         targets[1].choices.pruned,
         vec![(LocalCandidate::AvgAsSumCount, PruneReason::NullableAvgInput)]
     );
+}
+
+/// A key-only `HAVING` above a shared aggregate stays above the output when
+/// another consumer reads the aggregate without it.
+#[test]
+fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
+    let node = grouped_count(None);
+    let key = equals(0, ScalarValue::Utf8("a".into()));
+    let filtered = having_filter(node.clone(), key.clone());
+    let targets = enumerate_local_logical_candidates(vec![
+        (0, QueryRoot::Operator(filtered.clone())),
+        (1, QueryRoot::Operator(node.clone())),
+    ])
+    .unwrap()
+    .targets;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0].having,
+        vec![HavingEntry {
+            filter: Some(filtered),
+            predicate: key.clone(),
+            placement: HavingPlacement::AboveOutput,
+        }]
+    );
+
+    // Two consumers applying the same key-only predicate push it below.
+    let first = having_filter(node.clone(), key.clone());
+    let second = having_filter(node, key);
+    let targets = enumerate_local_logical_candidates(vec![
+        (0, QueryRoot::Operator(first)),
+        (1, QueryRoot::Operator(second)),
+    ])
+    .unwrap()
+    .targets;
+    assert!(targets[0]
+        .having
+        .iter()
+        .all(|entry| entry.placement == HavingPlacement::BelowAggregate));
+    assert_eq!(targets[0].having.len(), 2);
+}
+
+/// A global aggregate's `HAVING` always stays above the output, even a
+/// constant one: the one output row exists with no input rows.
+#[test]
+fn global_aggregate_having_stays_above() {
+    let count = || {
+        vec![AggIntent::Count {
+            accuracy: approximate(),
+        }]
+    };
+    let never = Predicate(ScalarExpr::Literal(ScalarValue::Boolean(false)));
+    let targets = enumerate_local_logical_candidates(vec![
+        (
+            0,
+            QueryRoot::Operator(having_filter(
+                aggregate_over(scan(false), count(), vec![], None),
+                never.clone(),
+            )),
+        ),
+        (
+            1,
+            QueryRoot::Operator(aggregate_over(scan(false), count(), vec![], Some(never))),
+        ),
+    ])
+    .unwrap()
+    .targets;
+    assert_eq!(targets.len(), 2);
+    for target in &targets {
+        let placements: Vec<_> = target.having.iter().map(|entry| entry.placement).collect();
+        assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
+    }
+}
+
+/// #509 Example 1 Q2 under ImplicitExact: the top-k's one option is plain
+/// `Exact`, its heap summaries pruned `RequiresExact`; `sum_over_time` gets
+/// its exact Sum accumulator.
+#[test]
+fn example_1_exact_q2_prunes_topk_heaps() {
+    let roots = implicit_exact_promql("topk by (job) (10, sum_over_time(http_requests_total[1m]))");
+    let candidates =
+        enumerate_local_logical_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let found: Vec<_> = candidates
+        .targets
+        .iter()
+        .map(|target| target.choices.clone())
+        .collect();
+    let topk = found
+        .iter()
+        .find(|choices| choices.alternatives == [LocalCandidate::Exact])
+        .expect("top-k target");
+    assert_eq!(
+        topk.pruned,
+        vec![
+            (
+                LocalCandidate::Summary(SketchAlgorithm::CmsWithHeap),
+                PruneReason::RequiresExact
+            ),
+            (
+                LocalCandidate::Summary(SketchAlgorithm::CountSketchWithHeap),
+                PruneReason::RequiresExact
+            ),
+        ]
+    );
+    assert!(found.iter().any(|choices| choices.alternatives
+        == [LocalCandidate::ExactAccumulator {
+            kind: ExactKind::Sum,
+            params: ExactParams::Sum
+        }]
+        && choices.pruned.is_empty()));
+    assert_eq!(found.len(), 2, "{found:#?}");
 }

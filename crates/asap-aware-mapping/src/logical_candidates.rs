@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, QueryRoot, SchemaDerivationError};
-use asap_types::post_asap::{ExactKind, ExactParams, SketchAlgorithm};
+use asap_types::post_asap::{ExactKind, ExactParams, Materialization, SketchAlgorithm};
 use asap_types::pre_asap::{resolve_column_ref, AggIntent, ColumnRef};
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
@@ -80,18 +80,33 @@ impl LocalChoices {
     }
 }
 
-/// Where a target's `HAVING` is applied. It covers the aggregate's own
-/// `having` and a `Filter` directly above the aggregate (the form the SQL
-/// frontend lowers `HAVING` to). Composition (#575) applies it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Where a target's `HAVING` is applied. Composition (#575) applies it.
+///
+/// Only the adjacent form is recorded for push-down: the aggregate's own
+/// `having`, or a `Filter` directly above the aggregate (the form the SQL
+/// frontend lowers `HAVING` to). A value predicate anywhere above an
+/// approximate output gets `guarantee = None` through guarantee propagation
+/// (#575); multi-level push-down is tracked in #664.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HavingPlacement {
-    /// The predicate reads only group keys, so it is pushed below the
-    /// aggregate as a row predicate, like a measure filter.
+    /// The predicate reads only group keys and every consumer of the
+    /// aggregate applies it, so it is pushed below the aggregate as a row
+    /// predicate, like a measure filter.
     BelowAggregate,
     /// The predicate reads aggregate values, so it stays a `Filter` above the
     /// finalize/estimate output; approximate candidates of this target carry
     /// `guarantee = None`, since membership near the threshold may change.
     AboveOutput,
+}
+
+/// One `HAVING` over a target's aggregate output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HavingEntry {
+    /// The consumer `Filter` that applies it; `None` for the aggregate's own
+    /// `having`, which every consumer reads.
+    pub filter: Option<Rc<OperatorNode>>,
+    pub predicate: Predicate,
+    pub placement: HavingPlacement,
 }
 
 /// One measure of an aggregate with at least one realization besides exact
@@ -106,7 +121,9 @@ pub struct LocalLogicalTarget {
     /// The measure's own filter; only rows that pass it update the state
     /// (`SummaryAgg.filter`).
     pub filter: Option<Predicate>,
-    pub having: Option<HavingPlacement>,
+    /// The aggregate's own `having`, then one entry per consumer `Filter`
+    /// directly above the aggregate.
+    pub having: Vec<HavingEntry>,
 }
 
 /// Compact Pass 1 inventory; roots and nested producer dependencies are retained.
@@ -120,12 +137,19 @@ pub struct LocalLogicalCandidates<Id> {
 pub enum LogicalCandidateError {
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
-    #[error("logical candidate input already has assigned execution timing")]
-    AssignedTiming,
+    #[error("logical candidate input already has assigned execution timing or materialization")]
+    AssignedPhysicalAnnotation,
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
-    #[error("approximate accuracy requires finite positive epsilon and delta in (0, 1)")]
-    InvalidAccuracy,
+    /// `root` and `measure` locate the target; [`local_candidates_for_intent`]
+    /// alone leaves them `None`.
+    #[error(
+        "approximate accuracy of root {root:?}, measure {measure:?} requires epsilon and delta in (0, 1)"
+    )]
+    InvalidAccuracy {
+        root: Option<String>,
+        measure: Option<usize>,
+    },
 }
 
 /// Enumerate exact, rewrite and summary choices of one measure in stable catalog
@@ -157,13 +181,12 @@ pub fn local_candidates_for_intent(
     if let Some(target) = accuracy_target(intent) {
         if *target != AccuracyTarget::Exact {
             let (epsilon, delta) = accuracy_budget(target);
-            if !epsilon.is_finite()
-                || epsilon <= 0.0
-                || !delta.is_finite()
-                || !(0.0..1.0).contains(&delta)
-                || delta == 0.0
-            {
-                return Err(LogicalCandidateError::InvalidAccuracy);
+            let unit = |value: f64| value > 0.0 && value < 1.0;
+            if !unit(epsilon) || !unit(delta) {
+                return Err(LogicalCandidateError::InvalidAccuracy {
+                    root: None,
+                    measure: None,
+                });
             }
         }
         let summaries = summary_candidates(intent).iter().cloned();
@@ -198,9 +221,10 @@ fn nullable_avg_input(node: &OperatorNode, intent: &AggIntent) -> bool {
         .is_none_or(|field| field.nullable)
 }
 
-/// Where `having` over `aggregate`'s output is applied: below the aggregate
-/// when it reads only `by(...)` group keys, otherwise above the output.
-fn having_placement(aggregate: &OperatorNode, having: &Predicate) -> HavingPlacement {
+/// Whether `having` over `aggregate`'s output reads only `by(...)` group keys.
+/// A global aggregate (no group keys) never qualifies: its one output row
+/// exists even when no input row does, so no row predicate can stand in.
+fn key_only_having(aggregate: &OperatorNode, having: &Predicate) -> bool {
     let keys = match aggregate.non_asap() {
         Some(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(by),
@@ -208,9 +232,13 @@ fn having_placement(aggregate: &OperatorNode, having: &Predicate) -> HavingPlace
         }) if !by.is_without() => by.len(),
         _ => 0,
     };
-    if having.0.operator_refs().is_empty()
+    keys > 0
+        && having.0.operator_refs().is_empty()
         && having.0.columns_referenced().iter().all(|id| *id < keys)
-    {
+}
+
+fn placement(below: bool) -> HavingPlacement {
+    if below {
         HavingPlacement::BelowAggregate
     } else {
         HavingPlacement::AboveOutput
@@ -222,15 +250,18 @@ fn having_placement(aggregate: &OperatorNode, having: &Predicate) -> HavingPlace
 /// has a realization besides exact execution, even if every such realization
 /// is pruned; the prune reasons are reported on the target. Measure filters
 /// and `HAVING` keep every candidate; the target records how they are applied.
-pub fn enumerate_local_logical_candidates<Id>(
+/// A consumer `Filter`'s key-only `HAVING` is pushed below only when every
+/// consumer of the aggregate applies the same predicate.
+pub fn enumerate_local_logical_candidates<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
 ) -> Result<LocalLogicalCandidates<Id>, LogicalCandidateError> {
     let mut seen = HashSet::new();
+    // Each aggregate with the first root that reaches it.
     let mut aggregates = Vec::new();
-    // `HAVING` lowered as a `Filter` directly above an aggregate; a shared
-    // aggregate keeps the placement that is safe for every such filter.
-    let mut havings: HashMap<*const OperatorNode, HavingPlacement> = HashMap::new();
-    for (_, root) in &roots {
+    // Every consumer of each node: `Some(parent)`, or `None` for a root or
+    // scalar reference.
+    let mut consumers: HashMap<*const OperatorNode, Vec<Option<Rc<OperatorNode>>>> = HashMap::new();
+    for (id, root) in &roots {
         root.validate_structure()?;
         let operators = match root {
             QueryRoot::Operator(node) => vec![node],
@@ -240,31 +271,29 @@ pub fn enumerate_local_logical_candidates<Id>(
             if root.contains_asap() {
                 return Err(LogicalCandidateError::ContainsAsap);
             }
+            consumers.entry(Rc::as_ptr(root)).or_default().push(None);
             for node in OperatorNode::reachable(root) {
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                if node.timing.is_some() {
-                    return Err(LogicalCandidateError::AssignedTiming);
+                if node.timing.is_some() || node.materialization != Materialization::NotMaterialized
+                {
+                    return Err(LogicalCandidateError::AssignedPhysicalAnnotation);
                 }
-                match node.non_asap() {
-                    Some(NonASAPOp::Aggregate { .. }) => aggregates.push(node),
-                    Some(NonASAPOp::Filter { pred, child })
-                        if matches!(child.non_asap(), Some(NonASAPOp::Aggregate { .. })) =>
-                    {
-                        let placement = having_placement(child, pred);
-                        havings
-                            .entry(Rc::as_ptr(child))
-                            .and_modify(|having| *having = (*having).max(placement))
-                            .or_insert(placement);
-                    }
-                    _ => {}
+                for child in node.children() {
+                    consumers
+                        .entry(Rc::as_ptr(child))
+                        .or_default()
+                        .push(Some(Rc::clone(&node)));
+                }
+                if matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. })) {
+                    aggregates.push((format!("{id:?}"), node));
                 }
             }
         }
     }
     let mut targets = Vec::new();
-    for node in aggregates {
+    for (root, node) in aggregates {
         let Some(NonASAPOp::Aggregate {
             measures,
             filters,
@@ -274,16 +303,46 @@ pub fn enumerate_local_logical_candidates<Id>(
         else {
             continue;
         };
-        let having = having
-            .as_ref()
-            .map(|having| having_placement(&node, having))
-            .max(havings.get(&Rc::as_ptr(&node)).copied());
+        let mut entries: Vec<HavingEntry> = having
+            .iter()
+            .map(|having| HavingEntry {
+                filter: None,
+                predicate: having.clone(),
+                placement: placement(key_only_having(&node, having)),
+            })
+            .collect();
+        let parents = &consumers[&Rc::as_ptr(&node)];
+        let filters_above: Vec<(&Rc<OperatorNode>, &Predicate)> = parents
+            .iter()
+            .flatten()
+            .filter_map(|parent| match parent.non_asap() {
+                Some(NonASAPOp::Filter { pred, .. }) => Some((parent, pred)),
+                _ => None,
+            })
+            .collect();
+        for (filter, predicate) in &filters_above {
+            let shared_by_all = filters_above.len() == parents.len()
+                && filters_above.iter().all(|(_, other)| other == predicate);
+            entries.push(HavingEntry {
+                filter: Some(Rc::clone(filter)),
+                predicate: (*predicate).clone(),
+                placement: placement(shared_by_all && key_only_having(&node, predicate)),
+            });
+        }
         for (measure, intent) in measures.iter().enumerate() {
-            let mut choices = local_candidates_for_intent(intent)?;
+            let mut choices = local_candidates_for_intent(intent).map_err(|error| match error {
+                LogicalCandidateError::InvalidAccuracy { .. } => {
+                    LogicalCandidateError::InvalidAccuracy {
+                        root: Some(root.clone()),
+                        measure: Some(measure),
+                    }
+                }
+                error => error,
+            })?;
             if choices.alternatives == [LocalCandidate::Exact] && choices.pruned.is_empty() {
                 continue;
             }
-            if nullable_avg_input(&node, intent) {
+            if matches!(intent, AggIntent::Avg { .. }) && nullable_avg_input(&node, intent) {
                 choices.prune(PruneReason::NullableAvgInput, |choice| {
                     *choice == LocalCandidate::AvgAsSumCount
                 });
@@ -293,7 +352,7 @@ pub fn enumerate_local_logical_candidates<Id>(
                 measure,
                 choices,
                 filter: filters.get(measure).cloned().flatten(),
-                having,
+                having: entries.clone(),
             });
         }
     }
