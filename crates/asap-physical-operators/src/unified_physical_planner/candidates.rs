@@ -87,7 +87,8 @@ pub fn cut_candidate(
 }
 
 /// Materialization frontier implied by lifecycle-assigned timing: ingestion-time
-/// nodes read by a query-time node, plus the root when it is ingestion-timed.
+/// nodes read by a query-time node, plus each root, and each node a scalar
+/// root reads, that is ingestion-timed.
 /// `cut_candidate` of one [`compile`] result with this frontier realizes the
 /// assignment, so different assignments are different cuts of one lowering.
 /// That holds while timing-dependent lowering (an ingestion-time `Binary`
@@ -101,7 +102,14 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
         .map(|node| (node.id, node.output_state.timing))
         .collect::<BTreeMap<_, _>>();
     let mut frontier = BTreeSet::new();
-    for root in &dag.roots {
+    // Operator roots, and the nodes standalone scalar roots read: both are
+    // read at query time.
+    let roots = dag.roots.iter().chain(
+        dag.scalar_roots
+            .iter()
+            .flat_map(|(_, expr)| expr.operator_refs()),
+    );
+    for root in roots {
         if timing.get(root) == Some(&IngestionTime) {
             frontier.insert(*root as u64);
         }
@@ -476,6 +484,21 @@ mod tests {
         use planner_types::post_asap::ExecutionTiming::IngestionTime;
         let (dag, _, root) = grouped_rate();
         let timed = with_timing(&dag, |_| IngestionTime);
+        assert_eq!(frontier_from_timing(&timed).unwrap(), [root]);
+    }
+
+    /// A node a standalone scalar root reads is read at query time, so an
+    /// ingestion-time one is on the frontier like an operator root.
+    #[test]
+    fn frontier_from_timing_includes_ingestion_scalar_reference() {
+        use planner_types::ir::ScalarExpr;
+        use planner_types::post_asap::ExecutionTiming::IngestionTime;
+        let (dag, _, root) = grouped_rate();
+        let mut timed = with_timing(&dag, |_| IngestionTime);
+        let read = timed.roots.remove(0);
+        timed
+            .scalar_roots
+            .push((0, ScalarExpr::PromqlScalarFromVector(read)));
         assert_eq!(frontier_from_timing(&timed).unwrap(), [root]);
     }
 

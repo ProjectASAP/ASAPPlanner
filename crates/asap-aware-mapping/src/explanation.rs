@@ -458,9 +458,9 @@ fn visit(
     visit_children(node, &label, locations);
 }
 
-/// `node`'s own **relational-skeleton** operator children — the same scope
-/// `crate::replacement`'s own target-discovery `walk_children` (and
-/// `asap_types::ir::cse::share_common_sub_dags`) use. Exhaustive over every
+/// `node`'s operator inputs, including the operator nodes its scalar
+/// expressions read — the same scope `crate::replacement`'s own
+/// target-discovery `walk_children` uses. Exhaustive over every
 /// `NonASAPOp` variant: a new variant fails to compile here until this match
 /// is extended too. An ASAP node never occurs in a workload root.
 fn visit_children(
@@ -472,10 +472,11 @@ fn visit_children(
     let Operator::NonASAP(op) = &node.operator else {
         return;
     };
+    let mut inputs: Vec<(&Rc<OperatorNode>, String)> = Vec::new();
     match op {
         Scan { .. } | Values { .. } => {}
         PromqlVectorFromScalar(ScalarExpr::PromqlScalarFromVector(c)) => {
-            visit(c, format!("{label} > child"), locations)
+            inputs.push((c, format!("{label} > child")))
         }
         PromqlVectorFromScalar(_) => {}
         PromqlRelabel { child, .. }
@@ -490,20 +491,30 @@ fn visit_children(
         | TimeShift { child, .. }
         | SQLWindowFunc { child, .. }
         | Sort { child, .. }
-        | Limit { child, .. } => visit(child, format!("{label} > child"), locations),
+        | Limit { child, .. } => inputs.push((child, format!("{label} > child"))),
         Concat { children, .. } => {
             for (i, c) in children.iter().enumerate() {
-                visit(c, format!("{label} > concat[{i}]"), locations);
+                inputs.push((c, format!("{label} > concat[{i}]")));
             }
         }
         Join { left, right, .. } | SetOp { left, right, .. } => {
-            visit(left, format!("{label} > left"), locations);
-            visit(right, format!("{label} > right"), locations);
+            inputs.push((left, format!("{label} > left")));
+            inputs.push((right, format!("{label} > right")));
         }
         BinaryOp { lhs, rhs, .. } => {
-            visit(lhs, format!("{label} > lhs"), locations);
-            visit(rhs, format!("{label} > rhs"), locations);
+            inputs.push((lhs, format!("{label} > lhs")));
+            inputs.push((rhs, format!("{label} > rhs")));
         }
+    }
+    // Operator nodes read from this node's scalar expressions (`scalar(v)`
+    // in a predicate or projection, subqueries) are inputs too.
+    for input in node.children() {
+        if !inputs.iter().any(|(visited, _)| Rc::ptr_eq(visited, input)) {
+            inputs.push((input, format!("{label} > scalar")));
+        }
+    }
+    for (input, path) in inputs {
+        visit(input, path, locations);
     }
 }
 
@@ -583,6 +594,35 @@ mod tests {
         );
         assert!(sketch[0].location.contains("dashboard_p99"));
         assert!(sketch[0].reason.to_lowercase().contains("kll"));
+    }
+
+    /// A quantile read through `scalar(...)` in a predicate is located under
+    /// the node whose expression reads it.
+    #[test]
+    fn a_quantile_read_by_a_scalar_expression_is_located() {
+        use asap_types::ir::ExprSemantics;
+        use asap_types::pre_asap::CompareOpKind;
+        let q = agg(vec![], default_quantile(0.99), metric_scan(&["job"]));
+        let root = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(1)),
+                op: CompareOpKind::Gt,
+                right: Box::new(ScalarExpr::PromqlScalarFromVector(q)),
+                semantics: ExprSemantics::Promql,
+            }),
+            child: metric_scan(&["job"]),
+        }))
+        .unwrap();
+        let findings = explain_replacements(vec![("alert", root)]).unwrap();
+        let sketch = findings
+            .iter()
+            .find(|f| f.kind == ExplanationKind::SketchApproximation)
+            .unwrap_or_else(|| panic!("expected a sketch finding, got {findings:?}"));
+        assert!(
+            sketch.location.contains("root \"alert\" > scalar"),
+            "{}",
+            sketch.location
+        );
     }
 
     /// `node_hash` must be the literal `structural_hash` a downstream
