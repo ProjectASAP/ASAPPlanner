@@ -427,6 +427,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                 nodes,
                 edges,
                 roots: vec![4],
+                scalar_roots: vec![],
             };
             let physical_dag = compile(
                 &dag,

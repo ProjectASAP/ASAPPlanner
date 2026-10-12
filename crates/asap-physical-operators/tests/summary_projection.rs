@@ -95,6 +95,7 @@ fn post_asap_summary_projection_survives_recovery() {
             window: WindowEdgeCompatibility::NotApplicable,
         }],
         roots: vec![1],
+        scalar_roots: vec![],
     };
     let program = compile(
         &dag,

@@ -131,6 +131,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             nodes,
             edges,
             roots: vec![3],
+            scalar_roots: vec![],
         };
         // Identity metadata must remain one non-null Utf8 column.
         for mutation in 0..3 {
@@ -308,6 +309,7 @@ fn state_dag(
             nodes,
             edges,
             roots: vec![root],
+            scalar_roots: vec![],
         },
         &[0],
         &[root as u64],

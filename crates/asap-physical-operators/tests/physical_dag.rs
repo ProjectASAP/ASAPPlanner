@@ -547,6 +547,7 @@ fn bind_post_asap_before_execution() {
             window: WindowEdgeCompatibility::NotApplicable,
         }],
         roots: vec![1],
+        scalar_roots: vec![],
     };
     let sources = || -> BTreeMap<u64, asap_physical_operators::dag::planner::Source<'static>> {
         BTreeMap::from([(
@@ -655,6 +656,7 @@ fn source_batches_must_match_the_bound_schema() {
         }],
         edges: vec![],
         roots: vec![0],
+        scalar_roots: vec![],
     };
     let source = Box::new(WrongSource {
         schema: expected,
@@ -813,6 +815,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             edge(3, 4, EdgeRole::Input, &rows_schema),
         ],
         roots: vec![4],
+        scalar_roots: vec![],
     };
     let text = |v: &str| Value::Utf8(v.into());
     for (phase, scope) in [

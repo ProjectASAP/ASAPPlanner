@@ -117,6 +117,7 @@ fn plan(
         ],
         edges: vec![edge(0, 1), edge(1, 2)],
         roots: vec![2],
+        scalar_roots: vec![],
     }
 }
 fn registry(source: Arc<dyn RawSource>) -> DataSources {

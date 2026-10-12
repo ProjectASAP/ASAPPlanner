@@ -484,6 +484,10 @@ async fn scalar_roots_survive_planning_in_workload_order() {
                 panic!()
             };
             assert_eq!(expr.operator_refs().len(), 1);
+            assert!(Rc::ptr_eq(
+                expr.operator_refs()[0],
+                &output.scalar_plans[0].plan.root
+            ));
         }
     }
 }

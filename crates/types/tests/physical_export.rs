@@ -5,7 +5,7 @@ use asap_types::ir::physical_export::{
 };
 use asap_types::ir::{
     apply_lifecycle_timings, ASAPOp, LifecycleAssignment, NonASAPOp, Operator, OperatorNode,
-    TimingMemo,
+    QueryRoot, TimingMemo,
 };
 use asap_types::post_asap::{
     ExactKind, ExactParams, ExecutionDataStateError, ExecutionTiming, SummaryUpdate,
@@ -111,10 +111,64 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
         .iter()
         .map(|root| apply_lifecycle_timings(root, &assignment, &mut memo).unwrap())
         .collect();
-    let dag = compile_physical_asap_workload(&timed).unwrap();
+    let roots: Vec<QueryRoot> = timed.into_iter().map(QueryRoot::Operator).collect();
+    let dag = compile_physical_asap_workload(&roots).unwrap();
     dag.validate().unwrap();
     assert_eq!(dag.roots.len(), 2);
     assert_eq!(dag.nodes.len(), 4, "scan and summary are exported once");
+}
+
+/// A standalone scalar query exports as a scalar root keyed by its position
+/// in the batch, reading the shared nodes by id; operator queries keep `roots`.
+#[test]
+fn scalar_roots_export_in_batch_order_and_reference_nodes() {
+    use asap_types::ir::{ExprSemantics, ScalarExpr};
+    use asap_types::pre_asap::ArithmeticOpKind;
+    let timed = apply_lifecycle_timings(
+        &plan(),
+        &LifecycleAssignment::default_maintained(),
+        &mut TimingMemo::new(),
+    )
+    .unwrap();
+    let scalar = ScalarExpr::Arithmetic {
+        op: ArithmeticOpKind::Add,
+        left: Box::new(ScalarExpr::PromqlScalarFromVector(Rc::clone(&timed))),
+        right: Box::new(ScalarExpr::literal_f64(1.0)),
+        semantics: ExprSemantics::Promql,
+    };
+    let dag = compile_physical_asap_workload(&[
+        QueryRoot::Scalar(scalar),
+        QueryRoot::Operator(Rc::clone(&timed)),
+    ])
+    .unwrap();
+    assert_eq!(dag.nodes.len(), 3, "the read plan is exported once");
+    assert_eq!(dag.roots.len(), 1);
+    assert_eq!(dag.scalar_roots.len(), 1);
+    let (position, expr) = &dag.scalar_roots[0];
+    assert_eq!(*position, 0);
+    assert_eq!(expr.operator_refs(), vec![&dag.roots[0]]);
+    let document = PhysicalASAPDAGDocument::new(dag.clone());
+    let decoded: PhysicalASAPDAGDocument =
+        serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
+    assert_eq!(decoded, document);
+
+    // A scalar-only batch is valid: its referenced nodes are reachable.
+    let mut scalar_only = dag.clone();
+    scalar_only.roots.clear();
+    scalar_only.validate().unwrap();
+
+    let mut missing = dag.clone();
+    missing.scalar_roots[0].1 = ScalarExpr::PromqlScalarFromVector(99);
+    assert_eq!(
+        missing.validate(),
+        Err(PhysicalASAPDAGValidationError::MissingRoot(99))
+    );
+    let mut outside = dag.clone();
+    outside.scalar_roots[0].0 = 2;
+    assert_eq!(
+        outside.validate(),
+        Err(PhysicalASAPDAGValidationError::ScalarRootPosition(2))
+    );
 }
 
 /// The roles of a binary operator's edges must match its inputs: swapping

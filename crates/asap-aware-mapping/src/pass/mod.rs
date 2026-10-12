@@ -164,8 +164,9 @@ pub enum OptimizationInputError {
 
 // ── Output ───────────────────────────────────────────────────────────────
 
-/// One query's selected post-ASAP DAG plus the maintenance decisions taken
-/// for it. The DAG is `plan.root`.
+/// One query's selected post-ASAP DAG, or one operator sub-DAG a standalone
+/// scalar query reads, plus the maintenance decisions taken for it. The DAG
+/// is `plan.root`.
 #[derive(Debug, Clone)]
 pub struct QueryLifecyclePlan {
     /// Index into `QueryWorkload::entries()`.
@@ -184,8 +185,12 @@ pub struct QueryLifecyclePlan {
 #[non_exhaustive]
 pub struct PlanOutput {
     pub plans: Vec<QueryLifecyclePlan>,
-    /// Exact scalar expressions, keyed by workload entry; embedded plan reads remain visible.
+    /// Standalone scalar queries, keyed by workload entry. Each operator
+    /// reference is the root of one of `scalar_plans`.
     pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
+    /// One plan per distinct operator sub-DAG a scalar root reads, keyed by
+    /// that scalar's entry, in `scalar_roots` order.
+    pub scalar_plans: Vec<QueryLifecyclePlan>,
 }
 
 impl PlanOutput {
@@ -193,6 +198,7 @@ impl PlanOutput {
         Self {
             plans,
             scalar_roots: Vec::new(),
+            scalar_plans: Vec::new(),
         }
     }
 

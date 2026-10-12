@@ -557,3 +557,42 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
     assert_eq!(states.len(), 3);
     assert!(states.iter().all(|state| Rc::ptr_eq(state, &states[0])));
 }
+
+/// The operator sub-DAG a standalone scalar query reads is planned like an
+/// operator root (#511 §2.3): under an approximate target the quantile inside
+/// `scalar(...)` reads a summary, and the scalar root is rebuilt over the
+/// selected sub-DAG. The same quantile as an operator query shares that
+/// state, and entries keep their order around a literal scalar query.
+#[tokio::test]
+async fn scalar_queries_read_planned_summaries() {
+    let output = plan_promql(
+        &[
+            ("1", 0.01),
+            ("scalar(quantile(0.99, rate(x[5m])))", 0.01),
+            ("quantile(0.99, rate(x[5m]))", 0.01),
+        ],
+        &CHEAP_SUMMARY,
+    )
+    .await;
+    assert_eq!(output.entry_indices(), vec![0, 1, 2]);
+    let scalar_entries: Vec<_> = output.scalar_roots.iter().map(|(i, _)| *i).collect();
+    assert_eq!(scalar_entries, vec![0, 1]);
+    assert_eq!(output.plans.len(), 1);
+    assert_eq!(output.plans[0].entry_index, 2);
+
+    assert_eq!(output.scalar_plans.len(), 1);
+    let read = &output.scalar_plans[0];
+    assert_eq!(read.entry_index, 1);
+    assert!(!read.plan.selected_raw_recompute, "{:?}", read.plan.root);
+    let read_states: Vec<_> = read
+        .plan
+        .deployments
+        .iter()
+        .map(|deployment| Rc::clone(&deployment.summary))
+        .collect();
+    assert!(!read_states.is_empty());
+    assert!(same_states(&[read_states, states(&output).remove(0)]));
+    let refs = output.scalar_roots[1].1.operator_refs();
+    assert_eq!(refs.len(), 1);
+    assert!(Rc::ptr_eq(refs[0], &read.plan.root));
+}
