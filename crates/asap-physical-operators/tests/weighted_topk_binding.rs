@@ -1,5 +1,4 @@
 //! Planner output binds directly to the shared runtime at a declared rate-value frontier.
-#[path = "unified_common/mod.rs"]
 mod common;
 use asap_aware_mapping::{
     accuracy::{
@@ -193,7 +192,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
     }
 }
 
-use asap_frontend_promql::unified::lower_promql_workload;
+use asap_frontend_promql::lower_promql_workload;
 use planner_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence,
     PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
@@ -202,7 +201,7 @@ use planner_types::workload::{
 pub fn lower_promql(
     query: &str,
     accuracy: AccuracyTarget,
-) -> Result<Rc<planner_types::ir::OperatorNode>, asap_frontend_promql::unified::PromqlError> {
+) -> Result<Rc<planner_types::ir::OperatorNode>, asap_frontend_promql::PromqlError> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -278,7 +277,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
 }
 
 fn check_direct_rate_topk(dynamic: bool) {
-    use asap_physical_operators::unified_physical_planner::promql_rows::{
+    use asap_physical_operators::physical_planner::promql_rows::{
         decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
     };
     let mut logical =
@@ -336,7 +335,7 @@ fn check_direct_rate_topk(dynamic: bool) {
             .unwrap_or_else(|| panic!("missing {algorithm:?} over direct Rate"));
         if dynamic {
             let (source, ranked) =
-                asap_physical_operators::unified_physical_planner::promql_rows::compile_rate_ranking(
+                asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(
                     candidate,
                 )
                 .unwrap();
@@ -395,7 +394,7 @@ fn check_direct_rate_topk(dynamic: bool) {
         .unwrap();
         let bytes = serde_json::to_vec(&raw_compiled).unwrap();
         let raw_compiled = serde_json::from_slice::<
-            asap_physical_operators::unified_physical_planner::CompiledPhysicalDAG,
+            asap_physical_operators::physical_planner::CompiledPhysicalDAG,
         >(&bytes)
         .unwrap();
         // Each evaluation receives a complete raw window. A reset, a stopped
@@ -626,7 +625,7 @@ fn check_direct_rate_topk(dynamic: bool) {
 // CountSketch; a raw metric does not establish the non-negative CMS contract.
 #[test]
 fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
-    use asap_physical_operators::unified_physical_planner::promql_rows::{
+    use asap_physical_operators::physical_planner::promql_rows::{
         decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
     };
     let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
@@ -673,7 +672,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     )
     .unwrap();
     let snapshot_program =
-        asap_physical_operators::unified_physical_planner::promql_rows::compile_current_series_evaluation(
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
             selected,
         )
         .unwrap();
@@ -760,7 +759,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
 // Sort's groups is only the same result when both partition alike.
 #[test]
 fn spatial_topk_requires_the_limit_and_sort_partitions_to_agree() {
-    use asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity;
+    use asap_physical_operators::physical_planner::promql_rows::with_series_identity;
     use planner_types::ir::{NonASAPOp, Operator as IrOperator, OperatorNode};
     use planner_types::pre_asap::GroupKeys;
     let series_root = |query: &str| {
@@ -910,7 +909,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
 // placement: lifecycle timing, not a separate candidate, puts it in precompute.
 #[test]
 fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
-    use asap_physical_operators::unified_physical_planner::{
+    use asap_physical_operators::physical_planner::{
         compile_candidate, promql_rows::with_series_identity,
     };
     let root = Rc::new(
@@ -973,38 +972,36 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             &[heap.id as u64],
         )
         .unwrap();
-        let exported = asap_physical_operators::unified_physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&dag).unwrap();
+        let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&dag).unwrap();
         assert_eq!(
             serde_json::to_vec(&exported).unwrap(),
             serde_json::to_vec(&physical).unwrap()
         );
         // Execute the selected split across a state serialization boundary.
         // Each run builds fresh weights from that window's counters.
-        let execute =
-            |plan: &asap_physical_operators::unified_physical_planner::CompiledPhysicalDAG,
-             input: Batch,
-             scope: Scope| {
-                let id = plan.input_contracts().next().unwrap().0;
-                let source =
-                    Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
-                        as Source<'static>;
-                let physical_dag = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();
-                block_on(async {
-                    let mut stream = physical_dag
-                        .execute(
-                            plan.roots(),
-                            RunContext::new(scope, Limits::default()).unwrap(),
-                        )
-                        .unwrap()
-                        .remove(0);
-                    let mut batches = Vec::new();
-                    while let Some(batch) = stream.next().await {
-                        batches.push((*batch.unwrap()).clone());
-                    }
-                    assert_eq!(batches.len(), 1);
-                    batches.remove(0)
-                })
-            };
+        let execute = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDAG,
+                       input: Batch,
+                       scope: Scope| {
+            let id = plan.input_contracts().next().unwrap().0;
+            let source = Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
+                as Source<'static>;
+            let physical_dag = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();
+            block_on(async {
+                let mut stream = physical_dag
+                    .execute(
+                        plan.roots(),
+                        RunContext::new(scope, Limits::default()).unwrap(),
+                    )
+                    .unwrap()
+                    .remove(0);
+                let mut batches = Vec::new();
+                while let Some(batch) = stream.next().await {
+                    batches.push((*batch.unwrap()).clone());
+                }
+                assert_eq!(batches.len(), 1);
+                batches.remove(0)
+            })
+        };
         let (family, input, grouping) = match &state.payload {
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 family,

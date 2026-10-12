@@ -6,7 +6,6 @@ use asap_aware_mapping::accuracy::{
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
 use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
-#[path = "unified_support.rs"]
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};

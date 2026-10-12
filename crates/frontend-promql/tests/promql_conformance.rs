@@ -1,8 +1,8 @@
-//! PromQL **semantic conformance** for the parse-to-canonical-tree lowering.
+//! PromQL **semantic conformance** for the parse-to-canonical-DAG lowering.
 //!
 //! We *lower* PromQL to the intent algebra; we do not *execute* it. So "same
 //! semantic job as Prometheus" here means: for each canonical query, does the
-//! canonical tree encode the **documented PromQL meaning** — and where we knowingly
+//! canonical DAG encode the **documented PromQL meaning** — and where we knowingly
 //! diverge (reject, approximate, or drop a modifier), is that pinned by a test
 //! so it stays visible?
 //!
@@ -34,8 +34,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_frontend_promql::unified::PromqlError as LoweringError;
-#[path = "unified_support.rs"]
+use asap_frontend_promql::PromqlError as LoweringError;
 mod support;
 use asap_types::ir::{
     BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind,
@@ -60,7 +59,7 @@ fn ok(q: &str) -> Rc<OperatorNode> {
 fn rejected(q: &str) -> LoweringError {
     match lower_promql(q, AccuracyTarget::Exact) {
         Err(e) => e,
-        Ok(tree) => panic!("expected {q:?} to be rejected, but it lowered to: {tree:?}"),
+        Ok(dag) => panic!("expected {q:?} to be rejected, but it lowered to: {dag:?}"),
     }
 }
 
@@ -189,7 +188,7 @@ fn name_regex_matcher_is_rejected__GAP() {
 #[test]
 fn range_vector_selector_is_time_range() {
     // SEMANTICS: `[5m]` turns an instant vector into a range vector,
-    // represented in the canonical tree as a dedicated `TimeRange` node.
+    // represented in the canonical DAG as a dedicated `TimeRange` node.
     let qe = ok("node_cpu_seconds_total[5m]");
     let NonASAPOp::TimeRange { range, .. } = qe.expect_non_asap() else {
         panic!("expected TimeRange for a range-vector selector, got {qe:?}");
@@ -527,7 +526,7 @@ fn histogram_quantile_over_rate() {
 fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     // SEMANTICS: the standard pattern — bucket rates summed by `le`, then the
     // quantile. The `sum by (le)` aggregation must survive into the
-    // canonical tree.
+    // canonical DAG.
     let qe = ok(
         "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
     );
@@ -818,7 +817,7 @@ fn outer_aggregate_over_nested_aggregate_nests() {
     // `max(sum by (job) (rate(m[5m])))` — an outer cross-series reduction over a
     // nested per-group reduction over a per-series rate: three stacked levels the
     // flat two-level template rejected. Each level survives into the
-    // canonical tree (issue #27).
+    // canonical DAG (issue #27).
     let qe = ok("max(sum by (job) (rate(http_requests_total[5m])))");
     let NonASAPOp::Aggregate {
         measures, child, ..
@@ -914,7 +913,7 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
     // Issue #52: an outer aggregate's group key that appears in *neither* side of
     // a binary op — the metric-name label `__name__`, or a plain `job` — must
     // still resolve. Each `or` side is bound independently against its own
-    // sub-tree, so the key is seeded as an inherited column on both sides.
+    // sub-DAG, so the key is seeded as an inherited column on both sides.
     let qe = ok(r#"sum by (__name__)(metric_a{env="1"} or metric_b{env="2"})"#);
     let NonASAPOp::Aggregate {
         reduction, child, ..
@@ -1765,7 +1764,7 @@ fn timestamp_of_a_non_selector_is_the_eval_time() {
 #[test]
 fn timestamp_composes_under_an_outer_aggregation() {
     // `sum by (job) (timestamp(up))` — the per-series `timestamp` transform sits
-    // below an ordinary grouped sum. Both intents must appear in the tree.
+    // below an ordinary grouped sum. Both intents must appear in the DAG.
     let qe = ok("sum by (job) (timestamp(up))");
     assert!(has(&qe, |i| *i == AggIntent::TimeFn(TimeFunc::Timestamp)));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));

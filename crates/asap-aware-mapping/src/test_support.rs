@@ -35,7 +35,7 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
             ..Default::default()
         }),
     };
-    asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .pop()
         .unwrap()

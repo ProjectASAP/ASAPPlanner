@@ -21,7 +21,7 @@
 
 use std::rc::Rc;
 
-use asap_frontend_sql::unified::{lower_sql, SqlCatalog, SqlError as LoweringError};
+use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys};

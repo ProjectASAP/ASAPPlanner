@@ -368,7 +368,7 @@ fn empty_sources_and_three_valued_predicates() {
 fn compile_without_readers_and_rebind_inputs() {
     use asap_physical_operators::{
         operators::Operator,
-        unified_physical_planner::{compile, InputContract, Source},
+        physical_planner::{compile, InputContract, Source},
     };
     let (scan, schema, batches) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
@@ -403,8 +403,8 @@ fn compile_without_readers_and_rebind_inputs() {
 #[test]
 fn compilation_rejects_unknown_boundedness_for_sort() {
     use asap_physical_operators::{
+        physical_planner::{compile, InputContract},
         plan::{Boundedness, Emission, PlanProperties},
-        unified_physical_planner::{compile, InputContract},
     };
     let (scan, schema, _) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);

@@ -26,7 +26,7 @@ pub use sql::{SqlCatalog, SqlLowerer};
 ///
 /// The `catalog` supplies table schemas (used both to plan the SQL with
 /// DataFusion and to carry positional column identity into the resolved
-/// tree). `accuracy` is threaded onto every approximate intent as it's built.
+/// DAG). `accuracy` is threaded onto every approximate intent as it's built.
 pub async fn lower_sql(
     query: &str,
     catalog: &SqlCatalog,

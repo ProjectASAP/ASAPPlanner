@@ -1,4 +1,4 @@
-//! End-to-end tests for PromQL → unresolved → canonical tree lowering.
+//! End-to-end tests for PromQL → unresolved → canonical DAG lowering.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -15,8 +15,7 @@ use asap_types::workload::{
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
-use asap_frontend_promql::unified::{lower_promql_workload, PromqlError as LoweringError};
-#[path = "unified_support.rs"]
+use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
 mod support;
 use support::lower_promql;
 
@@ -60,14 +59,14 @@ fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
         "sum by(job)(distinct_over_time(cpu_usage[5m]))",
     ] {
         for accuracy in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.02)] {
-            let tree = lower_promql(query, accuracy.clone()).unwrap();
+            let dag = lower_promql(query, accuracy.clone()).unwrap();
             let mut intents = Vec::new();
-            collect_intents(&tree, &mut intents);
+            collect_intents(&dag, &mut intents);
             assert!(
                 intents.iter().any(|intent| matches!(
                     intent, AggIntent::Cardinality { accuracy: actual, .. } if actual == &accuracy
                 )),
-                "{query}: {tree:?}"
+                "{query}: {dag:?}"
             );
             assert!(!intents
                 .iter()
@@ -283,7 +282,7 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     // The canonical Prometheus histogram pattern. Previously returned
     // UnsupportedFeature because `extract_matrix` couldn't see through the
     // `sum by (le)` aggregate; now the `le` grouping survives into the
-    // canonical tree.
+    // canonical DAG.
     let qe = lower(r#"histogram_quantile(0.99, sum by (le) (rate(http_requests_bucket[5m])))"#);
     let NonASAPOp::Aggregate {
         measures, child, ..
@@ -504,19 +503,19 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
             Reduction::by(vec![2]),
         ),
     ] {
-        let tree = lower(query);
+        let dag = lower(query);
         let NonASAPOp::Aggregate {
             measures,
             reduction: actual,
             child,
             ..
-        } = tree.expect_non_asap()
+        } = dag.expect_non_asap()
         else {
-            panic!("expected outer Count: {tree:?}");
+            panic!("expected outer Count: {dag:?}");
         };
         assert!(
             matches!(measures.as_slice(), [AggIntent::Count { .. }]),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
         assert_eq!(actual, &reduction, "{query}");
         let NonASAPOp::Aggregate {
@@ -526,11 +525,11 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
             ..
         } = child.expect_non_asap()
         else {
-            panic!("expected inner per-series Cardinality: {tree:?}");
+            panic!("expected inner per-series Cardinality: {dag:?}");
         };
         assert!(
             matches!(measures.as_slice(), [AggIntent::Cardinality { .. }]),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
         assert_eq!(reduction, &Reduction::PerEntity, "{query}");
         assert!(
@@ -552,17 +551,17 @@ fn count_never_lowers_to_distinct_sample_values() {
         "count(count_over_time(up[5m]))",
         "count_over_time(up[5m])",
     ] {
-        let tree = lower(query);
-        let intents = all_intents(&tree);
+        let dag = lower(query);
+        let intents = all_intents(&dag);
         assert!(
             intents.iter().any(|i| matches!(i, AggIntent::Count { .. })),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
         assert!(
             !intents
                 .iter()
                 .any(|i| matches!(i, AggIntent::Cardinality { .. })),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
     }
 }
@@ -901,7 +900,7 @@ fn binary_op_binds_each_branch_against_its_own_schema() {
     );
 }
 
-/// Collect every `AggIntent` in the tree, root-to-leaf.
+/// Collect every `AggIntent` in the dag, root-to-leaf.
 fn all_intents(e: &OperatorNode) -> Vec<AggIntent> {
     let mut out = Vec::new();
     collect_intents(e, &mut out);
@@ -928,7 +927,7 @@ fn collect_intents(e: &OperatorNode, out: &mut Vec<AggIntent>) {
     }
 }
 
-/// True if any `AggIntent` anywhere in the tree satisfies `pred`.
+/// True if any `AggIntent` anywhere in the dag satisfies `pred`.
 fn has_intent<F: Fn(&AggIntent) -> bool>(e: &OperatorNode, pred: F) -> bool {
     all_intents(e).iter().any(pred)
 }
@@ -1502,7 +1501,7 @@ fn explicit_range_selector_is_a_range_time_range() {
 
 #[test]
 fn instant_and_range_selectors_of_equal_length_stay_distinct() {
-    // The kind is part of the shape: a 1s range selector is not the same tree as
+    // The kind is part of the shape: a 1s range selector is not the same dag as
     // the 1s instant lookback injected around a bare selector.
     assert_ne!(lower("up"), lower("up[1s]"));
 }

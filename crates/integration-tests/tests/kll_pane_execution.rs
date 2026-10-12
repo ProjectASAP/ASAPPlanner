@@ -2,10 +2,10 @@
 mod physical_common;
 use asap_physical_operators::{
     operators::{Operator, SummaryEvaluation},
+    physical_planner::{CompiledPhysicalDAG, InputContract, Source},
     plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
-    unified_physical_planner::{CompiledPhysicalDAG, InputContract, Source},
     values::{Batch, SchemaRef, Value},
     AggregateCore, Error,
 };

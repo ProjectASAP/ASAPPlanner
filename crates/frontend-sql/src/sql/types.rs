@@ -1,6 +1,6 @@
 //! Type bridges between DataFusion's Arrow types and the canonical `DataType`, plus
 //! the SQL table catalog used to register tables with DataFusion and to carry
-//! resolved leaf schemas into the canonical, unresolved tree.
+//! resolved leaf schemas into the canonical, unresolved DAG.
 
 use std::collections::HashMap;
 
@@ -12,7 +12,7 @@ use datafusion::common::ScalarValue as DfScalarValue;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::ScalarValue;
 
-use crate::unified::error::SqlError as LoweringError;
+use crate::error::SqlError as LoweringError;
 
 /// Table catalog for SQL lowering: table name → resolved canonical [`Schema`].
 ///

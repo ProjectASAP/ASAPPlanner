@@ -130,7 +130,7 @@ enum Kind {
     },
     Join {
         kind: planner_types::pre_asap::JoinKind,
-        predicate: Box<crate::expressions::unified_planner::CompiledExpression>,
+        predicate: Box<crate::expressions::CompiledExpression>,
     },
     SummaryBuild {
         family: SummaryFamilyType,

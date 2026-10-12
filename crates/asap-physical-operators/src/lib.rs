@@ -26,9 +26,8 @@ mod error;
 pub use error::Error;
 pub mod expressions;
 pub mod operators;
+pub mod physical_planner;
 pub mod plan;
 pub mod runtime;
+pub mod sources;
 pub mod values;
-
-pub mod unified_physical_planner;
-pub mod unified_sources;

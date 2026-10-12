@@ -7,7 +7,6 @@
 //! resolution, so a successful `lower` already proves schema derivation is
 //! total over the tree.
 
-use ::asap_frontend_sql::unified as asap_frontend_sql;
 use asap_types::ir::Predicate;
 use std::rc::Rc;
 
@@ -232,7 +231,7 @@ async fn where_folds_predicate_onto_scan() {
 async fn multi_aggregate_group_by_binds_columns_positionally() {
     // SUM(bytes)=col 3, AVG(latency)=col 2, GROUP BY service=col 1.
     let qe = lower("SELECT service, SUM(bytes), AVG(latency) FROM metrics GROUP BY service").await;
-    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate in the tree");
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate in the DAG");
     assert_eq!(by, &vec![1], "GROUP BY service → column 1");
     assert!(
         measures.contains(&AggIntent::Sum { col: Some(3) }),
@@ -325,7 +324,7 @@ async fn count_ranked_topk_is_heavy_hitter() {
 async fn count_ranked_topk_via_alias_is_also_heavy_hitter() {
     // Regression for #20: aliasing `COUNT(*)` in the ORDER BY used to defeat the
     // SQL front-end gate. The positional `canonicalize` pass now promotes it too,
-    // so the aliased and inline forms produce an identical canonical tree.
+    // so the aliased and inline forms produce an identical canonical DAG.
     let inline = lower(
         "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
     )
@@ -523,7 +522,7 @@ async fn join_predicate_disambiguates_shared_column_name() {
          FROM metrics JOIN hosts ON metrics.service = hosts.service",
     )
     .await;
-    let join = find_join(&qe).expect("expected a Join in the tree");
+    let join = find_join(&qe).expect("expected a Join in the DAG");
     assert_eq!(
         join_eq_columns(join),
         [1, 4],
@@ -544,7 +543,7 @@ async fn derived_table_join_disambiguates_via_alias() {
          JOIN (SELECT service, region FROM hosts) b ON a.service = b.service",
     )
     .await;
-    let join = find_join(&qe).expect("expected a Join in the tree");
+    let join = find_join(&qe).expect("expected a Join in the DAG");
     assert_eq!(
         join_eq_columns(join),
         [0, 2],
@@ -562,7 +561,7 @@ async fn derived_table_select_star_join_disambiguates_via_alias() {
          ON a.service = b.service",
     )
     .await;
-    let join = find_join(&qe).expect("expected a Join in the tree");
+    let join = find_join(&qe).expect("expected a Join in the DAG");
     let [l, r] = join_eq_columns(join);
     assert_ne!(
         l, r,
@@ -580,7 +579,7 @@ async fn self_join_disambiguates_via_aliases() {
          FROM metrics a JOIN metrics b ON a.service = b.service",
     )
     .await;
-    let join = find_join(&qe).expect("expected a self-Join in the tree");
+    let join = find_join(&qe).expect("expected a self-Join in the DAG");
     assert_eq!(
         join_eq_columns(join),
         [1, 5],
@@ -990,7 +989,7 @@ fn all_intents(root: &Rc<OperatorNode>) -> Vec<AggIntent> {
 async fn derived_table_aggregate_over_aggregate_nests() {
     // `MAX(s)` over a derived table `(SELECT service, SUM(bytes) AS s … GROUP BY
     // service)` — the SQL counterpart of PromQL function nesting (issue #27).
-    // Both reductions survive into the canonical tree: an outer `Max` over
+    // Both reductions survive into the canonical DAG: an outer `Max` over
     // the inner `Sum`.
     let qe = lower(
         "SELECT MAX(s) FROM \
@@ -1400,8 +1399,8 @@ async fn count_distinct_carries_its_input_column() {
 #[tokio::test]
 async fn quantile_and_count_distinct_over_an_expression_bind_the_derived_column() {
     // A SQL aggregate has no "sample value" to fall back on, so an expression
-    // argument must never reach the canonical tree as `col: None` (#115).
-    // Since #110 it reaches the canonical tree as `col: Some(derived)`
+    // argument must never reach the canonical DAG as `col: None` (#115).
+    // Since #110 it reaches the canonical DAG as `col: Some(derived)`
     // instead of being rejected.
     for q in [
         "SELECT approx_percentile_cont(bytes * 8, 0.95) FROM metrics",
@@ -1548,7 +1547,7 @@ async fn time_bucketing_keeps_the_scan_predicate() {
 
 #[tokio::test]
 async fn a_plain_group_by_inserts_no_projection() {
-    // Queries that lowered before #110 must keep their exact tree shape — the
+    // Queries that lowered before #110 must keep their exact DAG shape — the
     // projection appears only when something actually needs materializing.
     for q in [
         "SELECT service, SUM(bytes) FROM metrics GROUP BY service",
@@ -3075,7 +3074,6 @@ async fn qualified_reducer_argument_over_a_join_reads_its_own_side() {
         assert_eq!(cols, [side], "{sql}");
     }
 }
-
 /// DataFusion 54 compares `ROW_NUMBER()` (UInt64) with an Int64 literal
 /// through `Decimal128(20, 0)`; canonical integers are all Int64, so the
 /// widening cast lowers as a no-op.

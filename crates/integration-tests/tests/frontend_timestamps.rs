@@ -1,6 +1,6 @@
 //! Cross-frontend evaluation-time semantics (issues #46 and #184).
 
-use asap_frontend_sql::unified::{lower_sql, SqlCatalog};
+use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql_root;
 use asap_types::ir::{NonASAPOp, ScalarExpr};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};

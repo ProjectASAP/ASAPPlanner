@@ -162,7 +162,7 @@ impl ScalarUDFImpl for CollectionPlanningFunction {
         Ok(Arc::new(ArrowField::new(self.name, dtype, nullable)))
     }
     fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        Err(DataFusionError::NotImplemented("collection planning adapter cannot execute; use a capable query engine or external exact sub_dag".into()))
+        Err(DataFusionError::NotImplemented("collection planning adapter cannot execute; use a capable query engine or external exact sub-DAG".into()))
     }
 }
 

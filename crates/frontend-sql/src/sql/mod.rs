@@ -72,7 +72,7 @@ use asap_types::pre_asap::{
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
-use crate::unified::error::SqlError as LoweringError;
+use crate::error::SqlError as LoweringError;
 
 mod clickhouse_ast;
 mod collection_planning;
@@ -2143,7 +2143,7 @@ struct DerivedCols<'l> {
     lowerer: &'l SqlLowerer<'l>,
     cols: Vec<ProjectItem>,
     /// Whether any column is genuinely derived. Without one the aggregate keeps
-    /// its original child, so trees that lower today keep their exact shape.
+    /// its original child, so DAGs that lower today keep their exact shape.
     any: bool,
     /// First same-name-different-value collision, reported only if the
     /// projection is actually inserted (see [`Self::wrap`]).
@@ -2276,7 +2276,7 @@ impl<'l> DerivedCols<'l> {
 
     /// Wrap `input` in the materializing `Project`, or return it untouched when
     /// nothing needed deriving — so a query that lowers today keeps its exact
-    /// tree, and a name collision that the projection would have flattened only
+    /// DAG, and a name collision that the projection would have flattened only
     /// matters once the projection exists.
     fn wrap(self, input: Unresolved) -> Result<Unresolved, LoweringError> {
         if !self.any {

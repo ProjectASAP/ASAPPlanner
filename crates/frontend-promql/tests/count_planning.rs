@@ -5,7 +5,6 @@ use asap_aware_mapping::{
     default_strategies, search_workload_with_targets, ASAPStrategies, Replacement,
     ReplacementStrategy, TargetSubDAG,
 };
-#[path = "unified_support.rs"]
 mod support;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, Operator};

@@ -5,15 +5,14 @@
 //! heuristic's false-positive and false-negative cases. Undeclared metrics still
 //! fall back to the heuristic.
 
-use asap_frontend_promql::unified::{HistogramCatalog, HistogramKind};
-#[path = "unified_support.rs"]
+use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 mod support;
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, lower_promql_with_histograms};
 
-/// The histogram/quantile intent kind in the lowered tree: `"HQ"` for the
+/// The histogram/quantile intent kind in the lowered DAG: `"HQ"` for the
 /// classic-bucket `HistogramQuantile`, `"Q"` for the sketch-able `Quantile`.
 fn quantile_kind(qe: &OperatorNode) -> &'static str {
     fn walk(e: &OperatorNode) -> Option<&'static str> {

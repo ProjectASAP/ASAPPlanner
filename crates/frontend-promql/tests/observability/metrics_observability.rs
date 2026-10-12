@@ -10,8 +10,8 @@ use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
     ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_frontend_promql::unified::PromqlError;
-#[path = "../unified_support.rs"]
+use asap_frontend_promql::PromqlError;
+#[path = "../support.rs"]
 mod support;
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;

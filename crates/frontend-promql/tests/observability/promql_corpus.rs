@@ -19,8 +19,8 @@ use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
     ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_frontend_promql::unified::PromqlError as LoweringError;
-#[path = "../unified_support.rs"]
+use asap_frontend_promql::PromqlError as LoweringError;
+#[path = "../support.rs"]
 mod support;
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
@@ -75,7 +75,7 @@ impl Tally {
 fn tally(corpus: &str) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match asap_frontend_promql::unified::lower_promql_query_workload(
+        match asap_frontend_promql::lower_promql_query_workload(
             &support::workload(q, AccuracyTarget::Exact),
             0,
         ) {

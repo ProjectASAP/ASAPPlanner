@@ -80,7 +80,7 @@ pub fn bind_with_data_sources<'a>(
     dag: &PhysicalASAPDAG,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-    data_sources: &crate::unified_sources::DataSources,
+    data_sources: &crate::sources::DataSources,
 ) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
     let restored = logical::restore(dag)?;
     // Only resolve scans reachable below the selected input boundaries.
@@ -906,8 +906,8 @@ fn expression(
     input: &SchemaRef,
 ) -> Result<Expression, Error> {
     let expr = local_scalar(expr)?;
-    Ok(Expression::unified_planner(
-        crate::expressions::unified_planner::CompiledExpression::compile(&expr, input)?,
+    Ok(Expression::planner(
+        crate::expressions::CompiledExpression::compile(&expr, input)?,
     ))
 }
 

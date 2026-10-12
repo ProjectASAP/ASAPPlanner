@@ -2,7 +2,7 @@
 //! Expectations follow ASAP's IR (notably row-count and IEEE NaN equality).
 //! Reference: apache/datafusion e2ca7f3, physical-plan/src/{limit.rs,sorts/sort.rs}.
 use asap_physical_operators::{
-    expressions::unified_planner::CompiledExpression,
+    expressions::CompiledExpression,
     operators::{Expression, Operator, Reduction, SortKey},
     plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
@@ -341,17 +341,13 @@ fn projection_rejects_expression_bound_to_another_schema() {
     let original = schema(&[("a", DataType::Int64, false), ("b", DataType::Int64, false)]);
     let current = schema(&[("a", DataType::Int64, false)]);
     let expr = CompiledExpression::compile(&QueryExpr::Column(1), &original).unwrap();
-    assert!(Operator::project(
-        current,
-        vec![("b".into(), Expression::unified_planner(expr))]
-    )
-    .is_err());
+    assert!(Operator::project(current, vec![("b".into(), Expression::planner(expr))]).is_err());
 }
 
 // A valid Planner MIN/MAX schema must bind even for a non-null input column.
 #[test]
 fn global_extrema_bind_with_planner_derived_schema() {
-    use asap_physical_operators::unified_physical_planner::compile_node;
+    use asap_physical_operators::physical_planner::compile_node;
     use planner_types::{
         post_asap::*,
         pre_asap::{AggIntent, GroupKeys, Reduction as PlanReduction},

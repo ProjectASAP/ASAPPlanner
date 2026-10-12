@@ -31,7 +31,7 @@ pub enum PromqlError {
     InvalidParameter(String),
     /// The workload's query language is not PromQL.
     WrongLanguage(String),
-    /// Resolving the canonical unresolved tree failed (name resolution
+    /// Resolving the canonical unresolved DAG failed (name resolution
     /// against the bound schema).
     Convert(ResolveDAGError),
 }

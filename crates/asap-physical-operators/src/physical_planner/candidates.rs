@@ -368,7 +368,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let root = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+        let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
             .unwrap()
             .remove(0);
         let root = promql_rows::with_series_identity(&root).unwrap();
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn candidates_for_all_frontiers_share_one_lowering() {
         let (dag, inputs, root) = grouped_rate();
-        let lowered = || crate::unified_physical_planner::LOWERED_NODES.with(|count| count.get());
+        let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
         let before = lowered();
         let compiled = compile(&dag, inputs, &[root]).unwrap();
         let once = lowered() - before;
@@ -455,7 +455,7 @@ mod tests {
         let (retained, _, root) = grouped_rate();
         let ephemeral = with_timing(&retained, |_| QueryTime);
         let inputs = raw_input(&retained);
-        let lowered = || crate::unified_physical_planner::LOWERED_NODES.with(|count| count.get());
+        let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
         let before = lowered();
         let compiled = compile(&ephemeral, inputs.clone(), &[root]).unwrap();
         let once = lowered() - before;

@@ -2,7 +2,7 @@
 //! Deployments choose the encoding; JSON is used here only as a test format.
 use asap_physical_operators::{
     operators::{Operator, SortKey},
-    unified_physical_planner::{CompiledPhysicalDAG, InputContract},
+    physical_planner::{CompiledPhysicalDAG, InputContract},
 };
 use planner_types::{
     post_asap::{Field, FieldDataType},
@@ -74,7 +74,7 @@ fn recovery_retains_selected_operator_and_rejects_invalid_contracts() {
 
 #[test]
 fn candidate_recovery_preserves_materialization_boundary() {
-    use asap_physical_operators::unified_physical_planner::CompiledPhysicalPlan;
+    use asap_physical_operators::physical_planner::CompiledPhysicalPlan;
     let precompute = sorted();
     let output = InputContract::bounded(precompute.output_contract(1).unwrap().schema);
     let query = CompiledPhysicalDAG::from_operators(

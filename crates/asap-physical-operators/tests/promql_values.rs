@@ -3,8 +3,8 @@ use asap_physical_operators::expressions::binary::{BinaryOpKind, BinaryOperator}
 
 use asap_physical_operators::{
     operators::Operator,
+    physical_planner::{promql_values::*, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{promql_values::*, CompiledPhysicalDAG, Source},
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
@@ -211,9 +211,9 @@ fn histogram_quantile_keeps_each_label_group() {
 #[test]
 fn composed_ensemble_shares_a_producer_across_roots() {
     use asap_physical_operators::{
+        physical_planner::InputContract,
         plan::{PhysicalOperator, PlanProperties},
         runtime::{Input, OutputStream},
-        unified_physical_planner::InputContract,
         values::SchemaRef,
     };
     use planner_types::pre_asap::ArithmeticOpKind;

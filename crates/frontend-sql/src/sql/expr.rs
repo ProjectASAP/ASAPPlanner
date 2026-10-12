@@ -6,7 +6,7 @@ use asap_frontend_common::UnresolvedScalar as Unresolved;
 use asap_types::ir::ExprSemantics;
 use asap_types::pre_asap::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 
-use crate::unified::error::SqlError as LoweringError;
+use crate::error::SqlError as LoweringError;
 
 use super::types::{cast_target, scalar_value_to_asap};
 use super::SqlLowerer;
@@ -329,7 +329,7 @@ pub(super) fn split_disjuncts(expr: &Expr) -> Vec<&Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::unified::sql::SqlCatalog;
+    use crate::sql::SqlCatalog;
     use asap_types::pre_asap::schema::DataType;
     use datafusion::common::ScalarValue as DfScalarValue;
 

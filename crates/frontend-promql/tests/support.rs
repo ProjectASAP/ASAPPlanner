@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use asap_frontend_promql::unified::{
+use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, HistogramCatalog, PromqlError,
 };
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
@@ -87,7 +87,7 @@ pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export
 
 #[allow(dead_code)]
 pub fn scalar_root(query: &str) -> ScalarExpr {
-    match asap_frontend_promql::unified::lower_promql_query_workload(
+    match asap_frontend_promql::lower_promql_query_workload(
         &workload(query, AccuracyTarget::Exact),
         0,
     )

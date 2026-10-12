@@ -2,8 +2,8 @@
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
+    physical_planner::{precompute, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{precompute, CompiledPhysicalDAG, Source},
     values::{Batch, Value},
     Statistic,
 };

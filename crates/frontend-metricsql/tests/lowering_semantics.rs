@@ -1,7 +1,7 @@
-//! The unified MetricsQL lowering (`asap_frontend_metricsql::unified`).
+//! MetricsQL lowering semantics: counts, rollup ranges, instant lookback.
 use std::time::Duration;
 
-use asap_frontend_metricsql::unified::{lower_metricsql_query_workload, MetricsqlError};
+use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
@@ -16,7 +16,7 @@ fn lower_metricsql(
     query: &str,
     accuracy: AccuracyTarget,
 ) -> Result<std::rc::Rc<OperatorNode>, MetricsqlError> {
-    asap_frontend_metricsql::unified::lower_metricsql(query, accuracy, INTERVAL)
+    asap_frontend_metricsql::lower_metricsql(query, accuracy, INTERVAL)
 }
 
 fn workload(language: QueryLanguage, query: &str) -> PlanningWorkload {

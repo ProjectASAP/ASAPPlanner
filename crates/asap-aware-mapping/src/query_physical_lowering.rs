@@ -2828,7 +2828,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let root = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+        let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
             .unwrap()
             .remove(0);
         // Read one node through every reference (as a planner that shares

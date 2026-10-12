@@ -27,21 +27,19 @@ pub mod fixtures {
     pub fn lower_promql(
         query: &str,
         accuracy: AccuracyTarget,
-    ) -> Result<Rc<OperatorNode>, asap_frontend_promql::unified::PromqlError> {
+    ) -> Result<Rc<OperatorNode>, asap_frontend_promql::PromqlError> {
         match lower_promql_root(query, accuracy)? {
             asap_types::ir::QueryRoot::Operator(node) => Ok(node),
-            _ => Err(
-                asap_frontend_promql::unified::PromqlError::UnsupportedFeature(
-                    "expected vector root".into(),
-                ),
-            ),
+            _ => Err(asap_frontend_promql::PromqlError::UnsupportedFeature(
+                "expected vector root".into(),
+            )),
         }
     }
 
     pub fn lower_promql_root(
         query: &str,
         accuracy: AccuracyTarget,
-    ) -> Result<asap_types::ir::QueryRoot, asap_frontend_promql::unified::PromqlError> {
+    ) -> Result<asap_types::ir::QueryRoot, asap_frontend_promql::PromqlError> {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
@@ -66,7 +64,7 @@ pub mod fixtures {
                 ..Default::default()
             }),
         };
-        let mut lowered = asap_frontend_promql::unified::lower_promql_query_workload(&workload, 0)?;
+        let mut lowered = asap_frontend_promql::lower_promql_query_workload(&workload, 0)?;
         Ok(lowered.remove(0))
     }
 

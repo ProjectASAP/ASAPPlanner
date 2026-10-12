@@ -1,11 +1,11 @@
 //! SQL frontend, candidate selection, physical compilation and fresh-run execution.
 mod physical_common;
 use asap_aware_mapping::{search_workload, DefaultCostModel};
-use asap_frontend_sql::unified::{lower_sql, SqlCatalog};
+use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_physical_operators::{
+    physical_planner::{compile, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{compile, InputContract, Source},
-    unified_sources::{DataSources, MemorySource},
+    sources::{DataSources, MemorySource},
     values::{Batch, Value},
 };
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;

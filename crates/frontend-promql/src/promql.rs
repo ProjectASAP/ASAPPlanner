@@ -16,7 +16,7 @@
 //!   the schema-*dependent* work: binding every `ColumnRef` to its
 //!   positional `ColumnId`.
 //!
-//! # PromQL → canonical unresolved-tree mapping (summary)
+//! # PromQL → canonical unresolved-DAG mapping (summary)
 //!
 //! | PromQL | Canonical shape |
 //! |---|---|
@@ -84,11 +84,11 @@ use asap_types::types::AccuracyTarget;
 /// Every scalar expression this front end builds follows PromQL's numeric rules.
 const PROMQL: ExprSemantics = ExprSemantics::Promql;
 
-use crate::unified::error::PromqlError as LoweringError;
+use crate::error::PromqlError as LoweringError;
 
 type Result<T> = std::result::Result<T, LoweringError>;
 
-/// Parses and lowers (→ the canonical, unresolved tree) a PromQL query string.
+/// Parses and lowers (→ the canonical, unresolved DAG) a PromQL query string.
 pub(crate) struct PromqlLowerer;
 
 #[derive(Debug, Clone)]
@@ -193,8 +193,8 @@ impl PromqlLowerer {
         let mut metrics = Vec::new();
         collect_metric_names(&ast, &mut metrics);
         if metrics.iter().any(|metric| {
-            crate::unified::histogram::current_kind_of(metric)
-                == Some(crate::unified::histogram::HistogramKind::Native)
+            crate::histogram::current_kind_of(metric)
+                == Some(crate::histogram::HistogramKind::Native)
         }) {
             return Err(LoweringError::UnsupportedFeature(
                 "native histogram samples have no IR representation".into(),
@@ -477,8 +477,8 @@ fn vector_binary(
 /// `extract_matrix` can't accept it. Lower the sub-query recursively and reduce
 /// it per series (issue #27).
 fn walk_call(call: &Call) -> Result<Unresolved> {
-    if let Some(tree) = range_fn_over_subquery(call)? {
-        return Ok(tree);
+    if let Some(dag) = range_fn_over_subquery(call)? {
+        return Ok(dag);
     }
     build(lower_inner_call(call)?, vec![], Outer::None)
 }
@@ -721,11 +721,11 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// `Reduce(without(keys))`: a `without` grouping is never label-preserving —
 /// per-entity requires `!by.is_without()` — so this both re-tags an existing
 /// `Reduce` and upgrades a wrongly-early `PerEntity` guess, uniformly.
-fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
+fn mark_without(dag: Unresolved, without: bool) -> Unresolved {
     if !without {
-        return tree;
+        return dag;
     }
-    match tree {
+    match dag {
         Unresolved::Aggregate {
             reduction,
             measures,
@@ -1058,7 +1058,7 @@ fn is_presence_fn(name: &str) -> bool {
 /// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
 /// to an `Aggregate{[Absent/…]}` over the (instant or range) argument. The
 /// empty-result → synthesized-1-sample logic is a post-ASAP/runtime concern;
-/// the canonical tree only marks the operation (issue #47).
+/// the canonical DAG only marks the operation (issue #47).
 fn walk_presence(call: &Call) -> Result<Unresolved> {
     let func = match call.func.name {
         "absent" => AggIntent::Absent,
@@ -1325,7 +1325,7 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
 /// `Quantile` (`true`) or exact classic-bucket interpolation (`false`).
 ///
 /// Metadata wins: if any metric referenced in `arg` has a declared
-/// [`HistogramKind`](crate::unified::histogram::HistogramKind), that decides it (issue
+/// [`HistogramKind`](crate::histogram::HistogramKind), that decides it (issue
 /// #79) — this fixes both the false-positive (a `…_bucket`-named non-histogram
 /// declared `RawSamples`) and the false-negative (a suffix-less classic
 /// histogram declared `ClassicBucket`) of the structural heuristic. With no
@@ -1335,9 +1335,9 @@ fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
     collect_metric_names(arg, &mut metrics);
     let kinds = metrics
         .iter()
-        .filter_map(|metric| crate::unified::histogram::current_kind_of(metric))
+        .filter_map(|metric| crate::histogram::current_kind_of(metric))
         .collect::<Vec<_>>();
-    if kinds.contains(&crate::unified::histogram::HistogramKind::Native) {
+    if kinds.contains(&crate::histogram::HistogramKind::Native) {
         return Err(LoweringError::UnsupportedFeature(
             "native histogram samples have no IR representation".into(),
         ));
@@ -1624,7 +1624,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
     }
 }
 
-/// Assemble the Layer-2 tree from a lowered inner vector, the resolved group
+/// Assemble the Layer-2 DAG from a lowered inner vector, the resolved group
 /// keys, and the enclosing aggregator shape.
 fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
     match outer {
@@ -1712,7 +1712,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             };
             let additive_ranking = measure.is_supported(descending);
             if additive_ranking {
-                // Preserve the ranked aggregate intent in the canonical tree so the
+                // Preserve the ranked aggregate intent in the canonical DAG so the
                 // intent algebra is explicit about what is being computed.
                 // Post-ASAP binding may fuse the Count and TopK into a
                 // single-pass heavy-hitter sketch (SpaceSaving /
@@ -1763,7 +1763,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
 
 /// Decide `PerEntity` vs `Reduce(by)` for a canonical `Aggregate`, entirely
 /// from local PromQL semantics: the keys and whether this operation preserves
-/// each input series. It never infers entity reduction from the child tree's
+/// each input series. It never infers entity reduction from the child DAG's
 /// temporal shape. `without()` is applied
 /// separately, post-hoc, by `mark_without` — see its doc for why that's still
 /// correct here.

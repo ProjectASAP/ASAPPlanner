@@ -1,6 +1,5 @@
 use asap_types::types::AccuracyTarget;
 
-#[path = "unified_support.rs"]
 mod support;
 use support::lower_promql;
 

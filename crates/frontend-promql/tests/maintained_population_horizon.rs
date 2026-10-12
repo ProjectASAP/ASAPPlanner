@@ -1,4 +1,3 @@
-#[path = "unified_support.rs"]
 mod support;
 use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
