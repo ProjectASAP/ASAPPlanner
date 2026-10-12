@@ -62,7 +62,7 @@ operator inputs and scalar query-result references use `Rc<OperatorNode>`.
 read by expressions. Keep `ScalarExpr::Column(ColumnId)`: the ID selects a field
 for type checking and the corresponding input value for evaluation, independently
 of the executor's row/column storage layout. See the
-[fields versus column references contract](operator-sharing.md#21-one-schema-model-for-values-and-state).
+[fields versus column references contract](asap-primitive-schema.md#3-proposed-schema-design).
 
 Names are resolved to `ColumnId` before constructing these nodes. Parsing and
 unresolved `ColumnRef` handling remain frontend concerns; no alternative generic

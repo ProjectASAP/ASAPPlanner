@@ -49,7 +49,8 @@ summary family supports incremental maintenance.
   and selects the joined rows. Completeness evidence belongs to pruning, not ranking.
 
 A `SummaryNode` carries its expression, schema and optional result guarantee.
-State and query values have different contracts. Exact operations over
+State and query values have different contracts; see
+[Schema and physical data for ASAP primitives](../proposals/asap-primitive-schema.md). Exact operations over
 approximate readouts still require composed accuracy guarantees. See the
 [accuracy implementation companion](../../develop_docs/end-to-end-accuracy-guarantees.md)
 and [physical-plan integration](../architecture/physical-plan-integration.md)
