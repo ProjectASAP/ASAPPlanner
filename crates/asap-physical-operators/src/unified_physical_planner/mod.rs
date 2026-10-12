@@ -1,5 +1,7 @@
 //! Compile logical computation to native operators with typed external inputs.
 //! Compilation needs no readers; deployment resolves inputs after selection.
+//! A node without a native lowering fails compilation; the deployment runtime
+//! must execute it.
 use crate::operators::ReadoutQuery;
 use crate::summary_kernels::exact::ExactReadout;
 use crate::{
@@ -34,7 +36,6 @@ fn invalid(message: impl Into<String>) -> Error {
 pub type Source<'a> = Box<dyn PhysicalOperator<Batch, SchemaRef> + 'a>;
 
 pub mod precompute;
-pub mod promql_fallback;
 pub mod promql_rows;
 pub mod promql_values;
 
@@ -118,9 +119,11 @@ thread_local! {
 /// Planner ID range, so every boundary choice yields a subgraph of the same
 /// lowering and candidate cuts need not renumber operators. A node lowering to
 /// several helpers takes consecutive indices below its base.
-fn helper_id(node: NodeId, index: u64) -> NodeId {
-    debug_assert!(node <= u64::from(u32::MAX) && index < 1 << 16);
-    u64::MAX - (node << 16) - index
+fn helper_id(node: NodeId, index: u64) -> Result<NodeId, Error> {
+    if index >= 1 << 16 {
+        return Err(invalid(format!("node {node} needs more than 2^16 helpers")));
+    }
+    Ok(u64::MAX - (node << 16) - index)
 }
 
 fn compile_internal(
@@ -129,6 +132,10 @@ fn compile_internal(
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
+    // Helper IDs lie above the u32 range; a larger Planner ID could collide.
+    if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {
+        return Err(invalid(format!("Planner node ID {} exceeds u32", node.id)));
+    }
     let restored = logical::restore(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
@@ -156,35 +163,7 @@ fn compile_internal(
             .or_default()
             .push(edge.producer as u64);
     }
-    let mut fallback = BTreeMap::new();
-    for (&id, root) in &restored {
-        let raw_summary_input = matches!(root.non_asap(), Some(NonASAPOp::TimeRange { .. }))
-            && dag.edges.iter().any(|e| {
-                e.producer as u64 == id
-                    && matches!(
-                        nodes[&(e.consumer as u64)].payload,
-                        Payload::ASAP(ASAPOp::SummaryAgg { .. })
-                    )
-            });
-        if !root.contains_asap() && !raw_summary_input {
-            if let Ok(lowered) = promql_fallback::lower(root) {
-                fallback.insert(id, lowered);
-            }
-        }
-    }
-    let known = |id: &NodeId| {
-        nodes.contains_key(id)
-            || promql_fallback::raw_series_owner(*id).is_some_and(|owner| {
-                matches!(
-                    nodes.get(&owner),
-                    Some(PhysicalASAPDAGNode {
-                        payload: Payload::NonASAP(_),
-                        ..
-                    })
-                )
-            })
-    };
-    if !sources.keys().all(known) {
+    if !sources.keys().all(|id| nodes.contains_key(id)) {
         return Err(invalid("source binding names an unknown node"));
     }
     let mut ordered = Vec::new();
@@ -202,30 +181,16 @@ fn compile_internal(
             return Err(invalid(format!("missing root {id}")));
         }
         pending.push((id, true));
-        if !sources.contains_key(&id) && !fallback.contains_key(&id) {
+        if !sources.contains_key(&id) {
             for &input in dependencies.get(&id).into_iter().flatten() {
                 pending.push((input, false));
             }
         }
     }
-    // The PromQL fallback reads raw series slots, so a binding below a node it
-    // evaluates is never read. (A binding below another bound input is just
-    // superseded by it, as in `cut`.)
-    let mut below_fallback = BTreeSet::new();
-    let mut stack = ordered
-        .iter()
-        .filter(|id| !sources.contains_key(id) && fallback.contains_key(id))
-        .flat_map(|id| dependencies.get(id).into_iter().flatten().copied())
-        .collect::<Vec<_>>();
-    while let Some(id) = stack.pop() {
-        if below_fallback.insert(id) {
-            stack.extend(dependencies.get(&id).into_iter().flatten().copied());
-        }
-    }
     let mut dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
-        let mut auxiliary = helper_id(id, 0);
+        let auxiliary = helper_id(id, 0)?;
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
         if let Some(source) = sources.remove(&id) {
@@ -254,56 +219,6 @@ fn compile_internal(
                 )?;
                 inputs = vec![auxiliary];
                 schemas.truncate(1);
-            }
-            if let Some(promql_fallback::Lowering {
-                selectors,
-                mut steps,
-            }) = fallback.remove(&id)
-            {
-                let mut slots = Vec::new();
-                for (i, (_, schema)) in selectors.iter().enumerate() {
-                    let slot = promql_fallback::raw_series_input(id, i);
-                    match sources.remove(&slot) {
-                        Some(contract) if &contract.schema == schema => {
-                            dag.add_input(slot, contract)?
-                        }
-                        Some(_) => {
-                            return Err(invalid(format!(
-                            "node {id}: raw series input {slot} differs from the selector schema"
-                        )))
-                        }
-                        None => {
-                            return Err(invalid(format!(
-                                "node {id}: PromQL fallback requires raw series input {slot}"
-                            )))
-                        }
-                    }
-                    slots.push(slot);
-                }
-                let (last, last_inputs) = steps
-                    .pop()
-                    .ok_or_else(|| invalid("empty PromQL lowering"))?;
-                let mut ids = Vec::new();
-                let resolve = |inputs: Vec<promql_fallback::Input>, ids: &[NodeId]| {
-                    inputs
-                        .into_iter()
-                        .map(|input| match input {
-                            promql_fallback::Input::Raw(i) => slots[i],
-                            promql_fallback::Input::Step(i) => ids[i],
-                        })
-                        .collect::<Vec<_>>()
-                };
-                for (operator, inputs) in steps {
-                    dag.add(auxiliary, resolve(inputs, &ids), operator)?;
-                    ids.push(auxiliary);
-                    auxiliary -= 1;
-                }
-                dag.add(
-                    id,
-                    resolve(last_inputs, &ids),
-                    last.with_output_schema(output)?,
-                )?;
-                continue;
             }
             if let Payload::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &node.payload {
                 use planner_types::post_asap::maintained_population::PopulationInput;
@@ -366,10 +281,10 @@ fn compile_internal(
                         row_values::population_aggregate(&input, &spec.grouping, evaluation)?;
                     let last = chain.pop().expect("nonempty chain");
                     let mut inputs = inputs;
-                    for operator in chain {
-                        dag.add(auxiliary, inputs, operator)?;
-                        inputs = vec![auxiliary];
-                        auxiliary -= 1;
+                    for (index, operator) in chain.into_iter().enumerate() {
+                        let helper = helper_id(id, index as u64)?;
+                        dag.add(helper, inputs, operator)?;
+                        inputs = vec![helper];
                     }
                     dag.add(id, inputs, last.with_output_schema(output)?)?;
                     continue;
@@ -530,7 +445,6 @@ fn compile_internal(
                     } else {
                         dag.add(id, vec![auxiliary], project)?;
                     }
-                    auxiliary -= 1;
                     continue;
                 }
             }
@@ -569,11 +483,6 @@ fn compile_internal(
                 dag.add(id, inputs, operator)?;
             }
         }
-    }
-    if let Some(id) = sources.keys().find(|id| below_fallback.contains(id)) {
-        return Err(invalid(format!(
-            "input binding {id} is below a PromQL fallback node, which never reads it"
-        )));
     }
     dag.validate()?;
     Ok(dag)
@@ -942,7 +851,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             )
         }
         _ => Err(invalid(
-            "physical operation has no native binding; no fallback is installed",
+            "physical operation has no native binding; the deployment runtime must execute it",
         )),
     }
 }
