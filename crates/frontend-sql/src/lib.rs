@@ -102,3 +102,6 @@ pub async fn lower_sql_batch(
     }
     results
 }
+
+/// Unified SQL lowering; promoted to the root API at the planner cutover.
+pub mod unified;

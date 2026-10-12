@@ -62,3 +62,5 @@ pub use query_expr::{
 pub use resolve::{resolve_root, ResolveDAGError};
 pub use schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};
+
+pub use crate::ir::SchemaDerivationError;

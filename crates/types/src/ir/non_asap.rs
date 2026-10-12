@@ -641,6 +641,13 @@ impl NonASAPOp {
                     .ok_or(SchemaDerivationError::EmptyConcat)?
                     .schema
                     .clone();
+                // A column is nullable if any child's is: a rolled-up
+                // grouping key is NULL only in the coarser levels.
+                for child in &children[1..] {
+                    for (field, other) in s.fields.iter_mut().zip(&child.schema.fields) {
+                        field.nullable |= other.nullable;
+                    }
+                }
                 s.unique_keys.clear();
                 if let Some(key) = discriminator_unique_key {
                     let mut compound = vec![*key.discriminator()];
