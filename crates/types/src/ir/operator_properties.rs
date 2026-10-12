@@ -185,15 +185,6 @@ pub enum Source {
     Table { table_ref: String },
 }
 
-impl Source {
-    pub fn data_model(&self) -> DataModel {
-        match self {
-            Source::TimeSeries { .. } => DataModel::TimeSeries,
-            Source::Table { .. } => DataModel::Tabular,
-        }
-    }
-}
-
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
 /// [`ArithmeticOpKind`] / [`CompareOpKind`] so every arithmetic/comparison
 /// operator has exactly one representation (and one `Display`) across the IR.

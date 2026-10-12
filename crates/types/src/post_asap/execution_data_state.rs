@@ -23,9 +23,6 @@ pub enum ExecutionTiming {
 }
 
 impl ExecutionTiming {
-    pub fn is_query_time(&self) -> bool {
-        *self == Self::QueryTime
-    }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::IngestionTime => "ingestion_time",
