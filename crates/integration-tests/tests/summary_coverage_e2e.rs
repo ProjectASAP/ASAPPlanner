@@ -1,13 +1,16 @@
 //! Query string → planned summary state → `coverage()`, for the examples of
-//! the ASAP primitive schema design doc (#573 §4.2.2). Each query is lowered,
-//! searched and selected with the default cost model, and the quantile's KLL
-//! `SummaryAgg` in the selected DAG is checked: what its `definition` keeps
-//! and what its `selection` takes, row by row of §4.2.2's "More examples".
+//! the ASAP primitive schema design doc (#573 §4.2.2). Each query is lowered
+//! and searched, and the quantile's KLL `SummaryAgg` candidate in the search
+//! space is checked: what its `definition` keeps and what its `selection`
+//! takes, row by row of §4.2.2's "More examples". The tests read the
+//! candidate list, not a cost model's selection, so they do not depend on
+//! which candidate a cost model prefers.
 
 use std::ops::Bound;
 use std::rc::Rc;
 
-use asap_aware_mapping::{search_workload, DefaultCostModel};
+use asap_aware_mapping::replacement::Replacement;
+use asap_aware_mapping::search_workload;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::ir::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
@@ -24,26 +27,30 @@ fn accuracy() -> AccuracyTarget {
     }
 }
 
-fn plan(pre: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    let space = search_workload(vec![("query", pre)]);
-    space
-        .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
-        .expect("materialization failed")
-        .expect("root must be discovered")
-}
-
-/// The single KLL `SummaryAgg` of the selected DAG.
-fn kll_state(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    let states: Vec<_> = OperatorNode::reachable(root)
-        .into_iter()
-        .filter(|node| {
-            matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::Kll)
-        })
-        .collect();
-    assert_eq!(states.len(), 1, "expected one KLL state in {root:#?}");
-    states[0].clone()
+/// The single KLL `SummaryAgg` among the search space's candidates for `pre`.
+fn kll_state(pre: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    let space = search_workload(vec![("query", pre)]).unwrap();
+    let mut states: Vec<Rc<OperatorNode>> = Vec::new();
+    for group in space.target_subdag_candidates() {
+        for candidate in &group.candidates {
+            let Replacement::SubDAG(dag) = &candidate.replacement else {
+                continue;
+            };
+            for node in OperatorNode::reachable(dag) {
+                let is_kll = matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+                    if kind.algorithm() == &SketchAlgorithm::Kll);
+                if is_kll && !states.iter().any(|s| Rc::ptr_eq(s, &node)) {
+                    states.push(node);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        states.len(),
+        1,
+        "expected one KLL candidate state: {states:#?}"
+    );
+    states.pop().unwrap()
 }
 
 async fn sql_state(sql: &str) -> Rc<OperatorNode> {
@@ -58,13 +65,11 @@ async fn sql_state(sql: &str) -> Rc<OperatorNode> {
     let pre = lower_sql(sql, &catalog, accuracy())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
-    kll_state(&plan(pre))
+    kll_state(pre)
 }
 
 fn promql_state(query: &str) -> Rc<OperatorNode> {
-    kll_state(&plan(
-        lower_promql(query, accuracy()).expect("lowering failed"),
-    ))
+    kll_state(lower_promql(query, accuracy()).expect("lowering failed"))
 }
 
 fn column(table: Option<&str>, name: &str) -> ColumnIdentity {
@@ -81,6 +86,18 @@ fn utf8(value: &str) -> ScalarValue {
 /// The child of the definition's `SummaryAgg`.
 fn definition_child(state: &OperatorNode) -> Rc<OperatorNode> {
     state.coverage().unwrap().definition.children()[0].clone()
+}
+
+/// The definition's `SummaryAgg` carries no filter of its own.
+fn assert_definition_unfiltered(state: &OperatorNode) {
+    let definition = state.coverage().unwrap().definition;
+    assert!(
+        matches!(
+            definition.asap(),
+            Some(ASAPOp::SummaryAgg { filter: None, .. })
+        ),
+        "{definition:#?}"
+    );
 }
 
 /// The definition keeps the whole sub-DAG below the state: nothing moved
@@ -109,6 +126,7 @@ async fn sql_where_value_set_moves_to_selection() {
             relative_time: None,
         }]
     );
+    assert_definition_unfiltered(&state);
     let child = definition_child(&state);
     assert!(
         matches!(child.non_asap(), Some(NonASAPOp::Scan { predicates, .. }) if predicates.is_empty())
@@ -133,6 +151,7 @@ async fn sql_where_range_moves_to_selection() {
             relative_time: None,
         }]
     );
+    assert_definition_unfiltered(&state);
     let child = definition_child(&state);
     assert!(
         matches!(child.non_asap(), Some(NonASAPOp::Scan { predicates, .. }) if predicates.is_empty())
@@ -158,6 +177,7 @@ async fn sql_renamed_column_moves_and_expression_stays() {
             relative_time: None,
         }]
     );
+    assert_definition_unfiltered(&state);
     let project = definition_child(&state);
     assert!(matches!(
         project.non_asap(),
