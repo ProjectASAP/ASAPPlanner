@@ -300,9 +300,9 @@ meet its accuracy requirement.
 A sub-DAG is **eligible** when its root is an aggregation (an `Aggregate`
 operator) whose intent has at least one realization in the summary-family
 capabilities `F`: exact accumulator state or a summary family. Nested
-aggregations are separate
-targets: in `sum by (job) (rate(x[1m]))`, the per-series `rate` and the
-per-`job` `sum` are each a target, and their options multiply.
+aggregations are separate targets: in `sum by (job) (rate(x[1m]))`, the
+per-series `rate` and the per-`job` `sum` are each a target, and their options
+multiply.
 
 Example for summary candidates:
 
