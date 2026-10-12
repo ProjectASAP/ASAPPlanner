@@ -6,7 +6,7 @@ use datafusion::sql::sqlparser::ast::{
 };
 use std::ops::ControlFlow;
 
-use super::collection_udfs::MAP_PLANNING_NAME;
+use super::collection_udfs::MAP_UDF_NAME;
 
 pub(super) fn normalize(statement: &mut Statement) {
     struct PreserveNames;
@@ -66,7 +66,7 @@ pub(super) fn normalize(statement: &mut Statement) {
             return ControlFlow::Continue(());
         };
         if unquoted_name(&function.name).is_some_and(|name| name.eq_ignore_ascii_case("map")) {
-            function.name = ObjectName::from(vec![Ident::new(MAP_PLANNING_NAME)]);
+            function.name = ObjectName::from(vec![Ident::new(MAP_UDF_NAME)]);
             return ControlFlow::Continue(());
         }
         if !unquoted_name(&function.name).is_some_and(|name| name.eq_ignore_ascii_case("modulo"))
