@@ -1,5 +1,5 @@
 //! [`ParsedWorkload`] — a [`PlanningWorkload`] whose queries have been lowered
-//! to pre-ASAP IR.
+//! to the operator IR.
 //!
 //! This is the boundary between the frontend stage and the optimization stage
 //! (issues #429, #430). Everything downstream of lowering consumes this type
@@ -10,7 +10,7 @@
 
 use std::rc::Rc;
 
-use crate::pre_asap::query_expr::QueryExpr;
+use crate::ir::{OperatorNode, QueryRoot, ScalarExpr};
 use crate::workload::{
     DataWorkload, PlanningWorkload, QueryWorkload, QueryWorkloadEntry, WorkloadError,
 };
@@ -33,7 +33,9 @@ pub enum ParsedWorkloadError {
 #[derive(Debug, Clone)]
 pub struct ParsedWorkload {
     workload: PlanningWorkload,
-    exprs: Vec<Rc<QueryExpr>>,
+    exprs: Vec<Rc<OperatorNode>>,
+    operator_indices: Vec<usize>,
+    scalars: Vec<(usize, ScalarExpr)>,
 }
 
 impl ParsedWorkload {
@@ -41,16 +43,43 @@ impl ParsedWorkload {
     /// `i`-th entry.
     pub fn new(
         workload: PlanningWorkload,
-        exprs: Vec<Rc<QueryExpr>>,
+        exprs: Vec<Rc<OperatorNode>>,
+    ) -> Result<Self, ParsedWorkloadError> {
+        Self::from_roots(
+            workload,
+            exprs.into_iter().map(QueryRoot::Operator).collect(),
+        )
+    }
+
+    pub fn from_roots(
+        workload: PlanningWorkload,
+        roots: Vec<QueryRoot>,
     ) -> Result<Self, ParsedWorkloadError> {
         let entries = workload.query_workload.entries().count();
-        if entries != exprs.len() {
+        if entries != roots.len() {
             return Err(ParsedWorkloadError::LengthMismatch {
                 entries,
-                lowered: exprs.len(),
+                lowered: roots.len(),
             });
         }
-        Ok(Self { workload, exprs })
+        let mut exprs = Vec::new();
+        let mut operator_indices = Vec::new();
+        let mut scalars = Vec::new();
+        for (index, root) in roots.into_iter().enumerate() {
+            match root {
+                QueryRoot::Operator(node) => {
+                    operator_indices.push(index);
+                    exprs.push(node);
+                }
+                QueryRoot::Scalar(expr) => scalars.push((index, expr)),
+            }
+        }
+        Ok(Self {
+            workload,
+            exprs,
+            operator_indices,
+            scalars,
+        })
     }
 
     pub fn planning_workload(&self) -> &PlanningWorkload {
@@ -65,24 +94,35 @@ impl ParsedWorkload {
         self.workload.data_workload.as_ref()
     }
 
-    pub fn exprs(&self) -> &[Rc<QueryExpr>] {
+    pub fn exprs(&self) -> &[Rc<OperatorNode>] {
         &self.exprs
     }
 
     pub fn len(&self) -> usize {
-        self.exprs.len()
+        self.exprs.len() + self.scalars.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.exprs.is_empty()
+        self.len() == 0
     }
 
     /// Normalized entries paired with their lowered expression.
-    pub fn entries(&self) -> impl Iterator<Item = (QueryWorkloadEntry, &Rc<QueryExpr>)> + '_ {
+    pub fn entries(&self) -> impl Iterator<Item = (QueryWorkloadEntry, &Rc<OperatorNode>)> + '_ {
         self.workload
             .query_workload
             .entries()
+            .enumerate()
+            .filter(|(index, _)| self.operator_indices.binary_search(index).is_ok())
+            .map(|(_, entry)| entry)
             .zip(self.exprs.iter())
+    }
+
+    pub fn operator_indices(&self) -> &[usize] {
+        &self.operator_indices
+    }
+
+    pub fn scalar_roots(&self) -> &[(usize, ScalarExpr)] {
+        &self.scalars
     }
 
     /// The retained workload's own validation — entry legality and data-workload

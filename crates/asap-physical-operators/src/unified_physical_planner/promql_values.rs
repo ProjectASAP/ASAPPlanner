@@ -243,10 +243,10 @@ pub fn compile_exact_evaluation(
     };
     let input = exact_state_schema(family)?;
     let merge = Operator::summary_merge(input.clone(), 1, vec![0])?;
-    let mut evaluation = Operator::readout(
+    let mut evaluation = Operator::evaluation(
         merge.schema(),
         1,
-        ReadoutQuery::Exact(ExactReadout {
+        SummaryEvaluation::Exact(ExactEvaluation {
             statistic,
             lookback_ms: None,
         }),

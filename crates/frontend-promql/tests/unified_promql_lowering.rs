@@ -1679,3 +1679,26 @@ fn label_matcher_predicates_carry_promql_semantics() {
         }
     ));
 }
+
+// A subquery's `offset` / `@` modifier stays a `TimeShift` over the subquery.
+#[test]
+fn subquery_time_shift_is_retained() {
+    let root = lower("max_over_time(m[5m:1m] offset 1m)");
+    let NonASAPOp::Aggregate { child, .. } = root.expect_non_asap() else {
+        panic!("expected a range function, got {root:?}");
+    };
+    let NonASAPOp::TimeShift { shift, child } = child.expect_non_asap() else {
+        panic!("subquery offset was dropped: {child:?}");
+    };
+    assert_eq!(shift.offset_ms, 60_000);
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::PromqlSubquery { .. }
+    ));
+    let root = lower("max_over_time(m[5m:1m] @ 100)");
+    assert!(matches!(
+        root.expect_non_asap(),
+        NonASAPOp::Aggregate { child, .. }
+            if matches!(child.expect_non_asap(), NonASAPOp::TimeShift { .. })
+    ));
+}

@@ -28,10 +28,10 @@
 //!
 //! ## What counts as a "near-duplicate", and why
 //!
-//! Two [`QueryExpr::Aggregate`] nodes are accuracy-near-duplicates here iff,
+//! Two `NonASAPOp::Aggregate` nodes are accuracy-near-duplicates here iff,
 //! **in this order**:
 //!
-//! 1. Both are the same bindable shape [`crate::replacement::SketchAlgorithmStrategy`]
+//! 1. Both are the same bindable shape [`crate::replacement::ASAPStrategies`]
 //!    itself targets — a single measure, no `HAVING` (`bindable_intent`'s own
 //!    scope) — **and** that one measure is one of the four accuracy-bearing
 //!    [`AggIntent`] variants ([`crate::replacement::accuracy_target`]'s own
@@ -105,7 +105,7 @@
 //!
 //! Like every [`ReplacementStrategy`], this only ever *proposes* — the
 //! looser-accuracy consumer's own independently-sized candidate (from
-//! [`crate::replacement::SketchAlgorithmStrategy`]) stays in its
+//! [`crate::replacement::ASAPStrategies`]) stays in its
 //! [`crate::replacement::TargetSubDAGCandidates`] right alongside this strategy's
 //! "read the tighter sibling instead" [`Replacement::Rewrite`] candidate;
 //! [`crate::cost_model::CostModel`]-driven ranking picks between them;
@@ -149,11 +149,13 @@
 //! same structural child, so adding the edge preserves the reference DAG's
 //! parent-before-child topological ordering.
 
+use asap_types::ir::non_asap::any_measure_filtered;
 use std::cmp::Ordering;
 use std::rc::Rc;
 
+use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{any_measure_filtered, QueryExpr, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{
@@ -169,27 +171,27 @@ type BindableAccuracyAggregate<'a> = (
     &'a AggIntent,
     &'a AccuracyTarget,
     &'a [String],
-    &'a Rc<QueryExpr>,
+    &'a Rc<OperatorNode>,
 );
 
 /// The `(reduction, intent, accuracy, output_names, child)` shape this
 /// module operates on: the same single-measure, no-`HAVING` bindable shape
-/// [`crate::replacement::SketchAlgorithmStrategy`] targets (see that
+/// [`crate::replacement::ASAPStrategies`] targets (see that
 /// module's private `bindable_intent`), further narrowed to a measure whose
 /// intent actually carries an [`AccuracyTarget`]
 /// ([`crate::replacement::accuracy_target`]'s own scope: `Count` /
 /// `Quantile` / `Cardinality` / `TopK`). `None` for anything else, including
 /// a multi-measure or `HAVING` aggregate, a non-`Aggregate` node, or an
 /// accuracy-free intent (`Sum`, `Avg`, …).
-fn bindable_accuracy_aggregate(node: &QueryExpr) -> Option<BindableAccuracyAggregate<'_>> {
-    let QueryExpr::Aggregate {
+fn bindable_accuracy_aggregate(node: &OperatorNode) -> Option<BindableAccuracyAggregate<'_>> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         output_names,
         filters,
         having,
         child,
-    } = node
+    }) = node.non_asap()
     else {
         return None;
     };
@@ -278,7 +280,7 @@ fn strictly_tighter(a: &AccuracyTarget, b: &AccuracyTarget) -> bool {
 /// this strategy from the same post-CSE `Aggregate` sibling set it already
 /// builds for `RollupStrategy`.
 pub struct AccuracyReconciliationStrategy {
-    siblings: Vec<Rc<QueryExpr>>,
+    siblings: Vec<Rc<OperatorNode>>,
 }
 
 impl AccuracyReconciliationStrategy {
@@ -286,7 +288,7 @@ impl AccuracyReconciliationStrategy {
     /// each as a candidate tighter-accuracy source (or looser-accuracy
     /// target) — typically the full set of `Aggregate` nodes a workload-wide
     /// discovery pass already found.
-    pub fn new(siblings: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(siblings: &[Rc<OperatorNode>]) -> Self {
         Self {
             siblings: siblings.to_vec(),
         }
@@ -311,14 +313,14 @@ impl AccuracyReconciliationStrategy {
     /// reports no unique key — see `cse.rs`'s "Legality" section) would get
     /// proposed for reconciliation even though nothing guarantees a second
     /// read of it lines up row-for-row with the first.
-    fn tighter_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<QueryExpr>> {
+    fn tighter_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<OperatorNode>> {
         let Some((target_reduction, target_intent, target_accuracy, target_names, target_child)) =
             bindable_accuracy_aggregate(target.root)
         else {
             return Vec::new();
         };
 
-        let mut sources: Vec<&Rc<QueryExpr>> = self
+        let mut sources: Vec<&Rc<OperatorNode>> = self
             .siblings
             .iter()
             .filter(|candidate| {
@@ -335,9 +337,7 @@ impl AccuracyReconciliationStrategy {
                     && (Rc::ptr_eq(child, target_child) || child == target_child)
                     && same_intent_except_accuracy(intent, target_intent)
                     && strictly_tighter(accuracy, target_accuracy)
-                    && candidate
-                        .output_schema()
-                        .is_ok_and(|schema| schema.has_unique_key())
+                    && candidate.schema.has_unique_key()
             })
             .collect();
         sources.sort_by(|a, b| {
@@ -369,7 +369,7 @@ impl ReplacementStrategy for AccuracyReconciliationStrategy {
                     .expect("tighter_sources only returns bindable_accuracy_aggregate matches");
                 ReplacementSubDAG {
                     strategy: self.name(),
-                    replacement: Replacement::Rewrite(Rc::clone(source)),
+                    replacement: Replacement::SubDAG(Rc::clone(source)),
                     provenance: ReplacementProvenance::AccuracyReconciliation,
                     rationale: format!(
                         "reuses a near-duplicate sibling aggregate — identical intent and grouping \
@@ -391,9 +391,9 @@ impl ReplacementStrategy for AccuracyReconciliationStrategy {
 mod tests {
     use super::*;
     use crate::cost_model::{CostModel, DefaultCostModel};
+    use asap_types::ir::cse::share_common_sub_dags;
+    use asap_types::ir::operator_properties::{GroupKeys, Source};
     use asap_types::post_asap::SketchAlgorithm;
-    use asap_types::pre_asap::cse::share_common_sub_dags;
-    use asap_types::pre_asap::query_expr::{GroupKeys, Source};
     use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
 
     /// `[ts(0), value(1), job(2)]`.
@@ -401,8 +401,8 @@ mod tests {
     /// willing to hoist it — see `Schema::has_unique_key`/`cse.rs`'s own
     /// "Legality" section: a producer with no provable unique key is always
     /// inserted fresh, never hoisted, regardless of structural equality.
-    fn metric_scan() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
+    fn metric_scan() -> Rc<OperatorNode> {
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -414,21 +414,23 @@ mod tests {
                 0,
                 vec![vec![0]],
             ),
-        })
+        }))
+        .unwrap()
     }
 
-    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
             filters: vec![],
             having: None,
             child: Rc::clone(child),
-        })
+        }))
+        .unwrap()
     }
 
-    fn quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         agg(
             vec![2],
             AggIntent::Quantile {
@@ -441,10 +443,14 @@ mod tests {
     }
 
     /// A globally-grouped (`by(vec![])`) quantile — `aggregate_output_schema`
-    /// reports no unique key for an empty `by` (see `query_expr.rs`'s own
+    /// reports no unique key for an empty `by` (see `aggregate_schema.rs`'s own
     /// `unique_keys = if by.is_empty() || has_count_values { vec![] } else
     /// { .. }`).
-    fn global_quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn ungrouped_quantile(
+        q: f64,
+        accuracy: AccuracyTarget,
+        child: &Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
         agg(
             vec![],
             AggIntent::Quantile {
@@ -463,9 +469,9 @@ mod tests {
         q: f64,
         accuracy: AccuracyTarget,
         excluded: Vec<ColumnId>,
-        child: &Rc<QueryExpr>,
-    ) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+        child: &Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(excluded)),
             measures: vec![AggIntent::Quantile {
                 col: None,
@@ -476,7 +482,8 @@ mod tests {
             filters: vec![],
             having: None,
             child: Rc::clone(child),
-        })
+        }))
+        .unwrap()
     }
 
     // ── dominates / strictly_tighter ─────────────────────────────────────
@@ -548,7 +555,7 @@ mod tests {
         assert!(strategy.matches(&TargetSubDAG::new(&loose)));
         let replacements = strategy.replacements(&TargetSubDAG::new(&loose));
         assert_eq!(replacements.len(), 1);
-        let Replacement::Rewrite(rc) = &replacements[0].replacement else {
+        let Replacement::SubDAG(rc) = &replacements[0].replacement else {
             panic!("expected a Rewrite candidate");
         };
         assert!(Rc::ptr_eq(rc, &tight));
@@ -580,7 +587,7 @@ mod tests {
         assert!(
             loose_group.candidates.iter().any(|candidate| {
                 candidate.strategy == "AccuracyReconciliationStrategy"
-                    && matches!(candidate.replacement, Replacement::Rewrite(_))
+                    && matches!(candidate.replacement, Replacement::SubDAG(_))
             }),
             "expected an AccuracyReconciliationStrategy candidate for the looser consumer, got: \
              {:?}",
@@ -661,7 +668,7 @@ mod tests {
     // ── exact structural equality / share_common_sub_dags is unchanged ────
 
     #[test]
-    fn share_common_sub_dags_still_never_merges_differing_accuracy() {
+    fn share_common_subdags_still_never_merges_differing_accuracy() {
         // The additive guarantee this issue explicitly must not violate:
         // pre-ASAP CSE's own exact-equality merge stays exact. Two
         // aggregates differing only in `accuracy` must come back as two
@@ -669,8 +676,8 @@ mod tests {
         // is the *only* place cross-accuracy sharing gets proposed, never
         // `share_common_sub_dags` itself.
         let scan = metric_scan();
-        let a = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
-        let b = (*quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan)).clone();
+        let a = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+        let b = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
 
         let roots = share_common_sub_dags(vec![("a", a), ("b", b)]);
         assert!(
@@ -684,10 +691,10 @@ mod tests {
 
         // The identical scan child, though, is still shared exactly as
         // before — this module changes nothing about that.
-        let QueryExpr::Aggregate { child: child_a, .. } = roots[0].1.as_ref() else {
+        let Some(NonASAPOp::Aggregate { child: child_a, .. }) = roots[0].1.non_asap() else {
             panic!("expected an Aggregate root");
         };
-        let QueryExpr::Aggregate { child: child_b, .. } = roots[1].1.as_ref() else {
+        let Some(NonASAPOp::Aggregate { child: child_b, .. }) = roots[1].1.non_asap() else {
             panic!("expected an Aggregate root");
         };
         assert!(Rc::ptr_eq(child_a, child_b));
@@ -700,8 +707,8 @@ mod tests {
         // exact equality — unrelated to this module, but pins the contrast
         // with the test above.
         let scan = metric_scan();
-        let a = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
-        let b = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
+        let a = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+        let b = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
 
         let roots = share_common_sub_dags(vec![("a", a), ("b", b)]);
         assert!(Rc::ptr_eq(&roots[0].1, &roots[1].1));
@@ -717,11 +724,11 @@ mod tests {
         // `share_common_sub_dags`/`RollupStrategy` apply, which this
         // strategy must not bypass (module docs, point 5).
         let scan = metric_scan();
-        let tight = global_quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
-        let loose = global_quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
+        let tight = ungrouped_quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+        let loose = ungrouped_quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
 
         assert!(
-            !tight.output_schema().unwrap().has_unique_key(),
+            !tight.schema.clone().has_unique_key(),
             "fixture sanity: a globally-grouped aggregate has no provable unique key"
         );
 
@@ -741,7 +748,7 @@ mod tests {
         let loose = without_quantile(0.99, AccuracyTarget::Epsilon(0.05), vec![2], &scan);
 
         assert!(
-            !tight.output_schema().unwrap().has_unique_key(),
+            !tight.schema.clone().has_unique_key(),
             "fixture sanity: a without(...) aggregate has no provable unique key"
         );
 
@@ -831,7 +838,7 @@ mod tests {
             "global_selection must commit to some candidate for a single-consumer looser target"
         );
         // With no recompute term at all (it never rebuilds `target`), this
-        // candidate strictly undercuts every SketchAlgorithmStrategy
+        // candidate strictly undercuts every ASAPStrategies
         // candidate (which each pay a recompute term on top of their own
         // maintenance term) under DefaultCostModel's numbers — the sane
         // direction: reading an already-necessary sibling should be able to

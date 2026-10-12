@@ -6,17 +6,14 @@ use crate::{
 use planner_types::pre_asap::{ArithmeticOpKind, DataType};
 pub mod arithmetic;
 pub mod binary;
-mod planner;
 pub mod unified_planner;
-pub use planner::CompiledExpression;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Expression {
     Binary {
-        operator: planner_types::post_asap::BinaryOperator,
+        operator: crate::expressions::binary::BinaryOperator,
         left: Box<Expression>,
         right: Box<Expression>,
     },
-    Planner(Box<crate::expressions::CompiledExpression>),
     UnifiedPlanner(Box<unified_planner::CompiledExpression>),
     Column(usize),
     ExactFloat64(usize),
@@ -59,9 +56,6 @@ impl Expression {
     pub fn unified_planner(expression: unified_planner::CompiledExpression) -> Self {
         Self::UnifiedPlanner(Box::new(expression))
     }
-    pub fn planner(expression: crate::expressions::CompiledExpression) -> Self {
-        Self::Planner(Box::new(expression))
-    }
     pub(crate) fn dtype(&self, input: &SchemaRef) -> Result<(DataType, bool), Error> {
         use Expression::*;
         match self {
@@ -70,7 +64,8 @@ impl Expression {
                 left,
                 right,
             } => {
-                use planner_types::pre_asap::{BinaryOpKind, CompareOpKind};
+                use crate::expressions::binary::BinaryOpKind;
+                use planner_types::pre_asap::CompareOpKind;
                 let (a, n) = left.dtype(input)?;
                 let (b, m) = right.dtype(input)?;
                 if a != DataType::Float64 || b != a || operator.vector_match.is_some() {
@@ -106,10 +101,6 @@ impl Expression {
                 Ok((dtype, n || m))
             }
             UnifiedPlanner(expression) => {
-                expression.validate_input(input)?;
-                Ok(expression.dtype())
-            }
-            Planner(expression) => {
                 expression.validate_input(input)?;
                 Ok(expression.dtype())
             }
@@ -295,7 +286,6 @@ impl Expression {
                     arithmetic::evaluate_binary(operator, a, b)?
                 }
             }
-            Planner(expression) => expression.evaluate(row)?,
             UnifiedPlanner(expression) => expression.evaluate(row)?,
             Label { column, name } => {
                 let Value::Map(entries) = &row[*column] else {
@@ -329,7 +319,8 @@ impl Expression {
                     }
                 }
                 Value::Utf8(
-                    crate::physical_planner::promql_rows::encode_series_identity(&labels)?.into(),
+                    crate::unified_physical_planner::promql_rows::encode_series_identity(&labels)?
+                        .into(),
                 )
             }
             Column(i) => row[*i].clone(),

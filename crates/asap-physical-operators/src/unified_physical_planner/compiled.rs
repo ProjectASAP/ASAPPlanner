@@ -35,7 +35,7 @@ enum Node {
 
 /// Selected native operators and input slots. Rebinding never repeats lowering.
 /// Serde is format-agnostic; deployments choose the encoding and its versioning.
-/// Deserialization validates the dag before it is usable.
+/// Deserialization validates the DAG before it is usable.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "UncheckedDAG")]
 pub struct CompiledPhysicalDAG {
@@ -63,7 +63,7 @@ impl TryFrom<UncheckedDAG> for CompiledPhysicalDAG {
 impl CompiledPhysicalDAG {
     /// Link already-selected physical fragments without lowering operators again.
     /// Fragment keys and source keys share a namespace; repeated dependency IDs
-    /// therefore remain one producer in the composed dag.
+    /// therefore remain one producer in the composed DAG.
     pub fn compose(
         sources: BTreeMap<NodeId, InputContract>,
         fragments: BTreeMap<NodeId, (Vec<NodeId>, Self)>,

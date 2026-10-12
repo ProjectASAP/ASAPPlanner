@@ -1,4 +1,4 @@
-//! Compile maintenance-selected frontiers without deployment-specific dag rewrites.
+//! Compile maintenance-selected frontiers without deployment-specific DAG rewrites.
 use super::*;
 
 /// One computation realization; lifecycle/window/revision requirements accompany
@@ -325,5 +325,172 @@ impl CompiledPhysicalPlan {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use planner_types::workload::*;
+
+    fn grouped_rate() -> (PhysicalASAPDAG, BTreeMap<NodeId, InputContract>, NodeId) {
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: Some(vec![BatchEntry {
+                    query: Query("sum by(job)(rate(m[1m]))".into()),
+                    requirements: QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(
+                            planner_types::types::AccuracyTarget::Exact,
+                        ),
+                        ..Default::default()
+                    },
+                    predictability: Predictability::Unknown,
+                    invocations: 1,
+                    execute_at: None,
+                    time_selection: TimeSelection::default(),
+                }]),
+                repeating_queries: None,
+            },
+            data_workload: Some(DataWorkload {
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1000)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        let root = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+            .unwrap()
+            .remove(0);
+        let root = promql_rows::with_series_identity(&root).unwrap();
+        let space = asap_aware_mapping::search_workload(vec![("q", root)]);
+        let selected = space
+            .global_selection(&asap_aware_mapping::cost_model::DefaultCostModel)
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .unwrap();
+        let selected = planner_types::ir::apply_lifecycle_timings(
+            &selected,
+            &Default::default(),
+            &mut Default::default(),
+        )
+        .unwrap();
+        let dag = planner_types::ir::physical_export::compile_physical_asap_dag(&selected).unwrap();
+        let state = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, Payload::ASAP(ASAPOp::SummaryAgg { .. })))
+            .unwrap();
+        let inputs = BTreeMap::from([(
+            state.id as u64,
+            InputContract::bounded(Arc::new(state.output_schema.clone())),
+        )]);
+        (dag.clone(), inputs, dag.roots[0] as u64)
+    }
+
+    /// Enumerating and cutting every frontier lowers each Planner node once.
+    #[test]
+    fn candidates_for_all_frontiers_share_one_lowering() {
+        let (dag, inputs, root) = grouped_rate();
+        let lowered = || crate::unified_physical_planner::LOWERED_NODES.with(|count| count.get());
+        let before = lowered();
+        let compiled = compile(&dag, inputs, &[root]).unwrap();
+        let once = lowered() - before;
+        let frontiers = enumerate_compiled_frontiers(&compiled, 4096).unwrap();
+        assert!(frontiers.len() >= 3, "{frontiers:?}");
+        for frontier in &frontiers {
+            cut_candidate(&compiled, frontier).unwrap();
+        }
+        assert!(once > 0);
+        assert_eq!(lowered() - before, once);
+    }
+
+    fn with_timing(
+        dag: &PhysicalASAPDAG,
+        timing: impl Fn(&PhysicalASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
+    ) -> PhysicalASAPDAG {
+        let mut timed = dag.clone();
+        for node in &mut timed.nodes {
+            node.output_state.timing = timing(node);
+        }
+        for edge in &mut timed.edges {
+            let producer = timed.nodes.iter().find(|node| node.id == edge.producer);
+            edge.data_state = producer.unwrap().output_state;
+        }
+        timed
+    }
+
+    fn raw_input(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, InputContract> {
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.payload,
+                    Payload::NonASAP(planner_types::ir::NonASAPOp::TimeRange { .. })
+                )
+            })
+            .unwrap();
+        BTreeMap::from([(
+            raw.id as u64,
+            InputContract::bounded(Arc::new(raw.output_schema.clone())),
+        )])
+    }
+
+    /// Cutting one compilation by a retained-state timing and by the all
+    /// query-time timing (what ContinuouslyMaintained and Ephemeral assign)
+    /// lowers each Planner node once and matches `compile_candidate`.
+    #[test]
+    fn timing_cuts_share_one_lowering() {
+        use planner_types::post_asap::ExecutionTiming::QueryTime;
+        let (retained, _, root) = grouped_rate();
+        let ephemeral = with_timing(&retained, |_| QueryTime);
+        let inputs = raw_input(&retained);
+        let lowered = || crate::unified_physical_planner::LOWERED_NODES.with(|count| count.get());
+        let before = lowered();
+        let compiled = compile(&ephemeral, inputs.clone(), &[root]).unwrap();
+        let once = lowered() - before;
+        let cuts = [&retained, &ephemeral].map(|timed| {
+            let frontier = frontier_from_timing(timed).unwrap();
+            let cut = cut_candidate(&compiled, &frontier).unwrap();
+            (timed, frontier, cut)
+        });
+        assert!(once > 0);
+        assert_eq!(lowered() - before, once);
+        assert_eq!(cuts[0].1.len(), 1);
+        assert!(cuts[1].1.is_empty());
+        for (timed, frontier, cut) in cuts {
+            let expected = compile_candidate(timed, inputs.clone(), &[root], &frontier).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&cut).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+    }
+
+    /// The frontier is the ingestion-time nodes read at query time; an
+    /// ingestion-time root is itself the frontier.
+    #[test]
+    fn frontier_from_timing_includes_ingestion_root() {
+        use planner_types::post_asap::ExecutionTiming::IngestionTime;
+        let (dag, _, root) = grouped_rate();
+        let timed = with_timing(&dag, |_| IngestionTime);
+        assert_eq!(frontier_from_timing(&timed).unwrap(), [root]);
+    }
+
+    /// A query-time node feeding an ingestion-time node is rejected.
+    #[test]
+    fn frontier_from_timing_rejects_query_time_input_to_ingestion() {
+        use planner_types::post_asap::ExecutionTiming::{IngestionTime, QueryTime};
+        let (dag, _, _) = grouped_rate();
+        let timed = with_timing(&dag, |node| {
+            if node.id == dag.roots[0] {
+                IngestionTime
+            } else {
+                QueryTime
+            }
+        });
+        assert!(frontier_from_timing(&timed).is_err());
     }
 }

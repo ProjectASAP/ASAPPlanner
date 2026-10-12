@@ -4,6 +4,8 @@ use super::*;
 use planner_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_dag_with_node_ids,
 };
+use planner_types::ir::ASAPOp;
+use planner_types::ir::NonASAPOp;
 use planner_types::post_asap::FieldDataType as SummaryFamilyType;
 use planner_types::pre_asap::DataType;
 use std::rc::Rc;

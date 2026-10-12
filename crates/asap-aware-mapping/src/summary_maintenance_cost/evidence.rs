@@ -134,7 +134,7 @@ pub struct SummaryOperationCpuEvidence {
     pub delete_events_per_second: Option<f64>,
     /// Concrete state instances touched by one delete event.
     pub delete_routing_fanout: Option<u64>,
-    pub readout_cpu_ops: Option<f64>,
+    pub evaluation_cpu_ops: Option<f64>,
 }
 
 /// Physical evidence for one `SummaryJoin` implementation. Total work,
@@ -185,7 +185,7 @@ pub struct SummaryOperatorResourceEvidence {
 }
 
 /// Evidence is structured by logical summary operation so delete-only facts
-/// cannot be attached to merge, subtract, or readout nodes.
+/// cannot be attached to merge, subtract, or evaluation nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryOperatorEvidence {
     /// Exact query-time arithmetic over two independently realized operands.
@@ -201,7 +201,7 @@ pub enum SummaryOperatorEvidence {
         events_per_second: f64,
         routing_fanout: u64,
     },
-    Readout(SummaryOperatorResourceEvidence),
+    Evaluation(SummaryOperatorResourceEvidence),
 }
 
 impl SummaryOperatorEvidence {
@@ -212,7 +212,7 @@ impl SummaryOperatorEvidence {
             | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
-            | Self::Readout(resource) => resource,
+            | Self::Evaluation(resource) => resource,
         }
     }
 
@@ -224,7 +224,7 @@ impl SummaryOperatorEvidence {
             | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
-            | Self::Readout(resource) => resource,
+            | Self::Evaluation(resource) => resource,
         }
     }
 }
@@ -247,27 +247,27 @@ pub struct RetainedSubDAGEvidence {
 /// structurally equal node is not silently treated as the same deployment.
 #[derive(Debug, Clone, Default)]
 pub struct SummaryNodeEvidence {
-    pub(super) aggregations: HashMap<*const SummaryNode, SummaryAggregateEvidence>,
-    pub(super) joins: HashMap<*const SummaryNode, SummaryJoinEvidence>,
-    pub(super) operations: HashMap<*const SummaryNode, SummaryOperatorEvidence>,
-    pub(super) operation_state_owners: HashMap<*const SummaryNode, *const SummaryNode>,
-    pub(super) retained_queries: HashMap<*const SummaryNode, RetainedSubDAGEvidence>,
+    pub(super) aggregations: HashMap<*const OperatorNode, SummaryAggregateEvidence>,
+    pub(super) joins: HashMap<*const OperatorNode, SummaryJoinEvidence>,
+    pub(super) operations: HashMap<*const OperatorNode, SummaryOperatorEvidence>,
+    pub(super) operation_state_owners: HashMap<*const OperatorNode, *const OperatorNode>,
+    pub(super) retained_queries: HashMap<*const OperatorNode, RetainedSubDAGEvidence>,
 }
 
 impl SummaryNodeEvidence {
     pub fn insert_aggregation(
         &mut self,
-        node: &Rc<SummaryNode>,
+        node: &Rc<OperatorNode>,
         evidence: SummaryAggregateEvidence,
     ) {
         self.aggregations.insert(Rc::as_ptr(node), evidence);
     }
 
-    pub fn insert_join(&mut self, node: &Rc<SummaryNode>, evidence: SummaryJoinEvidence) {
+    pub fn insert_join(&mut self, node: &Rc<OperatorNode>, evidence: SummaryJoinEvidence) {
         self.joins.insert(Rc::as_ptr(node), evidence);
     }
 
-    pub fn insert_operation(&mut self, node: &Rc<SummaryNode>, evidence: SummaryOperatorEvidence) {
+    pub fn insert_operation(&mut self, node: &Rc<OperatorNode>, evidence: SummaryOperatorEvidence) {
         self.operations.insert(Rc::as_ptr(node), evidence);
     }
 
@@ -275,8 +275,8 @@ impl SummaryNodeEvidence {
     /// aggregation deployment whose active interval it follows.
     pub fn insert_state_operation(
         &mut self,
-        node: &Rc<SummaryNode>,
-        state: &Rc<SummaryNode>,
+        node: &Rc<OperatorNode>,
+        state: &Rc<OperatorNode>,
         evidence: SummaryOperatorEvidence,
     ) {
         self.operations.insert(Rc::as_ptr(node), evidence);
@@ -286,52 +286,57 @@ impl SummaryNodeEvidence {
 
     pub fn insert_retained_query(
         &mut self,
-        node: &Rc<SummaryNode>,
+        node: &Rc<OperatorNode>,
         evidence: RetainedSubDAGEvidence,
     ) {
         self.retained_queries.insert(Rc::as_ptr(node), evidence);
     }
 
-    pub(super) fn aggregation(&self, node: &SummaryNode) -> Option<SummaryAggregateEvidence> {
+    pub(super) fn aggregation(&self, node: &OperatorNode) -> Option<SummaryAggregateEvidence> {
         self.aggregations.get(&(node as *const _)).cloned()
     }
 }
 
 pub(super) fn summary_operation_evidence<'a>(
-    node: &SummaryNode,
+    node: &OperatorNode,
     evidence: &'a SummaryNodeEvidence,
 ) -> Result<&'a SummaryOperatorEvidence, AnalyticalCostError> {
     let operation = evidence
         .operations
         .get(&(node as *const _))
         .ok_or(AnalyticalCostError::MissingOrStale("summary operation"))?;
-    let matches = matches!(
-        (&node.expr, operation),
+    // A binary operator or join over two inputs is `Binary` evidence; every
+    // other non-ASAP operator, and the accumulator/population boundaries,
+    // is a `ValueOperation`.
+    let matches = match (&node.operator, operation) {
         (
-            SummaryExpr::BinaryOp { .. },
-            SummaryOperatorEvidence::Binary(_)
-        ) | (
-            SummaryExpr::ValueOperation { .. },
-            SummaryOperatorEvidence::ValueOperation(_)
-        ) | (
-            SummaryExpr::SummaryMerge { .. },
-            SummaryOperatorEvidence::Merge(_)
-        ) | (
-            SummaryExpr::SummarySubtract { .. },
-            SummaryOperatorEvidence::Subtract(_)
-        ) | (
-            SummaryExpr::SummaryDelete { .. },
-            SummaryOperatorEvidence::Delete { .. }
-        ) | (
-            SummaryExpr::SummaryEstimate { .. },
-            SummaryOperatorEvidence::Readout(_)
-        )
-    );
+            Operator::NonASAP(NonASAPOp::BinaryOp { .. } | NonASAPOp::Join { .. }),
+            SummaryOperatorEvidence::Binary(_),
+        ) => true,
+        (Operator::NonASAP(NonASAPOp::BinaryOp { .. } | NonASAPOp::Join { .. }), _) => false,
+        (
+            Operator::NonASAP(_)
+            | Operator::ASAP(
+                ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. },
+            ),
+            SummaryOperatorEvidence::ValueOperation(_),
+        ) => true,
+        (Operator::ASAP(ASAPOp::SummaryMerge { .. }), SummaryOperatorEvidence::Merge(_))
+        | (Operator::ASAP(ASAPOp::SummarySubtract { .. }), SummaryOperatorEvidence::Subtract(_))
+        | (Operator::ASAP(ASAPOp::SummaryDelete { .. }), SummaryOperatorEvidence::Delete { .. })
+        | (
+            Operator::ASAP(ASAPOp::SummaryEstimate { .. }),
+            SummaryOperatorEvidence::Evaluation(_),
+        ) => true,
+        _ => false,
+    };
     if matches {
         Ok(operation)
     } else {
         Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "summary operation evidence kind does not match SummaryExpr",
+            "summary operation evidence kind does not match the operator",
         ))
     }
 }
