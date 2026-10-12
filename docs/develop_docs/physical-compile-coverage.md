@@ -20,6 +20,10 @@ not rebuild operator choices from PromQL text or construct operators itself.
 Surveyed backend: `ASAPQuery-backend` branch `perf/788-startup-search`.
 Planner base: `split/462-f-physical-planner` (#475).
 
+`Fallback` below names the legacy wrapper node of that base. #543 removed it:
+those shapes are ordinary operator nodes now, and the Planner has no
+execution fallback.
+
 Status values:
 
 - **Supported**: `compile` or `compile_node` already covers this computation.
@@ -76,14 +80,15 @@ Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Backend.
 
 ## Covered by PromQL fallback compilation
 
-`compile` now lowers a `Fallback{QueryExpr}` node from its typed expression,
-realized with `promql_rows::with_series_identity`. The deployment supplies the
-raw rows of the `i`th selector returned by `promql_fallback::raw_series` at
-`promql_fallback::raw_series_input(node, i)`, with that selector's schema. Each
-selector has its own slot, even when two selectors read the same metric. The
-node's own ID still names its output, so a deployment may instead supply the
-whole result, for example from an external exact engine. A Fallback that reads
-no selector, such as `vector(1)`, needs no input.
+`compile` lowers each PromQL operator node (selector, range function,
+subquery, binary operator) natively, realized with
+`promql_rows::with_series_identity`. The deployment supplies the raw rows of
+each selector as the input of its `Scan` node, by that node's ID and with its
+schema. Each selector has its own `Scan`, even when two selectors read the same
+metric. A node's own ID still names its output, so a deployment may instead
+supply that whole result, for example from an external exact engine. A node
+that reads no selector, such as `vector(1)`, needs no input. The Planner has no
+execution fallback: a node `compile` cannot lower fails compilation.
 
 `Operator::series_window` evaluates each series at the query time, or at each
 subquery step, over the left-open window `(t - offset - range, t - offset]`.
@@ -200,7 +205,7 @@ Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
 In order of backend usage:
 
-1. Rows 1 and 12, the remaining `Fallback` shapes:
+1. Rows 1 and 12, the remaining PromQL shapes:
    - Other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
