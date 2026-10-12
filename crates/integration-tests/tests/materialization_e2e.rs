@@ -1,0 +1,375 @@
+//! Materialization decides placement, not answers: the same selected DAG
+//! timed with its states `NotMaterialized` (everything at query time) and
+//! `MatAtIngestion` (states in precompute) executes to the same result.
+//! Ported from the removed summary-maintenance-lifecycle end-to-end tests.
+
+use std::collections::BTreeMap;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
+use asap_aware_mapping::{search_workload, DefaultCostModel};
+use asap_integration_tests::fixtures::lower_promql;
+use asap_physical_operators::physical_planner::{
+    compile_candidate, frontier_from_timing, promql_rows, CompiledPhysicalDAG, InputContract,
+};
+use asap_physical_operators::runtime::Scope;
+use asap_physical_operators::values::{Batch, SchemaRef, Value};
+use asap_types::ir::physical_export::{
+    compile_physical_asap_dag, PhysicalASAPDAG, PhysicalASAPOperatorPayload,
+};
+use asap_types::ir::{
+    apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
+    NonASAPOp, OperatorNode, TimingMemo,
+};
+use asap_types::post_asap::maintained_population::PopulationInput;
+use asap_types::post_asap::ExecutionTiming;
+use asap_types::pre_asap::Source;
+use asap_types::types::AccuracyTarget;
+
+mod physical_common;
+
+const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
+
+/// The selected logical DAG for `query`, optionally with a PromQL series
+/// identity (per-entity state needs one).
+fn selected(query: &str, series_identity: bool) -> Rc<OperatorNode> {
+    let mut root = lower_promql(query, AccuracyTarget::Epsilon(0.01)).unwrap();
+    if series_identity {
+        root = promql_rows::with_series_identity(&root).unwrap();
+    }
+    let space = search_workload(vec![("query", root)]).unwrap();
+    space
+        .global_selection(&DefaultCostModel)
+        .assemble_selected_query(&space.roots[0].1)
+        .unwrap()
+        .unwrap()
+}
+
+/// The two placements under test: nothing stored, and every state stored at
+/// ingestion time where the DAG allows it.
+fn placements() -> [MaterializationAssignment; 2] {
+    [
+        MaterializationAssignment::default(),
+        MaterializationAssignment::with_default(AT_INGESTION),
+    ]
+}
+
+fn timed_dag(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> PhysicalASAPDAG {
+    let timed = apply_materialization_timings(root, assignment, &mut TimingMemo::new()).unwrap();
+    compile_physical_asap_dag(&timed).unwrap()
+}
+
+fn states(dag: &PhysicalASAPDAG) -> Vec<u64> {
+    dag.nodes
+        .iter()
+        .filter(|node| node.materialization == AT_INGESTION)
+        .map(|node| node.id as u64)
+        .collect()
+}
+
+fn floats(result: &[Vec<Batch>]) -> Vec<f64> {
+    result[0]
+        .iter()
+        .flat_map(|batch| batch.rows())
+        .flat_map(|row| row.iter())
+        .filter_map(|value| match value {
+            Value::Float64(value) => Some(*value),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Execute a timed DAG over one raw-source batch per `TimeRange`/`Scan`
+/// input (`batch(schema, metric)`): precompute (when there is one) over
+/// `ingestion`, then the query at `evaluation_time_ms`. Returns the root's
+/// values and the frontier.
+fn execute(
+    dag: &PhysicalASAPDAG,
+    batch: &dyn Fn(&SchemaRef, &str) -> Batch,
+    ingestion: Scope,
+    evaluation_time_ms: i64,
+) -> (Vec<f64>, Vec<u64>) {
+    let mut raw = BTreeMap::new();
+    for node in &dag.nodes {
+        if !matches!(
+            node.payload,
+            PhysicalASAPOperatorPayload::NonASAP(
+                NonASAPOp::TimeRange { .. } | NonASAPOp::Scan { .. }
+            )
+        ) {
+            continue;
+        }
+        let mut id = node.id;
+        loop {
+            let n = dag.nodes.iter().find(|n| n.id == id).unwrap();
+            if let PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries { metric },
+                ..
+            }) = &n.payload
+            {
+                raw.insert(
+                    node.id as u64,
+                    (Arc::new(node.output_schema.clone()), metric.clone()),
+                );
+                break;
+            }
+            id = dag
+                .edges
+                .iter()
+                .find(|e| e.consumer == id)
+                .unwrap()
+                .producer;
+        }
+    }
+    let frontier = frontier_from_timing(dag).unwrap();
+    let candidate = compile_candidate(
+        dag,
+        raw.iter()
+            .map(|(id, (schema, _))| (*id, InputContract::bounded(schema.clone())))
+            .collect(),
+        &[dag.roots[0] as u64],
+        &frontier,
+    )
+    .unwrap();
+    let raw_sources = |plan: &CompiledPhysicalDAG| {
+        plan.input_contracts()
+            .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let mut query_sources = raw_sources(&candidate.query);
+    if frontier.is_empty() {
+        assert!(candidate.precompute.is_none());
+    }
+    if let Some(precompute) = &candidate.precompute {
+        let stored = physical_common::execute(precompute, raw_sources(precompute), ingestion);
+        for (root, batches) in precompute.roots().iter().zip(stored) {
+            query_sources.insert(*root, batches[0].clone());
+        }
+    }
+    let result = physical_common::execute(
+        &candidate.query,
+        query_sources,
+        Scope::Query {
+            evaluation_time_ms,
+            revision: 1,
+        },
+    );
+    (floats(&result), frontier)
+}
+
+/// `(metric, job, seconds, value)` samples as one batch per metric.
+fn job_samples<'a>(
+    samples: &'a [(&'a str, &'a str, i64, f64)],
+) -> impl Fn(&SchemaRef, &str) -> Batch + 'a {
+    move |schema, name| {
+        let rows = samples
+            .iter()
+            .filter(|sample| sample.0 == name)
+            .map(|(metric, job, seconds, value)| {
+                let labels = BTreeMap::from([
+                    ("__name__".to_string(), metric.to_string()),
+                    ("job".to_string(), job.to_string()),
+                ]);
+                promql_rows::series_row(schema, &labels, seconds * 1000, *value).unwrap()
+            })
+            .collect();
+        Batch::try_new(schema.clone(), rows).unwrap()
+    }
+}
+
+/// `MatAtIngestion` puts the quantile's state in precompute;
+/// `NotMaterialized` leaves precompute empty and reads the raw source at
+/// query time; both answer alike.
+#[test]
+fn materialization_decides_precompute_contents() {
+    let root = selected("quantile(0.99, latency)", false);
+    let mut answers = Vec::new();
+    for assignment in placements() {
+        let dag = timed_dag(&root, &assignment);
+        let batch = |schema: &SchemaRef, _: &str| {
+            let rows = (1..=100)
+                .map(|value| {
+                    schema
+                        .fields
+                        .iter()
+                        .map(|field| match field.dtype {
+                            asap_types::post_asap::FieldDataType::Plain(
+                                asap_types::pre_asap::DataType::Float64,
+                            ) => Value::Float64(f64::from(value)),
+                            asap_types::post_asap::FieldDataType::Plain(
+                                asap_types::pre_asap::DataType::Timestamp,
+                            ) => Value::Timestamp(300_000),
+                            _ => panic!("unexpected field {field:?}"),
+                        })
+                        .collect()
+                })
+                .collect();
+            Batch::try_new(schema.clone(), rows).unwrap()
+        };
+        let ingestion = Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: 300_000,
+            revision: 1,
+        };
+        let (values, frontier) = execute(&dag, &batch, ingestion, 300_000);
+        assert_eq!(frontier, states(&dag));
+        answers.push(values);
+    }
+    assert_eq!(answers[1].len(), 1);
+    assert!(!states(&timed_dag(&root, &placements()[1])).is_empty());
+    assert_eq!(answers[0], answers[1]);
+}
+
+/// A maintained current-series population: `MatAtIngestion` stores it in
+/// precompute, `NotMaterialized` rebuilds it from the raw source at query
+/// time; both rank alike.
+#[test]
+fn population_materialization_decides_precompute_contents() {
+    let root = promql_rows::with_series_identity(
+        &lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.01)).unwrap(),
+    )
+    .unwrap();
+    let root = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
+        .candidate(&root)
+        .unwrap();
+    let population = OperatorNode::reachable(&root)
+        .into_iter()
+        .find(|node| matches!(node.asap(), Some(ASAPOp::MaintainPopulation { .. })))
+        .expect("a maintained population");
+    let mut stored = MaterializationAssignment::default();
+    stored.set(&population, AT_INGESTION);
+    let mut answers = Vec::new();
+    for assignment in [MaterializationAssignment::default(), stored] {
+        let dag = timed_dag(&root, &assignment);
+        let lookback = dag
+            .nodes
+            .iter()
+            .find_map(|node| match &node.payload {
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::MaintainPopulation {
+                    population,
+                    ..
+                }) => match &population.input {
+                    PopulationInput::CurrentSeries(spec) => {
+                        Some(i64::try_from(spec.lookback_ms).unwrap())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("current-series population");
+        let end = 60_000;
+        let batch = |schema: &SchemaRef, _: &str| {
+            let rows = [("a", end - 1, 100.), ("a", end, 1.), ("b", end, 20.)]
+                .into_iter()
+                .map(|(instance, at, value)| {
+                    promql_rows::series_row(
+                        schema,
+                        &BTreeMap::from([
+                            ("job".into(), "api".into()),
+                            ("instance".into(), instance.into()),
+                        ]),
+                        at,
+                        value,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            Batch::try_new(schema.clone(), rows).unwrap()
+        };
+        let ingestion = Scope::Ingestion {
+            window_start_ms: end - lookback,
+            window_end_ms: end,
+            revision: 1,
+        };
+        let (values, frontier) = execute(&dag, &batch, ingestion, end);
+        assert_eq!(frontier, states(&dag));
+        answers.push(values);
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0], [20.]);
+}
+
+/// Whether the DAG has an ingestion-time `BinaryOp`.
+fn ingestion_binary(dag: &PhysicalASAPDAG) -> bool {
+    dag.nodes.iter().any(|node| {
+        matches!(
+            node.payload,
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::BinaryOp { .. })
+        ) && node.output_state.timing == ExecutionTiming::IngestionTime
+    })
+}
+
+const INGESTION_WINDOW: Scope = Scope::Ingestion {
+    window_start_ms: 240_000,
+    window_end_ms: 300_000,
+    revision: 1,
+};
+
+/// Prometheus drops series without a match: arithmetic over different
+/// selectors keeps only label sets present on both sides (none when
+/// disjoint), at either placement, and never becomes aligned maintenance.
+#[test]
+fn arithmetic_over_different_selectors_matches_prometheus() {
+    // The selected root reads the outer `sum`'s exact state through its
+    // finalize.
+    let root = selected("sum(sum_over_time(m[1m]) + sum_over_time(n[1m]))", true);
+    assert!(matches!(
+        root.asap(),
+        Some(ASAPOp::FinalizeExactAccumulator { .. })
+    ));
+    let disjoint = [
+        ("m", "a", 250, 1.0),
+        ("m", "a", 290, 2.0),
+        ("n", "b", 250, 5.0),
+    ];
+    // Only job a is on both sides: m_a + n_a = (1 + 2) + 7; m{job="b"} is dropped.
+    let overlapping = [
+        ("m", "a", 250, 1.0),
+        ("m", "a", 290, 2.0),
+        ("m", "b", 250, 5.0),
+        ("n", "a", 250, 7.0),
+    ];
+    for assignment in placements() {
+        let dag = timed_dag(&root, &assignment);
+        assert!(!ingestion_binary(&dag));
+        let (values, _) = execute(&dag, &job_samples(&disjoint), INGESTION_WINDOW, 300_000);
+        assert!(values.is_empty(), "{values:?}");
+        let (values, _) = execute(&dag, &job_samples(&overlapping), INGESTION_WINDOW, 300_000);
+        assert_eq!(values, [10.0]);
+    }
+    let root = selected(
+        "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
+        true,
+    );
+    assert!(!ingestion_binary(&timed_dag(&root, &placements()[1])));
+}
+
+/// Arithmetic over one selector is aligned maintenance when stored at
+/// ingestion time, and adds each series' two evaluations before the
+/// quantile at either placement.
+#[test]
+fn arithmetic_over_one_selector_executes() {
+    let root = selected(
+        "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(m[1m]))",
+        true,
+    );
+    let samples = [
+        ("m", "a", 250, 1.0),
+        ("m", "a", 290, 2.0),
+        ("m", "b", 250, 5.0),
+    ];
+    let [not_materialized, at_ingestion] = placements().map(|a| timed_dag(&root, &a));
+    assert!(!ingestion_binary(&not_materialized));
+    assert!(
+        ingestion_binary(&at_ingestion),
+        "one selector shares its key set"
+    );
+    for dag in [not_materialized, at_ingestion] {
+        let (values, _) = execute(&dag, &job_samples(&samples), INGESTION_WINDOW, 300_000);
+        // job a: 3 + 3 = 6; job b: 5 + 5 = 10 (mispairing a with b gives 8 and 8).
+        // KLL at epsilon 0.01 returns an input value within 0.01 of rank 0.9;
+        // of two values only the larger is.
+        assert_eq!(values, [10.0]);
+    }
+}
