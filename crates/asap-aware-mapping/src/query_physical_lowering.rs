@@ -162,6 +162,52 @@ pub fn lower_query_physical_dag(
             self.push(evidence, operator, children, None)
         }
 
+        /// `operator` over its row input `child`, plus one
+        /// `PromqlVectorToScalar` input per distinct operator reference
+        /// (`scalar(v)`) its expressions read, in reference order.
+        fn lower_with_scalar_inputs<'e>(
+            &mut self,
+            query: &OperatorNode,
+            occurrence: usize,
+            operator: PhysicalOperator,
+            child: &OperatorNode,
+            exprs: impl IntoIterator<Item = &'e ScalarExpr>,
+        ) -> Result<String, AnalyticalCostError> {
+            let mut refs: Vec<&Rc<OperatorNode>> = Vec::new();
+            for expr in exprs {
+                for node in expr.operator_refs() {
+                    if !refs.iter().any(|r| Rc::ptr_eq(r, node)) {
+                        refs.push(node);
+                    }
+                }
+            }
+            if refs.is_empty() {
+                return self.lower_unary(query, occurrence, operator, child);
+            }
+            let mut children = vec![self.lower(child)?];
+            for node in refs {
+                let scalar = ScalarExpr::PromqlScalarFromVector(Rc::clone(node));
+                let scalar_occurrence = self.next_id;
+                self.next_id += 1;
+                children.push(self.lower_scalar_operand(query, scalar_occurrence, &scalar)?);
+            }
+            let evidence = self.resolve(query, operator, occurrence, false, &children, None)?;
+            require_statistics_shape(&evidence.physical_id, &evidence.statistics, children.len())?;
+            for (index, child_id) in children.iter().enumerate() {
+                let child_statistics = self.node_statistics(child_id)?;
+                if evidence.statistics.input(index) != Some(child_statistics.output()) {
+                    return Err(AnalyticalCostError::ConflictingEdgeStatistics {
+                        parent: evidence.physical_id.clone(),
+                        child: child_id.clone(),
+                        input_index: index,
+                    });
+                }
+                require_promql_edge(&evidence.statistics, index, child_statistics)?;
+            }
+            require_operator_statistics(operator, &evidence.statistics)?;
+            self.push(evidence, operator, children, None)
+        }
+
         fn lower_promql_unary(
             &mut self,
             query: &OperatorNode,
@@ -294,7 +340,7 @@ pub fn lower_query_physical_dag(
                     let operator = PhysicalOperator::Filter {
                         predicate_operations_per_row: scalar_operation_count(&pred.0)?.max(1),
                     };
-                    self.lower_unary(query, occurrence, operator, child)
+                    self.lower_with_scalar_inputs(query, occurrence, operator, child, [&pred.0])
                 }
                 NonASAPOp::Project { cols, child, .. } => {
                     let expression_operations_per_row = cols
@@ -309,13 +355,14 @@ pub fn lower_query_physical_dag(
                                 .ok_or(AnalyticalCostError::Overflow)
                         })?
                         .max(1);
-                    self.lower_unary(
+                    self.lower_with_scalar_inputs(
                         query,
                         occurrence,
                         PhysicalOperator::Project {
                             expression_operations_per_row,
                         },
                         child,
+                        cols.iter().map(|item| &item.expr),
                     )
                 }
                 NonASAPOp::Aggregate {
@@ -1133,6 +1180,8 @@ fn scalar_operation_count(expr: &ScalarExpr) -> Result<u64, AnalyticalCostError>
         | ScalarExpr::Literal(_)
         | ScalarExpr::EvalTimestamp
         | ScalarExpr::CurrentTimestamp => Ok(0),
+        // Read from a scalar input of the containing operator.
+        ScalarExpr::PromqlScalarFromVector(_) => Ok(0),
         ScalarExpr::Compare { left, right, .. } | ScalarExpr::Arithmetic { left, right, .. } => {
             with_local(&[left, right])
         }
@@ -1325,8 +1374,14 @@ mod tests {
     ) -> OperatorStatistics {
         let edges = unary_edges(input, output);
         match operator {
-            PhysicalOperator::Filter { .. } => OperatorStatistics::Filter { edges },
-            PhysicalOperator::Project { .. } => OperatorStatistics::Project { edges },
+            PhysicalOperator::Filter { .. } => OperatorStatistics::Filter {
+                edges,
+                scalar_inputs: vec![],
+            },
+            PhysicalOperator::Project { .. } => OperatorStatistics::Project {
+                edges,
+                scalar_inputs: vec![],
+            },
             PhysicalOperator::InMemoryComparisonSort { .. } => {
                 OperatorStatistics::InMemoryComparisonSort {
                     edges,
@@ -2708,5 +2763,158 @@ mod tests {
             ]
         ));
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &query_scope, &dag.evidence).is_ok());
+    }
+
+    /// `a / scalar(b)` and `a > scalar(b)` read `b` through a
+    /// `PromqlVectorToScalar` input of the `Project` or `Filter`, after its
+    /// row input, so the queries lower and cost.
+    #[test]
+    fn scalar_reference_in_an_expression_is_a_scalar_input() {
+        for query in [
+            "rate(a[5m]) / scalar(rate(b[5m]))",
+            "rate(a[5m]) > scalar(rate(b[5m]))",
+        ] {
+            assert_scalar_reference_is_a_scalar_input(query);
+        }
+    }
+
+    fn assert_scalar_reference_is_a_scalar_input(query: &str) {
+        use crate::physical_operator_statistics::ScalarInputStatistics;
+        use asap_types::types::AccuracyTarget;
+        use asap_types::workload::{
+            AccuracyRequirement, BatchEntry, DataWorkload, Evidence, PlanningWorkload,
+            Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
+        };
+        use std::cell::RefCell;
+
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: Some(vec![BatchEntry {
+                    query: Query(query.into()),
+                    requirements: QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                        ..Default::default()
+                    },
+                    predictability: Predictability::Unknown,
+                    invocations: 1,
+                    execute_at: None,
+                    time_selection: TimeSelection::default(),
+                }]),
+                repeating_queries: None,
+            },
+            data_workload: Some(DataWorkload {
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1_000)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        let root = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+            .unwrap()
+            .remove(0);
+
+        let vector = |series| promql_edge(series, 10, PromqlValueKind::Vector);
+        let produced: RefCell<HashMap<String, OperatorStatistics>> = RefCell::default();
+        let provider = |request: PhysicalNodeRequest<'_>| {
+            let produced_now = produced.borrow();
+            let inputs: Vec<&OperatorStatistics> = request
+                .children
+                .iter()
+                .map(|id| &produced_now[id])
+                .collect();
+            let input = || inputs[0].output();
+            let promql_input = || inputs[0].promql_output().unwrap();
+            let scalar_inputs = || {
+                inputs[1..]
+                    .iter()
+                    .map(|scalar| ScalarInputStatistics {
+                        edge: scalar.output(),
+                        promql: scalar.promql_output(),
+                    })
+                    .collect()
+            };
+            let statistics = match request.operator {
+                PhysicalOperator::Scan => OperatorStatistics::Scan {
+                    edges: promql_unary_edges(
+                        edge(100, 1_600),
+                        edge(100, 1_600),
+                        vector(10),
+                        vector(10),
+                    ),
+                    source_read_bytes: 1_600,
+                },
+                PhysicalOperator::PromqlRange { .. } => OperatorStatistics::PromqlRange {
+                    edges: promql_unary_edges(
+                        input(),
+                        input(),
+                        promql_input(),
+                        promql_edge(10, 10, PromqlValueKind::RangeVector),
+                    ),
+                    max_window_samples_per_series: 10,
+                },
+                PhysicalOperator::PromqlPerSeries { .. } => OperatorStatistics::PromqlPerSeries {
+                    edges: promql_unary_edges(input(), edge(10, 160), promql_input(), vector(10)),
+                    accumulator_bytes_per_series: 8,
+                },
+                PhysicalOperator::PromqlVectorToScalar => {
+                    OperatorStatistics::PromqlVectorToScalar {
+                        edges: promql_unary_edges(
+                            input(),
+                            edge(10, 160),
+                            promql_input(),
+                            promql_edge(0, 10, PromqlValueKind::Scalar),
+                        ),
+                    }
+                }
+                PhysicalOperator::Project { .. } => OperatorStatistics::Project {
+                    edges: promql_unary_edges(input(), input(), promql_input(), promql_input()),
+                    scalar_inputs: scalar_inputs(),
+                },
+                PhysicalOperator::Filter { .. } => OperatorStatistics::Filter {
+                    edges: promql_unary_edges(input(), input(), promql_input(), promql_input()),
+                    scalar_inputs: scalar_inputs(),
+                },
+                other => panic!("unexpected physical operator {other:?}"),
+            };
+            drop(produced_now);
+            let physical_id = format!("query-{}", request.occurrence);
+            produced
+                .borrow_mut()
+                .insert(physical_id.clone(), statistics.clone());
+            Ok(PhysicalNodeEvidence {
+                physical_id,
+                ..evidence(statistics)
+            })
+        };
+        let query_scope = scope(vec![
+            coverage(
+                asap_types::pre_asap::Source::TimeSeries { metric: "a".into() },
+                vec![],
+            ),
+            coverage(
+                asap_types::pre_asap::Source::TimeSeries { metric: "b".into() },
+                vec![],
+            ),
+        ]);
+        let dag = lower_query_physical_dag(&root, &query_scope, &provider).unwrap();
+        let root_node = dag.nodes.iter().find(|node| node.id == dag.root).unwrap();
+        assert!(
+            matches!(
+                root_node.operator,
+                PhysicalOperator::Project { .. } | PhysicalOperator::Filter { .. }
+            ),
+            "{query}: {:?}",
+            root_node.operator
+        );
+        assert_eq!(root_node.children.len(), 2, "{query}");
+        let scalar = dag
+            .nodes
+            .iter()
+            .find(|node| node.id == root_node.children[1])
+            .unwrap();
+        assert_eq!(scalar.operator, PhysicalOperator::PromqlVectorToScalar);
+        estimate_physical_dag(&dag.nodes, &dag.root, &query_scope, &dag.evidence).unwrap();
     }
 }

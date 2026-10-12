@@ -221,6 +221,16 @@ pub struct UnaryEdgeStatistics {
     pub promql: Option<PromqlUnaryEdgeStatistics>,
 }
 
+/// Evidence for one scalar input a `Filter` or `Project` expression reads
+/// beside its row input: the edge from a `PromqlVectorToScalar` child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScalarInputStatistics {
+    pub edge: EdgeStatistics,
+    #[serde(default)]
+    pub promql: Option<PromqlEdgeStatistics>,
+}
+
 /// Input and output evidence for a binary physical operator. The input order
 /// is the physical operator's left/right order and must match its DAG children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,9 +309,17 @@ pub enum OperatorStatistics {
     },
     Filter {
         edges: UnaryEdgeStatistics,
+        /// One input per operator reference (`scalar(v)`) the predicate
+        /// reads, after the row input, in DAG child order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scalar_inputs: Vec<ScalarInputStatistics>,
     },
     Project {
         edges: UnaryEdgeStatistics,
+        /// One input per operator reference (`scalar(v)`) the expressions
+        /// read, after the row input, in DAG child order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scalar_inputs: Vec<ScalarInputStatistics>,
     },
     HashAggregate {
         edges: UnaryEdgeStatistics,
@@ -386,9 +404,10 @@ pub enum OperatorStatistics {
 impl OperatorStatistics {
     pub fn input_count(&self) -> usize {
         match self {
+            Self::Filter { scalar_inputs, .. } | Self::Project { scalar_inputs, .. } => {
+                1 + scalar_inputs.len()
+            }
             Self::Scan { .. }
-            | Self::Filter { .. }
-            | Self::Project { .. }
             | Self::HashAggregate { .. }
             | Self::InMemoryComparisonSort { .. }
             | Self::TopK { .. }
@@ -415,9 +434,18 @@ impl OperatorStatistics {
             Self::Scan { edges, .. }
             | Self::HashAggregate { edges, .. }
             | Self::HashDeduplicate { edges, .. } => (index == 0).then_some(edges.input),
-            Self::Filter { edges }
-            | Self::Project { edges }
-            | Self::InMemoryComparisonSort { edges, .. }
+            Self::Filter {
+                edges,
+                scalar_inputs,
+            }
+            | Self::Project {
+                edges,
+                scalar_inputs,
+            } => match index {
+                0 => Some(edges.input),
+                _ => scalar_inputs.get(index - 1).map(|input| input.edge),
+            },
+            Self::InMemoryComparisonSort { edges, .. }
             | Self::TopK { edges }
             | Self::InMemoryAnalyticWindow { edges, .. }
             | Self::Limit { edges }
@@ -443,8 +471,8 @@ impl OperatorStatistics {
             Self::Scan { edges, .. }
             | Self::HashAggregate { edges, .. }
             | Self::HashDeduplicate { edges, .. } => edges.output,
-            Self::Filter { edges }
-            | Self::Project { edges }
+            Self::Filter { edges, .. }
+            | Self::Project { edges, .. }
             | Self::InMemoryComparisonSort { edges, .. }
             | Self::TopK { edges }
             | Self::InMemoryAnalyticWindow { edges, .. }
@@ -476,6 +504,11 @@ impl OperatorStatistics {
             Self::HashJoin { edges }
             | Self::PromqlBinary { edges, .. }
             | Self::PromqlInfoEnrich { edges, .. } => edges.promql?.inputs.get(index).copied(),
+            Self::Filter { scalar_inputs, .. } | Self::Project { scalar_inputs, .. }
+                if index > 0 =>
+            {
+                scalar_inputs.get(index - 1)?.promql
+            }
             _ => self.unary_promql().and_then(
                 |edges| {
                     if index == 0 {
@@ -505,8 +538,8 @@ impl OperatorStatistics {
     pub(crate) fn unary_promql(&self) -> Option<PromqlUnaryEdgeStatistics> {
         match self {
             Self::Scan { edges, .. }
-            | Self::Filter { edges }
-            | Self::Project { edges }
+            | Self::Filter { edges, .. }
+            | Self::Project { edges, .. }
             | Self::HashAggregate { edges, .. }
             | Self::InMemoryComparisonSort { edges, .. }
             | Self::TopK { edges }

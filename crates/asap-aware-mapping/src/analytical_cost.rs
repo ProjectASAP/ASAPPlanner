@@ -921,9 +921,12 @@ fn expected_input_arity(
             statistics_inputs: 1,
             dag_children: 0,
         },
-        PhysicalOperator::Filter { .. }
-        | PhysicalOperator::Project { .. }
-        | PhysicalOperator::HashAggregate { .. }
+        // The row input, then one input per scalar the expressions read.
+        PhysicalOperator::Filter { .. } | PhysicalOperator::Project { .. } => OperatorInputArity {
+            statistics_inputs: variadic_child_count.max(1),
+            dag_children: variadic_child_count.max(1),
+        },
+        PhysicalOperator::HashAggregate { .. }
         | PhysicalOperator::InMemoryComparisonSort { .. }
         | PhysicalOperator::TopK { .. }
         | PhysicalOperator::HashDeduplicate { .. }
@@ -2483,6 +2486,7 @@ mod tests {
                 "filter".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(edge, edge),
+                    scalar_inputs: vec![],
                 },
             ),
         ]);
@@ -2579,6 +2583,7 @@ mod tests {
                 filter_operator(),
                 OperatorStatistics::Filter {
                     edges: unary_row_edges(10, 11),
+                    scalar_inputs: vec![],
                 },
             ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
@@ -2588,6 +2593,7 @@ mod tests {
                 project_operator(),
                 OperatorStatistics::Project {
                     edges: unary_row_edges(10, 9),
+                    scalar_inputs: vec![],
                 },
             ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
@@ -2675,6 +2681,7 @@ mod tests {
             },
             OperatorStatistics::Filter {
                 edges: unary_row_edges(1_000, 100),
+                scalar_inputs: vec![],
             },
         );
         assert_eq!(
@@ -2841,12 +2848,14 @@ mod tests {
                 "left".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(scan_edge, branch_edge),
+                    scalar_inputs: vec![],
                 },
             ),
             (
                 "right".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(scan_edge, branch_edge),
+                    scalar_inputs: vec![],
                 },
             ),
             (
@@ -3084,6 +3093,7 @@ mod tests {
                         bytes: 400,
                     },
                 ),
+                scalar_inputs: vec![],
             },
         );
         assert_eq!(
@@ -3151,6 +3161,7 @@ mod tests {
                             bytes: 400,
                         },
                     ),
+                    scalar_inputs: vec![],
                 },
             ),
         ]);
@@ -3200,6 +3211,7 @@ mod tests {
                 "filter".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(input, EdgeStatistics { rows: 0, bytes: 0 }),
+                    scalar_inputs: vec![],
                 },
             ),
         ]);
@@ -3450,6 +3462,7 @@ mod tests {
         };
         let filter = OperatorStatistics::Filter {
             edges: unary_edges(edge, edge),
+            scalar_inputs: vec![],
         };
 
         assert_eq!(
@@ -3523,6 +3536,7 @@ mod tests {
         };
         let filter = OperatorStatistics::Filter {
             edges: unary_edges(edge, edge),
+            scalar_inputs: vec![],
         };
         assert_eq!(
             estimate_operator(
