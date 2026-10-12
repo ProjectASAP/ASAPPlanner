@@ -511,15 +511,19 @@ fn validate_non_asap(
                 return Err(ExecutionDataStateError::InvalidCheckedDivision);
             }
             if timing == ExecutionTiming::IngestionTime {
+                // The opaque series identity is a non-null Utf8 key; every
+                // other column is a non-null Float64 value or timestamp.
                 let plain_float_or_ts = |schema: &Schema| {
                     schema.fields.iter().all(|field| {
                         !field.nullable
-                            && (matches!(
-                                field.dtype,
-                                FieldDataType::Plain(DataType::Float64 | DataType::Timestamp)
-                            ) || (field.name
-                                == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY
-                                && field.dtype == FieldDataType::Plain(DataType::Utf8)))
+                            && if field.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY {
+                                field.dtype == FieldDataType::Plain(DataType::Utf8)
+                            } else {
+                                matches!(
+                                    field.dtype,
+                                    FieldDataType::Plain(DataType::Float64 | DataType::Timestamp)
+                                )
+                            }
                     })
                 };
                 let float_count = node
@@ -922,5 +926,100 @@ mod tests {
             ));
         }
         validate_default(&corr_over(3), ExecutionTiming::QueryTime).unwrap();
+    }
+    // Typed derived updates retain one opaque series identity only when both
+    // operands cover the same series; arbitrary labels are never admitted.
+    #[test]
+    fn maintenance_binary_accepts_only_well_typed_series_identity() {
+        use crate::ir::non_asap::BinaryOperator;
+        use crate::pre_asap::{ArithmeticOpKind, BinaryOpKind};
+        let identity = crate::pre_asap::schema::PROMQL_SERIES_IDENTITY;
+        // A finalized per-series Sum of `metric`'s rows.
+        let operand = |metric: &str, schema: &Schema| {
+            let rows = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries {
+                    metric: metric.into(),
+                },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("value", DataType::Float64, false),
+                    ],
+                    0,
+                    vec![],
+                ),
+            }))
+            .unwrap();
+            let mut state = schema.clone();
+            state.fields[0].dtype = exact_sum();
+            let sum = Rc::new(OperatorNode::with_schema(
+                crate::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                    child: rows,
+                    family: exact_sum(),
+                    input: SummaryUpdate::column(ColumnRef::SampleValue),
+                    reduction: Reduction::PerEntity,
+                    grouping: GroupingStrategy::default(),
+                    filter: None,
+                }),
+                state,
+            ));
+            Rc::new(OperatorNode::with_schema(
+                crate::ir::Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: sum }),
+                schema.clone(),
+            ))
+        };
+        let validate = |schema: Schema, rhs: &str| {
+            let binary = Rc::new(OperatorNode::with_schema(
+                crate::ir::Operator::NonASAP(NonASAPOp::BinaryOp {
+                    operator: BinaryOperator {
+                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                        vector_match: None,
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                    },
+                    return_bool: false,
+                    lhs: operand("m", &schema),
+                    rhs: operand(rhs, &schema),
+                }),
+                schema,
+            ));
+            validate_default(&placed_at_ingestion(binary), ExecutionTiming::IngestionTime)
+        };
+        let mut schema = Schema::lifted(
+            vec![
+                Field::plain("value", DataType::Float64, false),
+                Field::plain("ts", DataType::Timestamp, false),
+            ],
+            None,
+        );
+        schema.time_index = Some(1);
+        assert!(validate(schema.clone(), "m").is_ok());
+        assert!(
+            validate(schema.clone(), "n").is_ok(),
+            "no identity to align"
+        );
+        schema
+            .fields
+            .push(Field::plain(identity, DataType::Utf8, false));
+        assert!(validate(schema.clone(), "m").is_ok());
+        assert_eq!(
+            validate(schema.clone(), "n"),
+            Err(ExecutionDataStateError::InvalidMaintenanceBinary),
+            "different selectors may cover different series"
+        );
+        for mutation in 0..4 {
+            let mut invalid = schema.clone();
+            match mutation {
+                0 => invalid.fields[2].nullable = true,
+                1 => invalid.fields[2].dtype = FieldDataType::Plain(DataType::Timestamp),
+                2 => invalid.fields.push(invalid.fields[2].clone()),
+                _ => invalid.fields[2].name = "label".into(),
+            }
+            assert_eq!(
+                validate(invalid, "m"),
+                Err(ExecutionDataStateError::InvalidMaintenanceBinary)
+            );
+        }
     }
 }
