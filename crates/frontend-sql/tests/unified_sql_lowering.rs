@@ -345,6 +345,44 @@ async fn count_ranked_topk_via_alias_is_also_heavy_hitter() {
     );
 }
 
+/// A heavy-hitter sketch ranks every row; a count over only some rows
+/// (#466) stays a generic Sort + Limit: an explicit `FILTER`, and the
+/// `IsNotNull` filter `COUNT(col)` gets over a nullable column.
+#[tokio::test]
+async fn filtered_count_ranking_is_not_a_heavy_hitter() {
+    let catalog = SqlCatalog::new().with_table(
+        "metrics",
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("service", DataType::Utf8),
+                col("latency", DataType::Float64),
+                Field::plain("bytes", DataType::Int64, true),
+            ],
+            0,
+            vec![vec![0, 1]],
+        ),
+    );
+    for sql in [
+        "SELECT service, COUNT(*) FILTER (WHERE latency > 1) AS c FROM metrics \
+         GROUP BY service ORDER BY c DESC LIMIT 10",
+        "SELECT service, COUNT(bytes) AS c FROM metrics GROUP BY service ORDER BY c DESC LIMIT 10",
+    ] {
+        let qe = lower_sql(sql, &catalog, AccuracyTarget::Exact)
+            .await
+            .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
+        let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+            "{sql}: the filtered Count must stay, got {measures:?}"
+        );
+        let NonASAPOp::Aggregate { filters, .. } = op(find_aggregate_node(&qe).unwrap()) else {
+            unreachable!()
+        };
+        assert!(filters[0].is_some(), "{sql}: the measure is filtered");
+    }
+}
+
 #[tokio::test]
 async fn non_count_ranked_limit_keeps_the_aggregate() {
     // Ranking by AVG (not a count) must NOT become a frequency heavy-hitter —

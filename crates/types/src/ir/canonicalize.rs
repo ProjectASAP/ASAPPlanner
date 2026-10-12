@@ -207,6 +207,7 @@ fn try_promote_additive_top_ranking(
     let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
+        filters,
         child: aggregate_child,
         ..
     }) = agg_node.non_asap()
@@ -216,6 +217,11 @@ fn try_promote_additive_top_ranking(
     let Reduction::Reduce(by) = reduction else {
         return Ok(None);
     };
+    // A heavy-hitter sketch ranks the raw update stream; a filtered measure
+    // counts only part of it, and no binding rule applies the filter (#466).
+    if crate::ir::non_asap::any_measure_filtered(filters) {
+        return Ok(None);
+    }
     let [ranked_agg] = measures.as_slice() else {
         return Ok(None);
     };
@@ -499,6 +505,37 @@ mod tests {
         // Limit 5 { Sort DESC by count-col (1) { Aggregate[Count] by [1] } }.
         let q = limit(5, 0, sort(desc(1), count_by_service()));
         assert!(is_topk_over_count(&canonicalize(q).unwrap()));
+    }
+
+    // A heavy-hitter sketch ranks every row; a count that only counts some
+    // rows (#466) is not that, so the generic Sort + Limit stays. Covers an
+    // explicit `FILTER (WHERE latency > 1)` and the `IsNotNull` filter of
+    // `COUNT(col)` over a nullable column.
+    #[test]
+    fn does_not_promote_a_filtered_count_ranking() {
+        use crate::ir::Predicate;
+        use crate::pre_asap::{CompareOpKind, ScalarValue};
+        let greater = Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(2)),
+            op: CompareOpKind::Gt,
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+            semantics: crate::ir::ExprSemantics::Sql,
+        });
+        let not_null = Predicate(ScalarExpr::IsNotNull(Box::new(ScalarExpr::Column(2))));
+        for filter in [greater, not_null] {
+            let filtered = node(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![1]),
+                measures: vec![count()],
+                output_names: vec![],
+                filters: vec![Some(filter)],
+                having: None,
+                child: scan(),
+            });
+            let q = limit(5, 0, sort(desc(1), filtered));
+            let canonical = canonicalize(Rc::clone(&q)).unwrap();
+            assert!(!is_topk_over_count(&canonical));
+            assert!(Rc::ptr_eq(&canonical, &q));
+        }
     }
 
     #[test]

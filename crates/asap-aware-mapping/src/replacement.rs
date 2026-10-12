@@ -3584,6 +3584,7 @@ fn realize_keyed_additive_summary_input(
     let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
+        filters,
         having: None,
         child: raw_child,
         ..
@@ -3591,6 +3592,11 @@ fn realize_keyed_additive_summary_input(
     else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
+    // The heap sketch consumes every raw row; a filtered measure counts only
+    // some of them (#466).
+    if asap_types::ir::non_asap::any_measure_filtered(filters) {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
     let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
         && matches!(raw_child.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
             if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
