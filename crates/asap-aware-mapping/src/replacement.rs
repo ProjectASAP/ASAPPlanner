@@ -1423,7 +1423,9 @@ impl<'a> ASAPStrategies<'a> {
         let timed = |node: &Rc<OperatorNode>| {
             asap_types::ir::timing::apply_materialization_timings(
                 node,
-                &asap_types::ir::timing::MaterializationAssignment::all_ingestion_time(),
+                &asap_types::ir::timing::MaterializationAssignment::with_default(
+                    asap_types::ir::Materialization::MatAtIngestion(asap_types::ir::Medium::Memory),
+                ),
                 &mut asap_types::ir::timing::TimingMemo::new(),
             )
             .ok()

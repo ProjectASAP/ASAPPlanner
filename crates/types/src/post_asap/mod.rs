@@ -33,7 +33,7 @@ pub mod summary_window;
 pub use crate::pre_asap::schema::{Field, FieldDataType, Schema};
 pub use execution_data_state::{
     lift_plain, DataPrimitive, ExactOperationSchemaError, ExecutionDataState,
-    ExecutionDataStateError, ExecutionTiming,
+    ExecutionDataStateError, ExecutionTiming, Materialization, Medium,
 };
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,

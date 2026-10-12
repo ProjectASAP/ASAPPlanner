@@ -54,7 +54,7 @@ use asap_types::ir::operator_properties::{GroupKeys, Reduction, Source};
 use asap_types::ir::timing::{
     apply_materialization_timings, MaterializationAssignment, TimingMemo,
 };
-use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
+use asap_types::ir::{Materialization, Medium, NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
 
@@ -175,22 +175,22 @@ pub(crate) fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<Operato
     .unwrap()
 }
 
-/// `root` timed under the default (every summary at query time)
+/// `root` timed under the default (every sub-DAG `NotMaterialized`)
 /// assignment — the shape export and the post-ASAP validators consume.
 pub(crate) fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_materialization_timings(
         root,
-        &MaterializationAssignment::all_query_time(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .expect("default materialization timings apply")
 }
 
-/// `root` timed with every summary maintained at ingestion time.
+/// `root` timed with every sub-DAG `MatAtIngestion` where the DAG allows it.
 pub(crate) fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_materialization_timings(
         root,
-        &MaterializationAssignment::all_ingestion_time(),
+        &MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory)),
         &mut TimingMemo::new(),
     )
     .expect("maintained materialization timings apply")
@@ -206,7 +206,7 @@ pub(crate) fn time_and_export(
 > {
     let timed = apply_materialization_timings(
         root,
-        &MaterializationAssignment::all_query_time(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )?;
     asap_types::ir::physical_export::compile_physical_asap_dag(&timed)

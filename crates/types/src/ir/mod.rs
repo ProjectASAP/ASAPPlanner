@@ -21,6 +21,7 @@ pub mod flat;
 pub mod physical_export;
 /// Execution timing for physical plans: a materialization assignment expanded onto every node.
 pub mod timing;
+pub use crate::post_asap::execution_data_state::{Materialization, Medium};
 pub use timing::{
     apply_materialization_timings, data_state, planned_data_state, split_shared_by_phase,
     validate_maintained, MaterializationAssignment, TimingMemo,

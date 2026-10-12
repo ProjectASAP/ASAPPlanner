@@ -504,6 +504,7 @@ fn bind_post_asap_before_execution() {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
+        materialization: Default::default(),
         output_schema: (*schema).clone(),
         guarantee: None,
     };
@@ -651,6 +652,7 @@ fn source_batches_must_match_the_bound_schema() {
                 schema: (*expected).clone(),
             }),
             output_state: ExecutionDataState::QUERY_ROWS,
+            materialization: Default::default(),
             output_schema: (*expected).clone(),
             guarantee: None,
         }],
@@ -732,6 +734,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             payload,
             output_schema: (**schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
+            materialization: Default::default(),
             guarantee: None,
         };
     let edge = |producer, consumer, role, schema: &asap_physical_operators::values::SchemaRef| {
@@ -829,9 +832,14 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             },
         ),
     ] {
-        let dag = dag
-            .with_execution_phases(&dag.nodes.iter().map(|node| (node.id, phase)).collect())
-            .unwrap();
+        // A hand-built plan placed entirely at `phase`.
+        let mut dag = dag.clone();
+        for node in &mut dag.nodes {
+            node.output_state.timing = phase;
+        }
+        for edge in &mut dag.edges {
+            edge.data_state.timing = phase;
+        }
         let sources: BTreeMap<u64, Source<'static>> = BTreeMap::from([
             (
                 0,
@@ -1196,6 +1204,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         id,
         payload: PhysicalASAPOperatorPayload::NonASAP(operation),
         output_state: ExecutionDataState::QUERY_ROWS,
+        materialization: Default::default(),
         output_schema: (*input).clone(),
         guarantee: None,
     };
@@ -1283,6 +1292,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             id: 2,
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
+            materialization: Default::default(),
             guarantee: None,
             payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
                 kind: JoinKind::Semi,
@@ -1398,6 +1408,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         id: 2,
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
+        materialization: Default::default(),
         guarantee: None,
         payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
             operator: BinaryOperator {

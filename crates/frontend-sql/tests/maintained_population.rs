@@ -43,7 +43,7 @@ fn population(mut node: &OperatorNode) -> (&Rc<OperatorNode>, &MaintainedPopulat
 fn compile(plan: &Rc<OperatorNode>) -> Result<(), String> {
     let timed = apply_materialization_timings(
         plan,
-        &MaterializationAssignment::all_query_time(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .map_err(|e| e.to_string())?;

@@ -14,7 +14,7 @@ runs at query time. Physical deployment and execution remain downstream. The
 | Layer | Owner | Examples |
 |---|---|---|
 | Logical candidate semantics | ASAPPlanner | Query rewrite; summary family and parameters; grouping; accuracy guarantees when established. |
-| Summary materialization and realization selection | Stage 2 materialization (#509); downstream until then | Ingestion-time maintenance or query-time computation per summary state; direct build or incremental update; window implementations compared using provider evidence. |
+| Summary materialization and realization selection | ASAPPlanner Stage 2 materialization (#509) | `NotMaterialized`, `MatAtIngestion(medium)` or `MatAtQuery(medium)` per sub-DAG, and how long a stored output is kept; direct build or incremental update; window implementations compared using provider evidence. |
 | Concrete implementation and deployment | ASAPQuery-backend and its workload optimizer | Library and data-structure implementation, exact pane layout, placement, sharding, storage, transmission, materialization IDs, executor configuration, and workload-wide assignment. |
 
 ASAPCollector and the ASAPQuery data plane execute the compiled downstream

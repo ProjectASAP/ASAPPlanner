@@ -77,7 +77,7 @@ pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export
     use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
     let timed = apply_materialization_timings(
         root,
-        &MaterializationAssignment::all_query_time(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .expect("default materialization timings");

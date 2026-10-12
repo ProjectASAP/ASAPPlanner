@@ -46,21 +46,20 @@ pub fn execute(
 pub fn compile_physical_asap_dag(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    compile_with(
-        root,
-        &asap_types::ir::MaterializationAssignment::all_query_time(),
-    )
+    compile_with(root, &asap_types::ir::MaterializationAssignment::default())
 }
 
-/// As [`compile_physical_asap_dag`], with every summary maintained at
-/// ingestion time, the placement precompute compilation requires.
+/// As [`compile_physical_asap_dag`], with every sub-DAG `MatAtIngestion`
+/// where the DAG allows it, the placement precompute compilation requires.
 #[allow(dead_code)] // Not every test binary sharing this module compiles precompute.
 pub fn compile_maintained_physical_asap_dag(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     compile_with(
         root,
-        &asap_types::ir::MaterializationAssignment::all_ingestion_time(),
+        &asap_types::ir::MaterializationAssignment::with_default(
+            asap_types::ir::Materialization::MatAtIngestion(asap_types::ir::Medium::Memory),
+        ),
     )
 }
 

@@ -178,7 +178,7 @@ mod tests {
         );
         let timed = asap_types::ir::timing::apply_materialization_timings(
             &candidates[0],
-            &asap_types::ir::timing::MaterializationAssignment::all_query_time(),
+            &asap_types::ir::timing::MaterializationAssignment::default(),
             &mut asap_types::ir::timing::TimingMemo::new(),
         )
         .expect("the demo candidate has a legal default timing");

@@ -77,6 +77,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhys
             rhs: 1,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
+        materialization: Default::default(),
         output_schema: (*schema).clone(),
         guarantee: None,
     };
@@ -398,6 +399,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         } else {
                             ExecutionDataState::QUERY_ROWS
                         },
+                        materialization: Default::default(),
                         output_schema: if id < 2 {
                             (*state_schema).clone()
                         } else {

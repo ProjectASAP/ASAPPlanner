@@ -90,10 +90,12 @@ pub fn compile_current_series_evaluation(
     use planner_types::post_asap::{
         maintained_population::PopulationStatistic, Field as SummaryField,
     };
-    // This compiler emits maintained precompute: every summary at ingestion time.
+    // This compiler emits maintained precompute: every sub-DAG `MatAtIngestion`.
     let selected = planner_types::ir::apply_materialization_timings(
         selected,
-        &planner_types::ir::MaterializationAssignment::all_ingestion_time(),
+        &planner_types::ir::MaterializationAssignment::with_default(
+            planner_types::ir::Materialization::MatAtIngestion(planner_types::ir::Medium::Memory),
+        ),
         &mut planner_types::ir::TimingMemo::new(),
     )
     .map_err(|e| invalid(e.to_string()))?;
@@ -205,10 +207,12 @@ pub fn compile_rate_ranking(
         }
         node.children().into_iter().find_map(frontier)
     }
-    // This compiler emits maintained precompute: every summary at ingestion time.
+    // This compiler emits maintained precompute: every sub-DAG `MatAtIngestion`.
     let selected = planner_types::ir::apply_materialization_timings(
         selected,
-        &planner_types::ir::MaterializationAssignment::all_ingestion_time(),
+        &planner_types::ir::MaterializationAssignment::with_default(
+            planner_types::ir::Materialization::MatAtIngestion(planner_types::ir::Medium::Memory),
+        ),
         &mut planner_types::ir::TimingMemo::new(),
     )
     .map_err(|e| invalid(e.to_string()))?;

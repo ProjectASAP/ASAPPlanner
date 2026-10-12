@@ -80,7 +80,7 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// hash is SipHash over two parts:
 ///
 /// 1. the canonical JSON of [`own_fields`] plus `result_kind`, `schema`,
-///    `guarantee` and `timing` — every field `PartialEq` compares except the
+///    `guarantee`, `timing` and `materialization` — every field `PartialEq` compares except the
 ///    children. A scalar expression is serialized as data with each operator
 ///    node it reads replaced by `()`, so a reference to an
 ///    interned sub-DAG contributes nothing of its own here;
@@ -112,6 +112,7 @@ pub fn structural_hash(node: &OperatorNode, cache: &mut HashCache) -> u64 {
         &node.schema,
         &node.guarantee,
         node.timing,
+        node.materialization,
     );
     serde_json::to_string(&own)
         .unwrap_or_default()
@@ -167,6 +168,7 @@ fn same_node(left: &OperatorNode, right: &OperatorNode, memo: &mut EqMemo) -> bo
         && left.result_kind == right.result_kind
         && left.schema == right.schema
         && left.timing == right.timing
+        && left.materialization == right.materialization
         && same_value(&left.guarantee, &right.guarantee)
         && same_value(&own_fields(left), &own_fields(right))
 }
@@ -234,7 +236,8 @@ pub fn dag_node_count(root: &Rc<OperatorNode>) -> usize {
 type Visited = HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>;
 
 /// Intern `node`'s children (recursively), then `node` itself. The rebuilt
-/// node keeps `node`'s retained schema, result kind, guarantee and timing:
+/// node keeps `node`'s retained schema, result kind, guarantee, timing and
+/// materialization:
 /// every child is replaced by an equal node, so each derived property stays
 /// valid, and the result is `PartialEq`-equal to the input.
 fn intern_bottom_up(
@@ -250,7 +253,8 @@ fn intern_bottom_up(
         .map_children(|child| intern_bottom_up(table, visited, child));
     let rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
         .with_guarantee(node.guarantee.clone())
-        .with_timing(node.timing);
+        .with_timing(node.timing)
+        .with_materialization(node.materialization);
     let interned = table.intern(rebuilt);
     visited.insert(Rc::as_ptr(node), (Rc::clone(node), Rc::clone(&interned)));
     interned

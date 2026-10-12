@@ -380,7 +380,11 @@ mod tests {
             .unwrap();
         let selected = planner_types::ir::apply_materialization_timings(
             &selected,
-            &planner_types::ir::MaterializationAssignment::all_ingestion_time(),
+            &planner_types::ir::MaterializationAssignment::with_default(
+                planner_types::ir::Materialization::MatAtIngestion(
+                    planner_types::ir::Medium::Memory,
+                ),
+            ),
             &mut Default::default(),
         )
         .unwrap();
@@ -418,9 +422,21 @@ mod tests {
         dag: &PhysicalASAPDAG,
         timing: impl Fn(&PhysicalASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
     ) -> PhysicalASAPDAG {
+        use planner_types::post_asap::{ExecutionTiming, Materialization, Medium};
         let mut timed = dag.clone();
         for node in &mut timed.nodes {
             node.output_state.timing = timing(node);
+            // A stored sub-DAG output runs when its materialization says.
+            let stored = matches!(
+                node.payload,
+                Payload::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::MaintainPopulation { .. })
+            );
+            node.materialization = match node.output_state.timing {
+                ExecutionTiming::IngestionTime if stored => {
+                    Materialization::MatAtIngestion(Medium::Memory)
+                }
+                _ => Materialization::NotMaterialized,
+            };
         }
         for edge in &mut timed.edges {
             let producer = timed.nodes.iter().find(|node| node.id == edge.producer);

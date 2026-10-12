@@ -65,6 +65,9 @@ fn post_asap_summary_projection_survives_recovery() {
                 }),
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
+                materialization: planner_types::post_asap::Materialization::MatAtIngestion(
+                    planner_types::post_asap::Medium::Memory,
+                ),
                 guarantee: None,
             },
             PhysicalASAPDAGNode {
@@ -82,6 +85,9 @@ fn post_asap_summary_projection_survives_recovery() {
                 }),
                 output_schema: output.clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
+                materialization: planner_types::post_asap::Materialization::MatAtIngestion(
+                    planner_types::post_asap::Medium::Memory,
+                ),
                 guarantee: None,
             },
         ],

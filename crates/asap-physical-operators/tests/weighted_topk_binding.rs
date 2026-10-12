@@ -87,13 +87,15 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         })
         .unwrap();
     let dag = compile_physical_asap_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {family:FieldDataType::Sketch(kind,_),..})if kind.algorithm()==&algorithm)).unwrap();
-    let rate_id = dag
-        .edges
-        .iter()
-        .find(|edge| edge.consumer == build.id)
-        .unwrap()
-        .producer;
+    let rate_id_of = |dag: &PhysicalASAPDAG| {
+        let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {family:FieldDataType::Sketch(kind,_),..})if kind.algorithm()==&algorithm)).unwrap();
+        dag.edges
+            .iter()
+            .find(|edge| edge.consumer == build.id)
+            .unwrap()
+            .producer
+    };
+    let rate_id = rate_id_of(&dag);
     let rates = Arc::new(
         dag.nodes
             .iter()
@@ -129,9 +131,11 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
     })
     .collect();
     let batch = Batch::try_new(rates.clone(), rows).unwrap();
-    for (phase, scope) in [
+    // The summaries `MatAtIngestion` run as data arrives; `NotMaterialized`
+    // (the default) runs everything when the query does.
+    for (placed, scope) in [
         (
-            ExecutionTiming::IngestionTime,
+            continuously_maintained_dag(&plan),
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 60_000,
@@ -139,16 +143,14 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
             },
         ),
         (
-            ExecutionTiming::QueryTime,
+            dag.clone(),
             Scope::Query {
                 evaluation_time_ms: 60_000,
                 revision: 1,
             },
         ),
     ] {
-        let placed = dag
-            .with_execution_phases(&dag.nodes.iter().map(|node| (node.id, phase)).collect())
-            .unwrap();
+        let rate_id = rate_id_of(&placed);
         let source = Box::new(Operator::source(rates.clone(), vec![batch.clone()]).unwrap())
             as Source<'static>;
         let compiled = compile(
@@ -813,55 +815,37 @@ fn spatial_topk_requires_the_limit_and_sort_partitions_to_agree() {
     assert!(candidates(&with_limit_partition(&global, by_job.clone())).is_empty());
 }
 
-/// Every summary state of `candidate` maintained at ingestion time, the
-/// materialization a deployment would assign for a continuously served query:
-/// each `SummaryAgg` and every input it consumes run at ingestion time, the
-/// rest at query time. The phases are assigned on the exported DAG because
-/// the candidate pins its finalize boundary to query time.
+/// `candidate` with every `SummaryAgg` `MatAtIngestion`, the materialization
+/// a continuously served query would get: each summary and every input it
+/// consumes run at ingestion time, the rest at query time. The candidate pins
+/// its finalize boundary to query time, which would put the summaries above
+/// it upstream of a query-time node, so the pin is lifted first.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
-    use planner_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
-    let timed = apply_materialization_timings(
-        candidate,
-        &MaterializationAssignment::all_query_time(),
-        &mut TimingMemo::new(),
-    )
-    .unwrap();
-    let dag = planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap();
-    let mut pending: Vec<_> = dag
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
-            )
-        })
-        .map(|node| node.id)
-        .collect();
-    let mut ingestion = std::collections::HashSet::new();
-    while let Some(id) = pending.pop() {
-        if ingestion.insert(id) {
-            pending.extend(
-                dag.edges
-                    .iter()
-                    .filter(|edge| edge.consumer == id)
-                    .map(|edge| edge.producer),
-            );
+    use planner_types::ir::{
+        apply_materialization_timings, Materialization, MaterializationAssignment, Medium,
+        Operator as IrOperator, OperatorNode, TimingMemo,
+    };
+    fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        let mut copy = (**node).clone();
+        copy.operator = node.operator.map_children(unpinned);
+        if matches!(
+            copy.operator,
+            IrOperator::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
+        ) {
+            copy.timing = None;
+        }
+        Rc::new(copy)
+    }
+    let candidate = unpinned(candidate);
+    let mut assignment = MaterializationAssignment::default();
+    for node in OperatorNode::reachable(&candidate) {
+        if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
+            assignment.set(&node, Materialization::MatAtIngestion(Medium::Memory));
         }
     }
-    let phases = dag
-        .nodes
-        .iter()
-        .map(|node| {
-            let timing = if ingestion.contains(&node.id) {
-                ExecutionTiming::IngestionTime
-            } else {
-                ExecutionTiming::QueryTime
-            };
-            (node.id, timing)
-        })
-        .collect();
-    dag.with_execution_phases(&phases).unwrap()
+    let timed =
+        apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new()).unwrap();
+    planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap()
 }
 
 // A maintained heap over finalized per-series Rate is the fixed-window

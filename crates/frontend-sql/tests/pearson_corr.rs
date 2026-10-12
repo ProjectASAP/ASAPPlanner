@@ -154,7 +154,7 @@ async fn corr_survives_exact_plan_compilation() {
     assert_eq!(aggregate(&plan).0, aggregate(&query).0);
     let timed = apply_materialization_timings(
         &plan,
-        &MaterializationAssignment::all_query_time(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .unwrap();

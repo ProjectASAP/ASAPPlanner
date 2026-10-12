@@ -44,13 +44,15 @@ decided by a `MaterializationAssignment`, as the layer contract below states.
 1. **Logical Post-ASAP** (`CandidateLogicalASAPDAGs`) decides what to compute: summary
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
-2. **Materialization** (Stage 2, #509) chooses ingestion or query time for each
-   summary state (`SummaryAgg`) and records it in a `MaterializationAssignment`.
-   `apply_materialization_timings` writes every node's `ExecutionTiming`: an
-   ingestion-time state and all of its inputs run at ingestion time; readouts,
-   other consumers, and query-time states run at query time.
-   `MaintainPopulation` always runs at ingestion time. The default assignment
-   is all query time, which `PlanOutput::execution_timed_dag` applies.
+2. **Materialization** (Stage 2, #509) chooses `NotMaterialized`,
+   `MatAtIngestion(medium)` or `MatAtQuery(medium)` for each sub-DAG whose
+   output may be stored (a `SummaryAgg` or a `MaintainPopulation`) and records
+   it in a `MaterializationAssignment`. `apply_materialization_timings` writes
+   every node's `ExecutionTiming` and `Materialization`: a `MatAtIngestion`
+   state and all of its inputs run at ingestion time; readouts, other
+   consumers, and the other states run at query time. The default assignment
+   is `NotMaterialized` everywhere, which `PlanOutput::execution_timed_dag`
+   applies.
 3. **Physical compile** (Planner) reads timing: ingestion-time nodes form the
    precompute DAG and the rest form the query DAG, joined by typed outputs. It
    does not see raw ingestion, panes, storage or stored-state readout.

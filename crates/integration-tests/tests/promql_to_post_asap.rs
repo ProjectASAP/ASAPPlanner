@@ -26,9 +26,9 @@ use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{
-    CompositionOperator, EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
-    Schema, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr,
-    SummaryUpdate,
+    CompositionOperator, EntityIdentity, ExactKind, ExactParams, ExecutionDataStateError,
+    FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind, SketchParams,
+    SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::schema::DataType;
@@ -477,18 +477,32 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
             rates.asap(),
             Some(ASAPOp::FinalizeExactAccumulator { .. })
         ));
+        // Not materialized by default: everything runs at query time.
         let dag = post_asap_dag(&plan);
-        for phase in [
-            asap_types::post_asap::ExecutionTiming::IngestionTime,
-            asap_types::post_asap::ExecutionTiming::QueryTime,
-        ] {
-            let phases = dag.nodes.iter().map(|node| (node.id, phase)).collect();
-            let placed = dag.with_execution_phases(&phases).unwrap();
-            assert!(placed
-                .nodes
-                .iter()
-                .all(|node| node.output_state.timing == phase));
-        }
+        assert!(dag.nodes.iter().all(|node| {
+            node.output_state.timing == asap_types::post_asap::ExecutionTiming::QueryTime
+                && node.materialization == asap_types::post_asap::Materialization::NotMaterialized
+        }));
+        // The candidate pins the finalize boundary below the weighted summary
+        // to query time, so that summary cannot be materialized at ingestion.
+        let mut assignment = asap_types::ir::MaterializationAssignment::default();
+        assignment.set(
+            summary_input,
+            asap_types::post_asap::Materialization::MatAtIngestion(
+                asap_types::post_asap::Medium::Memory,
+            ),
+        );
+        assert_eq!(
+            asap_types::ir::apply_materialization_timings(
+                &plan,
+                &assignment,
+                &mut asap_types::ir::TimingMemo::new()
+            )
+            .err(),
+            Some(ExecutionDataStateError::UpstreamNotAtIngestion {
+                operator: "SummaryAgg"
+            })
+        );
         let guarantee = plan.guarantee.as_ref().unwrap();
         assert!(guarantee.failure_probability.evaluate().unwrap() <= 0.01);
         assert!(guarantee.provenance.iter().any(|source| matches!(source,

@@ -101,19 +101,25 @@ pub mod fixtures {
 pub mod post_asap {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
     use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, OperatorNode, TimingMemo,
+        apply_materialization_timings, Materialization, MaterializationAssignment, Medium,
+        OperatorNode, TimingMemo,
     };
     use std::rc::Rc;
 
-    /// Time `root` under the default assignment (every summary computed at
-    /// query time). Returns the timed copy; read `node.timing` on it.
+    /// Time `root` under the default assignment (every sub-DAG
+    /// `NotMaterialized`, so every summary computed at query time). Returns the timed copy; read `node.timing` on it.
     pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        timed_with(root, &MaterializationAssignment::all_query_time())
+        timed_with(root, &MaterializationAssignment::default())
     }
 
-    /// Time `root` with every summary maintained at ingestion time.
+    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows it.
     pub fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        timed_with(root, &MaterializationAssignment::all_ingestion_time())
+        timed_with(
+            root,
+            &MaterializationAssignment::with_default(Materialization::MatAtIngestion(
+                Medium::Memory,
+            )),
+        )
     }
 
     fn timed_with(
@@ -129,7 +135,8 @@ pub mod post_asap {
         compile_physical_asap_dag(&timed(root)).expect("post-ASAP DAG export failed")
     }
 
-    /// Time `root` with every summary maintained, then export the physical DAG.
+    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows
+    /// it, then export the physical DAG.
     pub fn maintained_post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
         compile_physical_asap_dag(&maintained(root)).expect("post-ASAP DAG export failed")
     }

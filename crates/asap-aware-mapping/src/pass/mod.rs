@@ -234,7 +234,7 @@ impl PlanOutput {
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
         // One memo, so a node shared by several roots is timed and exported once.
         let mut memo = TimingMemo::new();
-        let assignment = MaterializationAssignment::all_query_time();
+        let assignment = MaterializationAssignment::default();
         let timed = self
             .roots()
             .iter()
