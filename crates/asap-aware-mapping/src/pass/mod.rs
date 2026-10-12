@@ -269,7 +269,14 @@ impl PlanOutput {
 
     /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
     /// once: operator queries become its `roots` and standalone scalar
-    /// queries its `scalar_roots`, keyed by entry index.
+    /// queries its `scalar_roots`, keyed by position in the batch. That
+    /// position is the entry index, because `check_contract` requires dense
+    /// entry indices.
+    ///
+    /// An empty workload is an error
+    /// ([`PhysicalASAPDAGValidationError::NoRoots`](asap_types::ir::physical_export::PhysicalASAPDAGValidationError::NoRoots)).
+    /// A workload of only literal scalars yields a DAG with no nodes: just
+    /// its `scalar_roots`.
     pub fn execution_timed_dag(
         &self,
     ) -> Result<
