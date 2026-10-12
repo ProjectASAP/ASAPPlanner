@@ -12,7 +12,7 @@
 // `--epsilon <f64>` is optional and applies to every query in the run: it
 // lowers with `AccuracyTarget::Epsilon(<f64>)` instead of the default
 // `AccuracyTarget::Exact`. Without it, every `AggIntent` lowers exact and
-// `asap_aware_mapping::SketchAlgorithmStrategy` never has a genuine sketch
+// `asap_aware_mapping::ASAPStrategies` never has a genuine sketch
 // alternative to report — so no node ever picks up a `SketchApproximation`
 // note. Pass it to actually exercise that path, e.g.:
 //   cargo run -p asap-lower --bin dag_export -- \
@@ -41,7 +41,7 @@
 //     `asap_types::dag_export::export_post_asap`.
 //
 // Together these surface every one of the four concrete replacement kinds:
-// the sketch family `SketchAlgorithmStrategy`/`HydraGroupingStrategy` bound,
+// the sketch family `ASAPStrategies`/`HydraGroupingStrategy` bound,
 // the CSE share/recompute choice `SharedSubDAGStrategy` found, the
 // workload-aware roll-up `RollupStrategy` derived, and the `avg ->
 // sum/count` rewrite `AvgToSumOverCountStrategy` proposes. Without
@@ -88,8 +88,8 @@ use asap_aware_mapping::physical_plan_cost_model::{
 };
 use asap_aware_mapping::query_physical_lowering::PhysicalNodeRequest;
 use asap_aware_mapping::replacement::{
-    default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
-    ReplacementSubDAG,
+    default_strategies_with_evidence, is_logical_rewrite, search_workload, search_workload_with,
+    Replacement, ReplacementSubDAG,
 };
 use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
@@ -97,11 +97,9 @@ use asap_types::dag_export::{
     self, DAGDecision, DAGNote, ExportDAG, NamedDAG, PostAsapSubstitution, TargetRejection,
     TargetReplacement, TargetReplacementAfter, WorkloadDAG,
 };
-use asap_types::post_asap::SummaryExpr;
-use asap_types::post_asap::SummaryNode;
+use asap_types::ir::cse::{structural_hash, HashCache};
+use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{CompositionOperator, FieldDataType, SketchStatistic};
-use asap_types::pre_asap::cse::{structural_hash, HashCache};
-use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::resources::CacheProfile;
 use asap_types::types::AccuracyTarget;
@@ -137,7 +135,7 @@ fn parse_planner_cost_document(raw: &str) -> Result<PlannerCostDocument, String>
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TargetPhysicalEvidence {
-    target: QueryExpr,
+    target: Rc<OperatorNode>,
     scope: ComparisonScopeEvidence,
     candidates: Vec<CandidatePhysicalEvidence>,
 }
@@ -192,7 +190,7 @@ impl ComparisonScopeEvidence {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryNodePhysicalEvidence {
-    logical_node: QueryExpr,
+    logical_node: OperatorNode,
     operator: asap_aware_mapping::analytical_cost::PhysicalOperator,
     occurrence: usize,
     synthetic: bool,
@@ -228,11 +226,11 @@ impl CandidatePhysicalEvidence {
 
     fn matches(&self, candidate: &ReplacementSubDAG) -> bool {
         let actual = match (self, &candidate.replacement) {
-            (Self::Summary { .. }, Replacement::Summary(summary)) => {
-                serde_json::to_value(dag_export::export_summary(summary))
+            (Self::Summary { .. }, Replacement::SubDAG(node)) if !is_logical_rewrite(node) => {
+                serde_json::to_value(dag_export::export(node))
             }
-            (Self::Rewrite { .. }, Replacement::Rewrite(query)) => {
-                serde_json::to_value(dag_export::export(query))
+            (Self::Rewrite { .. }, Replacement::SubDAG(node)) if is_logical_rewrite(node) => {
+                serde_json::to_value(dag_export::export(node))
             }
             _ => return false,
         };
@@ -369,7 +367,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
     fn summary_physical_dag(
         &self,
         snapshot: &PhysicalEvidenceSnapshot,
-        _summary: &Rc<SummaryNode>,
+        _summary: &Rc<OperatorNode>,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
     ) -> Result<PhysicalDAG, AnalyticalCostError> {
         if snapshot.scope != self.target.scope.resolve()? {
@@ -400,7 +398,7 @@ impl ExportPlannerCostModel<'_> {
             .document
             .targets
             .iter()
-            .filter(|entry| entry.target == **target.root);
+            .filter(|entry| entry.target == *target.root);
         let target_evidence = targets.next()?;
         if targets.next().is_some() {
             return None;
@@ -429,7 +427,7 @@ impl ExportPlannerCostModel<'_> {
     fn annotations(
         &self,
         candidate: &ReplacementSubDAG,
-        target: &Rc<QueryExpr>,
+        target: &Rc<OperatorNode>,
     ) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(target);
         let Some((provider, calibration)) = self.bound(candidate, &target) else {
@@ -960,12 +958,11 @@ fn parse_args_from(argv: impl Iterator<Item = String>) -> ParsedArgs {
     }
 }
 
-/// Attach workload-wide replacement explanations to their exact DAG nodes.
-/// `node_hash` is only a narrowing filter; `source_expr == Some(target)` is
-/// the collision-safe identity check (`source_expr` is `None` only for a
-/// post-ASAP-originated node inside a `--post-asap` `post_dag`, which this
-/// function is never called on — every node it sees, from an ordinary
-/// [`dag_export::export`], carries `Some`).
+/// Attach workload-wide replacement explanations to their exact dag nodes.
+/// `node_hash` is only a narrowing filter; `source_node == Some(target)` is
+/// the collision-safe identity check (every node an ordinary
+/// [`dag_export::export`] produces carries `Some`; the `None` arm is
+/// defensive only).
 fn annotate_with_explanations(
     dag: &mut ExportDAG,
     explanations: &[asap_aware_mapping::ReplacementExplanation],
@@ -974,7 +971,7 @@ fn annotate_with_explanations(
     for (i, explanation) in explanations.iter().enumerate() {
         for node in dag.nodes.iter_mut() {
             if node.hash == Some(explanation.node_hash)
-                && node.source_expr.as_ref() == Some(explanation.target.as_ref())
+                && node.source_node.as_ref() == Some(&explanation.target)
             {
                 node.notes.push(DAGNote {
                     kind: format!("{:?}", explanation.kind),
@@ -992,7 +989,7 @@ fn annotate_with_explanations(
 /// never disagree about which candidate won for a given target.
 #[allow(dead_code)]
 struct Winner<'a> {
-    target: &'a Rc<QueryExpr>,
+    target: &'a Rc<OperatorNode>,
     candidate: &'a ReplacementSubDAG,
     costs: (CostAnnotation, CostAnnotation, CostAnnotation),
 }
@@ -1056,7 +1053,7 @@ fn lookup_winner(
     by_hash: &HashMap<u64, Vec<usize>>,
     winners: &[Winner<'_>],
     cache: &mut HashCache,
-    expr: &QueryExpr,
+    expr: &OperatorNode,
 ) -> Option<usize> {
     let hash = structural_hash(expr, cache);
     by_hash
@@ -1102,12 +1099,10 @@ fn target_replacement(
     let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
     let after = match &winner.candidate.replacement {
-        Replacement::Summary(node) => {
-            TargetReplacementAfter::Summary(dag_export::export_summary(node))
+        Replacement::SubDAG(node) if is_logical_rewrite(node) => {
+            TargetReplacementAfter::Rewrite(dag_export::export(node))
         }
-        Replacement::Rewrite(rewritten) => {
-            TargetReplacementAfter::Rewrite(dag_export::export(rewritten))
-        }
+        Replacement::SubDAG(node) => TargetReplacementAfter::Summary(dag_export::export(node)),
         Replacement::ExactComposition(_) => {
             unreachable!("composition candidates are materialized by GlobalSelection")
         }
@@ -1129,6 +1124,20 @@ fn target_replacement(
         selected_cost: Some(selected_cost),
         benefit: Some(benefit),
     }
+}
+
+/// Is `replacement` `retain_exact`'s conservative no-op fallback — the
+/// target itself, unbound, carrying only an exact "kept pre-ASAP" guarantee?
+/// `ASAPStrategies` emits it for an intent with no summary
+/// realization at all (`STDDEV_POP`, `AVG`, ... dispatch to
+/// `Realization::PassThrough`). It is "nothing to bind here", not a
+/// replacement decision. A logical rewrite (no guarantee yet) and any sub-DAG
+/// with an ASAP operator are real candidates.
+fn is_trivial_retain_exact(replacement: &Replacement) -> bool {
+    matches!(
+        replacement,
+        Replacement::SubDAG(node) if node.guarantee.is_some() && !node.contains_asap()
+    )
 }
 
 /// The two additive `--post-asap` outputs — see this file's top-of-file
@@ -1159,7 +1168,7 @@ fn raw_only_post_asap_results() -> PostAsapResults {
 }
 
 /// Assign collision-free, explicit identities to structurally equal nodes
-/// across a set of exported query DAGs. The full canonical sub-DAG string
+/// across a set of exported query graphs. The full canonical sub-DAG string
 /// is the equality key; the compact integer is what JSON consumers receive.
 /// Consequently the viewer never needs to guess identity from labels,
 /// hashes, or a client-side node signature.
@@ -1210,7 +1219,7 @@ fn assign_workload_node_ids(dags: &mut [&mut ExportDAG]) {
 /// which candidate won for a given target.
 #[allow(dead_code)]
 fn run_post_asap_with_progress(
-    lowered_queries: &[(String, String, QueryExpr)],
+    lowered_queries: &[(String, String, Rc<OperatorNode>)],
     progress: bool,
     cost_model: &dyn CostModel,
     export_model: Option<&ExportPlannerCostModel<'_>>,
@@ -1220,9 +1229,9 @@ fn run_post_asap_with_progress(
     if progress {
         eprintln!("[3/4] ASAP-aware mapping is running…");
     }
-    let roots: Vec<(String, Rc<QueryExpr>)> = lowered_queries
+    let roots: Vec<(String, Rc<OperatorNode>)> = lowered_queries
         .iter()
-        .map(|(name, _, qe)| (name.clone(), Rc::new(qe.clone())))
+        .map(|(name, _, qe)| (name.clone(), Rc::clone(qe)))
         .collect();
     let strategies;
     let space = if let Some(evidence) = evidence {
@@ -1233,28 +1242,23 @@ fn run_post_asap_with_progress(
     };
     let selection = space.global_selection(cost_model);
 
-    // A group's top candidate can be `keep_pre_asap`'s own conservative
-    // fallback — `Replacement::Summary(SummaryNode { expr:
-    // KeepPreAsap(Rc::new(target.clone())), .. })` — the *whole target*
-    // wrapped as unbound, e.g. for a multi-measure/`HAVING`-bearing
-    // aggregate, or (the case that actually surfaces this: `STDDEV_POP`/
-    // `AVG`/`VARIANCE` dispatch to `Realization::PassThrough` with no
-    // alternative at all, per `realizations_for_intent`'s own doc) an
-    // intent with no summary realization whatsoever. This isn't a
-    // replacement decision — it's `SketchAlgorithmStrategy` saying "nothing
-    // to bind here" — the identical "no-op candidate" concept
-    // `explanation.rs`'s own `sketch_finding_reason` already excludes from
-    // being reported as a finding ("a candidate list containing only the
-    // trivial no-op realization... isn't an opportunity, it's just the
-    // target's existing shape reflected back"). Filtered out here for a
-    // second, load-bearing reason beyond just matching that precedent:
-    // `export_post_asap`'s `find_winner` re-checks every node reached
-    // inside a spliced-in `KeepPreAsap` payload (by design, so a target
-    // nested underneath one still gets found) — if that payload structurally
-    // *is* the enclosing target, `find_winner` immediately matches the same
-    // winner again, forever. Treating this candidate as "no winner" (same
-    // as an empty candidate list) avoids ever handing `export_post_asap` a
-    // winner that can't help but recurse into itself.
+    // A group's top candidate can be `retain_exact`'s own conservative
+    // fallback — the *whole target* itself, unbound, carrying only an exact
+    // "kept pre-ASAP" guarantee (see `is_trivial_retain_exact`) — e.g. for
+    // a multi-measure/`HAVING`-bearing aggregate, or (the case that actually
+    // surfaces this: `STDDEV_POP`/`AVG`/`VARIANCE` dispatch to
+    // `Realization::PassThrough` with no alternative at all, per
+    // `realizations_for_intent`'s own doc) an intent with no summary
+    // realization whatsoever. This isn't a replacement decision — it's
+    // `ASAPStrategies` saying "nothing to bind here" — the
+    // identical "no-op candidate" concept `explanation.rs`'s own
+    // `sketch_finding_reason` already excludes from being reported as a
+    // finding ("a candidate list containing only the trivial no-op
+    // realization... isn't an opportunity, it's just the target's existing
+    // shape reflected back"). Treating this candidate as "no winner" (same
+    // as an empty candidate list) also keeps `post_dag` honest: splicing
+    // the target in for itself would tag every node of an unchanged sub-DAG
+    // with a "replacement" decision.
     let winners: Vec<Winner<'_>> = selection
         .target_selections()
         .filter_map(|group| {
@@ -1267,10 +1271,7 @@ fn run_post_asap_with_progress(
             if matches!(candidate.replacement, Replacement::ExactComposition(_)) {
                 return None;
             }
-            if matches!(
-                &candidate.replacement,
-                Replacement::Summary(node) if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
-            ) {
+            if is_trivial_retain_exact(&candidate.replacement) {
                 return None;
             }
             Some(Winner {
@@ -1318,7 +1319,7 @@ fn run_post_asap_with_progress(
     }
     let post_started = Instant::now();
     let mut post_dag_cache = HashCache::new();
-    let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
+    let mut find_winner = |expr: &Rc<OperatorNode>| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_dag_cache, expr)?;
         let winner = &winners[i];
         let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
@@ -1337,11 +1338,11 @@ fn run_post_asap_with_progress(
             benefit: Some(benefit),
         };
         Some(match &winners[i].candidate.replacement {
-            Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite {
+            Replacement::SubDAG(rc) if is_logical_rewrite(rc) => PostAsapSubstitution::Rewrite {
                 replacement: Rc::clone(rc),
                 decision,
             },
-            Replacement::Summary(rc) => PostAsapSubstitution::Summary {
+            Replacement::SubDAG(rc) => PostAsapSubstitution::Summary {
                 replacement: Rc::clone(rc),
                 decision,
             },
@@ -1389,20 +1390,20 @@ fn run_post_asap_with_progress(
     for (name, _, qe) in lowered_queries {
         let dag = dag_export::export(qe);
         for node in &dag.nodes {
-            let Some(source_expr) = node.source_expr.as_ref() else {
+            let Some(source_node) = node.source_node.as_ref() else {
                 continue; // never true for a plain `export` — defensive only.
             };
-            if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_expr) {
+            if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_node) {
                 replacements.push((
                     name.clone(),
                     target_replacement(i as u32, node.id, &winners[i]),
                 ));
                 matched[i] = true;
             }
-            let hash = structural_hash(source_expr, &mut lookup_cache);
+            let hash = structural_hash(source_node, &mut lookup_cache);
             for &i in rejected_by_hash.get(&hash).into_iter().flatten() {
                 let group = rejected_groups[i];
-                if *source_expr != *group.target {
+                if *source_node != group.target {
                     continue;
                 }
                 rejections.extend(group.rejected.iter().map(|rejected| {
@@ -1465,7 +1466,7 @@ fn run_post_asap_with_progress(
 }
 
 #[cfg(test)]
-fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
+fn run_post_asap(lowered_queries: &[(String, String, Rc<OperatorNode>)]) -> PostAsapResults {
     run_post_asap_with_progress(lowered_queries, false, &DefaultCostModel, None, None)
 }
 
@@ -1704,14 +1705,26 @@ mod tests {
     };
     use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
     use asap_devtools::PromqlError;
+    use asap_types::ir::NonASAPOp;
     use asap_types::pre_asap::{DataType, Field, Reduction, Schema, Source};
 
-    fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
+    fn lower_promql(
+        query: &str,
+        accuracy: AccuracyTarget,
+    ) -> Result<Rc<OperatorNode>, PromqlError> {
         lower_promql_with_data_ingestion_interval(query, accuracy, 1_000)
     }
 
-    fn non_topk_query() -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn non_topk_query() -> Rc<OperatorNode> {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "events".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Field::plain("v", DataType::Int64, false)]),
+        }))
+        .expect("scan leaf derives its schema");
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![asap_types::pre_asap::AggIntent::Count {
                 accuracy: AccuracyTarget::Epsilon(0.1),
@@ -1719,23 +1732,18 @@ mod tests {
             output_names: vec![],
             filters: vec![],
             having: None,
-            child: Rc::new(QueryExpr::Scan {
-                source: Source::Table {
-                    table_ref: "events".into(),
-                },
-                predicates: vec![],
-                schema: Schema::new(vec![Field::plain("v", DataType::Int64, false)]),
-            }),
-        }
+            child: scan,
+        }))
+        .expect("count aggregate derives its schema")
     }
 
     fn fixture_raw_dag(
-        query: &QueryExpr,
+        query: &Rc<OperatorNode>,
         candidate: &ReplacementSubDAG,
         document: &PlannerCostDocument,
     ) -> PhysicalDAG {
         let model = ExportPlannerCostModel { document };
-        let root = Rc::new(query.clone());
+        let root = Rc::clone(query);
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
         let (provider, _) = model.bound(candidate, &target).unwrap();
         let snapshot = provider.capture_evidence_snapshot(&target).unwrap();
@@ -1751,7 +1759,7 @@ mod tests {
         let (query, candidate, mut document) = cost_fixture();
         let raw = fixture_raw_dag(&query, &candidate, &document);
         let candidate_dag = cheap_candidate_dag();
-        let root = Rc::new(query.clone());
+        let root = Rc::clone(&query);
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
         assert!(ExportPlannerCostModel {
             document: &document
@@ -1914,7 +1922,7 @@ mod tests {
         let (query, candidate, mut document) = cost_fixture();
         let raw = fixture_raw_dag(&query, &candidate, &document);
         let candidate_dag = cheap_candidate_dag();
-        let root = Rc::new(query.clone());
+        let root = Rc::clone(&query);
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
         assert!(ExportPlannerCostModel {
             document: &document
@@ -2194,7 +2202,7 @@ mod tests {
         EdgeStatistics { rows, bytes }
     }
 
-    fn query_evidence(query: &QueryExpr) -> Vec<QueryNodePhysicalEvidence> {
+    fn query_evidence(query: &Rc<OperatorNode>) -> Vec<QueryNodePhysicalEvidence> {
         let entries = RefCell::new(Vec::new());
         let scope = test_scope().resolve().unwrap();
         let provider = |request: PhysicalNodeRequest<'_>| {
@@ -2242,7 +2250,7 @@ mod tests {
             });
             Ok(evidence)
         };
-        lower_query_physical_dag(&Rc::new(query.clone()), &scope, &provider).unwrap();
+        lower_query_physical_dag(query, &scope, &provider).unwrap();
         entries.into_inner()
     }
 
@@ -2282,49 +2290,28 @@ mod tests {
 
     fn candidate_plan(candidate: &ReplacementSubDAG) -> serde_json::Value {
         match &candidate.replacement {
-            Replacement::Summary(summary) => {
-                serde_json::to_value(dag_export::export_summary(summary)).unwrap()
-            }
-            Replacement::Rewrite(rewrite) => {
-                serde_json::to_value(dag_export::export(rewrite)).unwrap()
-            }
+            Replacement::SubDAG(node) => serde_json::to_value(dag_export::export(node)).unwrap(),
             Replacement::ExactComposition(_) => {
                 unreachable!("cost fixtures select directly materialized candidates")
             }
         }
     }
 
-    fn cost_fixture() -> (QueryExpr, ReplacementSubDAG, PlannerCostDocument) {
+    fn cost_fixture() -> (Rc<OperatorNode>, ReplacementSubDAG, PlannerCostDocument) {
         let query = non_topk_query();
-        let root = Rc::new(query.clone());
+        let root = Rc::clone(&query);
         let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
         let group = space
             .target_subdag_candidates()
-            .find(|group| *group.target == query)
+            .find(|group| group.target == query)
             .expect("aggregate memo group");
         let candidate = group
             .candidates
             .iter()
-            .find(|candidate| {
-                !matches!(
-                    &candidate.replacement,
-                    Replacement::Summary(node)
-                        if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
-                )
-            })
+            .find(|candidate| !is_trivial_retain_exact(&candidate.replacement))
             .expect("summary candidate")
             .clone();
-        let plan = match &candidate.replacement {
-            Replacement::Summary(summary) => {
-                serde_json::to_value(dag_export::export_summary(summary)).unwrap()
-            }
-            Replacement::Rewrite(rewrite) => {
-                serde_json::to_value(dag_export::export(rewrite)).unwrap()
-            }
-            Replacement::ExactComposition(_) => {
-                unreachable!("cost fixtures select directly materialized candidates")
-            }
-        };
+        let plan = candidate_plan(&candidate);
         let document = PlannerCostDocument {
             storage_io: None,
             handoffs: None,
@@ -2339,12 +2326,14 @@ mod tests {
                 target: query.clone(),
                 scope: test_scope(),
                 candidates: vec![match &candidate.replacement {
-                    Replacement::Summary(_) => CandidatePhysicalEvidence::Summary {
-                        plan,
-                        query_nodes: query_evidence(&query),
-                        physical_dag: cheap_candidate_dag(),
-                    },
-                    Replacement::Rewrite(_) => CandidatePhysicalEvidence::Rewrite {
+                    Replacement::SubDAG(node) if !is_logical_rewrite(node) => {
+                        CandidatePhysicalEvidence::Summary {
+                            plan,
+                            query_nodes: query_evidence(&query),
+                            physical_dag: cheap_candidate_dag(),
+                        }
+                    }
+                    Replacement::SubDAG(_) => CandidatePhysicalEvidence::Rewrite {
                         plan,
                         query_nodes: query_evidence(&query),
                     },
@@ -2365,7 +2354,7 @@ mod tests {
         assert_eq!(parsed.targets[0].target, query);
         assert!(parsed.targets[0].candidates[0].matches(&candidate));
         let model = ExportPlannerCostModel { document: &parsed };
-        let target_rc = Rc::new(query.clone());
+        let target_rc = Rc::clone(&query);
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
         let (provider, calibration) = model.bound(&candidate, &target).expect("exact binding");
         let estimate = PhysicalPlanCostModel::new(&provider, calibration.clone())
@@ -2373,7 +2362,7 @@ mod tests {
             .estimate_candidate(&candidate, &target)
             .unwrap();
         assert!(estimate.candidate_cost < estimate.raw_cost);
-        let (baseline, selected, benefit) = model.annotations(&candidate, &Rc::new(query));
+        let (baseline, selected, benefit) = model.annotations(&candidate, &query);
         assert!(baseline.value.is_some());
         assert!(selected.value.is_some());
         assert!(benefit.value.is_some());
@@ -2405,7 +2394,7 @@ mod tests {
             .unwrap()
             .remove("cache_profile");
         let parsed = parse_planner_cost_document(&json.to_string()).unwrap();
-        let target = Rc::new(query);
+        let target = query;
         let legacy = ExportPlannerCostModel { document: &parsed }.annotations(&candidate, &target);
         let explicit = ExportPlannerCostModel {
             document: &document,
@@ -2426,7 +2415,7 @@ mod tests {
     fn cache_json_affects_ranking_and_exports_declared_evidence() {
         // Identical repeats hit the result cache; distinct evaluations still execute.
         let (query, candidate, document) = cost_fixture();
-        let target_rc = Rc::new(query);
+        let target_rc = query;
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
         let no_cache = ExportPlannerCostModel {
             document: &document,
@@ -2513,7 +2502,7 @@ mod tests {
     #[test]
     fn duplicate_target_candidate_and_query_evidence_each_fail_closed() {
         let (query, candidate, document) = cost_fixture();
-        let target_rc = Rc::new(query);
+        let target_rc = query;
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
 
         let mut duplicate_target = document.clone();
@@ -2555,7 +2544,7 @@ mod tests {
     #[test]
     fn incomplete_or_unused_json_evidence_fails_closed() {
         let (query, candidate, document) = cost_fixture();
-        let target_rc = Rc::new(query);
+        let target_rc = query;
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
 
         let mut missing = document.clone();
@@ -2596,7 +2585,7 @@ mod tests {
         physical_dag.nodes.push(physical_dag.nodes[0].clone());
         let document = parse_planner_cost_document(&serde_json::to_string(&document).unwrap())
             .expect("invalid physical semantics are checked by the estimator");
-        let target_rc = Rc::new(query);
+        let target_rc = query;
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
         assert!(ExportPlannerCostModel {
             document: &document
@@ -2608,18 +2597,17 @@ mod tests {
     #[test]
     fn global_selection_uses_the_cheapest_complete_physical_candidate() {
         let query = non_topk_query();
-        let root = Rc::new(query.clone());
+        let root = Rc::clone(&query);
         let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
         let group = space
             .target_subdag_candidates()
-            .find(|group| *group.target == query)
+            .find(|group| group.target == query)
             .expect("aggregate memo group");
         let candidates: Vec<_> = group
             .candidates
             .iter()
             .filter(|candidate| {
-                matches!(candidate.replacement, Replacement::Summary(ref node)
-                    if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)))
+                matches!(&candidate.replacement, Replacement::SubDAG(node) if node.contains_asap())
             })
             .take(2)
             .collect();
@@ -2677,7 +2665,7 @@ mod tests {
         let selection = space.global_selection(&model);
         let chosen = selection
             .target_selections()
-            .find(|selected| selected.target.as_ref() == &query)
+            .find(|selected| *selected.target == query)
             .and_then(|selected| selected.chosen)
             .expect("one complete physical candidate should win");
         assert!(document.targets[0].candidates[1].matches(chosen));
@@ -2779,13 +2767,13 @@ mod tests {
         let selected_query = lower_promql("up", AccuracyTarget::Exact).unwrap();
         let other_query = lower_promql("process_cpu_seconds_total", AccuracyTarget::Exact).unwrap();
         let selected = ReplacementSubDAG {
-            replacement: Replacement::Rewrite(Rc::new(selected_query.clone())),
+            replacement: Replacement::SubDAG(Rc::clone(&selected_query)),
             strategy: "same-strategy",
             provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
             rationale: String::new(),
         };
         let other = ReplacementSubDAG {
-            replacement: Replacement::Rewrite(Rc::new(other_query)),
+            replacement: Replacement::SubDAG(other_query),
             strategy: "same-strategy",
             provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
             rationale: String::new(),
@@ -3038,8 +3026,8 @@ mod tests {
             .1;
         let q3_root = &q3.nodes[q3.root as usize];
         let q4_root = &q4.nodes[q4.root as usize];
-        assert!(q3_root.label.contains("Limit { n: 5,"));
-        assert!(q4_root.label.contains("Limit { n: 10,"));
+        assert!(q3_root.label.contains("Limit(5)"));
+        assert!(q4_root.label.contains("Limit(10)"));
         assert_ne!(q3_root.workload_node_id, q4_root.workload_node_id);
         let q3_ranked = &q3.nodes[q3_root.children[0] as usize];
         let q4_ranked = &q4.nodes[q4_root.children[0] as usize];
@@ -3147,21 +3135,19 @@ mod tests {
     /// against real corpus queries (a `STDDEV_POP` aggregate, which — like
     /// `AVG` — dispatches to `Realization::PassThrough` with no
     /// alternative strategy of its own, so its *only* candidate is
-    /// `keep_pre_asap`'s conservative fallback: `Replacement::Summary`
-    /// wrapping the *entire target* as `SummaryExpr::KeepPreAsap`).
-    /// `run_post_asap` must not treat that as a real winner: splicing it
-    /// into `export_post_asap` would recurse forever, since `find_winner`
-    /// re-checks every node inside a spliced `KeepPreAsap` payload by
-    /// design, and this payload structurally *is* the enclosing target — a
-    /// fresh `find_winner` call finds the identical winner again,
-    /// unconditionally, every time. Filtering this shape out of `winners`
-    /// (same "no-op candidate" concept `explanation.rs`'s own
-    /// `sketch_finding_reason` already excludes from being a finding) is
-    /// what keeps this terminating: this test's only assertion that matters
-    /// is that `run_post_asap` returns at all instead of overflowing the
-    /// stack.
+    /// `retain_exact`'s conservative fallback: the *entire target* itself,
+    /// unbound, carrying only an exact "kept pre-ASAP" guarantee).
+    /// `run_post_asap` must not treat that as a real winner: under the old
+    /// IR, splicing it into `export_post_asap` recursed forever (the spliced
+    /// payload structurally *was* the enclosing target, so every fresh
+    /// `find_winner` call found the identical winner again). Filtering this
+    /// shape out of `winners` (same "no-op candidate" concept
+    /// `explanation.rs`'s own `sketch_finding_reason` already excludes from
+    /// being a finding) is what keeps this terminating and keeps the output
+    /// free of a fake replacement: this test asserts both that
+    /// `run_post_asap` returns at all and that it reports nothing.
     #[tokio::test]
-    async fn post_asap_does_not_recurse_forever_on_a_trivial_keep_pre_asap_winner() {
+    async fn post_asap_does_not_recurse_forever_on_a_trivial_retain_exact_winner() {
         let cat = default_catalog();
         let stddev_query = lower_sql(
             "SELECT STDDEV_POP(latency) FROM metrics",
@@ -3178,12 +3164,12 @@ mod tests {
 
         let results = run_post_asap(&lowered_queries);
 
-        // A trivial keep_pre_asap winner must be filtered before it ever
+        // A trivial retain_exact winner must be filtered before it ever
         // becomes a flat `TargetReplacement` — there's no real replacement
         // to report for a target with no alternative at all.
         assert!(
             results.replacements.is_empty(),
-            "a target whose only candidate is the trivial keep_pre_asap fallback \
+            "a target whose only candidate is the trivial retain_exact fallback \
              shouldn't produce a flat replacement entry: {:?}",
             results
                 .replacements

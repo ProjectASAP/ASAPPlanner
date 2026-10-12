@@ -1,7 +1,7 @@
 //! `Schema::closed` propagation — open/closed invariant tests.
 //!
-//! Verifies that `QueryExpr::output_schema()` propagates the open/closed
-//! completeness flag correctly through a lowered query DAG.
+//! Verifies that the derived `OperatorNode::schema` propagates the open/closed
+//! completeness flag correctly through a lowered query tree.
 //!
 //! Key invariant: a PromQL scan is always `closed: false` (open) because its
 //! label set is runtime-only.  The schema freezes to `closed: true` exactly at
@@ -12,14 +12,14 @@
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> asap_types::pre_asap::QueryExpr {
+fn lower(q: &str) -> std::rc::Rc<asap_types::ir::OperatorNode> {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
 // bare scan is open — the metric's full label set is unknown at plan time
 #[test]
 fn schema_bare_scan_is_open() {
-    let s = lower("http_requests_total").output_schema().unwrap();
+    let s = lower("http_requests_total").schema.clone();
     assert!(!s.closed, "PromQL scan must be open");
 }
 
@@ -27,8 +27,8 @@ fn schema_bare_scan_is_open() {
 #[test]
 fn schema_filtered_scan_is_open() {
     let s = lower(r#"http_requests_total{job="api-server"}"#)
-        .output_schema()
-        .unwrap();
+        .schema
+        .clone();
     assert!(!s.closed, "PromQL scan with predicates must remain open");
     assert_eq!(s.fields.len(), 3, "[ts, value, job]");
 }
@@ -36,9 +36,7 @@ fn schema_filtered_scan_is_open() {
 // per-series rate is label-preserving → output stays open
 #[test]
 fn schema_rate_stays_open() {
-    let s = lower("rate(http_requests_total[5m])")
-        .output_schema()
-        .unwrap();
+    let s = lower("rate(http_requests_total[5m])").schema.clone();
     assert!(!s.closed, "per-series rate is label-preserving; stays open");
 }
 
@@ -46,24 +44,22 @@ fn schema_rate_stays_open() {
 #[test]
 fn schema_count_over_time_stays_open() {
     let s = lower("count_over_time(http_requests_total[5m])")
-        .output_schema()
-        .unwrap();
+        .schema
+        .clone();
     assert!(!s.closed, "per-series count_over_time stays open");
 }
 
 // cross-series sum with no group keys freezes to closed
 #[test]
 fn schema_sum_freezes_to_closed() {
-    let s = lower("sum(http_requests_total)").output_schema().unwrap();
+    let s = lower("sum(http_requests_total)").schema.clone();
     assert!(s.closed, "cross-series aggregate must freeze to closed");
 }
 
 // cross-series sum grouped by job also freezes to closed
 #[test]
 fn schema_sum_by_job_freezes_to_closed() {
-    let s = lower("sum by (job) (http_requests_total)")
-        .output_schema()
-        .unwrap();
+    let s = lower("sum by (job) (http_requests_total)").schema.clone();
     assert!(
         s.closed,
         "grouped cross-series aggregate must freeze to closed"
@@ -74,8 +70,8 @@ fn schema_sum_by_job_freezes_to_closed() {
 #[test]
 fn schema_sum_over_rate_freezes_to_closed() {
     let s = lower("sum by (job) (rate(http_requests_total[5m]))")
-        .output_schema()
-        .unwrap();
+        .schema
+        .clone();
     assert!(
         s.closed,
         "cross-series aggregate over rate must freeze to closed"
@@ -86,8 +82,8 @@ fn schema_sum_over_rate_freezes_to_closed() {
 #[test]
 fn schema_binary_op_two_open_stays_open() {
     let s = lower("http_requests_total / http_errors_total")
-        .output_schema()
-        .unwrap();
+        .schema
+        .clone();
     assert!(!s.closed, "binary op over two open scans must stay open");
 }
 
@@ -95,8 +91,8 @@ fn schema_binary_op_two_open_stays_open() {
 #[test]
 fn schema_binary_op_two_closed_is_closed() {
     let s = lower("sum by (job) (http_requests_total) / sum by (job) (http_errors_total)")
-        .output_schema()
-        .unwrap();
+        .schema
+        .clone();
     assert!(
         s.closed,
         "binary op over two closed aggregates must be closed"

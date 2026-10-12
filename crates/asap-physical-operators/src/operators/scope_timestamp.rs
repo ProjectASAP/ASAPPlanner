@@ -26,7 +26,7 @@ impl Operator {
                     candidate.dtype == field.dtype
                         && candidate.nullable == field.nullable
                         && (candidate.name == field.name
-                            || !matches!(field.dtype, FieldDataType::Plain(_)))
+                            || !matches!(field.dtype, SummaryFamilyType::Plain(_)))
                 })
                 .map(|(index, _)| index)
                 .collect();

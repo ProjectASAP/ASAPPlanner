@@ -277,7 +277,7 @@ pub struct ClickHouseBuiltin {
 pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
     // Explicit time-series reducers. These deliberately survive under their
     // own names: the SQL frontend validates (value, timestamp, window_ms) and
-    // lowers the window to QueryExpr::TimeRange rather than pretending these
+    // lowers the window to NonASAPOp::TimeRange rather than pretending these
     // are ordinary tabular aggregates.
     ClickHouseBuiltin {
         name: "asap_rate",
@@ -323,7 +323,7 @@ pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
 ///
 /// This list exists for one reason: `asap-frontend-sql`'s DataFusion-registry
 /// drift test (issue #225, item 3 -- see
-/// `asap_frontend_sql::sql::catalog_drift`) walks a real `SessionContext`'s
+/// `asap_frontend_sql::unified::sql::catalog_drift`) walks a real `SessionContext`'s
 /// resolved aggregate names and requires every one to be either in
 /// [`NATIVE_FUNCTIONS`], a [`CLICKHOUSE_BUILTINS`] name, or listed here. A
 /// name landing here is a *recorded decision*, not a silenced test failure --

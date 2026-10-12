@@ -2,8 +2,9 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use asap_types::post_asap::{SketchAlgorithm, SummaryExpr, SummaryNode};
-use asap_types::pre_asap::{AggIntent, QueryExpr};
+use asap_types::ir::OperatorNode;
+use asap_types::post_asap::SketchAlgorithm;
+use asap_types::pre_asap::AggIntent;
 use asap_types::resources::CacheProfile;
 
 use crate::analytical_cost::{
@@ -40,7 +41,7 @@ pub struct PhysicalEvidenceSnapshot {
 /// operator. Post-ASAP summary operators need a physical plan provider because their
 /// implementation, placement, and retained-state layout are deployment
 /// choices; that provider must return the complete summary DAG, including any
-/// embedded `KeepPreAsap` work.
+/// non-ASAP work kept inside it.
 pub trait PlannerPhysicalPlanProvider {
     /// Atomically captures the comparison scope and evidence generation.
     fn capture_evidence_snapshot(
@@ -57,7 +58,7 @@ pub trait PlannerPhysicalPlanProvider {
     fn summary_physical_dag(
         &self,
         snapshot: &PhysicalEvidenceSnapshot,
-        summary: &Rc<SummaryNode>,
+        summary: &Rc<OperatorNode>,
         target: &TargetSubDAG<'_>,
     ) -> Result<PhysicalDAG, AnalyticalCostError>;
 }
@@ -91,7 +92,7 @@ pub struct PhysicalPlanCostModel<'a> {
 }
 
 struct CachedTargetEvidence {
-    root: Rc<QueryExpr>,
+    root: Rc<OperatorNode>,
     consumer_count: usize,
     snapshot: PhysicalEvidenceSnapshot,
     raw: PhysicalDAG,
@@ -188,15 +189,14 @@ impl<'a> PhysicalPlanCostModel<'a> {
             Replacement::ExactComposition(_) => {
                 return Err(AnalyticalCostError::UnsupportedCandidate)
             }
-            Replacement::Rewrite(query) => lower_query_physical_dag(query, scope, &evidence)?,
-            Replacement::Summary(summary) => match &summary.expr {
-                SummaryExpr::KeepPreAsap(query) => {
-                    lower_query_physical_dag(query, scope, &evidence)?
-                }
-                _ => self
-                    .provider
-                    .summary_physical_dag(&snapshot, summary, target)?,
-            },
+            // A sub-DAG without summary state is the planner's own query
+            // lowering; anything with summary state is deployment-provided.
+            Replacement::SubDAG(sub_dag) if !sub_dag.contains_asap() => {
+                lower_query_physical_dag(sub_dag, scope, &evidence)?
+            }
+            Replacement::SubDAG(summary) => self
+                .provider
+                .summary_physical_dag(&snapshot, summary, target)?,
         };
         let resources = estimate_physical_dag_comparison(
             PhysicalDAGEstimateRequest {
@@ -359,7 +359,8 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{DataType, Field, QueryExpr, Reduction, Schema, Source};
+    use asap_types::ir::{NonASAPOp, OperatorNode};
+    use asap_types::pre_asap::{DataType, Field, Reduction, Schema, Source};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
@@ -405,8 +406,16 @@ mod tests {
         }
     }
 
-    fn query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn query() -> Rc<OperatorNode> {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "events".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
+        }))
+        .unwrap();
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Epsilon(0.01),
@@ -414,14 +423,9 @@ mod tests {
             output_names: vec![],
             filters: vec![],
             having: None,
-            child: Rc::new(QueryExpr::Scan {
-                source: Source::Table {
-                    table_ref: "events".into(),
-                },
-                predicates: vec![],
-                schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-            }),
-        })
+            child: scan,
+        }))
+        .unwrap()
     }
 
     fn scope() -> ComparisonScope {
@@ -583,7 +587,7 @@ mod tests {
         fn summary_physical_dag(
             &self,
             snapshot: &PhysicalEvidenceSnapshot,
-            _summary: &Rc<SummaryNode>,
+            _summary: &Rc<OperatorNode>,
             _target: &TargetSubDAG<'_>,
         ) -> Result<PhysicalDAG, AnalyticalCostError> {
             assert_eq!(snapshot.version, "test-snapshot-1");
@@ -687,7 +691,7 @@ mod tests {
             version: "unused-base-v1".into(),
         };
         let candidates =
-            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+            crate::replacement::ASAPStrategies::default_cost_model().replacements(&target);
         provider.storage_io = Some(profile.clone());
         let model = PhysicalPlanCostModel::new(&provider, base.clone()).unwrap();
         let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
@@ -718,7 +722,7 @@ mod tests {
         let root = query();
         let target = TargetSubDAG::new(&root);
         let candidates =
-            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+            crate::replacement::ASAPStrategies::default_cost_model().replacements(&target);
         let provider = TestProvider::new(true, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
         let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
@@ -913,7 +917,7 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 snapshot: &PhysicalEvidenceSnapshot,
-                summary: &Rc<SummaryNode>,
+                summary: &Rc<OperatorNode>,
                 target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDAG, AnalyticalCostError> {
                 self.0.summary_physical_dag(snapshot, summary, target)
@@ -1001,7 +1005,7 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 snapshot: &PhysicalEvidenceSnapshot,
-                summary: &Rc<SummaryNode>,
+                summary: &Rc<OperatorNode>,
                 target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDAG, AnalyticalCostError> {
                 let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
@@ -1015,7 +1019,7 @@ mod tests {
         }
 
         let root = query();
-        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+        let candidates = crate::replacement::ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
         let provider = WrongScope(TestProvider::new(true, 800));
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
@@ -1053,7 +1057,7 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 _snapshot: &PhysicalEvidenceSnapshot,
-                _summary: &Rc<SummaryNode>,
+                _summary: &Rc<OperatorNode>,
                 _target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDAG, AnalyticalCostError> {
                 panic!("blank snapshot versions must fail before summary binding")
@@ -1061,7 +1065,7 @@ mod tests {
         }
 
         let root = query();
-        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+        let candidates = crate::replacement::ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
         let model = PhysicalPlanCostModel::new(&BlankVersionProvider, calibration()).unwrap();
         assert_eq!(
@@ -1088,7 +1092,7 @@ mod tests {
     #[test]
     fn sibling_candidates_share_one_scope_and_raw_baseline() {
         let root = query();
-        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+        let candidates = crate::replacement::ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
         assert!(candidates.len() >= 2);
         let provider = TestProvider::new(true, 800);

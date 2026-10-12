@@ -2,8 +2,8 @@
 //! Compilation needs no readers; deployment resolves inputs after selection.
 //! A node without a native lowering fails compilation; the deployment runtime
 //! must execute it.
-use crate::operators::ReadoutQuery;
-use crate::summary_kernels::exact::ExactReadout;
+use crate::operators::SummaryEvaluation;
+use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
     plan::{Boundedness, Emission, NodeId, PhysicalDAG, PhysicalOperator, PlanProperties},
@@ -116,7 +116,7 @@ thread_local! {
 }
 
 /// Helper operators are numbered from their Planner node alone, above the u32
-/// Planner ID range, so every boundary choice yields a subgraph of the same
+/// Planner ID range, so every boundary choice yields a sub-DAG of the same
 /// lowering and candidate cuts need not renumber operators. A node lowering to
 /// several helpers takes consecutive indices below its base.
 fn helper_id(node: NodeId, index: u64) -> Result<NodeId, Error> {
@@ -187,7 +187,7 @@ fn compile_internal(
             }
         }
     }
-    let mut dag = CompiledPhysicalDAG::new(roots.to_vec());
+    let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
         let auxiliary = helper_id(id, 0)?;
@@ -197,7 +197,7 @@ fn compile_internal(
             if source.schema != output {
                 return Err(invalid("frontier does not have the declared schema"));
             }
-            dag.add_input(id, source)?;
+            physical_dag.add_input(id, source)?;
         } else {
             #[cfg(test)]
             LOWERED_NODES.with(|count| count.set(count.get() + 1));
@@ -212,7 +212,7 @@ fn compile_internal(
                 if schemas.iter().any(|s| s != &schemas[0]) {
                     return Err(invalid("summary merge inputs have different schemas"));
                 }
-                dag.add(
+                physical_dag.add(
                     auxiliary,
                     inputs,
                     Operator::union(schemas[0].clone(), schemas.len())?,
@@ -245,7 +245,7 @@ fn compile_internal(
                 let value = named_column(input, &ColumnRef::SampleValue)?;
                 let lookback = i64::try_from(spec.lookback_ms)
                     .map_err(|_| invalid("current-series lookback overflows"))?;
-                dag.add(
+                physical_dag.add(
                     id,
                     inputs,
                     Operator::current_series(input.clone(), identity, coordinate, value, lookback)?
@@ -283,10 +283,10 @@ fn compile_internal(
                     let mut inputs = inputs;
                     for (index, operator) in chain.into_iter().enumerate() {
                         let helper = helper_id(id, index as u64)?;
-                        dag.add(helper, inputs, operator)?;
+                        physical_dag.add(helper, inputs, operator)?;
                         inputs = vec![helper];
                     }
-                    dag.add(id, inputs, last.with_output_schema(output)?)?;
+                    physical_dag.add(id, inputs, last.with_output_schema(output)?)?;
                     continue;
                 };
                 let groups = spec
@@ -295,7 +295,7 @@ fn compile_internal(
                     .map(|name| named_column(&input, &ColumnRef::Named(name.clone())))
                     .collect::<Result<Vec<_>, _>>()?;
                 let value = named_column(&input, &ColumnRef::SampleValue)?;
-                dag.add(
+                physical_dag.add(
                     auxiliary,
                     inputs,
                     Operator::sort(
@@ -308,7 +308,7 @@ fn compile_internal(
                         groups.clone(),
                     )?,
                 )?;
-                dag.add(
+                physical_dag.add(
                     id,
                     vec![auxiliary],
                     Operator::limit(input, *k as u64, 0, groups)?.with_output_schema(output)?,
@@ -365,8 +365,8 @@ fn compile_internal(
                     groups,
                 )?;
                 let compact = build.schema();
-                dag.add(auxiliary, inputs, build)?;
-                dag.add(
+                physical_dag.add(auxiliary, inputs, build)?;
+                physical_dag.add(
                     id,
                     vec![auxiliary],
                     Operator::scope_timestamp(compact, output)?,
@@ -402,7 +402,7 @@ fn compile_internal(
                             [false, false],
                         )
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                        dag.add(id, inputs, binary.with_output_schema(output)?)?;
+                        physical_dag.add(id, inputs, binary.with_output_schema(output)?)?;
                         continue;
                     }
                 }
@@ -434,23 +434,23 @@ fn compile_internal(
                         .collect();
                     let project =
                         Operator::project(actual, columns)?.with_output_schema(output.clone())?;
-                    dag.add(auxiliary, inputs, evaluation)?;
+                    physical_dag.add(auxiliary, inputs, evaluation)?;
                     if temporal_evaluation_drops_name(node) {
-                        dag.add(auxiliary - 1, vec![auxiliary], project)?;
-                        dag.add(
+                        physical_dag.add(auxiliary - 1, vec![auxiliary], project)?;
+                        physical_dag.add(
                             id,
                             vec![auxiliary - 1],
                             Operator::series_without_name(output)?,
                         )?;
                     } else {
-                        dag.add(id, vec![auxiliary], project)?;
+                        physical_dag.add(id, vec![auxiliary], project)?;
                     }
                     continue;
                 }
             }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
-            if operator.is_counter_readout() {
+            if operator.is_counter_evaluation() {
                 let mut pending = vec![id];
                 let mut visited = BTreeSet::new();
                 let mut ranges = BTreeSet::new();
@@ -477,15 +477,15 @@ fn compile_internal(
                 }
             }
             if temporal_evaluation_drops_name(node) {
-                dag.add(auxiliary, inputs, operator)?;
-                dag.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
+                physical_dag.add(auxiliary, inputs, operator)?;
+                physical_dag.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
             } else {
-                dag.add(id, inputs, operator)?;
+                physical_dag.add(id, inputs, operator)?;
             }
         }
     }
-    dag.validate()?;
-    Ok(dag)
+    physical_dag.validate()?;
+    Ok(physical_dag)
 }
 
 // Temporal summary evaluations produce PromQL vectors, whose range functions drop
@@ -587,7 +587,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 return Operator::semi_join(left.clone(), right.clone(), keys);
             }
         }
-        return Operator::unified_relational_join(
+        return Operator::relational_join(
             left.clone(),
             right.clone(),
             join_kind.clone(),
@@ -636,10 +636,10 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 },
                 _ => return Err(invalid("exact finalization requires exact state")),
             };
-            Operator::readout(
+            Operator::evaluation(
                 input.clone(),
                 state,
-                ReadoutQuery::Exact(ExactReadout {
+                SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
                     lookback_ms: None,
                 }),
@@ -837,17 +837,17 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
         }
         Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
             if let SketchStatistic::TopK { k } = query {
-                return Operator::keyed_readout(
+                return Operator::keyed_evaluation(
                     input.clone(),
                     summary_column(input)?,
                     *k,
                     Arc::new(node.output_schema.clone()),
                 );
             }
-            Operator::readout(
+            Operator::evaluation(
                 input.clone(),
                 summary_column(input)?,
-                ReadoutQuery::Sketch(query.clone()),
+                SummaryEvaluation::Sketch(query.clone()),
             )
         }
         _ => Err(invalid(
@@ -870,9 +870,8 @@ fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
 }
 fn named_column(input: &SchemaRef, column: &ColumnRef) -> Result<usize, Error> {
     let name = match column {
-        // Executable SchemaRef retains column names, not table qualifiers.
-        // Frontend binding has resolved the qualifier; still reject ambiguous
-        // names here rather than guessing a join side.
+        // This summary-update lookup matches column names without qualifiers.
+        // Reject ambiguous names rather than guessing a join side.
         ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => name.as_str(),
         ColumnRef::SampleValue => "value",
         _ => {

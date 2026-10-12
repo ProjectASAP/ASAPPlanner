@@ -501,6 +501,10 @@ pub struct CompiledExpression {
     output: (DataType, bool),
 }
 impl CompiledExpression {
+    pub(crate) fn expression(&self) -> &ScalarExpr {
+        &self.expression
+    }
+
     pub fn compile(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
         if !input.is_all_plain() {
             return Err(Error::Invalid(
