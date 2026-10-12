@@ -297,16 +297,31 @@ For each eligible sub-DAG, Pass 1 identifies its computation semantics, applies
 rewrite rules, and generates every candidate that is not provably unable to
 meet its accuracy requirement.
 
+A sub-DAG is **eligible** when its root is an aggregation (an `Aggregate`
+operator) whose intent has at least one realization in the summary-family
+capabilities `F`: exact accumulator state or a summary family. Nested
+aggregations are separate targets: in `sum by (job) (rate(x[1m]))`, the
+per-series `rate` and the per-`job` `sum` are each a target, and their options
+multiply.
+
 Example for summary candidates:
 
 | Original computation | Per-computation candidates |
 |---|---|
-| `Sum(x) by (g)` | Exact grouped sum |
+| `Sum(x) by (g)` | Exact grouped sum (exact Sum accumulator state) |
 | `TopK(k, x) by (g)` | Exact sort and limit per group, Count-Min Sketch with a top-*k* heap per group, Hydra over all groups |
 | `Distinct(x)` | Exact distinct, a specialized distinct summary, UnivMon |
 | `Entropy(x)` | Exact entropy, a specialized entropy summary, UnivMon |
 | `L2(x)` | Exact L2 norm, a specialized norm summary, UnivMon |
 | `Quantile(x, window)` | Exact quantile, KLL over the requested window |
+
+Each target gets one exact option. If its intent has an exact mergeable
+accumulator (Count, Sum, Min, Max, Rate, IRate, Increase; avg via exact sum and
+count accumulator states) and the accumulator can be built, the exact option is
+**exact accumulator state**: a `SummaryAgg` with an exact family →
+`FinalizeExactAccumulator`. Otherwise, for example when a filter or HAVING
+prevents the accumulator or the intent has none, it is the plain exact
+computation. Whether the accumulator is materialized is decided in Stage 2.
 
 Each candidate records its input expression, filter, grouping, window,
 supported estimates and accuracy requirement. Pass 2 uses these to decide
@@ -362,37 +377,55 @@ Output: C1  — CandidateLogicalASAPDAGs with each sub-DAG replaced independentl
 
 *Example for Algorithm 1* (the workload of [Example 1](#example-1-aggregation-over-dimensions--the-candidate-set-through-every-stage)). Q1 needs an
 exact answer, so every summary replacement for it is pruned and only the exact
-computation remains. Q2 tolerates error and gets three replacements. The
-Cartesian product gives 1 × 3 = 3 whole-workload candidates.
+option remains for each of its two sub-DAGs, the per-series rate (s₁) and the
+per-`job` sum (s₂): its exact accumulator state. Q2's per-series
+`sum_over_time` (s₃) has no summary family and gets one option, its exact Sum
+accumulator state. Q2's top-*k* (s₄) tolerates error and gets three
+replacements. The Cartesian product gives 1 × 1 × 1 × 3 = 3 whole-workload
+candidates.
 
 ```mermaid
 flowchart LR
   subgraph IN["d: one workload LogicalDAG"]
     direction TB
-    s1["s₁ = Q1 · sum by (job) (rate(…[1m]))<br/>accuracy: exact"]:::exact
-    s2["s₂ = Q2 · topk by (job) (10, sum_over_time(…[1m]))<br/>accuracy: ε = 0.01"]:::exact
+    s1["s₁ = Q1 · rate(…[1m]) per series<br/>accuracy: exact"]:::exact
+    s2["s₂ = Q1 · sum by (job) (s₁)<br/>accuracy: exact"]:::exact
+    s3["s₃ = Q2 · sum_over_time(…[1m]) per series<br/>accuracy: ε = 0.01"]:::exact
+    s4["s₄ = Q2 · topk by (job) (10, s₃)<br/>accuracy: ε = 0.01"]:::exact
   end
   subgraph R1["Replacements(s₁)"]
     direction TB
-    a1["Exact rate + sum"]:::exact
-    a2["summary candidates<br/>✗ pruned: cannot be exact"]:::pruned
+    a3["Exact Rate accumulator<br/>per series"]:::exact
   end
   subgraph R2["Replacements(s₂)"]
+    direction TB
+    d3["Exact Sum accumulator<br/>per job"]:::exact
+    a2["summary candidates<br/>✗ pruned: cannot be exact"]:::pruned
+  end
+  subgraph R3["Replacements(s₃)"]
+    direction TB
+    e3["Exact Sum accumulator<br/>per series"]:::exact
+  end
+  subgraph R4["Replacements(s₄)"]
     direction TB
     b1["Exact sort + limit per job"]:::exact
     b2["CMS + top-10 heap per job"]:::summary
     b3["Hydra over all jobs"]:::summary
   end
-  subgraph OUT["C1 = Replacements(s₁) × Replacements(s₂) = 3 candidates"]
+  subgraph OUT["C1 = Replacements(s₁) × … × Replacements(s₄) = 1 × 1 × 1 × 3 = 3 candidates"]
     direction TB
-    c1["① exact Q1 + exact Q2"]:::ok
-    c2["② exact Q1 + CMS Q2"]:::ok
-    c3["③ exact Q1 + Hydra Q2"]:::ok
+    c1["① accumulators s₁, s₂, s₃ + exact s₄"]:::ok
+    c2["② accumulators s₁, s₂, s₃ + CMS s₄"]:::ok
+    c3["③ accumulators s₁, s₂, s₃ + Hydra s₄"]:::ok
   end
   s1 --> R1
   s2 --> R2
+  s3 --> R3
+  s4 --> R4
   R1 --> OUT
   R2 --> OUT
+  R3 --> OUT
+  R4 --> OUT
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
@@ -918,9 +951,13 @@ flowchart TB
 
 **Stage 1, Pass 1: 3 candidates.** Pass 1 finds per-computation options for each query:
 
-* **Q1** has one option, the exact per-series rate and per-`job` sum. Its
-  accuracy requirement is exact, so no summary qualifies.
-* **Q2** has three options. The exact one keeps a per-series sum and sorts
+* **Q1** has two targets, the per-series `rate` and the per-`job` `sum`. Each
+  has one option, its **exact accumulator state** (`SummaryAgg` with an exact
+  family → `FinalizeExactAccumulator`), so Q1 has one option. Its accuracy
+  requirement is exact, so no summary qualifies.
+* **Q2** has two targets. The per-series `sum_over_time` has one option, its
+  exact Sum accumulator state. The per-`job` top-*k* has three options, so Q2
+  has three options. The exact one keeps a per-series sum and sorts
   within each `job`, which is costly at one million Zipf-distributed series.
   The `EpsilonDelta` target also admits a **Count-Min Sketch with a top-*k*
   heap per `job`**, and **Hydra over the whole `job` column**, where one sketch
@@ -928,7 +965,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  subgraph C["Q2's three per-computation options"]
+  subgraph C["Q2 top-k's three per-computation options"]
     direction TB
     subgraph E["Exact"]
       direction LR
@@ -954,11 +991,12 @@ flowchart LR
 
 Combining them gives 1 × 3 = 3 workload candidates:
 
-| Logical candidate | Q1 | Q2 |
+| Query | Target | Options |
 |---|---|---|
-| Exact | exact | exact |
-| Count-Min | exact | Count-Min + heap |
-| Hydra | exact | Hydra |
+| Q1 | per-series `rate` | exact Rate accumulator |
+| Q1 | per-`job` `sum` | exact Sum accumulator |
+| Q2 | per-series `sum_over_time` | exact Sum accumulator |
+| Q2 | per-`job` top-*k* | exact, Count-Min + heap, Hydra |
 
 **Stage 1, Pass 2: 54 candidates.** Pass 2 applies two ASAP-aware CSE rules
 to each of the 3 candidates, and keeps every original:
