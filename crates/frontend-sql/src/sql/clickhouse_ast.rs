@@ -6,7 +6,7 @@ use datafusion::sql::sqlparser::ast::{
 };
 use std::ops::ControlFlow;
 
-use super::collection_planning::MAP_PLANNING_NAME;
+use super::collection_udfs::MAP_PLANNING_NAME;
 
 pub(super) fn normalize(statement: &mut Statement) {
     struct PreserveNames;

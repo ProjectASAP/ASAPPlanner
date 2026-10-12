@@ -226,7 +226,7 @@ impl SqlLowerer<'_> {
                         "asap_element_access".into()
                     } else if sf.func.name().eq_ignore_ascii_case("tupleelement") {
                         "asap_struct_field".into()
-                    } else if sf.func.name() == super::collection_planning::MAP_PLANNING_NAME {
+                    } else if sf.func.name() == super::collection_udfs::MAP_PLANNING_NAME {
                         "map".into()
                     } else {
                         sf.func.name().to_string()
