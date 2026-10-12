@@ -84,7 +84,7 @@ Based on our requirement, each field should contain the following information.
 
    - **Statistical aggregation intents** (`AggIntent`, `crates/types/src/pre_asap/agg_intent.rs`): which aggregate the state can answer, and how it is read out.
 
-     | Intent | Candidate types | Readout |
+     | Intent | Candidate types | Evaluation |
      |---|---|---|
      | `Quantile` | `Sketch`: `Kll`, `DDSketch` | `SummaryEstimate(Quantile { q })` |
      | `Cardinality` | `Sketch`: `Hll`, `Theta`, `Kmv`, `UnivMon` (one column only) | `SummaryEstimate(Cardinality)` |
@@ -93,7 +93,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; exact accumulators come from `exact_realization` there (`Count`) and from `function_rules.rs` (the others); the readouts are `SketchStatistic` ([§6.5](#65-update-input-and-readouts-post_asapsketchrs-post_asapmaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/asap-aware-mapping/src/replacement.rs`; exact accumulators come from `exact_realization` there (`Count`) and from `function_rules.rs` (the others); the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-post_asapsketchrs-post_asapmaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint panes combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -543,10 +543,10 @@ Both need the same KLL state, so the planner builds it once (sub-DAG sharing, [P
 
 | Question | Answer |
 |---|---|
-| What comes out? | the same columns, with `state` replaced by the answer: `quantile` Float64 here. Counts and cardinalities are Int64 (Float64 when the state was built per series, `PerEntity`). A top-k readout is a `topk` Utf8 field today; #579 changes it to return the selected rows: the partition keys, the item identity columns and a Float64 `value` score |
+| What comes out? | the same columns, with `state` replaced by the answer: `quantile` Float64 here. Counts and cardinalities are Int64 (Float64 when the state was built per series, `PerEntity`). A top-k evaluation is a `topk` Utf8 field today; #579 changes it to return the selected rows: the partition keys, the item identity columns and a Float64 `value` score |
 | When is it rejected? | the input is not a sketch, or the sketch cannot answer the question. For example, asking a KLL for a cardinality |
 | What is its coverage? | none: the output is a value |
-| State or value? | value. The node carries the readout's error bound |
+| State or value? | value. The node carries the evaluation's error bound |
 
 ### 5.3 `FinalizeExactAccumulator`: exact state → value
 
@@ -870,7 +870,7 @@ OperatorNode                                         §6.1
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
 │           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
 │                 └── category, algorithm, params    §6.4
-├── guarantee: ResultGuarantee                       §6.5  (accuracy of a readout)
+├── guarantee: ResultGuarantee                       §6.5  (accuracy of an evaluation)
 └── coverage() → SummaryCoverage                     §6.6
       └── definition: OperatorNode   (again a node, so the same structure)
 ```
@@ -881,10 +881,10 @@ OperatorNode                                         §6.1
 | §6.2 ASAP operators | `ASAPOp` | `OperatorNode.operator` |
 | §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
 | §6.4 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
-| §6.5 Update input and readouts | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
+| §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
 | §6.6 Summary coverage | `SummaryCoverage`, `SelectionBox`, `Constraint` | `OperatorNode::coverage()` on summary nodes |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the readout. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
 
 ### 6.1 DAG node (`crates/types/src/ir/node.rs`)
 
@@ -1220,12 +1220,12 @@ pub enum WaveletKind   { Haar }         pub enum WaveletParams   { Haar { coeffi
 pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { family: String } }
 ```
 
-### 6.5 Update input and readouts (`post_asap/sketch.rs`, `post_asap/maintained_population.rs`)
+### 6.5 Update input and evaluations (`post_asap/sketch.rs`, `post_asap/maintained_population.rs`)
 
 This part of the code answers two questions about summary state:
 
 1. **Update input** (`SummaryUpdate`): when a `SummaryAgg` reads one input row, what does it add to the state? It adds a **weight**, optionally under an **item** key.
-2. **Readouts**: once the state is built, what can be asked of it? `SketchStatistic` is what `SummaryEstimate` asks a sketch (§5.2). `MaintainedPopulation` and `PopulationStatistic` are the exact-population counterpart, used by `MaintainPopulation` and `EvaluatePopulation` (§5.4, §5.5).
+2. **Evaluations**: once the state is built, what can be asked of it? `SketchStatistic` is what `SummaryEstimate` asks a sketch (§5.2). `MaintainedPopulation` and `PopulationStatistic` are the exact-population counterpart, used by `MaintainPopulation` and `EvaluatePopulation` (§5.4, §5.5).
 
 **Update input examples** (as the planner builds them in `asap-aware-mapping`):
 
@@ -1237,7 +1237,7 @@ This part of the code answers two questions about summary state:
 
 `weight_domain` matters because some sketches (e.g. Count-Min) are only accurate when weights are never negative. The planner records why a weight is non-negative; if it cannot prove it, the weight counts as possibly negative.
 
-**Readout examples:** `Quantile { q: 0.99 }` reads p99 from a KLL; `PointCount { key: endpoint, value: Some("checkout") }` reads how often `checkout` occurred from a Count-Min; `TopK { k: 5 }` reads the 5 heaviest items.
+**Evaluation examples:** `Quantile { q: 0.99 }` reads p99 from a KLL; `PointCount { key: endpoint, value: Some("checkout") }` reads how often `checkout` occurred from a Count-Min; `TopK { k: 5 }` reads the 5 heaviest items.
 
 ```rust
 /// What one input row adds to the state.
@@ -1324,7 +1324,7 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to readout and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
+A finalized value's accuracy statement is `ResultGuarantee` (`post_asap/guarantee.rs`): `metric` (which error is measured, e.g. rank error), `bound` (the error bound), `failure_probability` (the chance the bound does not hold) and `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
 ### 6.6 Summary coverage (`crates/types/src/ir/summary_coverage.rs`)
 

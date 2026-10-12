@@ -80,12 +80,12 @@ An operator owns its scalar expressions and references input nodes through
 `Rc<OperatorNode>`. Either operation category can consume the other's outputs when
 the input contract permits it. `NonASAP` describes one operation, not its entire
 sub-DAG. Frontend DAGs contain only NonASAP operations; ASAP optimization may
-introduce state construction and readout.
+introduce state construction and evaluation.
 
 | Category | Meaning | All operations |
 |---|---|---|
 | `Operator::NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
-| `Operator::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
+| `Operator::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `EvaluatePopulation`, `Extension` |
 
 `CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to
 `ScalarExpr`, defined in the [companion proposal](decoupling_op_and_expr.md#22-scalar-expressions).
@@ -148,7 +148,7 @@ Ordinary payload fields have these roles:
   survive optimization. The optional concatenation key records a discriminator
   that distinguishes branches together with their within-branch key.
 
-`ASAPOp` describes state construction, state operations and readout separately.
+`ASAPOp` describes state construction, state operations and evaluation separately.
 `FieldDataType` (§2.1) types every output field; state-producing operations use its
 summary or exact-accumulator cases, never its `Plain` case.
 
@@ -156,14 +156,14 @@ summary or exact-accumulator cases, never its `Plain` case.
 enum ASAPOp {
     SummaryAgg {
         child: Rc<OperatorNode>, family: FieldDataType, input: SummaryUpdate,
-        reduction: Reduction, grouping: GroupingStrategy,
+        reduction: Reduction, grouping: GroupingStrategy, filter: Option<Predicate>,
     },
     SummaryEstimate {
         summary_input: Rc<OperatorNode>, query: SketchStatistic,
     },
     FinalizeExactAccumulator { child: Rc<OperatorNode> },
     MaintainPopulation { child: Rc<OperatorNode>, population: MaintainedPopulation },
-    ReadPopulation { child: Rc<OperatorNode>, readout: PopulationStatistic },
+    EvaluatePopulation { child: Rc<OperatorNode>, evaluation: PopulationStatistic },
 
     // Reserved operations; semantics and support require further design.
     SummaryMerge { children: Vec<Rc<OperatorNode>> },
@@ -176,7 +176,7 @@ enum ASAPOp {
 }
 ```
 
-The summary fields distinguish state construction and readout:
+The summary fields distinguish state construction and evaluation:
 
 | Field | Design meaning |
 |---|---|
@@ -184,7 +184,7 @@ The summary fields distinguish state construction and readout:
 | `input` | The item identity and observation or weight supplied to a state update |
 | `reduction` | Which input entities contribute to each logical result |
 | `grouping` | Whether those groups use separate state instances or a supported shared structure |
-| `query` / `readout` | The result requested from summary or maintained-population state |
+| `query` / `evaluation` | The result requested from summary or maintained-population state |
 | `population` | The population whose membership and values are maintained |
 
 The common `OperatorNode` fields are declared in the overview above and explained
@@ -212,7 +212,7 @@ function, explicitly written by the query author. This proposal does not insert
 it automatically: `sum(up)` alone is a valid query returning an instant vector.
 The scalar expression `PromqlScalarFromVector` represents that function and references its
 result to obtain one number. A valid ASAP rewrite may replace that producer with
-a summary readout, preserving the required vector and accuracy semantics; it cannot
+a summary evaluation, preserving the required vector and accuracy semantics; it cannot
 substitute raw summary state. Ordinary expressions such as `price * 2` reference
 columns and literals, not a query sub-DAG.
 
@@ -369,8 +369,8 @@ Every operator output, before and after optimization, uses one `Schema` whose
 `Field`s are typed by `FieldDataType`: `Plain(DataType)` for a readable value, or
 the family, algorithm and parameters of summary or exact-accumulator state.
 `OperatorResultKind` marks state outputs, and state becomes a value only through
-an explicit readout. The schema model, `ColumnRef` versus `ColumnId`, the
-validation entry points and the readout boundary are specified in
+an explicit evaluation. The schema model, `ColumnRef` versus `ColumnId`, the
+validation entry points and the evaluation boundary are specified in
 [Schema and physical data for ASAP primitives](asap-primitive-schema.md).
 
 ### 2.2 Preserve existing accuracy semantics
@@ -383,7 +383,7 @@ not make it exact; unknown accuracy must not be treated as exactness.
 
 The common node reuses `guarantee: Option<ResultGuarantee>` from `SummaryNode`.
 `Some` records an established guarantee; `None` covers an unassessed or unknown
-result, or state whose accuracy is only established at readout. Exactness must be
+result, or state whose accuracy is only established at evaluation. Exactness must be
 explicitly established using the existing model. This proposal introduces no new
 accuracy metric or guarantee-calculation workflow.
 
