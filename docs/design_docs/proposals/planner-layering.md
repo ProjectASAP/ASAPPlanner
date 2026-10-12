@@ -308,17 +308,20 @@ Example for summary candidates:
 
 | Original computation | Per-computation candidates |
 |---|---|
-| `Sum(x) by (g)` | Exact grouped sum, exact Sum accumulator |
+| `Sum(x) by (g)` | Exact grouped sum (exact Sum accumulator state) |
 | `TopK(k, x) by (g)` | Exact sort and limit per group, Count-Min Sketch with a top-*k* heap per group, Hydra over all groups |
 | `Distinct(x)` | Exact distinct, a specialized distinct summary, UnivMon |
 | `Entropy(x)` | Exact entropy, a specialized entropy summary, UnivMon |
 | `L2(x)` | Exact L2 norm, a specialized norm summary, UnivMon |
 | `Quantile(x, window)` | Exact quantile, KLL over the requested window |
 
-For an intent with an exact mergeable accumulator (Count, Sum, Min, Max, Rate,
-IRate, Increase), Pass 1 also offers **exact accumulator state**: a `SummaryAgg`
-with an exact family → `FinalizeExactAccumulator`, in addition to the plain exact
-computation and the summary families.
+Each target gets one exact option. If its intent has an exact mergeable
+accumulator (Count, Sum, Min, Max, Rate, IRate, Increase; avg via exact sum and
+count accumulator states) and the accumulator can be built, the exact option is
+**exact accumulator state**: a `SummaryAgg` with an exact family →
+`FinalizeExactAccumulator`. Otherwise, for example when a filter or HAVING
+prevents the accumulator or the intent has none, it is the plain exact
+computation. Whether the accumulator is materialized is decided in Stage 2.
 
 Each candidate records its input expression, filter, grouping, window,
 supported estimates and accuracy requirement. Pass 2 uses these to decide
@@ -374,11 +377,12 @@ Output: C1  — CandidateLogicalASAPDAGs with each sub-DAG replaced independentl
 
 *Example for Algorithm 1* (the workload of [Example 1](#example-1-aggregation-over-dimensions--the-candidate-set-through-every-stage)). Q1 needs an
 exact answer, so every summary replacement for it is pruned and only the exact
-computation and the exact accumulator state remain for each of its two
-sub-DAGs, the per-series rate (s₁) and the per-`job` sum (s₂). Q2's per-series
-`sum_over_time` (s₃) has no summary family and gets the same two. Q2's top-*k*
-(s₄) tolerates error and gets three replacements. The
-Cartesian product gives 2 × 2 × 2 × 3 = 24 whole-workload candidates.
+option remains for each of its two sub-DAGs, the per-series rate (s₁) and the
+per-`job` sum (s₂): its exact accumulator state. Q2's per-series
+`sum_over_time` (s₃) has no summary family and gets one option, its exact Sum
+accumulator state. Q2's top-*k* (s₄) tolerates error and gets three
+replacements. The Cartesian product gives 1 × 1 × 1 × 3 = 3 whole-workload
+candidates.
 
 ```mermaid
 flowchart LR
@@ -391,18 +395,15 @@ flowchart LR
   end
   subgraph R1["Replacements(s₁)"]
     direction TB
-    a1["Exact rate"]:::exact
     a3["Exact Rate accumulator<br/>per series"]:::exact
   end
   subgraph R2["Replacements(s₂)"]
     direction TB
-    d1["Exact sum"]:::exact
     d3["Exact Sum accumulator<br/>per job"]:::exact
     a2["summary candidates<br/>✗ pruned: cannot be exact"]:::pruned
   end
   subgraph R3["Replacements(s₃)"]
     direction TB
-    e1["Exact sum_over_time"]:::exact
     e3["Exact Sum accumulator<br/>per series"]:::exact
   end
   subgraph R4["Replacements(s₄)"]
@@ -411,13 +412,11 @@ flowchart LR
     b2["CMS + top-10 heap per job"]:::summary
     b3["Hydra over all jobs"]:::summary
   end
-  subgraph OUT["C1 = Replacements(s₁) × … × Replacements(s₄) = 2 × 2 × 2 × 3 = 24 candidates"]
+  subgraph OUT["C1 = Replacements(s₁) × … × Replacements(s₄) = 1 × 1 × 1 × 3 = 3 candidates"]
     direction TB
-    c1["① exact s₁, s₂, s₃ + exact s₄"]:::ok
-    c2["② exact s₁, s₂, s₃ + CMS s₄"]:::ok
-    c3["③ exact s₁, s₂, s₃ + Hydra s₄"]:::ok
-    c4["…"]:::ok
-    c24["㉔ accumulators s₁, s₂, s₃ + Hydra s₄"]:::ok
+    c1["① accumulators s₁, s₂, s₃ + exact s₄"]:::ok
+    c2["② accumulators s₁, s₂, s₃ + CMS s₄"]:::ok
+    c3["③ accumulators s₁, s₂, s₃ + Hydra s₄"]:::ok
   end
   s1 --> R1
   s2 --> R2
@@ -950,15 +949,15 @@ flowchart TB
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Stage 1, Pass 1: 24 candidates.** Pass 1 finds per-computation options for each query:
+**Stage 1, Pass 1: 3 candidates.** Pass 1 finds per-computation options for each query:
 
 * **Q1** has two targets, the per-series `rate` and the per-`job` `sum`. Each
-  has two options: the exact computation, and **exact accumulator state**
-  (`SummaryAgg` with an exact family → `FinalizeExactAccumulator`), so Q1 has
-  2 × 2 = 4 options. Its accuracy requirement is exact, so no summary qualifies.
-* **Q2** has two targets. The per-series `sum_over_time` has the same two
-  options, exact and exact Sum accumulator state. The per-`job` top-*k* has
-  three options, so Q2 has 2 × 3 = 6 options. The exact one keeps a per-series sum and sorts
+  has one option, its **exact accumulator state** (`SummaryAgg` with an exact
+  family → `FinalizeExactAccumulator`), so Q1 has one option. Its accuracy
+  requirement is exact, so no summary qualifies.
+* **Q2** has two targets. The per-series `sum_over_time` has one option, its
+  exact Sum accumulator state. The per-`job` top-*k* has three options, so Q2
+  has three options. The exact one keeps a per-series sum and sorts
   within each `job`, which is costly at one million Zipf-distributed series.
   The `EpsilonDelta` target also admits a **Count-Min Sketch with a top-*k*
   heap per `job`**, and **Hydra over the whole `job` column**, where one sketch
@@ -990,17 +989,17 @@ flowchart LR
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-Combining them gives 4 × 6 = 24 workload candidates:
+Combining them gives 1 × 3 = 3 workload candidates:
 
 | Query | Target | Options |
 |---|---|---|
-| Q1 | per-series `rate` | exact, exact Rate accumulator |
-| Q1 | per-`job` `sum` | exact, exact Sum accumulator |
-| Q2 | per-series `sum_over_time` | exact, exact Sum accumulator |
+| Q1 | per-series `rate` | exact Rate accumulator |
+| Q1 | per-`job` `sum` | exact Sum accumulator |
+| Q2 | per-series `sum_over_time` | exact Sum accumulator |
 | Q2 | per-`job` top-*k* | exact, Count-Min + heap, Hydra |
 
-**Stage 1, Pass 2: 432 candidates.** Pass 2 applies two ASAP-aware CSE rules
-to each of the 24 candidates, and keeps every original:
+**Stage 1, Pass 2: 54 candidates.** Pass 2 applies two ASAP-aware CSE rules
+to each of the 3 candidates, and keeps every original:
 
 * **Identical-expression rule.** Both queries read the same range selector,
   `http_requests_total[1m]`, so Pass 2 adds a variant in which Q1 and Q2 share
@@ -1020,7 +1019,7 @@ to each of the 24 candidates, and keeps every original:
 
 Each Pass 1 candidate therefore has 2 input choices (separate or shared) ×
 3 window forms for Q1 (none, sliding, tumbling) × 3 for Q2, so stage 1 outputs
-24 × 2 × 3 × 3 = 432 logical candidates.
+3 × 2 × 3 × 3 = 54 logical candidates.
 
 The window-composition rule applied to Q2 in the Hydra candidate:
 
@@ -1044,7 +1043,7 @@ flowchart LR
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Stage 2: 1,248 candidates.** Stage 2 picks, for each query, when its state is
+**Stage 2: 156 candidates.** Stage 2 picks, for each query, when its state is
 computed and whether it is kept. What it can choose depends on the query's
 window form from Pass 2:
 
@@ -1121,11 +1120,11 @@ flowchart LR
 ```
 
 Across the three window forms, each query has 1 + 2 + 3 = 6 physical options,
-so each Pass 1 candidate gives 6 × 6 = 36 combinations. The shared-input variant only
+so each Q2 option gives 6 × 6 = 36 combinations. The shared-input variant only
 changes the plan when both queries read raw samples at query time, which 4 of
 the 6 options do (all except the two ingestion-time ones). That adds
-4 × 4 = 16 shared-input plans, for 52 plans per Pass 1 candidate and
-24 × 52 = 1,248 physical candidates.
+4 × 4 = 16 shared-input plans, for 52 plans per Q2 option and
+3 × 52 = 156 physical candidates.
 
 **Stage 3: 1 plan.** Selection first rejects invalid candidates. The
 deployment's accuracy model checks the summary candidates against ε = 0.01,
