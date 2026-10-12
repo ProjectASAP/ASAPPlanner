@@ -194,7 +194,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
         )
         .await
         .expect("nested temporal SQL must lower");
-        let space = search_workload(vec![("nested", Rc::clone(&pre_asap))]);
+        let space = search_workload(vec![("nested", Rc::clone(&pre_asap))]).unwrap();
         let selection = space.global_selection(&DefaultCostModel);
         let root = selection
             .assemble_selected_dag(&space.roots[0].1)
@@ -255,7 +255,7 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     else {
         panic!("sanity: a SQL root is a Project, unlike lower_promql's bare Aggregate");
     };
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]);
+    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
         .assemble_selected_dag(&space.roots[0].1)
@@ -301,7 +301,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
     )
     .await
     .expect("two-subquery rate ratio must lower");
-    let space = search_workload(vec![("ratio", Rc::clone(&pre_asap))]);
+    let space = search_workload(vec![("ratio", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
         .assemble_selected_dag(&space.roots[0].1)
@@ -417,7 +417,7 @@ async fn unsupported_sql_join_shapes_remain_fail_closed() {
         )
         .await
         .unwrap_or_else(|error| panic!("join must lower before fail-closed mapping: {error}"));
-        let space = search_workload(vec![("unsupported-join", Rc::clone(&pre_asap))]);
+        let space = search_workload(vec![("unsupported-join", Rc::clone(&pre_asap))]).unwrap();
         let selection = space.global_selection(&DefaultCostModel);
         let root = selection
             .assemble_selected_dag(&space.roots[0].1)
@@ -446,7 +446,7 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
         AccuracyTarget::Epsilon(0.01),
     )
     .await;
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]);
+    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
         .assemble_selected_dag(&space.roots[0].1)
@@ -537,7 +537,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     };
     assert_eq!(expected_source_predicates.len(), 1, "fixture source WHERE");
 
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]);
+    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
         .assemble_selected_dag(&space.roots[0].1)
@@ -593,7 +593,7 @@ async fn sql_filter_preserves_local_fallback_boundary_for_unsupported_child() {
         AccuracyTarget::Exact,
     )
     .await;
-    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]);
+    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
         .assemble_selected_dag(&space.roots[0].1)
@@ -828,7 +828,7 @@ async fn map_projection_export_preserves_unsupported_child_boundary() {
         "SELECT map('job', t.service) AS labels, t.avg_bytes FROM (SELECT service, AVG(bytes) AS avg_bytes FROM metrics GROUP BY service) t WHERE t.avg_bytes > 100",
         &catalog(), SqlDialect::ClickhouseSQL, AccuracyTarget::Exact,
     ).await.unwrap();
-    let space = search_workload(vec![("map_query", pre)]);
+    let space = search_workload(vec![("map_query", pre)]).unwrap();
     let root = space
         .global_selection(&DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)

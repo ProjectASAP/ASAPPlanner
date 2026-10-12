@@ -85,7 +85,7 @@ fn distinct_over_time_offers_hll_cardinality_evaluation() {
 
 fn lower_search_and_materialize(query: &str) -> Rc<OperatorNode> {
     let pre = lower_promql(query, AccuracyTarget::Exact).expect("lowering failed");
-    let space = search_workload(vec![("query", pre)]);
+    let space = search_workload(vec![("query", pre)]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     selection
         .assemble_selected_dag(&space.roots[0].1)
@@ -579,7 +579,8 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
             &evidence,
         ),
         &DefaultAccuracyModel,
-    );
+    )
+    .unwrap();
     let root = &space.roots[0].1;
     let selected = space.global_selection(&DefaultCostModel);
     let chosen = selected
@@ -1007,7 +1008,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     )
     .expect("lowering failed");
     let original_schema = original.schema.clone();
-    let space = search_workload(vec![("query", original)]);
+    let space = search_workload(vec![("query", original)]).unwrap();
     let root = &space.roots[0].1;
     let group = space.candidates_for_target(root).expect("root memo group");
     let candidate = group
@@ -1056,7 +1057,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         AccuracyTarget::Epsilon(0.05),
     )
     .unwrap();
-    let space = search_workload(vec![("query", pre)]);
+    let space = search_workload(vec![("query", pre)]).unwrap();
     let selected = space.global_selection(&DefaultCostModel);
     let plan = selected
         .assemble_selected_dag(&space.roots[0].1)
@@ -1116,7 +1117,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
         ),
     ] {
         let input = lower_promql(query, AccuracyTarget::Epsilon(0.05)).unwrap();
-        let search = search_workload(vec![("q", input)]);
+        let search = search_workload(vec![("q", input)]).unwrap();
         let choice = search.global_selection(&DefaultCostModel);
         let plan = choice
             .assemble_selected_dag(&search.roots[0].1)
@@ -1159,7 +1160,8 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
         vec![("unproven", pre, Some(AccuracyTarget::Epsilon(0.01)))],
         &asap_aware_mapping::default_strategies(),
         &DefaultAccuracyModel,
-    );
+    )
+    .unwrap();
     let root_group = space
         .target_subdag_candidates()
         .find(|group| Rc::ptr_eq(&group.target, &space.roots[0].1))
@@ -1391,7 +1393,8 @@ fn without_aggregation_candidates_export_valid_dags() {
                 vec![(0, root, Some(accuracy.clone()))],
                 &asap_aware_mapping::default_strategies(),
                 &DefaultAccuracyModel,
-            );
+            )
+            .unwrap();
             let inventory = space.enumerate_candidate_dags_for_root(&0, 65_536).unwrap();
             assert!(!inventory.candidates.is_empty(), "{query}");
             for (_, node) in inventory.candidates.iter().flatten() {

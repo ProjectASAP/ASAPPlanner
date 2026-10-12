@@ -211,8 +211,9 @@ pub use replacement::{
     search_workload_with_targets, summary_candidates, ASAPStrategies, CandidateLogicalASAPDAGs,
     CompositionDecision, GlobalSelection, Matcher, Proposals, RankedTargetSubDAGCandidates,
     Realization, RealizationError, RecurrenceProfileMap, RejectedCandidate, Replacement,
-    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SharedSubDAGStrategy,
-    TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
+    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SearchError,
+    SharedSubDAGStrategy, TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection,
+    MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use summary_maintenance_dag_export::{

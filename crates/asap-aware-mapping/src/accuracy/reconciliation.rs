@@ -578,7 +578,8 @@ mod tests {
         let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
         let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
 
-        let space = crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]);
+        let space =
+            crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]).unwrap();
 
         let loose_root = &space.roots[1].1;
         let loose_group = space
@@ -807,7 +808,8 @@ mod tests {
         let scan = metric_scan();
         let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
         let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
-        let space = crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]);
+        let space =
+            crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]).unwrap();
         let loose_root = &space.roots[1].1;
 
         let cost_model = DefaultCostModel;
@@ -868,7 +870,8 @@ mod tests {
             ("loose_a", Rc::new(loose_a)),
             ("loose_b", Rc::new(loose_b)),
             ("tight", Rc::new(tight)),
-        ]);
+        ])
+        .unwrap();
 
         // Fixture sanity: the two loose roots really did merge onto one Rc.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
@@ -959,7 +962,8 @@ mod tests {
         let space = crate::replacement::search_workload(vec![
             ("tight", Rc::clone(&tight)),
             ("loose", Rc::clone(&loose)),
-        ]);
+        ])
+        .unwrap();
 
         let selected = space.global_selection(&PreferReconciliation);
         let tight_root = &space.roots[0].1;

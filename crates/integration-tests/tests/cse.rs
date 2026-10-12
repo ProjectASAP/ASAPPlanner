@@ -57,7 +57,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
         "fixture sanity: identical query text lowers identically"
     );
 
-    let space = search_workload(vec![("a", a), ("b", b)]);
+    let space = search_workload(vec![("a", a), ("b", b)]).unwrap();
 
     // roots[0] and roots[1] must have merged onto the same Rc — the
     // `share_common_sub_dags` pass `search_workload` runs internally.
@@ -125,7 +125,7 @@ fn distinct_workload_queries_get_independent_memo_groups() {
         .expect("query b failed to lower");
     assert_ne!(a, b, "fixture sanity: the two queries differ");
 
-    let space = search_workload(vec![("a", a), ("b", b)]);
+    let space = search_workload(vec![("a", a), ("b", b)]).unwrap();
     assert!(!Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
 
     let group_a = space
@@ -152,7 +152,7 @@ fn single_query_repeated_subexpression_shares_one_memo_group() {
     let query = "sum by (job) (http_requests_total) / sum by (job) (http_requests_total)";
     let expr = lower_promql(query, AccuracyTarget::Exact).expect("query failed to lower");
 
-    let space = search_workload(vec![("q", expr)]);
+    let space = search_workload(vec![("q", expr)]).unwrap();
     let [(_, root)] = space.roots.as_slice() else {
         panic!("expected 1 root");
     };

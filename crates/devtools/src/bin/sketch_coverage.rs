@@ -163,7 +163,7 @@ fn analyze_corpus(
 ) -> CorpusCoverage {
     let lowered = roots.len();
     let labels: Vec<String> = roots.iter().map(|(id, _)| root_label(id)).collect();
-    let explanations = explain_replacements(roots);
+    let explanations = explain_replacements(roots).expect("front ends emit pre-ASAP DAGs");
 
     let mut sketch_covered: BTreeSet<usize> = BTreeSet::new();
     let mut cse_covered: BTreeSet<usize> = BTreeSet::new();

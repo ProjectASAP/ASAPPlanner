@@ -227,7 +227,7 @@ fn selected_plan_for_lowered(
 ) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
     let root = lowered;
     let strategies = asap_aware_mapping::default_strategies_with(model);
-    let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
+    let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies).unwrap();
     let target = Rc::clone(&space.roots[0].1);
     let capabilities = SummaryMaintenanceLifecycleCapabilities {
         supports_ephemeral: true,
@@ -863,6 +863,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         }) if *k == kind)
     };
     let inventory = asap_aware_mapping::search_workload(vec![("q", root)])
+        .unwrap()
         .enumerate_candidate_dags(4096)
         .unwrap();
     let candidates = inventory

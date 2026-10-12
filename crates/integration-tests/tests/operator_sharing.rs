@@ -52,7 +52,7 @@ async fn plan(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let pre = lower_sql(sql, &catalog(), accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
-    let space = search_workload(vec![("query", pre)]);
+    let space = search_workload(vec![("query", pre)]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     selection
         .assemble_selected_dag(&space.roots[0].1)

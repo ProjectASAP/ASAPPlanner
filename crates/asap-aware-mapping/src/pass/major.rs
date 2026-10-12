@@ -86,7 +86,8 @@ impl OptimizationPass for MajorPass {
         // the roots went in.
         let entry_indices: Vec<usize> = roots.iter().map(|(index, _, _)| *index).collect();
 
-        let space = search_workload_with_targets(roots, &strategies, models.accuracy);
+        let space = search_workload_with_targets(roots, &strategies, models.accuracy)
+            .map_err(OptimizeError::Search)?;
 
         let lifecycle = input.lifecycle;
         let demand = WorkloadDemand {

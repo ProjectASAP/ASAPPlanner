@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn default_search_discovers_bindable_sum_and_count_targets() {
         let root = avg_agg(vec![2], None, metric_scan(&["job"]));
-        let space = crate::replacement::search_workload(vec![("avg", Rc::clone(&root))]);
+        let space = crate::replacement::search_workload(vec![("avg", Rc::clone(&root))]).unwrap();
 
         let avg_group = space
             .candidates_for_target(&space.roots[0].1)
@@ -908,7 +908,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             },
         );
-        let space = crate::replacement::search_workload(vec![("sum-count", root)]);
+        let space = crate::replacement::search_workload(vec![("sum-count", root)]).unwrap();
         let root = &space.roots[0].1;
         let group = space.candidates_for_target(root).expect("root memo group");
         let candidate = group

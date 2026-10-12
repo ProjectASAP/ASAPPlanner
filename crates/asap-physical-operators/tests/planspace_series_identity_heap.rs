@@ -119,6 +119,7 @@ fn inventories(query: &str, accuracy: AccuracyTarget) -> (Vec<InventoryDAG>, Vec
             .collect();
     let enumerate = |strategies: &[Box<dyn ReplacementStrategy>]| {
         search_workload_with_targets(roots.clone(), strategies, &DefaultAccuracyModel)
+            .unwrap()
             .enumerate_candidate_dags_for_root(&1, 65_536)
             .unwrap()
             .candidates
@@ -218,7 +219,8 @@ fn global_selection_never_commits_a_series_identity_heap() {
         vec![(0, root, Some(accuracy))],
         &strategies,
         &DefaultAccuracyModel,
-    );
+    )
+    .unwrap();
     let selected = space
         .global_selection(&DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)
@@ -242,7 +244,8 @@ fn repeated_roots_do_not_duplicate_alternatives() {
                 )
             })
             .collect();
-        let space = search_workload_with_targets(roots, &strategies, &DefaultAccuracyModel);
+        let space =
+            search_workload_with_targets(roots, &strategies, &DefaultAccuracyModel).unwrap();
         space
             .candidates_for_target(&space.roots[0].1)
             .unwrap()

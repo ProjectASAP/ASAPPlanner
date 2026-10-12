@@ -1207,7 +1207,7 @@ mod tests {
             ("root_b", filtered_root(2)),
             ("root_c", filtered_root(3)),
         ];
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
 
         // Fixture sanity: the three roots stayed distinct (different
         // literal predicates), but their `sum_agg()` children merged onto
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn plan_selection_uses_recurrence_profiles_for_cse_choices() {
         let roots = vec![("a", filtered_root(1)), ("b", filtered_root(2))];
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
         let shared = space
             .target_subdag_candidates()
             .find(|group| matches!(group.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
@@ -1331,7 +1331,7 @@ mod tests {
     fn recurrence_profiles_rejects_an_invalid_evaluation_rate() {
         let root = scan();
         let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
         let err = space
             .recurrence_profiles(&[RootRecurrence::Repeating(EvaluationRate(f64::NAN))], None)
             .unwrap_err();
@@ -1345,7 +1345,7 @@ mod tests {
     fn recurrence_profiles_reports_a_root_count_mismatch_as_an_error_not_a_panic() {
         let root = scan();
         let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
         let err = space.recurrence_profiles(&[], None).unwrap_err();
         assert_eq!(
             err,
@@ -1360,7 +1360,7 @@ mod tests {
     fn recurrence_profiles_rejects_an_invalid_update_rate() {
         let root = scan();
         let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("only", root)];
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
         let err = space
             .recurrence_profiles(
                 &[RootRecurrence::OneShotCount(1)],
@@ -1398,7 +1398,7 @@ mod tests {
             }))
             .unwrap();
         let roots: Vec<(&str, Rc<OperatorNode>)> = vec![("q", avg_root)];
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
 
         let count_group = space
             .target_subdag_candidates()
@@ -1459,7 +1459,7 @@ mod tests {
                 rhs: sum_agg(),
             }))
             .unwrap();
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
 
         let shared_group = space
             .target_subdag_candidates()

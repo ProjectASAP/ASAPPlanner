@@ -1241,7 +1241,8 @@ fn run_post_asap_with_progress(
         search_workload_with(roots, &strategies)
     } else {
         search_workload(roots)
-    };
+    }
+    .expect("front ends emit pre-ASAP DAGs");
     let selection = space.global_selection(cost_model);
 
     // A group's top candidate can be `retain_exact`'s own conservative
@@ -1537,7 +1538,8 @@ async fn main() {
             .iter()
             .map(|(name, _, qe)| (name.clone(), qe.clone()))
             .collect(),
-    );
+    )
+    .expect("front ends emit pre-ASAP DAGs");
     let mut matched = vec![false; explanations.len()];
     let mut queries = Vec::new();
     for (name, source, qe) in &lowered_queries {
@@ -2304,7 +2306,7 @@ mod tests {
     fn cost_fixture() -> (Rc<OperatorNode>, ReplacementSubDAG, PlannerCostDocument) {
         let query = non_topk_query();
         let root = Rc::clone(&query);
-        let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
+        let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]).unwrap();
         let group = space
             .target_subdag_candidates()
             .find(|group| group.target == query)
@@ -2602,7 +2604,7 @@ mod tests {
     fn global_selection_uses_the_cheapest_complete_physical_candidate() {
         let query = non_topk_query();
         let root = Rc::clone(&query);
-        let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
+        let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]).unwrap();
         let group = space
             .target_subdag_candidates()
             .find(|group| group.target == query)
@@ -2836,7 +2838,8 @@ mod tests {
         let a = lower_promql(query, AccuracyTarget::Exact).unwrap();
         let b = lower_promql(query, AccuracyTarget::Exact).unwrap();
         let explanations =
-            asap_aware_mapping::explain_replacements(vec![("a", a.clone()), ("b", b.clone())]);
+            asap_aware_mapping::explain_replacements(vec![("a", a.clone()), ("b", b.clone())])
+                .unwrap();
         assert!(explanations
             .iter()
             .any(|e| { e.kind == asap_aware_mapping::ExplanationKind::CommonSubexpressionReuse }));
@@ -2857,7 +2860,8 @@ mod tests {
             AccuracyTarget::Epsilon(0.01),
         )
         .unwrap();
-        let explanations = asap_aware_mapping::explain_replacements(vec![("target", target)]);
+        let explanations =
+            asap_aware_mapping::explain_replacements(vec![("target", target)]).unwrap();
         let explanation = explanations
             .iter()
             .find(|e| e.kind == asap_aware_mapping::ExplanationKind::SketchApproximation)

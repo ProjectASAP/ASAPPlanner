@@ -139,7 +139,7 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
         roots.push((index, expr, Some(accuracy)));
     }
     let strategies = default_strategies_with_evidence(models.cost, models.evidence);
-    let space = search_workload_with_targets(roots, &strategies, models.accuracy);
+    let space = search_workload_with_targets(roots, &strategies, models.accuracy).unwrap();
     let selection = space.global_selection(models.cost);
 
     assert_eq!(output.plans.len(), space.roots.len());

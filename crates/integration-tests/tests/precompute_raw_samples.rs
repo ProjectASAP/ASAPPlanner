@@ -68,7 +68,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let space = search_workload(vec![("query", root)]);
+    let space = search_workload(vec![("query", root)]).unwrap();
     if let Ok(Some(selected)) = space
         .global_selection(&DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)

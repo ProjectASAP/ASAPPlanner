@@ -139,7 +139,8 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
         vec![("q", root, Some(AccuracyTarget::Exact))],
         &default_strategies_with(&StatsModel),
         &Model,
-    );
+    )
+    .unwrap();
     let selection = space.global_selection(&StatsModel);
     assert!(selection
         .for_target(&space.roots[0].1)
@@ -163,7 +164,8 @@ fn root_target_rejects_unproven_composition() {
         vec![("q", root, Some(AccuracyTarget::Exact))],
         &default_strategies_with(&StatsModel),
         &asap_aware_mapping::DefaultAccuracyModel,
-    );
+    )
+    .unwrap();
     let selection = space.global_selection(&StatsModel);
     assert!(selection
         .for_target(&space.roots[0].1)
@@ -291,7 +293,7 @@ fn plan(
     roots: Vec<(&'static str, Rc<OperatorNode>)>,
     cost_model: &dyn CostModel,
 ) -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
-    search_workload_with(roots, &default_strategies_with(cost_model))
+    search_workload_with(roots, &default_strategies_with(cost_model)).unwrap()
 }
 
 fn is_plain(node: &OperatorNode) -> bool {
@@ -772,7 +774,8 @@ fn missing_cost_statistics_preserve_the_conservative_retain_exact() {
     let node = selection.assemble_selected_dag(&root).unwrap().unwrap();
     assert!(!is_query_time_fold(&node));
 
-    let explanations = asap_aware_mapping::explain_replacements(vec![("q", Rc::clone(&root))]);
+    let explanations =
+        asap_aware_mapping::explain_replacements(vec![("q", Rc::clone(&root))]).unwrap();
     assert!(explanations
         .iter()
         .any(|e| e.kind == ExplanationKind::ExactComposition));

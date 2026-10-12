@@ -159,7 +159,8 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
                     vec![("q", Rc::clone(&root), Some(target))],
                     &default_strategies(),
                     &DefaultAccuracyModel,
-                );
+                )
+                .unwrap();
                 assert!(space
                     .candidates_for_target(&space.roots[0].1)
                     .unwrap()

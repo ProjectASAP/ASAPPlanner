@@ -711,7 +711,8 @@ mod tests {
         let space = crate::replacement::search_workload_with(
             vec![("q", Rc::clone(&q))],
             &[Box::new(strategy)],
-        );
+        )
+        .unwrap();
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group.candidates.is_empty());
         assert_eq!(group.rejected.len(), 2);

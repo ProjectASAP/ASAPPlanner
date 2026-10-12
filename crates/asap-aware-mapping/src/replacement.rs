@@ -6481,8 +6481,22 @@ pub fn default_strategies_with_evidence<'a>(
 /// `sorted_by(cost_model)` step. Use [`search_workload_with`] to plug in a
 /// custom strategy set (e.g. built via [`default_strategies_with`] for a
 /// deployment-specific [`CostModel`]).
-pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogicalASAPDAGs<Id> {
+pub fn search_workload<Id>(
+    roots: Vec<(Id, Rc<OperatorNode>)>,
+) -> Result<CandidateLogicalASAPDAGs<Id>, SearchError> {
     search_workload_with(roots, &default_strategies())
+}
+
+/// Why [`search_workload`] could not search a workload.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SearchError {
+    /// Replacement search takes the front end's pre-ASAP DAG only.
+    #[error(
+        "a workload root already contains an ASAP operator ({0}); replacement search \
+         takes the front end's pre-ASAP DAG only"
+    )]
+    AsapInput(&'static str),
 }
 
 /// Like [`search_workload`], but with an explicit set of context-free
@@ -6506,10 +6520,10 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogic
 pub fn search_workload_with<'s, Id>(
     roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
-) -> CandidateLogicalASAPDAGs<Id> {
-    let mut space = search_cse_workload_with(cse_workload(roots), strategies);
+) -> Result<CandidateLogicalASAPDAGs<Id>, SearchError> {
+    let mut space = search_cse_workload_with(cse_workload(roots), strategies)?;
     space.prepare_compositions(&DefaultAccuracyModel, &HashMap::new());
-    space
+    Ok(space)
 }
 
 /// [`search_workload_with`] plus a per-root end-to-end `AccuracyTarget`
@@ -6535,7 +6549,7 @@ pub fn search_workload_with_targets<'s, Id>(
     roots: Vec<(Id, Rc<OperatorNode>, Option<AccuracyTarget>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
     accuracy_model: &dyn AccuracyModel,
-) -> CandidateLogicalASAPDAGs<Id> {
+) -> Result<CandidateLogicalASAPDAGs<Id>, SearchError> {
     let mut targets = Vec::with_capacity(roots.len());
     let roots = roots
         .into_iter()
@@ -6544,7 +6558,7 @@ pub fn search_workload_with_targets<'s, Id>(
             (id, root)
         })
         .collect();
-    let mut space = search_cse_workload_with(cse_workload(roots), strategies);
+    let mut space = search_cse_workload_with(cse_workload(roots), strategies)?;
     // `cse_workload` preserves root order, so targets zip by position.
     let root_ptrs: Vec<(*const OperatorNode, AccuracyTarget)> = space
         .roots
@@ -6634,7 +6648,7 @@ pub fn search_workload_with_targets<'s, Id>(
         }));
     }
     space.prepare_compositions(accuracy_model, &composition_targets);
-    space
+    Ok(space)
 }
 
 /// The strictest accuracy among `siblings` that read the same summary input
@@ -6712,14 +6726,9 @@ fn cse_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> Vec<(Id, Rc<OperatorN
 fn search_cse_workload_with<'s, Id>(
     cse_roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
-) -> CandidateLogicalASAPDAGs<Id> {
-    for (_, root) in &cse_roots {
-        assert!(
-            !root.contains_asap(),
-            "search_workload: a workload root already contains an ASAP operator \
-             ({}); replacement search takes the front end's pre-ASAP DAG only",
-            root.operator.kind_name()
-        );
+) -> Result<CandidateLogicalASAPDAGs<Id>, SearchError> {
+    if let Some((_, root)) = cse_roots.iter().find(|(_, root)| root.contains_asap()) {
+        return Err(SearchError::AsapInput(root.operator.kind_name()));
     }
     let mut order = Vec::new();
     let mut nodes = HashMap::new();
@@ -6859,12 +6868,12 @@ fn search_cse_workload_with<'s, Id>(
 
     add_effective_count_cse_candidates(&order, &mut groups);
 
-    CandidateLogicalASAPDAGs {
+    Ok(CandidateLogicalASAPDAGs {
         roots: cse_roots,
         groups,
         order,
         composition_plans: Vec::new(),
-    }
+    })
 }
 
 /// Materialize share/recompute alternatives for descendants whose raw edge
@@ -7030,6 +7039,29 @@ mod tests {
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
 
+    /// Search takes the front end's pre-ASAP DAG: a root that already holds
+    /// an ASAP operator is an error, not a panic.
+    #[test]
+    fn search_rejects_a_root_with_an_asap_operator() {
+        let root = lower_promql(
+            "quantile_over_time(0.99, m[1m])",
+            AccuracyTarget::Epsilon(0.01),
+        );
+        let space = search_workload(vec![("q", root)]).unwrap();
+        let summary = space
+            .target_subdag_candidates()
+            .flat_map(|group| &group.candidates)
+            .find_map(|candidate| match &candidate.replacement {
+                Replacement::SubDAG(node) if node.contains_asap() => Some(Rc::clone(node)),
+                _ => None,
+            })
+            .expect("a summary candidate");
+        assert!(matches!(
+            search_workload(vec![("q", summary)]),
+            Err(SearchError::AsapInput(_))
+        ));
+    }
+
     // Candidate shape without execution timing: what is computed, not where.
     fn timing_free_shape(node: &Rc<OperatorNode>) -> serde_json::Value {
         fn strip(value: &mut serde_json::Value) {
@@ -7059,6 +7091,7 @@ mod tests {
         ] {
             let root = lower_promql(query, accuracy);
             let inventory = search_workload(vec![(0usize, root)])
+                .unwrap()
                 .enumerate_candidate_dags(4096)
                 .unwrap();
             let shapes = inventory
@@ -7078,6 +7111,7 @@ mod tests {
     fn grouped_rate_sum_inventory_keeps_sum_state_for_lifecycle_placement() {
         let root = lower_promql("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact);
         let inventory = search_workload(vec![(0usize, root)])
+            .unwrap()
             .enumerate_candidate_dags(4096)
             .unwrap();
         let is_exact = |node: &OperatorNode, kind: ExactKind| {
@@ -7106,7 +7140,7 @@ mod tests {
             "sum_over_time(m[1m])",
         ] {
             let root = lower_promql(query, AccuracyTarget::Exact);
-            let space = search_workload(vec![(0usize, root.clone())]);
+            let space = search_workload(vec![(0usize, root.clone())]).unwrap();
             let inventory = space.enumerate_candidate_dags(4096).unwrap();
             assert!(!inventory.candidates.is_empty());
             let strategy = ASAPStrategies::new(&DefaultCostModel);
@@ -7149,7 +7183,7 @@ mod tests {
     #[test]
     fn unpriced_inventory_retains_quantile_families_and_raw_execution() {
         let query = agg(vec![2], default_quantile(0.9), metric_scan(&["job"]));
-        let space = search_workload(vec![(0usize, query)]);
+        let space = search_workload(vec![(0usize, query)]).unwrap();
         let inventory = space.enumerate_candidate_dags(4096).unwrap();
         let roots = inventory
             .candidates
@@ -7179,7 +7213,7 @@ mod tests {
                 )
             })
             .collect();
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
         assert!(space.enumerate_candidate_dags(4096).is_err());
         for id in 0..24 {
             let inventory = space.enumerate_candidate_dags_for_root(&id, 4096).unwrap();
@@ -7218,7 +7252,7 @@ mod tests {
                 )
             })
             .collect();
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
         let full = space.enumerate_candidate_dags(4096).unwrap();
         for id in 0..2 {
             let inventory = space.enumerate_candidate_dags_for_root(&id, 4096).unwrap();
@@ -7237,7 +7271,7 @@ mod tests {
     #[test]
     fn inventory_budget_never_returns_a_silent_partial_search() {
         let query = agg(vec![2], default_quantile(0.9), metric_scan(&["job"]));
-        let space = search_workload(vec![(0usize, query)]);
+        let space = search_workload(vec![(0usize, query)]).unwrap();
         assert!(space.enumerate_candidate_dags(0).is_err());
     }
 
@@ -7449,7 +7483,7 @@ mod tests {
                 false,
             ),
         ] {
-            let space = search_workload(vec![(0usize, Rc::clone(&root))]);
+            let space = search_workload(vec![(0usize, Rc::clone(&root))]).unwrap();
             let assembled = space
                 .global_selection(&DefaultCostModel)
                 .assemble_selected_query(&space.roots[0].1)
@@ -8272,7 +8306,8 @@ mod tests {
         let space = search_workload_with(
             vec![("q", Rc::clone(&outer))],
             &default_strategies_with(&PreferDDSketchViaCostModel),
-        );
+        )
+        .unwrap();
         let Some(NonASAPOp::Aggregate { child, .. }) = space.roots[0].1.non_asap() else {
             unreachable!()
         };
@@ -8442,7 +8477,7 @@ mod tests {
             },
         };
         let root = agg(vec![2], intent, metric_scan(&["job"]));
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
 
         // One group for the Aggregate, one for its Scan child.
         assert_eq!(space.len(), 2);
@@ -8516,7 +8551,7 @@ mod tests {
     #[test]
     fn cardinality_group_keeps_all_four_candidates() {
         let root = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
         let agg_group = space
             .target_subdag_candidates()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
@@ -8540,7 +8575,8 @@ mod tests {
             )],
             &default_strategies(),
             &DefaultAccuracyModel,
-        );
+        )
+        .unwrap();
         let target = &targeted.roots[0].1;
         assert!(targeted
             .candidates_for_target(target)
@@ -8567,7 +8603,8 @@ mod tests {
             )],
             &default_strategies(),
             &DefaultAccuracyModel,
-        );
+        )
+        .unwrap();
         assert!(exact_target
             .candidates_for_target(&exact_target.roots[0].1)
             .unwrap()
@@ -8585,7 +8622,7 @@ mod tests {
         // SharedSubDAGStrategy's share-vs-recompute pair.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let space = search_workload(vec![("a", a), ("b", b)]);
+        let space = search_workload(vec![("a", a), ("b", b)]).unwrap();
 
         // roots[0] and roots[1] must have merged onto the same Rc.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
@@ -8653,7 +8690,7 @@ mod tests {
             }))
             .unwrap();
 
-        let space = search_workload(vec![("a", root_a), ("b", root_b)]);
+        let space = search_workload(vec![("a", root_a), ("b", root_b)]).unwrap();
         assert_eq!(
             space.len(),
             4,
@@ -8804,7 +8841,7 @@ mod tests {
         for i in 0..20 {
             roots.push((i, Rc::new((*shared).clone())));
         }
-        let space = search_workload(roots);
+        let space = search_workload(roots).unwrap();
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert_eq!(group.consumer_count, 20);
 
@@ -8853,7 +8890,7 @@ mod tests {
         }
 
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
         let ranked = space.cost_sorted(&PreferDDSketch);
         let agg_group = ranked
             .iter()
@@ -8895,7 +8932,8 @@ mod tests {
             };
             let root = agg(vec![2, 3], intent, metric_scan(&["tenant_id", "endpoint"]));
             let strategies = default_strategies_with(&model);
-            let space = search_workload_with(vec![("tenant_endpoint_count", root)], &strategies);
+            let space =
+                search_workload_with(vec![("tenant_endpoint_count", root)], &strategies).unwrap();
             let ranked = space.cost_sorted(&model);
             let aggregate = ranked
                 .iter()
@@ -8926,7 +8964,7 @@ mod tests {
     #[test]
     fn cost_sorted_pairs_each_candidate_with_its_own_estimate_cost() {
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
         let ranked = space.cost_sorted(&DefaultCostModel);
         let agg_group = ranked
             .iter()
@@ -9010,7 +9048,8 @@ mod tests {
         }
 
         let aggregate = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let space = search_workload(vec![("left", Rc::clone(&aggregate)), ("right", aggregate)]);
+        let space =
+            search_workload(vec![("left", Rc::clone(&aggregate)), ("right", aggregate)]).unwrap();
         let root = &space.roots[0].1;
         assert!(cse_candidate_pair(space.candidates_for_target(root).unwrap()).is_some());
         let selected = space.global_selection(&MixedCost);
@@ -9025,7 +9064,7 @@ mod tests {
         // candidate must be cost_sorted's top pick, for both the sketch
         // group and its child Scan.
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
 
         let ranked = space.cost_sorted(&DefaultCostModel);
         let selected = space.global_selection(&DefaultCostModel);
@@ -9052,7 +9091,7 @@ mod tests {
         // gets a group with an empty candidate list (see TargetSubDAGCandidates's own
         // doc) — global_selection must not invent a candidate for it.
         let root = metric_scan(&["job"]);
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
         let selected = space.global_selection(&DefaultCostModel);
         let scan_group = selected
             .target_selections()
@@ -9090,7 +9129,7 @@ mod tests {
         }
 
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
         let selected = space.global_selection(&PreferDDSketch);
         let agg_group = selected
             .target_selections()
@@ -9218,7 +9257,7 @@ mod tests {
             .unwrap()
         };
 
-        let space = search_workload(vec![("root1", a()), ("root2", a()), ("root3", c())]);
+        let space = search_workload(vec![("root1", a()), ("root2", a()), ("root3", c())]).unwrap();
 
         // Fixture sanity: root1/root2 merged onto one shared `a`, and `c`
         // (root1/root2's shared child, and root3 itself) merged onto one
@@ -9341,7 +9380,8 @@ mod tests {
         let space = search_workload(vec![
             ("left", Rc::clone(&shared)),
             ("right", Rc::clone(&shared)),
-        ]);
+        ])
+        .unwrap();
         let planned = &space.roots[0].1;
 
         let selected = space.global_selection(&CompletePlanCost);
@@ -9367,7 +9407,7 @@ mod tests {
             }))
             .unwrap()
         };
-        let space = search_workload(vec![("root1", a()), ("root2", a())]);
+        let space = search_workload(vec![("root1", a()), ("root2", a())]).unwrap();
         let a_rc = &space.roots[0].1;
         let Some(NonASAPOp::Filter { child: c_rc, .. }) = a_rc.non_asap() else {
             panic!("expected Filter root");
@@ -9420,7 +9460,7 @@ mod tests {
             }))
             .unwrap()
         };
-        let space = search_workload(vec![("root1", parent()), ("root2", parent())]);
+        let space = search_workload(vec![("root1", parent()), ("root2", parent())]).unwrap();
         let parent_rc = &space.roots[0].1;
         let Some(NonASAPOp::Filter {
             child: child_rc, ..
@@ -9482,7 +9522,7 @@ mod tests {
         }))
         .unwrap();
         let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(ReplaceFilterChild)];
-        let space = search_workload_with(vec![("q", root)], &strategies);
+        let space = search_workload_with(vec![("q", root)], &strategies).unwrap();
         let root = &space.roots[0].1;
         let selected = space.global_selection(&DefaultCostModel);
         let Replacement::SubDAG(rewrite) = &selected
@@ -9545,7 +9585,7 @@ mod tests {
             }
         }
         let root = lower_promql("sum_over_time(a[1m])", AccuracyTarget::Exact);
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
         let selected = space.global_selection(&Unsupported);
         assert!(selected
             .for_target(&space.roots[0].1)
@@ -9593,7 +9633,7 @@ mod tests {
                 ))
             }
         }
-        let space = search_workload(vec![("q", root.clone())]);
+        let space = search_workload(vec![("q", root.clone())]).unwrap();
         let selected = space.global_selection(&PreferComposed);
         let node = selected.assemble_target(&space.roots[0].1).unwrap();
         assert!(matches!(&node.operator,
@@ -9628,7 +9668,7 @@ mod tests {
             }
         }
         let root = lower_promql("sum by(job)(sum_over_time(a[1m]))", AccuracyTarget::Exact);
-        let space = search_workload(vec![("q", root)]);
+        let space = search_workload(vec![("q", root)]).unwrap();
         let selection = space.global_selection(&ExplicitCosts);
         let selected = selection
             .for_target(&space.roots[0].1)
@@ -9665,7 +9705,7 @@ mod tests {
 
         let a = agg(vec![2], AggIntent::Avg { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Avg { col: None }, metric_scan(&["job"]));
-        let space = search_workload(vec![("a", a), ("b", b)]);
+        let space = search_workload(vec![("a", a), ("b", b)]).unwrap();
         let root = &space.roots[0].1;
         let selected = space.global_selection(&PreferLogicalRewrite);
 
@@ -9765,7 +9805,7 @@ mod tests {
         // module docs — so this always converges in exactly 2 passes).
         let a = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let b = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let space = search_workload(vec![("a", a), ("b", b)]);
+        let space = search_workload(vec![("a", a), ("b", b)]).unwrap();
         assert!(!space.is_empty());
     }
 
@@ -9821,7 +9861,7 @@ mod tests {
         let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(AlwaysGrowingStrategy {
             next: std::cell::Cell::new(0),
         })];
-        let _ = search_workload_with(vec![("q", root)], &strategies);
+        let _ = search_workload_with(vec![("q", root)], &strategies).unwrap();
     }
     // ── realize_child / retain_exact: end-to-end single-target realization ──
     //
@@ -11023,7 +11063,7 @@ mod tests {
                 &RankAdditiveModel,
                 &EqualSplitAllocator,
             ))];
-        let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies);
+        let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies).unwrap();
         let root = &space.roots[0].1;
         let group = space.candidates_for_target(root).unwrap();
         assert!(!group.rejected.is_empty());
@@ -11067,7 +11107,8 @@ mod tests {
             vec![("q", Rc::clone(&q), Some(AccuracyTarget::Epsilon(0.001)))],
             &default_strategies(),
             &DefaultAccuracyModel,
-        );
+        )
+        .unwrap();
         let root = &space.roots[0].1;
         let group = space.candidates_for_target(root).unwrap();
         assert!(group
@@ -11087,7 +11128,8 @@ mod tests {
             vec![("q", Rc::clone(&q), Some(AccuracyTarget::Epsilon(0.01)))],
             &default_strategies(),
             &DefaultAccuracyModel,
-        );
+        )
+        .unwrap();
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group
             .candidates
@@ -11099,7 +11141,8 @@ mod tests {
             vec![("q", Rc::clone(&q), Some(AccuracyTarget::Exact))],
             &default_strategies(),
             &DefaultAccuracyModel,
-        );
+        )
+        .unwrap();
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group.candidates.iter().all(|c| match &c.replacement {
             Replacement::SubDAG(node) if node.contains_asap() => node
@@ -11132,7 +11175,8 @@ mod tests {
             vec![("q", Rc::clone(&q), Some(AccuracyTarget::Epsilon(0.01)))],
             &default_strategies(),
             &DefaultAccuracyModel,
-        );
+        )
+        .unwrap();
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
 
         assert!(group.candidates.iter().any(|candidate| matches!(
@@ -11295,7 +11339,8 @@ mod tests {
             vec![("q", root.clone(), Some(AccuracyTarget::Exact))],
             &default_strategies(),
             &DefaultAccuracyModel,
-        );
+        )
+        .unwrap();
         let selected = space.global_selection(&DefaultCostModel);
         // CSE re-interns the workload, so the space's root/child `Rc`s are not
         // the fixture's. Assembly only assembles children that are discovered

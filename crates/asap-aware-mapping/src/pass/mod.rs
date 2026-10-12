@@ -286,6 +286,8 @@ pub enum OptimizeError {
         entry_index: usize,
         source: RealizationError,
     },
+    #[error("search: {0}")]
+    Search(crate::replacement::SearchError),
     #[error("summary-maintenance-lifecycle selection: {0}")]
     LifecycleSelection(SummaryMaintenanceLifecycleSelectionError),
     #[error("entry {entry_index}: {source}")]

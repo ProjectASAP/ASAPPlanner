@@ -53,7 +53,7 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
 fn exact_dag(query: &str) -> PhysicalASAPDAG {
     let expression = lower(query);
     let root = promql_rows::with_series_identity(&expression).unwrap_or(expression);
-    let space = asap_aware_mapping::search_workload(vec![("q", root)]);
+    let space = asap_aware_mapping::search_workload(vec![("q", root)]).unwrap();
     let selected = space
         .global_selection(&asap_aware_mapping::DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)

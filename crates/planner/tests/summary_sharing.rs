@@ -513,7 +513,7 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
             &UnivMonEvidence,
             &EqualSplitAllocator,
         ))];
-    let space = search_workload_with_targets(roots, &strategies, &UnivMonEvidence);
+    let space = search_workload_with_targets(roots, &strategies, &UnivMonEvidence).unwrap();
     let entry_indices: Vec<usize> = (0..queries.len()).collect();
     let selection = global_selection_with_summary_maintenance_lifecycles(
         &space,

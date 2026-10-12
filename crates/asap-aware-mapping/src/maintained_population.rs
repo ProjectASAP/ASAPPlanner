@@ -397,7 +397,8 @@ mod tests {
                 .map(|(i, r)| (i, Rc::clone(r)))
                 .collect(),
             &[Box::new(MaintainedPopulationStrategy::new(&roots))],
-        );
+        )
+        .unwrap();
         assert!(space
             .target_subdag_candidates()
             .flat_map(|g| &g.candidates)

@@ -265,7 +265,7 @@ pub struct ReplacementExplanation {
 /// "The reframing" section for what that translation actually checks.
 pub fn explain_replacements<Id: Display>(
     roots: Vec<(Id, Rc<OperatorNode>)>,
-) -> Vec<ReplacementExplanation> {
+) -> Result<Vec<ReplacementExplanation>, replacement::SearchError> {
     explain_replacements_with(roots, &replacement::default_strategies())
 }
 
@@ -280,13 +280,13 @@ pub fn explain_replacements<Id: Display>(
 pub fn explain_replacements_with<'s, Id: Display>(
     roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
-) -> Vec<ReplacementExplanation> {
+) -> Result<Vec<ReplacementExplanation>, replacement::SearchError> {
     let ided: Vec<(String, Rc<OperatorNode>)> = roots
         .into_iter()
         .map(|(id, expr)| (id.to_string(), expr))
         .collect();
-    let space = replacement::search_workload_with(ided, strategies);
-    findings_from_candidate_logical_asap_dags(&space)
+    let space = replacement::search_workload_with(ided, strategies)?;
+    Ok(findings_from_candidate_logical_asap_dags(&space))
 }
 
 /// Translate every discovered [`TargetSubDAGCandidates`] in `space` into zero, one, or two
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn approximate_quantile_is_a_sketch_applicability_finding() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let findings = explain_replacements(vec![("dashboard_p99", q)]);
+        let findings = explain_replacements(vec![("dashboard_p99", q)]).unwrap();
         let sketch: Vec<_> = findings
             .iter()
             .filter(|f| f.kind == ExplanationKind::SketchApproximation)
@@ -596,7 +596,7 @@ mod tests {
         let dag = asap_types::dag_export::export(&q);
         let expected_hash = dag.nodes[dag.root as usize].hash;
 
-        let findings = explain_replacements(vec![("dashboard_p99", q)]);
+        let findings = explain_replacements(vec![("dashboard_p99", q)]).unwrap();
         let sketch = findings
             .iter()
             .find(|f| f.kind == ExplanationKind::SketchApproximation)
@@ -620,7 +620,7 @@ mod tests {
             },
             metric_scan(&["job"]),
         );
-        let findings = explain_replacements(vec![("exact_p99", q)]);
+        let findings = explain_replacements(vec![("exact_p99", q)]).unwrap();
         assert!(
             findings
                 .iter()
@@ -638,7 +638,7 @@ mod tests {
         // nested_aggregates_bind_per_node test uses.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
-        let findings = explain_replacements(vec![("q", outer)]);
+        let findings = explain_replacements(vec![("q", outer)]).unwrap();
         let sketch_count = findings
             .iter()
             .filter(|f| f.kind == ExplanationKind::SketchApproximation)
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn pass_through_intent_reports_no_sketch_finding() {
         let q = agg(vec![2], AggIntent::Avg { col: None }, metric_scan(&["job"]));
-        let findings = explain_replacements(vec![("avg_latency", q)]);
+        let findings = explain_replacements(vec![("avg_latency", q)]).unwrap();
         assert!(findings
             .iter()
             .all(|f| f.kind != ExplanationKind::SketchApproximation));
@@ -672,7 +672,7 @@ mod tests {
             Rc::clone(&quantile),
             quantile,
         );
-        let findings = explain_replacements(vec![("ratio", root)]);
+        let findings = explain_replacements(vec![("ratio", root)]).unwrap();
         let sketch: Vec<_> = findings
             .iter()
             .filter(|f| f.kind == ExplanationKind::SketchApproximation)
@@ -694,7 +694,7 @@ mod tests {
         // gate — and identical across both roots, so it is shareable.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let findings = explain_replacements(vec![("dash_a", a), ("dash_b", b)]);
+        let findings = explain_replacements(vec![("dash_a", a), ("dash_b", b)]).unwrap();
         let reuse: Vec<_> = findings
             .iter()
             .filter(|f| f.kind == ExplanationKind::CommonSubexpressionReuse)
@@ -712,7 +712,8 @@ mod tests {
     fn descendant_of_a_shared_root_keeps_every_root_breadcrumb() {
         let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let outer = agg(vec![0], AggIntent::Sum { col: None }, inner);
-        let findings = explain_replacements(vec![("dash_a", Rc::clone(&outer)), ("dash_b", outer)]);
+        let findings =
+            explain_replacements(vec![("dash_a", Rc::clone(&outer)), ("dash_b", outer)]).unwrap();
         let inner_sketch = findings
             .iter()
             .find(|f| {
@@ -731,7 +732,7 @@ mod tests {
             AggIntent::Sum { col: None },
             metric_scan(&["route"]),
         );
-        let findings = explain_replacements(vec![("dash_a", a), ("dash_b", b)]);
+        let findings = explain_replacements(vec![("dash_a", a), ("dash_b", b)]).unwrap();
         assert!(
             findings
                 .iter()
@@ -747,7 +748,7 @@ mod tests {
         // must not report a finding either.
         let a = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let findings = explain_replacements(vec![("a", a), ("b", b)]);
+        let findings = explain_replacements(vec![("a", a), ("b", b)]).unwrap();
         assert!(findings
             .iter()
             .all(|f| f.kind != ExplanationKind::CommonSubexpressionReuse));
@@ -763,7 +764,7 @@ mod tests {
             Rc::clone(&branch),
             branch,
         );
-        let findings = explain_replacements(vec![("ratio", q)]);
+        let findings = explain_replacements(vec![("ratio", q)]).unwrap();
         let reuse: Vec<_> = findings
             .iter()
             .filter(|f| f.kind == ExplanationKind::CommonSubexpressionReuse)
@@ -801,7 +802,7 @@ mod tests {
                 child: shared,
             }))
             .unwrap();
-        let findings = explain_replacements(vec![("a", root_a), ("b", root_b)]);
+        let findings = explain_replacements(vec![("a", root_a), ("b", root_b)]).unwrap();
         let reuse: Vec<_> = findings
             .iter()
             .filter(|f| f.kind == ExplanationKind::CommonSubexpressionReuse)
@@ -843,7 +844,7 @@ mod tests {
         let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
             crate::replacement::ASAPStrategies::new(&custom_model),
         )];
-        let findings = explain_replacements_with(vec![("q", q)], &strategies);
+        let findings = explain_replacements_with(vec![("q", q)], &strategies).unwrap();
         assert_eq!(findings.len(), 1);
         assert!(findings[0].reason.to_lowercase().contains("ddsketch"));
     }

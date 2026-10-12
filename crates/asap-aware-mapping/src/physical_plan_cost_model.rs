@@ -820,7 +820,8 @@ mod tests {
         let space = crate::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
             &crate::replacement::default_strategies(),
-        );
+        )
+        .unwrap();
         let model = PhysicalPlanCostModel::new(&provider, zero_base.clone()).unwrap();
         let selected = space.global_selection(&model);
         assert!(selected
@@ -860,7 +861,8 @@ mod tests {
         let space = crate::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
             &crate::replacement::default_strategies(),
-        );
+        )
+        .unwrap();
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(true, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
@@ -926,7 +928,8 @@ mod tests {
         let space = crate::replacement::search_workload_with(
             vec![("q", query())],
             &crate::replacement::default_strategies(),
-        );
+        )
+        .unwrap();
         let provider = AlmostResident(TestProvider::new(true, WORKING_SET));
         let model = PhysicalPlanCostModel::new(
             &provider,
@@ -971,7 +974,8 @@ mod tests {
         let space = crate::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
             &crate::replacement::default_strategies(),
-        );
+        )
+        .unwrap();
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(false, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
@@ -1080,7 +1084,8 @@ mod tests {
         let space = crate::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
             &crate::replacement::default_strategies(),
-        );
+        )
+        .unwrap();
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(true, 100_000);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();

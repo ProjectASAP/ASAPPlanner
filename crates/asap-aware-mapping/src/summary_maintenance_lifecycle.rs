@@ -1823,7 +1823,7 @@ mod tests {
     #[test]
     fn rejects_invalid_parallel_data_evidence() {
         let query = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let space = crate::replacement::search_workload(vec![("q", quantile_query())]);
+        let space = crate::replacement::search_workload(vec![("q", quantile_query())]).unwrap();
         for rate in [1.0, -1.0, f64::NAN, f64::INFINITY] {
             let mut data = at_rest();
             data.ingestion_rate.value = Some(Rate(rate));
@@ -2655,7 +2655,7 @@ mod tests {
     #[test]
     fn lifecycle_cost_can_fall_back_to_raw_recomputation() {
         let target = sum_query();
-        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
+        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]).unwrap();
         let selection = space.global_selection(&RawCheaper);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
         let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
@@ -2785,7 +2785,7 @@ mod tests {
     #[test]
     fn materialization_falls_back_to_raw_when_raw_cost_is_unavailable() {
         let target = quantile_query();
-        let space = crate::replacement::search_workload(vec![("q", target)]);
+        let space = crate::replacement::search_workload(vec![("q", target)]).unwrap();
         let selection = space.global_selection(&UnitCosts);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
         let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
@@ -2811,7 +2811,7 @@ mod tests {
     #[test]
     fn unmatched_target_is_reported_as_raw_recomputation() {
         let target = query_root();
-        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
+        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]).unwrap();
         let selection = space.global_selection(&RawCheaper);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
         let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
@@ -2837,7 +2837,7 @@ mod tests {
     #[test]
     fn lifecycle_cost_reorders_semantic_summary_candidates_before_materialization() {
         let target = quantile_query();
-        let space = crate::replacement::search_workload(vec![("q", target)]);
+        let space = crate::replacement::search_workload(vec![("q", target)]).unwrap();
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
 
         let selection = global_selection_with_summary_maintenance_lifecycles(
@@ -3001,8 +3001,9 @@ mod tests {
         let space = crate::replacement::search_workload(vec![
             ("p50", quantile(0.5)),
             ("p99", quantile(0.99)),
-        ]);
-        let alone = crate::replacement::search_workload(vec![("p99", quantile(0.99))]);
+        ])
+        .unwrap();
+        let alone = crate::replacement::search_workload(vec![("p99", quantile(0.99))]).unwrap();
         assert_eq!(summaries(&space, &[0, 1]), vec![false, false]);
         assert_eq!(summaries(&alone, &[1]), vec![false]);
     }
@@ -3010,7 +3011,8 @@ mod tests {
     #[test]
     fn normalized_workload_drives_candidate_logical_asap_dags_recurrence_profiles() {
         let root = query_root();
-        let space = crate::replacement::search_workload(vec![("dashboard", Rc::clone(&root))]);
+        let space =
+            crate::replacement::search_workload(vec![("dashboard", Rc::clone(&root))]).unwrap();
         let workload = workload(vec![], vec![repeating()], continuous(1_000, 60_000));
         let profiles = space
             .recurrence_profiles_from_workload(
@@ -3036,7 +3038,8 @@ mod tests {
         let space = crate::replacement::search_workload(vec![
             ("dashboard", repeating_root),
             ("batch", batch_root),
-        ]);
+        ])
+        .unwrap();
         let workload = workload(
             vec![batch(Predictability::AdHoc)],
             vec![repeating()],

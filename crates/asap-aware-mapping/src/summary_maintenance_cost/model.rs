@@ -1404,7 +1404,7 @@ mod tests {
     #[test]
     fn global_selection_compares_streaming_summary_and_raw_over_one_horizon() {
         let target = streaming_sum_query();
-        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
+        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]).unwrap();
         let workload = streaming_workload();
         let mut model = streaming_model();
         for group in space.target_subdag_candidates() {

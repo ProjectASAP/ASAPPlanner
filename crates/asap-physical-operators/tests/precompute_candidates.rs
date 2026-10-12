@@ -51,7 +51,7 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static
     let root =
         asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity(&root)
             .unwrap();
-    search_workload(vec![("grouped-rate", root)])
+    search_workload(vec![("grouped-rate", root)]).unwrap()
 }
 
 fn grouped_rate() -> PhysicalASAPDAG {

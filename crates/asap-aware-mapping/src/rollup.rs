@@ -683,7 +683,8 @@ mod tests {
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &fine_scan);
         let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &coarse_scan);
 
-        let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
+        let space =
+            crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]).unwrap();
         let coarse_group = space
             .target_subdag_candidates()
             .find(|group| {
@@ -723,7 +724,8 @@ mod tests {
         };
         let fine = agg(vec![2, 3], intent.clone(), &metric_scan());
         let coarse = agg(vec![2], intent, &metric_scan());
-        let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
+        let space =
+            crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]).unwrap();
         let coarse_group = space
             .target_subdag_candidates()
             .find(|group| {
