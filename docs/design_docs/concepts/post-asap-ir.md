@@ -112,24 +112,27 @@ gives each sub-DAG one of three options: `NotMaterialized`,
 `MatAtIngestion(medium)` or `MatAtQuery(medium)`, with `Medium::Memory` or
 `Medium::Disk`. A
 [`MaterializationAssignment`](../../../crates/types/src/ir/timing.rs) records
-the option per sub-DAG, named by the node whose output would be stored (a
-`SummaryAgg` or a `MaintainPopulation`); `set(node, materialization)` assigns
+the option per sub-DAG, named by the node whose output would be stored. Any
+node may be named: a summary state, a population, or, as in #509 Example 4,
+the tumbling-window panes a query reads. `set(node, materialization)` assigns
 one, and every other sub-DAG is `NotMaterialized`. Choosing the options is
 Stage 2's job (#604); until then the planner materializes nothing.
 `apply_materialization_timings(root, &assignment, &mut TimingMemo)` then writes a
 timing and a materialization into every node, top-down:
 
 - `SummaryEstimate` and `EvaluatePopulation` run at query time;
-- a `SummaryAgg` or `MaintainPopulation` runs at ingestion time if it is
-  `MatAtIngestion`, and at query time if it is `NotMaterialized` or
-  `MatAtQuery`. Every node upstream of an ingestion-time node also runs at
-  ingestion time, so `MatAtIngestion` over something that can only exist at
-  query time (an evaluation, or a state that is not `MatAtIngestion`) fails
-  with `ExecutionDataStateError::UpstreamNotAtIngestion` ("upstream of
+- a node assigned `MatAtIngestion` runs at ingestion time, and one assigned
+  `MatAtQuery` at query time; a `SummaryAgg` or `MaintainPopulation` that is
+  `NotMaterialized` runs at query time. Every node upstream of an
+  ingestion-time node also runs at ingestion time, so `MatAtIngestion` over
+  something that can only exist at query time (an evaluation, or a state
+  that is not `MatAtIngestion`) fails with
+  `ExecutionDataStateError::UpstreamNotAtIngestion` ("upstream of
   ingestion-time node not at ingestion time");
 - every other node is not stored and runs when its consumer runs: everything
-  that feeds an ingestion-time state runs at ingestion time, everything above
-  an evaluation at query time.
+  that feeds an ingestion-time node runs at ingestion time, everything above
+  an evaluation at query time. A query-time consumer reads a `MatAtIngestion`
+  node's stored output.
 
 The pass then validates every edge (rows or exact-accumulator state into a
 `SummaryAgg`, state into an evaluation, a timed `MaintainPopulation` under
@@ -142,7 +145,8 @@ also Stage 2's decision and is not in the assignment.
 `MaterializationAssignment::with_default(materialization)` gives every sub-DAG
 that is not set explicitly `materialization` where the DAG allows it; a
 `MatAtIngestion` default over a sub-DAG that can only run at query time leaves
-that sub-DAG `NotMaterialized` instead of failing. `validate_maintained` and
+that sub-DAG `NotMaterialized` instead of failing (the default applies to
+`SummaryAgg` and `MaintainPopulation` nodes). `validate_at_ingestion` and
 `planned_data_state` use it to check, at planning time and without keeping
 anything, that a candidate stays valid when every sub-DAG is `MatAtIngestion`.
 

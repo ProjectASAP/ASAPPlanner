@@ -27,7 +27,7 @@ use crate::post_asap::execution_data_state::{
 use crate::post_asap::guarantee::ResultGuarantee;
 use crate::pre_asap::schema::{FieldDataType, Schema};
 
-pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 9;
+pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -68,9 +68,10 @@ pub struct PhysicalASAPDAGNode {
     pub payload: PhysicalASAPOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
-    /// Whether and where the deployment stores this node's output. Not
-    /// `NotMaterialized` only on a `SummaryAgg` or `MaintainPopulation`
-    /// whose sub-DAG the materialization assignment chose to store.
+    /// Whether and where the deployment stores this node's output: the
+    /// option the materialization assignment chose for the sub-DAG this node
+    /// produces. Any node may be stored (#509 §Materialization); a node with
+    /// no assignment is `NotMaterialized`.
     pub materialization: Materialization,
     pub output_schema: Schema,
     pub guarantee: Option<ResultGuarantee>,

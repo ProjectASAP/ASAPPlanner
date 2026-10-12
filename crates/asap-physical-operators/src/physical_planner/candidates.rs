@@ -94,6 +94,8 @@ pub fn cut_candidate(
 /// That holds while timing-dependent lowering (an ingestion-time `Binary`
 /// aligns by value column) has the same timing at compile time as here.
 /// A query-time node feeding an ingestion-time node has no valid placement.
+/// Only ingestion timing is read: a `MatAtQuery` output is not stored by
+/// this frontier yet (choosing and storing it is Stage 2's job).
 pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error> {
     use planner_types::post_asap::ExecutionTiming::IngestionTime;
     let timing = dag
@@ -462,20 +464,20 @@ mod tests {
         )])
     }
 
-    /// Cutting one compilation by a maintained-state timing and by the all
-    /// query-time timing
+    /// Cutting one compilation by a `MatAtIngestion` timing and by the
+    /// `NotMaterialized` (all query-time) timing
     /// lowers each Planner node once and matches `compile_candidate`.
     #[test]
     fn timing_cuts_share_one_lowering() {
         use planner_types::post_asap::ExecutionTiming::QueryTime;
-        let (retained, _, root) = grouped_rate();
-        let ephemeral = with_timing(&retained, |_| QueryTime);
-        let inputs = raw_input(&retained);
+        let (mat_at_ingestion, _, root) = grouped_rate();
+        let not_materialized = with_timing(&mat_at_ingestion, |_| QueryTime);
+        let inputs = raw_input(&mat_at_ingestion);
         let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
         let before = lowered();
-        let compiled = compile(&ephemeral, inputs.clone(), &[root]).unwrap();
+        let compiled = compile(&not_materialized, inputs.clone(), &[root]).unwrap();
         let once = lowered() - before;
-        let cuts = [&retained, &ephemeral].map(|timed| {
+        let cuts = [&mat_at_ingestion, &not_materialized].map(|timed| {
             let frontier = frontier_from_timing(timed).unwrap();
             let cut = cut_candidate(&compiled, &frontier).unwrap();
             (timed, frontier, cut)

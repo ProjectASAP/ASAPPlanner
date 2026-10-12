@@ -25,7 +25,7 @@ use asap_aware_mapping::{
     CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
 };
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::post_asap::{maintained, post_asap_dag, timed};
+use asap_integration_tests::post_asap::{at_ingestion, post_asap_dag, timed};
 use asap_types::dag_export;
 use asap_types::ir::operator_properties::{Reduction, Source};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -389,7 +389,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
         };
         // Timing is not stored on the plan: time it with the outer summary
         // maintained (which also validates every edge) and inspect the copy.
-        let root = maintained(root);
+        let root = at_ingestion(root);
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
             panic!("expected KLL evaluation, got {:?}", root.operator);
         };
@@ -671,7 +671,7 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
 
     let composed = selection.assemble_selected_query(&root).unwrap().unwrap();
     // Walk the timed copy, with the outer summary maintained at ingestion time.
-    let composed = maintained(&composed);
+    let composed = at_ingestion(&composed);
     let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &composed.operator else {
         panic!("expected evaluation root, got {:?}", composed.operator);
     };
@@ -725,7 +725,7 @@ fn summary_construction_follows_its_value_input_phase() {
     // time, because a evaluation sits below it.
     let state = asap_types::ir::planned_data_state(&illegal, ExecutionTiming::IngestionTime);
     assert_eq!(state.timing, ExecutionTiming::QueryTime);
-    asap_types::ir::validate_maintained(&illegal, state.timing).unwrap();
+    asap_types::ir::validate_at_ingestion(&illegal, state.timing).unwrap();
 }
 
 #[test]

@@ -113,7 +113,7 @@ pub mod post_asap {
     }
 
     /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows it.
-    pub fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         timed_with(
             root,
             &MaterializationAssignment::with_default(Materialization::MatAtIngestion(
@@ -137,7 +137,7 @@ pub mod post_asap {
 
     /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows
     /// it, then export the physical DAG.
-    pub fn maintained_post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        compile_physical_asap_dag(&maintained(root)).expect("post-ASAP DAG export failed")
+    pub fn at_ingestion_post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
+        compile_physical_asap_dag(&at_ingestion(root)).expect("post-ASAP DAG export failed")
     }
 }

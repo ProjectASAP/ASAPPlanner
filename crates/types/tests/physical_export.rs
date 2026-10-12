@@ -186,6 +186,7 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     let mut scalar_only = dag.clone();
     scalar_only.roots.clear();
     scalar_only.validate().unwrap();
+    let valid_scalar_only = scalar_only.clone();
     // Materialization is checked on the nodes a scalar reads, too.
     let state = scalar_only
         .nodes
@@ -227,13 +228,13 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     // Keys must strictly ascend: a duplicate or a descending key is rejected.
     let literal: ScalarExpr<usize> =
         ScalarExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(2.0));
-    let mut duplicate = scalar_only.clone();
+    let mut duplicate = valid_scalar_only.clone();
     duplicate.scalar_roots.push((0, literal.clone()));
     assert_eq!(
         duplicate.validate(),
         Err(PhysicalASAPDAGValidationError::ScalarRootPosition(0))
     );
-    let mut descending = scalar_only.clone();
+    let mut descending = valid_scalar_only;
     descending.scalar_roots[0].0 = 1;
     descending.scalar_roots.push((0, literal));
     assert_eq!(
@@ -389,9 +390,9 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     }))
     .unwrap();
     let mut memo = TimingMemo::new();
-    let timed =
-        apply_lifecycle_timings(&root, &LifecycleAssignment::default_maintained(), &mut memo)
-            .unwrap();
+    let at_ingestion =
+        MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory));
+    let timed = apply_materialization_timings(&root, &at_ingestion, &mut memo).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
     assert_eq!(

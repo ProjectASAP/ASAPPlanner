@@ -52,7 +52,7 @@ pub fn compile_physical_asap_dag(
 /// As [`compile_physical_asap_dag`], with every sub-DAG `MatAtIngestion`
 /// where the DAG allows it, the placement precompute compilation requires.
 #[allow(dead_code)] // Not every test binary sharing this module compiles precompute.
-pub fn compile_maintained_physical_asap_dag(
+pub fn compile_at_ingestion_physical_asap_dag(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     compile_with(

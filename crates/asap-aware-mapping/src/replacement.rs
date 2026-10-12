@@ -350,7 +350,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
-use asap_types::ir::timing::validate_maintained;
+use asap_types::ir::timing::validate_at_ingestion;
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
@@ -2003,7 +2003,7 @@ fn exact_topk_over_temporal_values(
         )
         .with_guarantee(guarantee),
     );
-    validate_maintained(&node, ExecutionTiming::QueryTime)?;
+    validate_at_ingestion(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
@@ -2022,7 +2022,7 @@ fn realize_temporal_average(
         return Ok(None);
     };
     operator.checked_finite_division = true;
-    validate_maintained(&node, ExecutionTiming::QueryTime)?;
+    validate_at_ingestion(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
@@ -2754,7 +2754,7 @@ fn finish_weighted_topk(
         )
         .with_guarantee(guarantee),
     );
-    validate_maintained(&result, ExecutionTiming::QueryTime)?;
+    validate_at_ingestion(&result, ExecutionTiming::QueryTime)?;
     Ok(result)
 }
 
@@ -5373,7 +5373,7 @@ impl<'a> GlobalSelection<'a> {
         let node = Rc::new(
             OperatorNode::with_schema(operator, target.schema.clone()).with_guarantee(guarantee),
         );
-        validate_maintained(&node, ExecutionTiming::QueryTime)?;
+        validate_at_ingestion(&node, ExecutionTiming::QueryTime)?;
         Ok(node)
     }
 
@@ -5492,7 +5492,7 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
                 )
                 .with_guarantee(node.guarantee.clone()),
             );
-            match validate_maintained(&rebuilt, ExecutionTiming::IngestionTime) {
+            match validate_at_ingestion(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -6918,7 +6918,9 @@ mod tests {
     use super::*;
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
-    use crate::test_support::{agg, agg_per_entity, lower_promql, maintained, metric_scan, timed};
+    use crate::test_support::{
+        agg, agg_per_entity, at_ingestion, lower_promql, metric_scan, timed,
+    };
     use asap_types::ir::operator_properties::{Reduction as ReductionTy, Source};
     use asap_types::ir::TimeRangeKind;
     use asap_types::pre_asap::agg_intent::{
@@ -10240,7 +10242,7 @@ mod tests {
         let outer = agg(vec![], default_quantile(0.9), inner);
         // Timing is not stored during realization: time the candidate under
         // a maintained materialization assignment to read the maintenance boundary.
-        let root = maintained(&realize(&outer).unwrap());
+        let root = at_ingestion(&realize(&outer).unwrap());
 
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
             panic!("expected estimate root, got {:?}", root.operator);

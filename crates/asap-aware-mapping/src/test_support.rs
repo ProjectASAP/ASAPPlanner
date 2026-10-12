@@ -187,13 +187,13 @@ pub(crate) fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 }
 
 /// `root` timed with every sub-DAG `MatAtIngestion` where the DAG allows it.
-pub(crate) fn maintained(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+pub(crate) fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_materialization_timings(
         root,
         &MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory)),
         &mut TimingMemo::new(),
     )
-    .expect("maintained materialization timings apply")
+    .expect("at-ingestion materialization timings apply")
 }
 
 /// Time `root` under the default materialization assignment (which runs every
