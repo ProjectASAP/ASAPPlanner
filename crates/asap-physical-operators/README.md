@@ -54,6 +54,9 @@ deployment source, including asynchronous I/O; computation operators remain in
 the library. The public `planner` export identifies the exact Planner types used
 by the crate. The physical compiler currently supports a subset of those types and
 operations; it does not interpret an unknown node as external fallback.
+`unified_physical_planner::compile` does the same for a `PhysicalASAPDAG`: a
+node without a native lowering fails compilation, and the deployment runtime
+must execute it.
 
 Plain values preserve Planner scalar/collection types and nullability. Numeric
 arithmetic uses matching Int64 or Float64 inputs; integer overflow is an error.

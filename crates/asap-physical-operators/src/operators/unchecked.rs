@@ -134,13 +134,11 @@ impl TryFrom<UncheckedOperator> for Operator {
                     operator
                 }
             }
-            Kind::Join { kind, predicate } => Operator::relational_join(
+            Kind::Join { kind, predicate } => Operator::bound_relational_join(
                 input(0)?,
                 input(1)?,
                 kind,
-                &planner_types::pre_asap::Predicate(std::rc::Rc::new(
-                    predicate.expression().clone(),
-                )),
+                *predicate,
                 output.clone(),
             )?,
             Kind::SummaryBuild {
