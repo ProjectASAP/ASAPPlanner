@@ -319,9 +319,14 @@ Each target gets one exact option. If its intent has an exact mergeable
 accumulator (Count, Sum, Min, Max, Rate, IRate, Increase; avg via exact sum and
 count accumulator states) and the accumulator can be built, the exact option is
 **exact accumulator state**: a `SummaryAgg` with an exact family →
-`FinalizeExactAccumulator`. Otherwise, for example when a filter or HAVING
-prevents the accumulator or the intent has none, it is the plain exact
-computation. Whether the accumulator is materialized is decided in Stage 2.
+`FinalizeExactAccumulator`. Otherwise, when the intent has no exact
+accumulator or it cannot be built (for example avg over a nullable input), it
+is the plain exact computation. A filter or HAVING does not prevent the
+accumulator or summary candidates: a per-measure filter goes into
+`SummaryAgg.filter`, a HAVING that reads only group keys is pushed below the
+aggregate as a row predicate, and a HAVING that reads aggregate values is a
+`Filter` above the output, with `guarantee = None` for approximate
+candidates. Whether the accumulator is materialized is decided in Stage 2.
 
 Each candidate records its input expression, filter, grouping, window,
 supported estimates and accuracy requirement. Pass 2 uses these to decide
@@ -400,7 +405,7 @@ flowchart LR
   subgraph R2["Replacements(s₂)"]
     direction TB
     d3["Exact Sum accumulator<br/>per job"]:::exact
-    a2["summary candidates<br/>✗ pruned: cannot be exact"]:::pruned
+    a2["no summary candidates:<br/>Sum has no summary family"]:::exact
   end
   subgraph R3["Replacements(s₃)"]
     direction TB

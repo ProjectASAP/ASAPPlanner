@@ -8,8 +8,11 @@ ASAP optimization in [planner layering](../design_docs/proposals/planner-layerin
 inventory containing the original named roots and one `LocalLogicalTarget` per
 eligible aggregate measure. Discovery includes operator producers read by
 scalar roots and expressions. Pointer identity prevents repeated discovery of one
-shared producer. Inputs with assigned execution timing or ASAP operators are
-rejected: the input `LogicalDAG` contains no ASAP summary choices.
+shared producer. Inputs with assigned execution timing or materialization, or
+with ASAP operators, are rejected: the input `LogicalDAG` contains no ASAP
+summary choices or physical annotations. An approximate accuracy requirement
+needs epsilon and delta in (0, 1); otherwise enumeration fails with
+`InvalidAccuracy`, naming the root and measure.
 
 ## Eligibility
 
@@ -43,16 +46,22 @@ the target keeps every candidate and records how the predicate is applied:
 
 - A measure's own filter is recorded as `LocalLogicalTarget.filter`; only
   rows that pass it update the state (`SummaryAgg.filter`).
-- `HAVING` is recorded as `LocalLogicalTarget.having`. The SQL frontend lowers
-  `HAVING` to a `Filter` directly above the aggregate, so that `Filter` counts,
-  as does the aggregate's own `having`. A predicate that reads only `by(...)`
-  group keys is `HavingPlacement::BelowAggregate`: it is pushed below the
-  aggregate as a row predicate, like a measure filter. A predicate that reads
-  aggregate values is `HavingPlacement::AboveOutput`: it stays a `Filter`
-  above the finalize/estimate output, and approximate candidates of the
-  target carry `guarantee = None`, since membership near the threshold may
-  change. When several such filters read one shared aggregate,
-  `AboveOutput` wins.
+- `HAVING` is recorded as `LocalLogicalTarget.having`, one `HavingEntry`
+  (consumer `Filter`, predicate, placement) each. Only the adjacent form is
+  recorded for push-down: the aggregate's own `having` (an entry with no
+  `Filter`) and a `Filter` directly above the aggregate, which is how the SQL
+  frontend lowers `HAVING`. A predicate that reads only `by(...)` group keys
+  is `HavingPlacement::BelowAggregate`: it is pushed below the aggregate as a
+  row predicate, like a measure filter. A consumer `Filter`'s predicate is
+  pushed below only when every consumer of the aggregate applies the same
+  predicate; otherwise another consumer would lose rows. Any other `HAVING`,
+  and every `HAVING` of a global aggregate (no group keys, so its one output
+  row exists even with no input rows), is `HavingPlacement::AboveOutput`: it
+  stays a `Filter` above the finalize/estimate output, and approximate
+  candidates of the target carry `guarantee = None`, since membership near
+  the threshold may change. A value predicate anywhere above an approximate
+  output, adjacent or not, gets `guarantee = None` through guarantee
+  propagation (#575); multi-level push-down is tracked in #664.
 
 For example, an approximate single-column distinct count offers exact execution,
 HLL, Theta, KMV and UnivMon; an approximate `count` offers its exact `Count`
@@ -74,6 +83,10 @@ the target's one exact option.
 
 Distinct-tuple counts do not acquire single-value UnivMon alternatives; that
 family is not declared for them, so it is not a pruned candidate.
+
+TopK offers its per-group heap summaries (`CmsWithHeap`,
+`CountSketchWithHeap`). The grouping-level Hydra candidate ("over all groups")
+is not generated in Pass 1 here; it is added in #605.
 
 ## Scope
 
