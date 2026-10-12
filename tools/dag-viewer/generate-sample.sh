@@ -12,6 +12,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 cargo run -p asap-devtools --bin dag_export -- \
   --post-asap --progress \
   --epsilon 0.01 \
+  --data-ingestion-interval-ms 15000 \
+  --default-cost \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   --sql "SELECT service, AVG(latency) FROM metrics GROUP BY service" --name q2 \
   --promql "topk(5, rate(http_requests_total[5m]))" --name q3 \

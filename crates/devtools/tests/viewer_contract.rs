@@ -6,93 +6,237 @@
 //! uncategorized).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+use std::time::Duration;
 
-use asap_types::ir::{ASAPOp, NonASAPOp};
+use asap_types::ir::{
+    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
+};
+use asap_types::post_asap::maintained_population::{
+    MaintainedPopulation, PopulationInput, PopulationStatistic,
+};
+use asap_types::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
+use asap_types::pre_asap::{
+    ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, FieldDataType, GroupKeys, JoinKind,
+    Reduction, RelationalSetOpKind, SampleKind, ScalarValue, Schema, Source, TimeShift,
+    WindowFuncKind,
+};
 
-/// Every `NonASAPOp::kind_name()`.
-const NON_ASAP_KINDS: &[&str] = &[
-    "Scan",
-    "Values",
-    "Filter",
-    "Project",
-    "Aggregate",
-    "Join",
-    "SetOp",
-    "Concat",
-    "Dedup",
-    "Sort",
-    "Limit",
-    "BinaryOp",
-    "SQLWindowFunc",
-    "TimeRange",
-    "TimeShift",
-    "PromqlVectorFromScalar",
-    "PromqlRelabel",
-    "PromqlInfoEnrich",
-    "PromqlSeriesSample",
-    "PromqlSubquery",
-];
-
-/// Every `ASAPOp::kind_name()`.
-const ASAP_KINDS: &[&str] = &[
-    "SummaryAgg",
-    "SummaryEstimate",
-    "FinalizeExactAccumulator",
-    "MaintainPopulation",
-    "EvaluatePopulation",
-    "SummaryMerge",
-    "SummarySubtract",
-    "SummaryDelete",
-    "SummaryJoin",
-    "Extension",
-];
-
-/// Compile-time tripwire: adding an operator variant fails these exhaustive
-/// matches until the matching `*_KINDS` list above is extended too. Never
-/// called; the match arms are the point.
-#[allow(dead_code)]
-fn kind_lists_track_every_variant(non_asap: &NonASAPOp, asap: &ASAPOp) {
-    let listed = |name: &str, list: &[&str]| assert!(list.contains(&name));
-    listed(
-        match non_asap {
-            NonASAPOp::Scan { .. } => "Scan",
-            NonASAPOp::Values { .. } => "Values",
-            NonASAPOp::Filter { .. } => "Filter",
-            NonASAPOp::Project { .. } => "Project",
-            NonASAPOp::Aggregate { .. } => "Aggregate",
-            NonASAPOp::Join { .. } => "Join",
-            NonASAPOp::SetOp { .. } => "SetOp",
-            NonASAPOp::Concat { .. } => "Concat",
-            NonASAPOp::Dedup { .. } => "Dedup",
-            NonASAPOp::Sort { .. } => "Sort",
-            NonASAPOp::Limit { .. } => "Limit",
-            NonASAPOp::BinaryOp { .. } => "BinaryOp",
-            NonASAPOp::SQLWindowFunc { .. } => "SQLWindowFunc",
-            NonASAPOp::TimeRange { .. } => "TimeRange",
-            NonASAPOp::TimeShift { .. } => "TimeShift",
-            NonASAPOp::PromqlVectorFromScalar(_) => "PromqlVectorFromScalar",
-            NonASAPOp::PromqlRelabel { .. } => "PromqlRelabel",
-            NonASAPOp::PromqlInfoEnrich { .. } => "PromqlInfoEnrich",
-            NonASAPOp::PromqlSeriesSample { .. } => "PromqlSeriesSample",
-            NonASAPOp::PromqlSubquery { .. } => "PromqlSubquery",
+/// One instance of every `NonASAPOp` variant, children elided. The
+/// exhaustive match fails to compile when a variant is added, until a sample
+/// for it is added here too.
+fn non_asap_samples() -> Vec<NonASAPOp<()>> {
+    let pred = || Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true)));
+    let samples = vec![
+        NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::default(),
         },
-        NON_ASAP_KINDS,
-    );
-    listed(
-        match asap {
-            ASAPOp::SummaryAgg { .. } => "SummaryAgg",
-            ASAPOp::SummaryEstimate { .. } => "SummaryEstimate",
-            ASAPOp::FinalizeExactAccumulator { .. } => "FinalizeExactAccumulator",
-            ASAPOp::MaintainPopulation { .. } => "MaintainPopulation",
-            ASAPOp::EvaluatePopulation { .. } => "EvaluatePopulation",
-            ASAPOp::SummaryMerge { .. } => "SummaryMerge",
-            ASAPOp::SummarySubtract { .. } => "SummarySubtract",
-            ASAPOp::SummaryDelete { .. } => "SummaryDelete",
-            ASAPOp::SummaryJoin { .. } => "SummaryJoin",
-            ASAPOp::Extension { .. } => "Extension",
+        NonASAPOp::Values {
+            rows: vec![],
+            schema: Schema::default(),
         },
-        ASAP_KINDS,
-    );
+        NonASAPOp::Filter {
+            pred: pred(),
+            child: (),
+        },
+        NonASAPOp::Project {
+            cols: vec![],
+            qualifier: None,
+            child: (),
+        },
+        NonASAPOp::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![],
+            output_names: vec![],
+            filters: vec![],
+            having: None,
+            child: (),
+        },
+        NonASAPOp::Join {
+            kind: JoinKind::Inner,
+            pred: pred(),
+            left: (),
+            right: (),
+        },
+        NonASAPOp::SetOp {
+            kind: RelationalSetOpKind::Union,
+            all: true,
+            left: (),
+            right: (),
+        },
+        NonASAPOp::Concat {
+            children: vec![],
+            discriminator_unique_key: None,
+        },
+        NonASAPOp::Dedup {
+            cols: vec![],
+            child: (),
+        },
+        NonASAPOp::Sort {
+            keys: vec![],
+            partition_by: GroupKeys::default(),
+            child: (),
+        },
+        NonASAPOp::Limit {
+            n: None,
+            offset: 0,
+            partition_by: GroupKeys::default(),
+            child: (),
+        },
+        NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: (),
+            rhs: (),
+        },
+        NonASAPOp::SQLWindowFunc {
+            func: WindowFuncKind::RowNumber,
+            args: vec![],
+            partition_by: GroupKeys::default(),
+            order_by: vec![],
+            frame: None,
+            output_name: "w".into(),
+            child: (),
+        },
+        NonASAPOp::TimeRange {
+            range: Duration::from_secs(60),
+            kind: TimeRangeKind::Range,
+            child: (),
+        },
+        NonASAPOp::TimeShift {
+            shift: TimeShift::default(),
+            child: (),
+        },
+        NonASAPOp::PromqlVectorFromScalar(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+        NonASAPOp::PromqlRelabel {
+            dst: "l".into(),
+            value: ScalarExpr::Literal(ScalarValue::Utf8("v".into())),
+            child: (),
+        },
+        NonASAPOp::PromqlInfoEnrich {
+            selector: vec![],
+            child: (),
+        },
+        NonASAPOp::PromqlSeriesSample {
+            by: GroupKeys::default(),
+            kind: SampleKind::LimitK(1),
+            child: (),
+        },
+        NonASAPOp::PromqlSubquery {
+            range: Duration::from_secs(60),
+            resolution: None,
+            child: (),
+        },
+    ];
+    for sample in &samples {
+        match sample {
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(_)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. } => {}
+        }
+    }
+    samples
+}
+
+/// One instance of every `ASAPOp` variant, children elided; see
+/// [`non_asap_samples`].
+fn asap_samples() -> Vec<ASAPOp<()>> {
+    let family = FieldDataType::Plain(DataType::Float64);
+    let rows = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "m".into() },
+        predicates: vec![],
+        schema: Schema::default(),
+    }))
+    .unwrap();
+    let samples = vec![
+        ASAPOp::SummaryAgg {
+            child: (),
+            family: family.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::by(vec![]),
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        },
+        ASAPOp::SummaryEstimate {
+            summary_input: (),
+            query: SketchStatistic::FrequencyL2,
+        },
+        ASAPOp::FinalizeExactAccumulator { child: () },
+        ASAPOp::MaintainPopulation {
+            child: (),
+            population: MaintainedPopulation {
+                input: PopulationInput::Rows {
+                    input: Rc::clone(&rows),
+                    value_column: 0,
+                    grouping: GroupKeys::default(),
+                },
+                max_k: 1,
+                quantiles: false,
+            },
+        },
+        ASAPOp::EvaluatePopulation {
+            child: (),
+            evaluation: PopulationStatistic::Sum,
+        },
+        ASAPOp::SummaryMerge { children: vec![] },
+        ASAPOp::SummarySubtract {
+            left: (),
+            right: (),
+        },
+        ASAPOp::SummaryDelete {
+            summary_input: (),
+            key: 0,
+        },
+        ASAPOp::SummaryJoin {
+            outer: (),
+            inner: (),
+            key: 0,
+            family,
+        },
+        ASAPOp::Extension {
+            child: (),
+            name: "x".into(),
+        },
+    ];
+    for sample in &samples {
+        match sample {
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. } => {}
+        }
+    }
+    samples
 }
 
 /// The viewer's `kind -> category` table, parsed out of the JS source the
@@ -115,10 +259,16 @@ fn viewer_kind_categories() -> BTreeMap<String, String> {
 
 #[test]
 fn viewer_categorizes_exactly_the_exported_node_kinds() {
-    let expected: BTreeSet<&str> = NON_ASAP_KINDS.iter().chain(ASAP_KINDS).copied().collect();
+    let non_asap = non_asap_samples();
+    let asap = asap_samples();
+    let expected: BTreeSet<&str> = non_asap
+        .iter()
+        .map(NonASAPOp::kind_name)
+        .chain(asap.iter().map(ASAPOp::kind_name))
+        .collect();
     assert_eq!(
         expected.len(),
-        NON_ASAP_KINDS.len() + ASAP_KINDS.len(),
+        non_asap.len() + asap.len(),
         "exported kind names must be unique"
     );
     let categories = viewer_kind_categories();
