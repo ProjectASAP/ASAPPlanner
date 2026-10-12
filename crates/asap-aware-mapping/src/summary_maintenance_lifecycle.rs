@@ -257,7 +257,7 @@ impl SummaryMaintenanceLifecyclePlan {
 /// exported once. `plans` are the lifecycle plans of every planned sub-DAG
 /// `roots` reach; timing follows the selected lifecycles of their
 /// deployments, as in [`SummaryMaintenanceLifecyclePlan::execution_timed_dag`].
-pub fn execution_timed_workload_dag(
+pub(crate) fn execution_timed_workload_dag(
     roots: &[QueryRoot],
     plans: &[&SummaryMaintenanceLifecyclePlan],
 ) -> Result<PhysicalASAPDAG, SummaryMaintenanceTimingError> {

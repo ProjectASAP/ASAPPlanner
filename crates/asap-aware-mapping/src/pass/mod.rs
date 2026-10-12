@@ -282,7 +282,7 @@ impl PlanOutput {
             .chain(&self.scalar_plans)
             .map(|p| &p.plan)
             .collect();
-        crate::execution_timed_workload_dag(&self.roots(), &plans)
+        crate::summary_maintenance_lifecycle::execution_timed_workload_dag(&self.roots(), &plans)
     }
 
     pub fn len(&self) -> usize {

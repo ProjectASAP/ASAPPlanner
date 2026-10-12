@@ -1,7 +1,8 @@
 //! Query string → planned summary state → `coverage()`, for the examples of
 //! the ASAP primitive schema design doc (#573 §4.2.2). Each query is lowered,
 //! searched and selected with the default cost model, and the quantile's KLL
-//! `SummaryAgg` in the selected DAG is checked.
+//! `SummaryAgg` in the selected DAG is checked: what its `definition` keeps
+//! and what its `selection` takes, row by row of §4.2.2's "More examples".
 
 use std::ops::Bound;
 use std::rc::Rc;
@@ -82,6 +83,16 @@ fn definition_child(state: &OperatorNode) -> Rc<OperatorNode> {
     state.coverage().unwrap().definition.children()[0].clone()
 }
 
+/// The definition keeps the whole sub-DAG below the state: nothing moved
+/// into the selection, which is the one unrestricted box.
+fn assert_nothing_selected(state: &OperatorNode) {
+    assert_eq!(
+        state.coverage().unwrap().selection,
+        vec![SelectionBox::default()]
+    );
+    assert!(Rc::ptr_eq(&definition_child(state), state.children()[0]));
+}
+
 #[tokio::test]
 async fn sql_where_value_set_moves_to_selection() {
     let state =
@@ -108,16 +119,23 @@ async fn sql_where_value_set_moves_to_selection() {
 async fn sql_where_range_moves_to_selection() {
     let state =
         sql_state("SELECT approx_percentile_cont(latency, 0.99) FROM t WHERE latency < 100").await;
-    let constraint = &state.coverage().unwrap().selection[0].columns[&column(Some("t"), "latency")];
+    assert_eq!(
+        state.coverage().unwrap().selection,
+        vec![SelectionBox {
+            columns: [(
+                column(Some("t"), "latency"),
+                Constraint::Interval {
+                    lower: Bound::Unbounded,
+                    upper: Bound::Excluded(ScalarValue::Float64(100.0)),
+                }
+            )]
+            .into(),
+            relative_time: None,
+        }]
+    );
+    let child = definition_child(&state);
     assert!(
-        matches!(
-            constraint,
-            Constraint::Interval {
-                lower: Bound::Unbounded,
-                upper: Bound::Excluded(ScalarValue::Float64(100.0)),
-            }
-        ),
-        "{constraint:?}"
+        matches!(child.non_asap(), Some(NonASAPOp::Scan { predicates, .. }) if predicates.is_empty())
     );
 }
 
@@ -173,21 +191,30 @@ fn promql_offset_window_is_relative_time() {
     ));
 }
 
-/// The label matcher is below `rate`, which the walk does not pass.
+/// The label matcher is below `rate`, which the walk does not pass: the
+/// definition keeps all of it, the matcher included.
 #[test]
 fn promql_matcher_below_rate_stays_in_definition() {
     let state = promql_state("quantile(0.99, rate(m{job=\"api\"}[5m]))");
-    assert_eq!(
-        state.coverage().unwrap().selection,
-        vec![SelectionBox::default()]
-    );
+    assert_nothing_selected(&state);
+    let scans: Vec<_> = OperatorNode::reachable(&definition_child(&state))
+        .into_iter()
+        .filter_map(|node| match node.non_asap() {
+            Some(NonASAPOp::Scan { predicates, .. }) => Some(predicates.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scans, vec![1], "the matcher stays in the scan");
 }
 
 /// A PromQL comparison lowers to a `Filter` above `rate`, so it picks the
-/// rate outputs the state reads.
+/// rate outputs the state reads; the definition keeps the `rate` below it.
 #[test]
 fn promql_comparison_above_rate_moves_to_selection() {
     let state = promql_state("quantile(0.99, rate(m[5m]) > 0)");
+    let filter = state.children()[0];
+    assert!(matches!(filter.non_asap(), Some(NonASAPOp::Filter { .. })));
+    assert!(Rc::ptr_eq(&definition_child(&state), filter.children()[0]));
     assert_eq!(
         state.coverage().unwrap().selection,
         vec![SelectionBox {
@@ -202,4 +229,27 @@ fn promql_comparison_above_rate_moves_to_selection() {
             relative_time: None,
         }]
     );
+}
+
+/// A vector/vector comparison is a `BinaryOp`, which the walk does not enter.
+#[test]
+fn promql_vector_comparison_stays_in_definition() {
+    let state = promql_state("quantile(0.99, rate(a[5m]) > rate(b[5m]))");
+    assert_nothing_selected(&state);
+    assert!(matches!(
+        definition_child(&state).non_asap(),
+        Some(NonASAPOp::BinaryOp { .. })
+    ));
+}
+
+/// A `bool` comparison lowers to a `Project` (values become 0 or 1), which
+/// drops no row, so it stays in the definition.
+#[test]
+fn promql_bool_comparison_stays_in_definition() {
+    let state = promql_state("quantile(0.99, rate(m[5m]) > bool 0)");
+    assert_nothing_selected(&state);
+    assert!(matches!(
+        definition_child(&state).non_asap(),
+        Some(NonASAPOp::Project { .. })
+    ));
 }
