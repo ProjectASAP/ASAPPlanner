@@ -169,6 +169,23 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
         outside.validate(),
         Err(PhysicalASAPDAGValidationError::ScalarRootPosition(2))
     );
+
+    // Keys must strictly ascend: a duplicate or a descending key is rejected.
+    let literal: ScalarExpr<usize> =
+        ScalarExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(2.0));
+    let mut duplicate = scalar_only.clone();
+    duplicate.scalar_roots.push((0, literal.clone()));
+    assert_eq!(
+        duplicate.validate(),
+        Err(PhysicalASAPDAGValidationError::ScalarRootPosition(0))
+    );
+    let mut descending = scalar_only.clone();
+    descending.scalar_roots[0].0 = 1;
+    descending.scalar_roots.push((0, literal));
+    assert_eq!(
+        descending.validate(),
+        Err(PhysicalASAPDAGValidationError::ScalarRootPosition(0))
+    );
 }
 
 /// The roles of a binary operator's edges must match its inputs: swapping

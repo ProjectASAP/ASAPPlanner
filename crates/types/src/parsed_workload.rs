@@ -11,9 +11,7 @@
 use std::rc::Rc;
 
 use crate::ir::{OperatorNode, QueryRoot, ScalarExpr};
-use crate::workload::{
-    DataWorkload, PlanningWorkload, QueryWorkload, QueryWorkloadEntry, WorkloadError,
-};
+use crate::workload::{DataWorkload, PlanningWorkload, QueryWorkload, WorkloadError};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParsedWorkloadError {
@@ -26,10 +24,10 @@ pub enum ParsedWorkloadError {
 /// One lowered expression per normalized workload entry, in
 /// [`QueryWorkload::entries`] order (batch first, then repeating).
 ///
-/// Positional correspondence between `exprs` and the workload's entries is an
-/// invariant, not a convention: the fields are private and [`Self::new`] is the
-/// only constructor, so a caller cannot hand the optimizer a root bound to the
-/// wrong entry's recurrence.
+/// Positional correspondence between the lowered roots and the workload's
+/// entries is an invariant, not a convention: the fields are private and
+/// [`Self::from_roots`] is the only constructor, so a caller cannot hand the
+/// optimizer a root bound to the wrong entry's recurrence.
 #[derive(Debug, Clone)]
 pub struct ParsedWorkload {
     workload: PlanningWorkload,
@@ -39,18 +37,8 @@ pub struct ParsedWorkload {
 }
 
 impl ParsedWorkload {
-    /// `exprs[i]` must be the lowering of `workload.query_workload.entries()`'s
+    /// `roots[i]` must be the lowering of `workload.query_workload.entries()`'s
     /// `i`-th entry.
-    pub fn new(
-        workload: PlanningWorkload,
-        exprs: Vec<Rc<OperatorNode>>,
-    ) -> Result<Self, ParsedWorkloadError> {
-        Self::from_roots(
-            workload,
-            exprs.into_iter().map(QueryRoot::Operator).collect(),
-        )
-    }
-
     pub fn from_roots(
         workload: PlanningWorkload,
         roots: Vec<QueryRoot>,
@@ -104,17 +92,6 @@ impl ParsedWorkload {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// Normalized entries paired with their lowered expression.
-    pub fn entries(&self) -> impl Iterator<Item = (QueryWorkloadEntry, &Rc<OperatorNode>)> + '_ {
-        self.workload
-            .query_workload
-            .entries()
-            .enumerate()
-            .filter(|(index, _)| self.operator_indices.binary_search(index).is_ok())
-            .map(|(_, entry)| entry)
-            .zip(self.exprs.iter())
     }
 
     pub fn operator_indices(&self) -> &[usize] {

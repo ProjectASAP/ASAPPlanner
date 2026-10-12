@@ -185,8 +185,10 @@ pub struct QueryLifecyclePlan {
 #[non_exhaustive]
 pub struct PlanOutput {
     pub plans: Vec<QueryLifecyclePlan>,
-    /// Standalone scalar queries, keyed by workload entry. Each operator
-    /// reference is the root of one of `scalar_plans`.
+    /// Standalone scalar queries, keyed by position in the batch, which is
+    /// the entry index because [`check_contract`] requires dense entry
+    /// indices. Each operator reference is the root of one of
+    /// `scalar_plans`.
     pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
     /// One plan per distinct operator sub-DAG a scalar root reads, keyed by
     /// that scalar's entry, in `scalar_roots` order.
@@ -350,6 +352,33 @@ fn check_contract(
             )));
         }
     }
+    // `scalar_plans` holds one plan per distinct reference of each scalar
+    // root, in `scalar_roots` order, keyed by that scalar's entry.
+    let mut scalar_plans = output.scalar_plans.iter();
+    for (entry_index, expr) in &output.scalar_roots {
+        let mut refs: Vec<&Rc<OperatorNode>> = Vec::new();
+        for node in expr.operator_refs() {
+            if !refs.iter().any(|r| Rc::ptr_eq(r, node)) {
+                refs.push(node);
+            }
+        }
+        for node in refs {
+            match scalar_plans.next() {
+                Some(plan)
+                    if plan.entry_index == *entry_index && Rc::ptr_eq(&plan.plan.root, node) => {}
+                _ => {
+                    return Err(violation(format!(
+                        "scalar root {entry_index} reads an operator without its scalar plan"
+                    )))
+                }
+            }
+        }
+    }
+    if scalar_plans.next().is_some() {
+        return Err(violation(
+            "a scalar plan is read by no scalar root".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -434,6 +463,35 @@ mod tests {
     fn contract_rejects_a_plan_count_that_does_not_cover_every_entry() {
         let output = PlanOutput::new(Vec::new());
         let err = check_contract(&output, "stub", 2).unwrap_err();
+        assert!(matches!(
+            err,
+            OptimizeError::ContractViolation { pass: "stub", .. }
+        ));
+    }
+
+    /// A scalar root's operator reference must be the root of its scalar
+    /// plan; a scalar root without one is rejected.
+    #[test]
+    fn contract_rejects_a_scalar_reference_without_its_plan() {
+        use asap_types::ir::non_asap::NonASAPOp;
+        use asap_types::ir::operator_properties::Source;
+        use asap_types::ir::{Operator, ScalarExpr};
+        use asap_types::pre_asap::schema::{DataType, Field, Schema};
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![Field::plain("ts", DataType::Timestamp, false)],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
+        let mut output = PlanOutput::new(Vec::new());
+        output
+            .scalar_roots
+            .push((0, ScalarExpr::PromqlScalarFromVector(scan)));
+        let err = check_contract(&output, "stub", 1).unwrap_err();
         assert!(matches!(
             err,
             OptimizeError::ContractViolation { pass: "stub", .. }

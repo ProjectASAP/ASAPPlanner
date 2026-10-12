@@ -335,8 +335,6 @@ pub enum PhysicalOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromqlBinaryOperandMode {
     VectorVector,
-    VectorScalar,
-    ScalarVector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1282,9 +1280,6 @@ pub fn estimate_operator(
             let promql = require_promql_binary(edges)?;
             let right = input(1)?;
             let matching_bytes = match operand_mode {
-                PromqlBinaryOperandMode::VectorScalar | PromqlBinaryOperandMode::ScalarVector => {
-                    per_row_width(output.rows, output.bytes)?
-                }
                 PromqlBinaryOperandMode::VectorVector => {
                     let build_series = match build_side.ok_or(
                         AnalyticalCostError::MissingOrStale("vector_match_build_side"),
@@ -2034,28 +2029,6 @@ fn validate_promql_binary(
         return invalid("PromQL binary evaluation steps or output kind are invalid");
     }
     let (row_bound, series_bound) = match operand_mode {
-        PromqlBinaryOperandMode::VectorScalar => {
-            if promql.inputs[0].value_kind != PromqlValueKind::Vector
-                || promql.inputs[1].value_kind != PromqlValueKind::Scalar
-                || cardinality != PromqlVectorCardinality::OneToOne
-                || build_side.is_some()
-                || matching_key_bytes != 0
-            {
-                return invalid("vector/scalar binary configuration is invalid");
-            }
-            (edges.inputs[0].rows, promql.inputs[0].series)
-        }
-        PromqlBinaryOperandMode::ScalarVector => {
-            if promql.inputs[0].value_kind != PromqlValueKind::Scalar
-                || promql.inputs[1].value_kind != PromqlValueKind::Vector
-                || cardinality != PromqlVectorCardinality::OneToOne
-                || build_side.is_some()
-                || matching_key_bytes != 0
-            {
-                return invalid("scalar/vector binary configuration is invalid");
-            }
-            (edges.inputs[1].rows, promql.inputs[1].series)
-        }
         PromqlBinaryOperandMode::VectorVector => {
             if promql
                 .inputs
