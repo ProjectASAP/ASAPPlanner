@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 consumer_dir=$(mktemp -d "${TMPDIR:-/tmp}/asap-metricsql-consumer.XXXXXX")
+trap 'rm -rf "$consumer_dir"' EXIT
 mkdir -p "$consumer_dir/src"
 
 cat > "$consumer_dir/Cargo.toml" <<EOF
@@ -21,6 +22,7 @@ fn main() {
     asap_frontend_metricsql::lower_metricsql(
         "sum(rate(requests_total[5m]))",
         asap_types::types::AccuracyTarget::Exact,
+        std::time::Duration::from_secs(15),
     )
     .expect("a downstream stable crate can parse and lower MetricsQL");
 }

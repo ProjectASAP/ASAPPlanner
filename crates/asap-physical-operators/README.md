@@ -47,7 +47,7 @@ assert!(matches!(batch.rows()[0][0], Value::Int64(-7)));
 # Ok::<(), asap_physical_operators::dag::Error>(())
 ```
 
-`physical_planner::compile` accepts a logical Post-ASAP DAG (`PhysicalASAPDAG`) and typed input contracts.
+`physical_planner::compile` accepts a Planner `PhysicalASAPDAG` and typed input contracts.
 The resulting candidate is instantiated with deployment readers after selection. It rejects unsupported operations and
 schema mismatches before starting a source. Implement `PhysicalOperator` for a
 deployment source, including asynchronous I/O; computation operators remain in

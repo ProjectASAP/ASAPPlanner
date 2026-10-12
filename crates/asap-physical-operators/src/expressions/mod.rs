@@ -15,7 +15,7 @@ pub enum Expression {
         left: Box<Expression>,
         right: Box<Expression>,
     },
-    Planner(Box<crate::expressions::CompiledExpression>),
+    Planner(Box<CompiledExpression>),
     Column(usize),
     ExactFloat64(usize),
     FiniteFloat64(Box<Expression>),
@@ -54,7 +54,7 @@ pub enum Expression {
     IsNull(Box<Expression>),
 }
 impl Expression {
-    pub fn planner(expression: crate::expressions::CompiledExpression) -> Self {
+    pub fn planner(expression: CompiledExpression) -> Self {
         Self::Planner(Box::new(expression))
     }
     pub(crate) fn dtype(&self, input: &SchemaRef) -> Result<(DataType, bool), Error> {

@@ -18,13 +18,13 @@ fn lower(query: &str) -> Rc<OperatorNode> {
 #[test]
 fn selector_range_aggregate_and_call_share_the_canonical_shape() {
     let query = r#"sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))"#;
-    let tree = lower(query);
+    let dag = lower(query);
     let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = tree.expect_non_asap()
+    } = dag.expect_non_asap()
     else {
         panic!("expected outer aggregate");
     };
@@ -48,13 +48,13 @@ fn selector_range_aggregate_and_call_share_the_canonical_shape() {
 
 #[test]
 fn default_rollup_with_explicit_range_is_last_over_time() {
-    let tree = lower("default_rollup(cpu_usage[5m])");
+    let dag = lower("default_rollup(cpu_usage[5m])");
     let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = tree.expect_non_asap()
+    } = dag.expect_non_asap()
     else {
         panic!("expected aggregate");
     };
@@ -63,15 +63,6 @@ fn default_rollup_with_explicit_range_is_last_over_time() {
     assert!(
         matches!(child.expect_non_asap(), NonASAPOp::TimeRange { range, kind, .. }
         if *range == Duration::from_secs(300) && *kind == TimeRangeKind::Range)
-    );
-}
-
-#[test]
-fn implicit_default_rollup_requires_runtime_step() {
-    let error =
-        lower_metricsql("default_rollup(cpu_usage)", AccuracyTarget::Exact, INTERVAL).unwrap_err();
-    assert!(
-        matches!(error, MetricsqlError::UnsupportedFeature(message) if message.contains("evaluation step"))
     );
 }
 

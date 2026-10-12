@@ -900,7 +900,7 @@ fn binary_op_binds_each_branch_against_its_own_schema() {
     );
 }
 
-/// Collect every `AggIntent` in the dag, root-to-leaf.
+/// Collect every `AggIntent` in the DAG, root-to-leaf.
 fn all_intents(e: &OperatorNode) -> Vec<AggIntent> {
     let mut out = Vec::new();
     collect_intents(e, &mut out);
@@ -1501,7 +1501,7 @@ fn explicit_range_selector_is_a_range_time_range() {
 
 #[test]
 fn instant_and_range_selectors_of_equal_length_stay_distinct() {
-    // The kind is part of the shape: a 1s range selector is not the same dag as
+    // The kind is part of the shape: a 1s range selector is not the same DAG as
     // the 1s instant lookback injected around a bare selector.
     assert_ne!(lower("up"), lower("up[1s]"));
 }
