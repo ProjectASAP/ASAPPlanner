@@ -153,8 +153,8 @@
 //!    targets are just two different entries in two different groups,
 //!    sharing every other node in the workload by construction (they *are*
 //!    the same `Rc`s — nothing was copied to make a second "plan").
-//! 2. **Dedup by structural hash + `PartialEq`, reusing `pre_asap::cse`'s own
-//!    discipline.** [`asap_types::pre_asap::cse::structural_hash`] (made
+//! 2. **Dedup by structural hash + `PartialEq`, reusing `ir::cse`'s own
+//!    discipline.** [`asap_types::ir::cse::structural_hash`] (made
 //!    `pub` for exactly this reuse) is only ever a candidate-narrowing
 //!    filter; [`TargetSubDAGCandidates::add_candidate`]'s actual duplicate check is
 //!    `OperatorNode`'s derived `PartialEq` — the same "hash is a filter,

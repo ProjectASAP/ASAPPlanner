@@ -700,7 +700,7 @@ mod tests {
 
     /// A sketch-applicable `Aggregate` reachable via two paths that CSE
     /// collapses onto one `Rc` — the same `median(x) == median(x)` shape
-    /// `pre_asap::cse`'s own `single_query_shares_its_own_repeated_sub-DAG`
+    /// `ir::cse`'s own `single_query_shares_its_own_repeated_sub_dag`
     /// test uses — must be reported once, not once per path: it is exactly
     /// one [`crate::replacement::TargetSubDAGCandidates`], keyed by `Rc` pointer identity,
     /// not one per path that reaches it.

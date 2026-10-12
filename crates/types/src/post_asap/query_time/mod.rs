@@ -1,6 +1,6 @@
 //! Code meant to run at **query execution time**, not planning time —
-//! folder-separated from `post_asap`'s other modules ([`super::expr`],
-//! [`super::schema`], [`super::sketch`]) on purpose.
+//! folder-separated from `post_asap`'s other modules ([`super::sketch`],
+//! [`super::guarantee`]) on purpose.
 //!
 //! `asap-types`' crate doc states the invariant this workspace otherwise
 //! holds to without exception: "no execution logic lives in this

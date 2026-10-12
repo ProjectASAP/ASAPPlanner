@@ -1136,7 +1136,7 @@ mod tests {
     /// Like `scan()`, plus a "job" label column to group by — CSE's
     /// sharing legality gate requires a provable unique key
     /// (`Schema::has_unique_key`), and an *ungrouped* aggregate's empty
-    /// `by` reports none (see `asap_types::pre_asap::cse`'s own "Legality"
+    /// `by` reports none (see `asap_types::ir::cse`'s own "Legality"
     /// module docs); grouping by a label column gives `sum_agg()` below a
     /// real one, matching the pattern
     /// `replacement.rs`'s own CSE fixtures already use (`metric_scan`/`agg`
@@ -1437,7 +1437,7 @@ mod tests {
 
     /// Issue #287 review (lower-priority item): a parent referencing the
     /// same shared child twice (`BinaryOp{lhs: X, rhs: X}`, the same shape
-    /// `pre_asap::cse`'s own within-one-query sharing collapses onto one
+    /// `ir::cse`'s own within-one-query sharing collapses onto one
     /// `Rc`) must credit that child with 2 contributions per repeating
     /// root, matching how `TargetSubDAGCandidates::consumer_count` already counts that
     /// exact structural occurrence twice — not 1, which a plain
