@@ -141,7 +141,7 @@ computed, not which physical operators execute it. Planning builds and shares
 converts a selected, timed tree into a `PhysicalASAPDAG` with stable node IDs
 and typed edges (`compile_physical_asap_workload` does the same for a batch,
 with one root per query), and `PhysicalASAPDAGDocument` is its versioned wire
-envelope (`schema_version` = `PHYSICAL_ASAP_DAG_WIRE_VERSION`, currently 8).
+envelope (`schema_version` = `PHYSICAL_ASAP_DAG_WIRE_VERSION`).
 Physical compilation consumes `PhysicalASAPDAG` and produces a separate
 physical DAG.
 

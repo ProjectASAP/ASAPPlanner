@@ -808,7 +808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `asap_types::dag_export::export(&query)` | Pre-ASAP inspection dag |
 | `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection dag |
 | `asap_types::ir::apply_lifecycle_timings(&root, &assignment, &mut TimingMemo::new())` | Write execution timing into every node from a `LifecycleAssignment` and validate the data-state edges; a lifecycle plan's `root` is already timed |
-| `asap_types::ir::physical_export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as a `PhysicalASAPDAG` (`PHYSICAL_ASAP_DAG_WIRE_VERSION`, currently 8); rejects an untimed node; `compile_physical_asap_workload(&roots)` exports a batch with one root per query |
+| `asap_types::ir::physical_export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as a `PhysicalASAPDAG` (`PHYSICAL_ASAP_DAG_WIRE_VERSION`); rejects an untimed node; `compile_physical_asap_workload(&roots)` exports a batch with one root per query |
 | `PhysicalASAPDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 | `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | Graph plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |
