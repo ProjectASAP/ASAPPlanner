@@ -2,7 +2,8 @@
 //!
 //! If two queries rank the same input and request top-k results with
 //! `small_k < large_k`, the smaller result is exactly the first `small_k`
-//! rows of the larger result.  This strategy therefore replaces
+//! rows of the larger result when both limit over the same partitions.
+//! This strategy therefore replaces
 //! `Limit(small_k, Sort(X))` with `Limit(small_k, Limit(large_k, Sort(X)))`.
 
 use std::rc::Rc;
@@ -29,8 +30,8 @@ impl TopKLimitReuseStrategy {
         let Some(NonASAPOp::Limit {
             n: Some(target_n),
             offset: 0,
+            partition_by: target_partition_by,
             child: target_child,
-            ..
         }) = target.root.non_asap()
         else {
             return Vec::new();
@@ -46,13 +47,15 @@ impl TopKLimitReuseStrategy {
                 let Some(NonASAPOp::Limit {
                     n: Some(n),
                     offset: 0,
+                    partition_by,
                     child,
-                    ..
                 }) = candidate.non_asap()
                 else {
                     return false;
                 };
+                // A global top-k is not a per-group one (or the reverse).
                 n > target_n
+                    && partition_by == target_partition_by
                     && (Rc::ptr_eq(child, target_child) || child.as_ref() == target_child.as_ref())
             })
             .collect();
@@ -121,13 +124,44 @@ mod tests {
     }
 
     fn limit(n: usize, offset: usize, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        partitioned_limit(n, offset, GroupKeys::none(), child)
+    }
+
+    fn partitioned_limit(
+        n: usize,
+        offset: usize,
+        partition_by: GroupKeys,
+        child: Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
         OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Limit {
             n: Some(n),
             offset,
-            partition_by: GroupKeys::none(),
+            partition_by,
             child,
         }))
         .unwrap()
+    }
+
+    /// A global top-10 is not the per-job top-5's source: its rows are the
+    /// ten best overall, not the five best of each job.
+    #[test]
+    fn global_limit_is_not_reused_for_a_per_group_limit() {
+        use asap_types::pre_asap::{DataType, Field};
+        let child = scan(
+            "m",
+            Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("job", DataType::Utf8, false),
+                ],
+                0,
+                vec![],
+            ),
+        );
+        let per_job = partitioned_limit(5, 0, GroupKeys::by(vec![1]), Rc::clone(&child));
+        let global = limit(10, 0, child);
+        let strategy = TopKLimitReuseStrategy::new(&[Rc::clone(&per_job), global]);
+        assert!(!strategy.matches(&TargetSubDAG::new(&per_job)));
     }
 
     #[test]

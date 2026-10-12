@@ -78,8 +78,8 @@ fn recognize(
         NonASAPOp::Limit {
             n: Some(n),
             offset: 0,
+            partition_by: limit_partition_by,
             child,
-            ..
         } => {
             let Some(NonASAPOp::Sort {
                 child,
@@ -89,6 +89,11 @@ fn recognize(
             else {
                 return None;
             };
+            // The limit must keep k rows per the sort's partitions; a global
+            // limit over a partitioned sort (or the reverse) is another query.
+            if limit_partition_by != partition_by {
+                return None;
+            }
             let [key] = keys.as_slice() else {
                 return None;
             };
