@@ -29,7 +29,12 @@
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
-//! groups × k. These numbers are illustrative, not calibrated: a binary,
+//! groups × k. State is priced by its bytes: a sketch by its parameters, a
+//! fixed-size exact accumulator (sum, count, min, max, rate, ...) as one
+//! value per group, and exact state that grows with the data (quantile,
+//! top-k, distinct count, entropy keep every value or item) as one value per
+//! input row of its group, assuming rows spread evenly over groups and, for
+//! distinct items, that every row may be distinct. These numbers are illustrative, not calibrated: a binary,
 //! join or concat node is priced from its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
 //! bad declared rates. Latency bounds and deployment capabilities are not
@@ -45,7 +50,7 @@ use asap_types::post_asap::{
     FieldDataType, Materialization, ResultGuarantee, SketchAlgorithm, SketchParams,
     SketchStatistic, WeightDomain,
 };
-use asap_types::pre_asap::{DataType, Reduction, Schema};
+use asap_types::pre_asap::{AggIntent, DataType, Reduction, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::DataWorkload;
 use thiserror::Error;
@@ -370,7 +375,7 @@ fn price(
     let calibration = ResourceCalibration {
         cost_per_cpu_op: 1e-6,
         cost_per_scan_byte: 1e-7,
-        cost_per_retained_byte: 0.0,
+        cost_per_retained_byte: 1e-7,
         version: "illustrative-v1".into(),
     };
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
@@ -447,6 +452,7 @@ fn price(
                         _ => 1,
                     };
                     let out = edge(group_count);
+                    let held = input.rows.div_ceil(group_count.max(1));
                     let estimate = estimate_operator(
                         PhysicalOperator::HashAggregate {
                             grouping_key_count: keys,
@@ -456,7 +462,11 @@ fn price(
                             edges: unary(out),
                             group_count,
                             key_bytes: 16 * keys,
-                            accumulator_bytes_per_group: 8,
+                            accumulator_bytes_per_group: measures
+                                .iter()
+                                .map(|m| if keeps_every_value(m) { 8 * held } else { 8 })
+                                .sum::<u64>()
+                                .max(8),
                         },
                     );
                     (
@@ -617,7 +627,21 @@ fn row_bytes(schema: &Schema) -> u64 {
         .max(1)
 }
 
-/// Update operations per input row and bytes per state.
+/// Exact state that keeps every value or item of its group, so grows with
+/// the data; other exact accumulators are fixed-size.
+fn keeps_every_value(measure: &AggIntent) -> bool {
+    matches!(
+        measure,
+        AggIntent::Quantile { .. }
+            | AggIntent::TopK { .. }
+            | AggIntent::Cardinality { .. }
+            | AggIntent::FrequencyEntropy { .. }
+    )
+}
+
+/// Update operations per input row and bytes per state. A KLL sketch keeps
+/// at most about `3k` items (its level capacities shrink geometrically by
+/// 2/3); other sketches without a sizing rule here are assumed 1 KiB.
 fn summary_shape(family: &FieldDataType) -> (u64, u64) {
     match family {
         FieldDataType::Sketch(kind, _) => match kind.params() {
@@ -637,6 +661,7 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
                 u64::from(*depth) + 1,
                 8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
             ),
+            SketchParams::Kll { k, .. } => (1, 8 * 3 * u64::from(*k)),
             _ => (1, 1_024),
         },
         _ => (1, 8),
@@ -961,6 +986,39 @@ mod tests {
         .unwrap();
         for id in &summaries {
             assert!(measured.costs.contains_key(*id), "{id} is valid");
+        }
+    }
+
+    /// Exact quantile state keeps every value of its group, so it costs more
+    /// than a quantile sketch sized for ε = 0.01, δ = 0.01, which is selected.
+    #[test]
+    fn exact_quantile_state_costs_more_than_a_sketch() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        for query in [
+            "quantile(0.99, rate(x[5m]))",
+            "quantile by (job) (0.99, rate(x[5m]))",
+        ] {
+            let candidates = all_candidates(query, &target);
+            let selection = select_plan(
+                &candidates,
+                &[Some(target.clone())],
+                &data(),
+                PlanningModels::builtin(),
+            )
+            .unwrap();
+            let exact = candidates.iter().find(|c| !has_summary_estimate(c)).unwrap();
+            let selected = candidates
+                .iter()
+                .find(|c| c.id == selection.selected)
+                .unwrap();
+            assert!(has_summary_estimate(selected), "{query}: {selection:?}");
+            assert!(
+                selection.costs[&selected.id].total < selection.costs[&exact.id].total,
+                "{query}: {selection:?}"
+            );
         }
     }
 
