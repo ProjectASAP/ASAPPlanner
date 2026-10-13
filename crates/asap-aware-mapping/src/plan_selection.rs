@@ -615,14 +615,25 @@ mod tests {
     }
 
     /// A summary whose analytical guarantee misses the target is rejected as
-    /// invalid with a reason; the exact plan is then selected.
+    /// invalid with a reason; the exact plan is then selected. (Top-K
+    /// estimates carry no guarantee since #575, so a quantile summary is used.)
     #[test]
     fn accuracy_failing_candidate_is_rejected_as_invalid() {
-        let candidates = candidates();
+        let planned = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let candidates = all_candidates("quantile_over_time(0.99, m[1m])", &planned);
         let strict = AccuracyTarget::EpsilonDelta {
             epsilon: 1e-6,
             delta: 1e-9,
         };
+        let summaries: Vec<_> = candidates
+            .iter()
+            .filter(|c| has_summary_estimate(c))
+            .map(|c| c.id.as_str())
+            .collect();
+        assert!(!summaries.is_empty());
         let selection = select_plan(
             &candidates,
             &[Some(strict)],
@@ -630,20 +641,17 @@ mod tests {
             PlanningModels::builtin(),
         )
         .unwrap();
-        assert_eq!(selection.selected, "P1");
-        let rejected: BTreeMap<_, _> = selection
-            .rejected
-            .iter()
-            .map(|r| (r.id.as_str(), r))
-            .collect();
-        assert_eq!(rejected.len(), 2);
-        assert!(!rejected["P3"].valid);
-        assert!(
-            rejected["P3"].reason.contains("misses target"),
-            "{}",
-            rejected["P3"].reason
-        );
-        assert!(!selection.costs.contains_key("P3"));
+        assert!(!summaries.contains(&selection.selected.as_str()));
+        for id in &summaries {
+            let rejection = selection.rejected.iter().find(|r| r.id == *id).unwrap();
+            assert!(!rejection.valid);
+            assert!(
+                rejection.reason.contains("misses target"),
+                "{}",
+                rejection.reason
+            );
+            assert!(!selection.costs.contains_key(*id));
+        }
     }
 
     /// Count-Min over weights not proven non-negative is invalid whatever
@@ -667,7 +675,9 @@ mod tests {
     }
 
     /// Each node is priced once, under its DAG id, and the total is the sum;
-    /// every candidate is either selected or rejected as costlier.
+    /// every candidate is either selected or rejected as costlier. The
+    /// CountSketch+heap estimate has no analytical guarantee, so deployment
+    /// evidence admits it.
     #[test]
     fn per_node_costs_cover_the_dag_and_sum_to_the_total() {
         let candidates = candidates();
@@ -679,7 +689,7 @@ mod tests {
             &candidates,
             &[Some(target)],
             &data(),
-            PlanningModels::builtin(),
+            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
         .unwrap();
         for candidate in candidates.iter().filter(|c| c.id != "P2") {
