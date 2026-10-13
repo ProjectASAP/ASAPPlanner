@@ -2,6 +2,10 @@
 
 > Status: accepted decision for the implementation described here.
 
+> **Historical:** that implementation (`CostModel::cse_share_decision` and
+> `cost_sorted` in the legacy search, `cost_model.rs`, `replacement.rs`) was
+> removed (#635); kept as a decision record.
+
 ## Context
 
 Sub-DAG sharing means multiple consumers reference one operator and its
@@ -28,7 +32,7 @@ decides the framework for stage 4, "wire workload-level CSE credit into
 ## Decision: cost-based (Volcano/Cascades), implemented for real
 
 This lands as an actual cost comparison, not a documented-but-unimplemented
-shape. [`CostModel::cse_share_decision`](../../../crates/asap-aware-mapping/src/cost_model.rs)
+shape. `CostModel::cse_share_decision` (removed `cost_model.rs`)
 compares two real, overridable cost estimates for every CSE candidate with
 two or more consumers:
 
@@ -78,7 +82,7 @@ gate) and the cost-aware decision is applied downstream, in
 
 ## Where it hooks in
 
-[`CandidateLogicalASAPDAGs::cost_sorted`](../../../crates/asap-aware-mapping/src/replacement.rs)
+`CandidateLogicalASAPDAGs::cost_sorted` (removed `replacement.rs`)
 is where this hooks in today. `search_workload_with` computes each shared
 sub-DAG's true `consumer_count` across the whole workload up front (the same
 role `implement_workload_with`'s pre-pass used to play, before that function
@@ -86,7 +90,7 @@ was retired along with `bind.rs` — this crate no longer commits to one
 physically-materialized answer at all; picking and building one final
 `SummaryNode` per shared sub-DAG is a downstream deployment's job, not this
 crate's). For a `TargetSubDAGCandidates` whose candidates are a
-[`SharedSubDAGStrategy`](../../../crates/asap-aware-mapping/src/replacement.rs)
+`SharedSubDAGStrategy` (removed `replacement.rs`)
 share-vs-recompute pair, `cost_sorted`'s ranking step (`rank_group`/
 `cse_preference`) asks `CostModel::cse_share_decision` once per group — using
 one representative bound `SummaryNode` built just for that comparison, not

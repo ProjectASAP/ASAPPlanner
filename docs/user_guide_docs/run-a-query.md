@@ -1,12 +1,12 @@
 # ASAPPlanner CLI user guide
 
-Use the `asap-devtools` commands to inspect query IR, export DAGs, and inspect
+Use the `asap-devtools` commands to inspect query IR, plan workloads, and inspect
 corpus coverage. These commands do not deploy or execute a physical plan.
 
 To develop an application using the Rust library, start with
 [Library API: definitions, options, and examples](../develop_docs/library-api.md).
-That guide explains how to choose strategies and models, rank candidates, and
-assemble selected DAGs.
+That guide explains how to plan a workload with the stage pipeline, inspect
+Stage 1's alternatives, and supply deployment models.
 
 ## Choose a command
 
@@ -15,14 +15,12 @@ tool on first use.
 
 | Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
-| `show_pre_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
-| `show_post_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | Same query file format | Prints all sketch-strategy Post-ASAP candidates using a fixed approximate target, in cost-model order |
-| `dag_export --data-ingestion-interval-ms 1000 --promql "<query>"` | One PromQL expression | Exports a query DAG for inspection |
-| `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query DAG for inspection |
+| `show_logical_dag --data-ingestion-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
+| `stage_pipeline --promql "<query>" --epsilon 0.01 --out plan.json` | PromQL expressions (`--promql` may repeat) | Writes the planner's four stages and the selected plan as JSON |
 | `analyze_corpora --corpora --data-ingestion-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
 | `variant_coverage --data-ingestion-interval-ms 1000` | Repository corpora | Reports Pre-ASAP IR variant coverage |
-| `sketch_coverage --data-ingestion-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports sketch/reuse opportunities among successfully lowered queries |
+| `sketch_coverage --data-ingestion-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Lists, per query, the sketch alternatives Stage 1 offers, and each corpus's coverage |
 
 ## Inspect a query from the command line
 
@@ -40,8 +38,8 @@ promql> quantile(0.99, rate(http_requests_total[5m]))
 sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 ```
 
-Blank lines and lines beginning with `#` are ignored. The two file/stdin tools
-accept `sql>` and `promql>`; MetricsQL is available through the library frontend.
+Blank lines and lines beginning with `#` are ignored. The file/stdin tool
+accepts `sql>` and `promql>`; MetricsQL is available through the library frontend.
 SQL examples use the fixed catalog
 `metrics(ts: Timestamp, service: Utf8, region: Utf8, latency: Float64, bytes: Int64)`.
 For your own schema, provide a `SqlCatalog` through the library API.
@@ -51,13 +49,13 @@ For your own schema, provide a `SqlCatalog` through the library API.
 Run:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir -- --data-ingestion-interval-ms 1000 queries.txt
+cargo run -p asap-devtools --bin show_logical_dag -- --data-ingestion-interval-ms 1000 queries.txt
 ```
 
 You can also provide the queries through stdin:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir -- --data-ingestion-interval-ms 1000 < queries.txt
+cargo run -p asap-devtools --bin show_logical_dag -- --data-ingestion-interval-ms 1000 < queries.txt
 ```
 
 To dump and compare every PromQL corpus, run:
@@ -78,61 +76,18 @@ The corresponding SQL corpus analysis is:
 cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir artifacts/sql_pre_asap
 ```
 
-### Inspect Post-ASAP IR candidates
-
-Run:
-
-```sh
-cargo run -p asap-devtools --bin show_post_asap_ir -- --data-ingestion-interval-ms 1000 queries.txt
-```
-
-Or through stdin:
-
-```sh
-cargo run -p asap-devtools --bin show_post_asap_ir -- --data-ingestion-interval-ms 1000 < queries.txt
-```
-
-`show_post_asap_ir` uses an approximation target of ε = 0.01 and prints every
-available binding from the sketch strategy for each query, numbered in cost-model
-order. If no candidate is available, it prints the pre-ASAP fallback as candidate
-1. It does not show the complete ranked workload candidate set or choose a
-deployment. Its SQL examples use a fixed demonstration catalog, not
-your database schema. Use the
-[library workflow](../develop_docs/library-api.md) to retain workload alternatives
-and provide your own models.
-
-The default strategy generates DDSketch quantile-ratio candidates even when no
-input-domain evidence is available. Such candidates have `guarantee: None`:
-they do not claim a certified end-to-end accuracy bound. They also remain
-visible in a target-aware `CandidateLogicalASAPDAGs` so the downstream backend can decide
-whether to select them using its own evidence. Planner's automatic
-`global_selection` skips them; their presence alone does not show that they
-meet the requested target.
-
-Each input line is followed by its debug IR or an `ERR:` message. Pre-ASAP and
-Post-ASAP output use the same node format: Post-ASAP output adds summary nodes
-(state, readouts) and keeps the original exact operators wherever no summary
-replaces them. An
-approximate target permits approximation; it does not guarantee a legal or
-certified sketch. The tool prints plans, not query results.
-
 ## More inspection commands
 
-### Export a query DAG
-
-Export pre-ASAP IR for SQL or PromQL queries for use with the interactive DAG viewer:
+### See how the planner plans a workload
 
 ```sh
-cargo run -p asap-devtools --bin dag_export -- --sql "<SQL query>"
+cargo run -p asap-devtools --bin stage_pipeline -- --promql "<PromQL query>" --epsilon 0.01 --out plan.json
 ```
 
-or:
-
-```sh
-cargo run -p asap-devtools --bin dag_export -- --data-ingestion-interval-ms 1000 --promql "<PromQL query>"
-```
-
-See [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md) for instructions on running the DAG viewer.
+writes the planner's four stages for the query: the frontends' DAG (Stage 0),
+the logical candidates (Stage 1), the physical candidates (Stage 2) and the
+selected plan with each candidate's cost (Stage 3). Without `--epsilon` the
+queries are exact. It prints plans, not query results.
 
 ### Check IR variant coverage
 
@@ -144,13 +99,13 @@ cargo run -p asap-devtools --bin variant_coverage -- --data-ingestion-interval-m
 
 ### Check sketch-replacement coverage
 
-Parse the same query corpora, lower them with an approximate `AccuracyTarget`, and report what fraction of each corpus's successfully-lowered queries got a genuine sketch alternative (`SketchApproximation`, e.g. KLL vs. DDSketch) and/or a cross-query common-subexpression-reuse candidate (`CommonSubexpressionReuse`):
+Parse the same query corpora, lower them with an approximate `AccuracyTarget`, and list, per query, the sketch alternatives (e.g. KLL and DDSketch) Stage 1's Pass 1 offers, with the fraction of each corpus's successfully-lowered queries that got at least one:
 
 ```sh
 cargo run -p asap-devtools --bin sketch_coverage -- --data-ingestion-interval-ms 1000 --epsilon 0.01
 ```
 
-`--epsilon` is optional (defaults to `0.01`). See the binary's own doc comment for exactly how "coverage" is defined and attributed back to each query.
+`--epsilon` is optional (defaults to `0.01`).
 
 ## Additional examples
 
@@ -176,5 +131,5 @@ cargo run -p asap-devtools --example canonical_examples
 
 PromQL commands require `--data-ingestion-interval-ms` with the nonzero source
 sample cadence in milliseconds. The examples use a one-second cadence; supply
-the interval for your data. The mixed-input `show_pre_asap_ir` and
-`show_post_asap_ir` tools require this option even for SQL-only input files.
+the interval for your data. The mixed-input `show_logical_dag` tool requires
+this option even for SQL-only input files.

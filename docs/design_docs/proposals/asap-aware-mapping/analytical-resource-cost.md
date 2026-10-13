@@ -2,9 +2,13 @@
 
 > Status: implemented model with explicit support limits. The
 > [analytical estimator](../../../../crates/asap-aware-mapping/src/analytical_cost.rs)
-> and physical-plan adapter implement supported evidenced comparisons.
+> prices Stage 3's candidates.
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
 > proposed extensions are not implied by the implemented formulas.
+
+> **Historical:** the physical-plan adapter (`PhysicalPlanCostModel`) and the
+> `DefaultCostModel` / `global_selection` path described below were removed with
+> the legacy cost model and search (#622, #635).
 
 ## Purpose and boundaries
 

@@ -1,5 +1,8 @@
 # Explaining a Replacement
 
+> **Historical:** the explanation module described here (`explain_replacements`)
+> was removed with the legacy replacement search (#635).
+
 ASAP-aware mapping should make its discovered opportunities visible to users and other components.
 
 For each relevant region of the plan, the planner should be able to explain:
@@ -24,4 +27,7 @@ Additional opportunities:
     - reuse finer-grained aggregation through roll-up
 ```
 
-Implemented as `asap-aware-mapping`'s `explanation` module (`explain_replacements`/`explain_replacements_with`, issue #257)
+The legacy replacement search implemented this (`explanation`,
+`explain_replacements`, issue #257); it was removed with that search. Today the
+`sketch_coverage` devtool lists, per query, the sketch alternatives Stage 1's
+Pass 1 offers.

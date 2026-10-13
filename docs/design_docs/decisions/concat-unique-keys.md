@@ -4,6 +4,8 @@
 
 > Historical: `crates/types/src/pre_asap/query_expr.rs` was removed in #543;
 > `Concat` is now `NonASAPOp::Concat` (`crates/types/src/ir/non_asap.rs`).
+> `dag_export.rs`, `replacement.rs` and `explanation.rs`, named below, have
+> since been removed (#616, #635).
 
 > **Update**: the investigation below found no current call site paying for a
 > redundant `Dedup` that this override would remove, and the original version

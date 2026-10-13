@@ -2,6 +2,9 @@
 
 > Status: planner rule implemented; deployment support is conditional. See
 > [MaintainedPopulationStrategy](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
+> `MaintainedPopulationStrategy` no longer implements the removed
+> `ReplacementStrategy` (#635): a deployment calls `candidate` directly, and
+> the stage pipeline does not offer it.
 > A deployment must provide the membership, freshness, state and operation
 > capabilities described below. Planner representation alone does not implement
 > population maintenance in a runtime.

@@ -14,8 +14,9 @@ What that buys:
 * A new optimization algorithm can be freely implemented as a trait implementation, rather than a
   rule disguised to fit a two-phase pipeline it does not share.
 
-Unchanged: `CandidateLogicalASAPDAGs`, `cost_sorted`, `global_selection`, and the interface
-[input, output, and workflows](input-output-workflow.md) describes.
+> **Historical:** the legacy API (`CandidateLogicalASAPDAGs`, `cost_sorted`,
+> `global_selection`) was later removed (#630, #635); the "before" example
+> below uses it.
 
 ```text
 PlanningWorkload ──lowering──▶ ParsedWorkload ──OptimizationPass──▶ PlanOutput
@@ -127,8 +128,8 @@ selection; the `stage_pipeline` devtool shows them. Every combination is enumera
 every candidate; nothing is capped. A search that avoids building every
 candidate is future work (#671).
 
-`ReplacementStrategy` remains a concept of the legacy candidate search, which
-no pass uses any more.
+`ReplacementStrategy` was a concept of the legacy candidate search, which has
+been removed (#635).
 
 ### 3.2 Plugging in another pass
 

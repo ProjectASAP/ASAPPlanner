@@ -19,13 +19,11 @@ Start with [ASAPPlanner input, output, and workflows](design_docs/architecture/i
 for the integration boundary, nested inputs, and choice of planning workflow.
 
 Use [Public library functions and examples](develop_docs/library-api.md) for
-frontend lowering, workload search, ranking, selection and DAG assembly.
+frontend lowering and planning a workload with the stage pipeline.
 
 ## Extend the planner
 
-1. Read the [ASAP-aware mapping architecture](develop_docs/asap-aware-mapping-architecture.md).
-2. Consult [mapping contracts](develop_docs/asap-aware-mapping-contracts.md).
-3. Follow [Extend ASAP-aware mapping](develop_docs/extend-asap-aware-mapping.md).
+Read the [ASAP-aware mapping architecture](develop_docs/asap-aware-mapping-architecture.md).
 
 ## Understand a design
 
