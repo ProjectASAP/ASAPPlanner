@@ -141,7 +141,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
         .filter(|c| shown.contains(c.id.as_str()))
         .map(|c| match &c.roots {
             Ok(roots) => json!({ "id": c.id, "label": c.label, "dag": export(roots) }),
-            Err(error) => json!({ "id": c.id, "label": c.label, "error": error }),
+            Err(error) => json!({ "id": c.id, "label": c.label, "error": error.to_string() }),
         })
         .collect();
     let physical: Vec<_> = run
