@@ -21,7 +21,7 @@ comment) and only differs in packaging: one query's worth of exported
 shared-hash highlighting *is* what this repo has for CSE today — both a
 hash-based proxy, not real CSE output; see README.md's "Shared-sub-DAG
 highlighting is a proxy" section. Structured cost/benefit annotations
-(issue #286, `CostAnnotation` in crates/types/src/cost.rs) pass through
+(issue #286, a WorkloadDAG `CostAnnotation`) pass through
 this deep-copy untouched, same as everything else `prepare_workload` below
 doesn't explicitly rewrite — viewer.js reads `decision.baseline_cost` /
 `.selected_cost` / `.benefit`, `NamedDAG.workload_cost`, and

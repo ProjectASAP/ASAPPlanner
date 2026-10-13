@@ -644,8 +644,8 @@ function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
 
 // ── Structured cost/benefit annotations ───────────────────────────────────
 // Renders only what a WorkloadDAG JSON export explicitly carries
-// (`CostAnnotation`/`WorkloadCostSummary`/`EdgeCostAnnotation` from
-// crates/types/src/cost.rs) — no client-side cost estimation. A value with
+// (`CostAnnotation`/`WorkloadCostSummary`/`EdgeCostAnnotation`) — no
+// client-side cost estimation. A value with
 // no `source: "Modeled"|"Measured"` (i.e. `Unavailable`, or the field
 // simply absent from an older export) always reads "Not estimated", never
 // a fabricated number.
