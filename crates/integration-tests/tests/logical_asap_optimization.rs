@@ -452,8 +452,7 @@ fn avg_table() -> SqlCatalog {
 
 /// SQL `avg` as `sum` and `count` states executes as the exact aggregate:
 /// NULL and '' groups stay apart, a non-Utf8 key works, and an empty global
-/// input averages to NULL. The measured column is `value`: the runtime binds
-/// a `count(*)` state's update to that name.
+/// input averages to NULL.
 #[tokio::test]
 async fn sql_avg_from_sum_and_count_executes_as_avg() {
     let catalog = avg_table();
@@ -553,4 +552,177 @@ fn promql_avg_divides_sum_and_count_vectors() {
         kinds.contains(&"BinaryOp") && !kinds.contains(&"Join"),
         "{kinds:?}"
     );
+}
+
+/// `t(k Utf8 NULL, <columns>)` as a catalog.
+fn table(columns: &[(&str, bool)]) -> SqlCatalog {
+    let mut fields = vec![Field::plain("k", DataType::Utf8, true)];
+    fields.extend(
+        columns
+            .iter()
+            .map(|(name, nullable)| Field::plain(*name, DataType::Float64, *nullable)),
+    );
+    SqlCatalog::new().with_table("t", Schema::new(fields))
+}
+
+/// Every candidate of `query` over `catalog`, composed, by candidate.
+async fn every_candidate(
+    catalog: &SqlCatalog,
+    query: &str,
+) -> Vec<(
+    ComputationCandidate,
+    Result<
+        Vec<(i32, QueryRoot)>,
+        asap_aware_mapping::per_computation_candidates::PerComputationCandidateError,
+    >,
+)> {
+    let root = lower_sql(query, catalog, accuracy()).await.unwrap();
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    assert_eq!(inventory.targets.len(), 1, "{query}");
+    inventory.targets[0]
+        .choices
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            (
+                candidate.clone(),
+                compose_logical_candidate(&inventory, &[index]),
+            )
+        })
+        .collect()
+}
+
+/// The update of every `count` state (exact or sketch) below `root`.
+fn count_updates(root: &QueryRoot) -> Vec<SummaryUpdate> {
+    let QueryRoot::Operator(root) = root else {
+        panic!("operator root expected")
+    };
+    OperatorNode::reachable(root)
+        .iter()
+        .filter_map(|node| match node.asap() {
+            Some(ASAPOp::SummaryAgg { family, input, .. })
+                if !matches!(
+                    family,
+                    FieldDataType::ExactAggregate(asap_types::post_asap::ExactKind::Sum, _)
+                ) =>
+            {
+                Some(input.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `update` reads only the column `name` of `t`.
+fn reads_only(update: &SummaryUpdate, name: &str) -> bool {
+    let column = SummaryInputExpr::Column(ColumnRef::Qualified {
+        table: "t".into(),
+        name: name.into(),
+    });
+    match &update.item {
+        Some(item) => *item == column && update.weight == SummaryInputExpr::Constant(1.0),
+        None => update.weight == column,
+    }
+}
+
+/// `avg(c)`'s count counts `c`, not a nullable `value` column: the result is
+/// the exact `avg`.
+#[tokio::test]
+async fn sql_avg_counts_its_own_input() {
+    let catalog = table(&[("value", true), ("c", false)]);
+    let query = "SELECT k, avg(c) FROM t GROUP BY k";
+    let (exact, root) = avg_as_sum_and_count(&catalog, query).await;
+    let row = |k: &str, value: Option<f64>, c: f64| {
+        vec![
+            ("k", Value::Utf8(k.into())),
+            ("value", value.map_or(Value::Null, Value::Float64)),
+            ("c", Value::Float64(c)),
+        ]
+    };
+    let rows = vec![
+        row("a", None, 1.),
+        row("a", Some(5.), 3.),
+        row("b", None, 4.),
+    ];
+    let want = vec![
+        vec!["\"a\"".to_string(), "2".to_string()],
+        vec!["\"b\"".to_string(), "4".to_string()],
+    ];
+    assert_eq!(execute(&exact, &rows), want);
+    assert_eq!(execute(&root, &rows), want);
+}
+
+/// `count(*)` counts a non-null column, never a nullable one; executed, it
+/// counts the rows whose nullable column is NULL too.
+#[tokio::test]
+async fn sql_count_star_counts_a_non_null_column() {
+    let catalog = table(&[("v", true), ("n", false)]);
+    let query = "SELECT k, count(*) FROM t GROUP BY k";
+    for (candidate, composed) in every_candidate(&catalog, query).await {
+        let composed = composed.unwrap_or_else(|e| panic!("{candidate:?}: {e}"));
+        composed[0].1.validate_structure().unwrap();
+        let updates = count_updates(&composed[0].1);
+        assert_eq!(updates.len(), 1, "{candidate:?}");
+        assert!(reads_only(&updates[0], "n"), "{candidate:?}: {updates:?}");
+    }
+    let (exact, root) = {
+        let exact = lower_sql(query, &catalog, accuracy()).await.unwrap();
+        let inventory =
+            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(exact.clone()))])
+                .unwrap();
+        let QueryRoot::Operator(root) = compose_logical_candidate(&inventory, &[0])
+            .unwrap()
+            .remove(0)
+            .1
+        else {
+            panic!("operator root expected")
+        };
+        (exact, root)
+    };
+    let row = |k: &str, v: Option<f64>| {
+        vec![
+            ("k", Value::Utf8(k.into())),
+            ("v", v.map_or(Value::Null, Value::Float64)),
+            ("n", Value::Float64(0.)),
+        ]
+    };
+    let rows = vec![row("a", None), row("a", Some(1.)), row("b", None)];
+    assert_eq!(execute(&root, &rows), execute(&exact, &rows));
+}
+
+/// `count(*)` with no column known to be non-null (one nullable numeric
+/// column, or several and none named `value`) is unsupported for every
+/// candidate, not a count of a nullable column or an invalid DAG.
+#[tokio::test]
+async fn sql_count_star_without_a_non_null_column_is_unsupported() {
+    for columns in [&[("v", true)][..], &[("a", true), ("b", true)][..]] {
+        let catalog = table(columns);
+        for (candidate, composed) in
+            every_candidate(&catalog, "SELECT k, count(*) FROM t GROUP BY k").await
+        {
+            match composed {
+                Err(asap_aware_mapping::per_computation_candidates::PerComputationCandidateError::Unsupported(_)) => {}
+                other => panic!("{columns:?} {candidate:?}: {other:?}"),
+            }
+        }
+    }
+}
+
+/// `count(v)` of a nullable `v` updates on `v` under its `v IS NOT NULL`
+/// filter: it counts the non-null values. The runtime executes no filtered
+/// state yet, so the shape is checked.
+#[tokio::test]
+async fn sql_count_of_a_nullable_column_counts_its_values() {
+    let catalog = table(&[("v", true), ("n", false)]);
+    for (candidate, composed) in
+        every_candidate(&catalog, "SELECT k, count(v) FROM t GROUP BY k").await
+    {
+        let composed = composed.unwrap_or_else(|e| panic!("{candidate:?}: {e}"));
+        composed[0].1.validate_structure().unwrap();
+        let updates = count_updates(&composed[0].1);
+        assert_eq!(updates.len(), 1, "{candidate:?}");
+        assert!(reads_only(&updates[0], "v"), "{candidate:?}: {updates:?}");
+    }
 }

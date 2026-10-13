@@ -504,6 +504,9 @@ pub fn compose_logical_candidate<Id: Clone>(
                     )
                 }
             };
+            // A substitution this module cannot express is an error, never an
+            // invalid DAG.
+            root.validate_structure()?;
             Ok((id.clone(), root))
         })
         .collect()
@@ -760,11 +763,11 @@ fn substitute_measure(
     let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
         unreachable!("substitute checked the aggregate")
     };
-    let state = |family: FieldDataType, intent: &AggIntent| {
+    let state = |family: FieldDataType, intent: &AggIntent, read: SummaryInputExpr| {
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::SummaryAgg {
                 child: input.clone(),
-                input: summary_update(intent, &family, reduction, &input.schema)?,
+                input: summary_update(intent, &family, reduction, &input.schema, read)?,
                 family,
                 reduction: reduction.clone(),
                 grouping: GroupingStrategy::default(),
@@ -772,8 +775,8 @@ fn substitute_measure(
             },
         ))?)
     };
-    let finalized = |kind: ExactKind, params: ExactParams, intent: &AggIntent| {
-        let state = state(FieldDataType::ExactAggregate(kind, params), intent)?;
+    let finalized = |kind: ExactKind, params: ExactParams, intent: &AggIntent, read| {
+        let state = state(FieldDataType::ExactAggregate(kind, params), intent, read)?;
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::FinalizeExactAccumulator { child: state },
         ))?)
@@ -790,13 +793,18 @@ fn substitute_measure(
             }))?
         }
         ComputationCandidate::ExactAccumulator { kind, params } => {
-            finalized(kind.clone(), params.clone(), intent)?
+            let read = measure_input(intent, input, filter.as_ref())?;
+            finalized(kind.clone(), params.clone(), intent, read)?
         }
         ComputationCandidate::Summary(algorithm) => {
             let family =
                 FieldDataType::Sketch(sized(algorithm, intent), GroupingStrategy::default());
             OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input: state(family, intent)?,
+                summary_input: state(
+                    family,
+                    intent,
+                    measure_input(intent, input, filter.as_ref())?,
+                )?,
                 query: statistic(intent)?,
             }))?
         }
@@ -806,17 +814,19 @@ fn substitute_measure(
                     "sum/count of a non-avg",
                 ));
             };
-            let mut sum = finalized(
-                ExactKind::Sum,
-                ExactParams::Sum,
-                &AggIntent::Sum { col: *col },
-            )?;
+            let sum_intent = AggIntent::Sum { col: *col };
+            // The count counts the averaged column, as `avg` does: it is
+            // non-null (a nullable input prunes this candidate), so it counts
+            // the rows the sum reads.
+            let read = measure_input(&sum_intent, input, filter.as_ref())?;
+            let mut sum = finalized(ExactKind::Sum, ExactParams::Sum, &sum_intent, read.clone())?;
             let count = finalized(
                 ExactKind::Count,
                 ExactParams::Count,
                 &AggIntent::Count {
                     accuracy: AccuracyTarget::Exact,
                 },
+                read,
             )?;
             if input.result_kind == OperatorResultKind::Relation {
                 return sql_avg(reduction, filter.is_some(), sum, count);
@@ -1039,22 +1049,89 @@ fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent) -> SketchKind {
     )
 }
 
-/// What each input row contributes, following the legacy realization rules:
-/// heap sketches rank series identities, frequency sketches count values, and
-/// every other family reads the measure's input column.
+/// What a measure's state reads from each row of `input`, resolvable there.
+/// A SQL `count` reads [`counted_column`]; any other measure, a PromQL count
+/// included, reads its input column (the sample value when it names none).
+fn measure_input(
+    intent: &AggIntent,
+    input: &OperatorNode,
+    filter: Option<&Predicate>,
+) -> Result<SummaryInputExpr, PerComputationCandidateError> {
+    let schema = &input.schema;
+    let read = match intent {
+        AggIntent::Count { .. } if input.result_kind == OperatorResultKind::Relation => {
+            SummaryInputExpr::Column(counted_column(schema, filter)?)
+        }
+        _ => crate::replacement::summarised_input(intent, schema).map_err(|_| {
+            PerComputationCandidateError::Unsupported("input column outside child schema")
+        })?,
+    };
+    if let SummaryInputExpr::Column(column) = &read {
+        resolve_column_ref(column, schema).map_err(|_| {
+            PerComputationCandidateError::Unsupported("summary input column does not resolve")
+        })?;
+    }
+    Ok(read)
+}
+
+/// The column a SQL `count` state updates on. The runtime skips NULL updates,
+/// so it is a column non-null on every counted row: one the measure filter
+/// proves non-null (`count(col)` lowers to the filter `col IS NOT NULL`), else
+/// a non-nullable one, Float64 first (the runtime's numeric update).
+fn counted_column(
+    schema: &Schema,
+    filter: Option<&Predicate>,
+) -> Result<ColumnRef, PerComputationCandidateError> {
+    fn not_null(expr: &ScalarExpr) -> Vec<usize> {
+        match expr {
+            ScalarExpr::IsNotNull(inner) => match **inner {
+                ScalarExpr::Column(column) => vec![column],
+                _ => vec![],
+            },
+            ScalarExpr::BoolAnd(conjuncts) => conjuncts.iter().flat_map(not_null).collect(),
+            _ => vec![],
+        }
+    }
+    let non_nullable = |float: bool| {
+        schema
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(move |(id, field)| {
+                (!field.nullable
+                    && (!float || field.dtype == FieldDataType::Plain(DataType::Float64)))
+                .then_some(id)
+            })
+    };
+    let reference = |id: usize| schema.fields.get(id).map(crate::replacement::column_ref);
+    filter
+        .map_or_else(Vec::new, |filter| not_null(&filter.0))
+        .into_iter()
+        .chain(non_nullable(true))
+        .chain(non_nullable(false))
+        .find_map(|id| {
+            reference(id).filter(|column| resolve_column_ref(column, schema).ok() == Some(id))
+        })
+        .ok_or(PerComputationCandidateError::Unsupported(
+            "SQL count over rows with no column known to be non-null",
+        ))
+}
+
+/// What each input row contributes, given what the measure reads
+/// ([`measure_input`]), following the legacy realization rules: heap sketches
+/// rank series identities, frequency sketches count values, and every other
+/// family reads the measure's input.
 fn summary_update(
     intent: &AggIntent,
     family: &FieldDataType,
     reduction: &Reduction,
     child: &Schema,
+    weight: SummaryInputExpr,
 ) -> Result<SummaryUpdate, PerComputationCandidateError> {
     let algorithm = match family {
         FieldDataType::Sketch(kind, _) => Some(kind.algorithm()),
         _ => None,
     };
-    let weight = crate::replacement::summarised_input(intent, child).map_err(|_| {
-        PerComputationCandidateError::Unsupported("input column outside child schema")
-    })?;
     Ok(match (intent, algorithm) {
         (AggIntent::TopK { .. }, Some(_)) => {
             if reduction.group_keys().is_some_and(|keys| keys.is_without()) {
