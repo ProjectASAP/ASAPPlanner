@@ -108,7 +108,7 @@ pub struct CandidateCost {
 }
 
 /// A candidate that was not selected. `valid == false`: it failed a check;
-/// `true`: it lost on cost.
+/// `true`: it lost on cost, or tied and lost on enumeration order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rejection {
     pub id: String,
@@ -186,13 +186,19 @@ pub fn select_plan(
     };
     for candidate in cands {
         if candidate.id != selected && costs.contains_key(&candidate.id) {
+            let total = costs[&candidate.id].total;
+            let reason = if total == best_total {
+                format!(
+                    "tied with the selected candidate {selected} at {total:.3} {COST_UNIT}; \
+                     lost on enumeration order"
+                )
+            } else {
+                format!("costlier: {total:.3} vs {best_total:.3} {COST_UNIT}")
+            };
             rejected.push(Rejection {
                 id: candidate.id.clone(),
                 valid: true,
-                reason: format!(
-                    "costlier: {:.3} vs {:.3} {COST_UNIT}",
-                    costs[&candidate.id].total, best_total
-                ),
+                reason,
             });
         }
     }
@@ -1267,6 +1273,26 @@ mod tests {
                 "{query}: {selection:?}"
             );
         }
+    }
+
+    /// A candidate that ties the selected one is rejected for losing on
+    /// enumeration order, not as costlier.
+    #[test]
+    fn a_tie_is_reported_as_lost_on_enumeration_order() {
+        let mut candidates = candidates();
+        candidates.truncate(1);
+        let mut twin = candidates[0].clone();
+        twin.id = "P1-twin".into();
+        candidates.push(twin);
+        let selection =
+            select_plan(&candidates, &[None], &data(), PlanningModels::builtin()).unwrap();
+        assert_eq!(selection.selected, "P1");
+        let reason = &selection.rejected[0].reason;
+        assert!(
+            reason.contains("tied with the selected candidate P1")
+                && reason.contains("enumeration order"),
+            "{reason}"
+        );
     }
 
     /// `scalar(v)` inherits `v`'s guarantee; arithmetic over it composes
