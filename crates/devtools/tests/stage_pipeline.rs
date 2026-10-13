@@ -18,10 +18,12 @@ fn generate(extra: &[&str]) -> Value {
 }
 
 fn generate_example(example: &str, extra: &[&str]) -> Value {
+    // Tests run as threads of one process, so the name needs a per-call counter.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let out = std::env::temp_dir().join(format!(
-        "stage_pipeline_{}_{example}_{}.json",
+        "stage_pipeline_{}_{call}_{example}.json",
         std::process::id(),
-        extra.len()
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
         .args(["--example", example, "--out"])
