@@ -16,7 +16,9 @@
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
 //     under `pruned` with the reason;
 //   - plan_selection: per-candidate costs, the selected candidate, and
-//     every other candidate as rejected (`valid: false`) or costlier.
+//     every other candidate as rejected (`valid: false`) or costlier. When
+//     selection fails, `selected` is null, with the rejections, or with
+//     `error` for any other failure.
 //
 // `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
 // query; without them the queries are exact. `--interval-ms` is the source
@@ -29,7 +31,7 @@ use asap_aware_mapping::per_computation_candidates::{
     PerComputationCandidates,
 };
 use asap_aware_mapping::physical_asap_optimization::optimize_physical_asap;
-use asap_aware_mapping::plan_selection::{select_plan, Selection};
+use asap_aware_mapping::plan_selection::{select_plan, Rejection, Selection, SelectionError};
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema_support::with_promql_series_identity;
@@ -162,8 +164,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         .map(|entry| Some(entry.requirements.accuracy.target()))
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let selection = select_plan(&physical, &targets, &data, PlanningModels::builtin())
-        .map_err(|e| format!("Stage 3: {e}"))?;
+    let selection = select_plan(&physical, &targets, &data, PlanningModels::builtin());
     let physical_json: Vec<_> = physical
         .iter()
         .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
@@ -182,7 +183,16 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     }))
 }
 
-fn plan_selection_json(selection: &Selection) -> Value {
+fn plan_selection_json(selection: &Result<Selection, SelectionError>) -> Value {
+    let selection = match selection {
+        Ok(selection) => selection,
+        Err(SelectionError::NoValidCandidate(rejected)) => {
+            return json!({ "costs": {}, "selected": null, "rejected": rejections_json(rejected) })
+        }
+        Err(error) => {
+            return json!({ "costs": {}, "selected": null, "rejected": [], "error": error.to_string() })
+        }
+    };
     let costs: serde_json::Map<_, _> = selection
         .costs
         .iter()
@@ -203,12 +213,18 @@ fn plan_selection_json(selection: &Selection) -> Value {
             )
         })
         .collect();
-    let rejected: Vec<_> = selection
-        .rejected
+    json!({
+        "costs": costs,
+        "selected": selection.selected,
+        "rejected": rejections_json(&selection.rejected),
+    })
+}
+
+fn rejections_json(rejected: &[Rejection]) -> Vec<Value> {
+    rejected
         .iter()
         .map(|r| json!({ "id": r.id, "valid": r.valid, "reason": r.reason }))
-        .collect();
-    json!({ "costs": costs, "selected": selection.selected, "rejected": rejected })
+        .collect()
 }
 
 /// A logical DAG as a flat node list: node `i` is `nodes[i]`, and children are
@@ -410,5 +426,41 @@ fn planner_layering_example1() -> PlanningWorkload {
             input_cardinality: declared(1_000_000),
             distribution: declared(DataDistribution::Zipf),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With no valid candidate, the document is still written: `selected`
+    /// is null and every rejection is listed.
+    #[test]
+    fn failed_selection_lists_rejections_without_a_selection() {
+        let rejected = vec![Rejection {
+            id: "P1".into(),
+            valid: false,
+            reason: "q1: misses target".into(),
+        }];
+        let document = plan_selection_json(&Err(SelectionError::NoValidCandidate(rejected)));
+        assert_eq!(
+            document,
+            json!({
+                "costs": {},
+                "selected": null,
+                "rejected": [{ "id": "P1", "valid": false, "reason": "q1: misses target" }],
+            })
+        );
+    }
+
+    /// A run with no physical candidate (here, none enumerated) still emits
+    /// every stage, with no selection.
+    #[test]
+    fn run_without_candidates_emits_plan_selection() {
+        let workload = promql_batch(&["sum(m)".into()], AccuracyTarget::Exact, 15_000);
+        let document = stage_pipeline(&workload, 0).unwrap();
+        assert_eq!(document["physical_asap_optimization"]["pruned"], json!([]));
+        assert_eq!(document["plan_selection"]["selected"], Value::Null);
+        assert_eq!(document["plan_selection"]["rejected"], json!([]));
     }
 }
