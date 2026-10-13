@@ -3,12 +3,13 @@
 //! the intent's accuracy target and `(ε, δ)` budget, default sketch sizing,
 //! and the column/tuple a summary consumes.
 
+use asap_types::ir::SchemaDerivationError;
+use asap_types::post_asap::{AccuracyError, ExactOperationSchemaError, ExecutionDataStateError};
 use asap_types::post_asap::{Field, Schema, SketchAlgorithm, SketchParams, SummaryInputExpr};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::types::AccuracyTarget;
-
-use crate::replacement::RealizationError;
+use thiserror::Error;
 
 /// Confidence δ assumed when the target carries only an ε
 /// (`AccuracyTarget::Epsilon`): the (ε, δ)-parameterised sketches (CMS) need
@@ -163,4 +164,39 @@ pub(crate) fn summarised_input(
     Ok(SummaryInputExpr::Tuple(
         legs.into_iter().map(SummaryInputExpr::Column).collect(),
     ))
+}
+
+/// Errors from the pre-ASAP → post-ASAP replacement/construction path
+/// (`realize_child` and `retain_exact`). Moved here from the former
+/// `bind.rs` (issue #251): this is what a `ReplacementStrategy`
+/// implementor's own construction path can realistically fail with —
+/// schema derivation over a pre-ASAP [`OperatorNode`] sub-DAG — not
+/// something specific to workload-wide orchestration.
+#[derive(Debug, Error)]
+pub enum RealizationError {
+    /// Schema derivation failed while lifting an edge to `Schema`.
+    #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
+    Schema(#[from] SchemaDerivationError),
+    /// The candidate is accuracy-illegal (issue #172): its composed
+    /// guarantee has no sound propagation rule, or misses the applicable
+    /// `AccuracyTarget`. Fail-closed — the candidate is never constructed
+    /// with the child "treated as exact". [`ASAPStrategies::propose`]
+    /// records it as a [`RejectedCandidate`] instead of a candidate.
+    #[error("accuracy-illegal candidate: {0}")]
+    Accuracy(#[from] AccuracyError),
+    /// The selected summary family has a physical realization rule for this
+    /// logical shape, but the rule cannot represent the complete input. The
+    /// candidate must not fall back to ordinary one-node binding because that
+    /// would change its semantics.
+    #[error("unsupported physical summary realization: {0}")]
+    PhysicalRealization(&'static str),
+    /// A constructed plan violates the update/evaluation phase contract
+    /// (issue #171) — e.g. a summary evaluation placed beneath a maintained
+    /// `SummaryAgg`. Detected at construction, never at runtime.
+    #[error("execution-data_state violation in post-ASAP plan: {0}")]
+    ExecutionDataState(#[from] ExecutionDataStateError),
+    /// An `ExactOperator`'s output schema could not be derived over its
+    /// child — the child carries summary state the operator can't read.
+    #[error("exact operator schema derivation failed: {0}")]
+    ExactOperationSchema(#[from] ExactOperationSchemaError),
 }

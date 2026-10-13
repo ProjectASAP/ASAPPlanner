@@ -351,18 +351,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::ir::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::timing::validate_at_ingestion;
-use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
     SortKey,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::post_asap::{
-    EntityIdentity, ExactKind, ExactOperationSchemaError, ExactParams, ExecutionDataStateError,
-    ExecutionTiming, Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SamplingKind,
-    SamplingParams, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams, SummaryInputExpr,
-    SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
+    EntityIdentity, ExactKind, ExactParams, ExecutionDataStateError, ExecutionTiming, Field,
+    FieldDataType, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams, Schema,
+    SketchAlgorithm, SketchKind, SketchParams, SketchStatistic as PostAsapSketchStatistic,
+    StatModelKind, StatModelParams, SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams,
+    WeightDomain,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
@@ -370,7 +369,6 @@ use asap_types::pre_asap::schema::ColumnId;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::{Rc, Weak};
-use thiserror::Error;
 
 use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
@@ -394,40 +392,7 @@ use crate::recurrence::{
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
 
-/// Errors from the pre-ASAP → post-ASAP replacement/construction path
-/// ([`realize_child`] and [`retain_exact`]). Moved here from the former
-/// `bind.rs` (issue #251): this is what a [`ReplacementStrategy`]
-/// implementor's own construction path can realistically fail with —
-/// schema derivation over a pre-ASAP [`OperatorNode`] sub-DAG — not
-/// something specific to workload-wide orchestration.
-#[derive(Debug, Error)]
-pub enum RealizationError {
-    /// Schema derivation failed while lifting an edge to `Schema`.
-    #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
-    Schema(#[from] SchemaDerivationError),
-    /// The candidate is accuracy-illegal (issue #172): its composed
-    /// guarantee has no sound propagation rule, or misses the applicable
-    /// `AccuracyTarget`. Fail-closed — the candidate is never constructed
-    /// with the child "treated as exact". [`ASAPStrategies::propose`]
-    /// records it as a [`RejectedCandidate`] instead of a candidate.
-    #[error("accuracy-illegal candidate: {0}")]
-    Accuracy(#[from] AccuracyError),
-    /// The selected summary family has a physical realization rule for this
-    /// logical shape, but the rule cannot represent the complete input. The
-    /// candidate must not fall back to ordinary one-node binding because that
-    /// would change its semantics.
-    #[error("unsupported physical summary realization: {0}")]
-    PhysicalRealization(&'static str),
-    /// A constructed plan violates the update/evaluation phase contract
-    /// (issue #171) — e.g. a summary evaluation placed beneath a maintained
-    /// `SummaryAgg`. Detected at construction, never at runtime.
-    #[error("execution-data_state violation in post-ASAP plan: {0}")]
-    ExecutionDataState(#[from] ExecutionDataStateError),
-    /// An `ExactOperator`'s output schema could not be derived over its
-    /// child — the child carries summary state the operator can't read.
-    #[error("exact operator schema derivation failed: {0}")]
-    ExactOperationSchema(#[from] ExactOperationSchemaError),
-}
+pub use crate::realization::RealizationError;
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
