@@ -61,6 +61,9 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     children: vec![],
                 }),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
+                materialization: planner_types::post_asap::Materialization::MatAtIngestion(
+                    planner_types::post_asap::Medium::Memory,
+                ),
                 output_schema: state_schema.clone(),
                 guarantee: None,
             },
@@ -70,6 +73,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     child: 0,
                 }),
                 output_state: ExecutionDataState::INGESTION_ROWS,
+                materialization: Default::default(),
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
@@ -89,6 +93,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     },
                 ),
                 output_state: ExecutionDataState::INGESTION_ROWS,
+                materialization: Default::default(),
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
@@ -106,6 +111,9 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     child: 2,
                 }),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
+                materialization: planner_types::post_asap::Materialization::MatAtIngestion(
+                    planner_types::post_asap::Medium::Memory,
+                ),
                 output_schema: state_schema.clone(),
                 guarantee: None,
             },
@@ -256,6 +264,9 @@ fn state_dag(
         id: 0,
         payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![] }),
         output_state: ExecutionDataState::INGESTION_SUMMARY,
+        materialization: planner_types::post_asap::Materialization::MatAtIngestion(
+            planner_types::post_asap::Medium::Memory,
+        ),
         output_schema: logical_schema(family.clone()),
         guarantee: None,
     }];
@@ -273,6 +284,7 @@ fn state_dag(
             child: read_id - 1,
         }),
         output_state: ExecutionDataState::INGESTION_ROWS,
+        materialization: Default::default(),
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
     });
@@ -288,6 +300,9 @@ fn state_dag(
                 child: read_id,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
+            materialization: planner_types::post_asap::Materialization::MatAtIngestion(
+                planner_types::post_asap::Medium::Memory,
+            ),
             output_schema: logical_schema(target),
             guarantee: None,
         });

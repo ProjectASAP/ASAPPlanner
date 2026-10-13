@@ -12,7 +12,7 @@ use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
 use super::summary_coverage::SummaryCoverage;
 use crate::ir::SchemaDerivationError;
-use crate::post_asap::execution_data_state::ExecutionTiming;
+use crate::post_asap::execution_data_state::{ExecutionTiming, Materialization};
 use crate::post_asap::guarantee::ResultGuarantee;
 use crate::pre_asap::schema::Schema;
 
@@ -91,8 +91,10 @@ impl Operator {
 /// `schema` and `result_kind` are derived from `operator` and its children
 /// at construction and retained. `guarantee` is `None` until accuracy
 /// assessment establishes one (`None` never means exact). `timing` is `None`
-/// until a lifecycle assignment is applied; export rejects an executable
-/// node without one.
+/// until a materialization assignment is applied; export rejects an executable
+/// node without one. `materialization` is the option that assignment chose
+/// for this node (`NotMaterialized` until then, and for every node whose
+/// output is not stored).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorNode {
     pub operator: Operator,
@@ -100,6 +102,7 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
+    pub materialization: Materialization,
 }
 
 impl OperatorNode {
@@ -124,6 +127,7 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
+            materialization: Materialization::NotMaterialized,
         }
     }
 
@@ -141,6 +145,11 @@ impl OperatorNode {
 
     pub fn with_timing(mut self, timing: Option<ExecutionTiming>) -> Self {
         self.timing = timing;
+        self
+    }
+
+    pub fn with_materialization(mut self, materialization: Materialization) -> Self {
+        self.materialization = materialization;
         self
     }
 
@@ -201,7 +210,8 @@ impl OperatorNode {
     /// the old derived schema are retained, for either operator category. A
     /// change in output arity with such overrides needs an explicit new
     /// naming assignment.
-    /// `guarantee` and `timing` depend on the inputs and are cleared.
+    /// `guarantee`, `timing` and `materialization` depend on the inputs and
+    /// are cleared.
     pub fn with_new_children(
         &self,
         f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,

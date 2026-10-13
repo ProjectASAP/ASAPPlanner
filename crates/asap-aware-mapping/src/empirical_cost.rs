@@ -2,16 +2,14 @@
 //! configuration and environment; they are neither runtime feedback nor proofs
 //! of an accuracy guarantee. CPU quantities are nanoseconds, never CPU operations.
 
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams};
+use asap_types::post_asap::{SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::AggIntent;
 use serde::{Deserialize, Serialize};
 
-use crate::cost_model::{Cost, CostModel, DefaultCostModel};
+use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::replacement::{
     accuracy_budget, accuracy_target, default_size_params, ReplacementSubDAG, TargetSubDAG,
 };
-use crate::summary_maintenance_lifecycle::SummaryMaintenanceLifecycleCostInputs;
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const EVIDENCE_MODEL_VERSION: &str = "empirical-update-cpu-v1";
@@ -207,40 +205,6 @@ impl EmpiricalEvidenceProvider {
         costs.sort_by(|a, b| a.1.total_cmp(&b.1));
         costs.into_iter().map(|(algorithm, _)| algorithm).collect()
     }
-
-    /// Costs for one independently instantiated sketch state, in CPU ns.
-    /// Unknown retention/retirement remain unavailable; CPU time must not be
-    /// mixed with an existing deployment's unitless or CPU-operation costs.
-    pub fn lifecycle_cost_inputs(
-        &self,
-        summary: &OperatorNode,
-    ) -> SummaryMaintenanceLifecycleCostInputs {
-        let Operator::ASAP(ASAPOp::SummaryAgg {
-            family: FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance),
-            grouping: GroupingStrategy::PerSubpopulationInstance,
-            ..
-        }) = &summary.operator
-        else {
-            return SummaryMaintenanceLifecycleCostInputs::default();
-        };
-        let Ok(row) = self.lookup(kind.algorithm(), kind.params()) else {
-            return SummaryMaintenanceLifecycleCostInputs::default();
-        };
-        SummaryMaintenanceLifecycleCostInputs {
-            build_cost: snapshot_build_cpu(row).map(Cost),
-            maintenance_cost_per_update: row
-                .metrics
-                .resources
-                .cpu
-                .update_cpu_ns
-                .as_ref()
-                .map(|m| Cost(m.value)),
-            // A point-frequency benchmark read does not price a total-count
-            // or quantile read. There is no query request in this hook.
-            summary_read_cost: None,
-            ..Default::default()
-        }
-    }
 }
 
 /// Standalone adapter for the existing planner boundary. Empirical data changes
@@ -275,13 +239,6 @@ impl CostModel for EmpiricalCostModel {
     // offline error is insufficient evidence to shrink a sketch safely.
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
         DefaultCostModel.estimate_cost(candidate, target)
-    }
-
-    fn summary_maintenance_lifecycle_cost_inputs(
-        &self,
-        summary: &OperatorNode,
-    ) -> SummaryMaintenanceLifecycleCostInputs {
-        self.provider.lifecycle_cost_inputs(summary)
     }
 }
 
@@ -358,14 +315,6 @@ fn invalid<T>(message: &str) -> Result<T, EvidenceError> {
 }
 fn nonnegative(value: f64) -> bool {
     value.is_finite() && value >= 0.0
-}
-
-fn snapshot_build_cpu(row: &OfflineMeasurement) -> Option<f64> {
-    let cpu = row.metrics.resources.cpu.build_cpu_ns.as_ref()?.value
-        + row.metrics.resources.cpu.update_cpu_ns.as_ref()?.value
-            * row.distribution.sample_count as f64
-        + snapshot_prepare_cpu(row)?;
-    nonnegative(cpu).then_some(cpu)
 }
 
 /// The existing fixed-snapshot CMS/CountSketch contract needs no separate
@@ -490,30 +439,6 @@ mod tests {
         );
     }
 
-    /// Lifecycle build includes all measured snapshot updates, not just an empty
-    /// allocation. A missing update measurement cannot become free ingestion.
-    #[test]
-    fn lifecycle_build_requires_complete_snapshot_ingestion() {
-        let (mut artifact, _, _) = fixture();
-        let row = &mut artifact.records[0];
-        row.metrics.resources.cpu.build_cpu_ns = Some(Measurement {
-            value: 10.0,
-            stddev: None,
-            samples: 1,
-            method: None,
-        });
-        assert_eq!(snapshot_build_cpu(row), Some(20010.0));
-        row.metrics.resources.cpu.prepare_cpu_ns = Some(Measurement {
-            value: 17.0,
-            stddev: None,
-            samples: 1,
-            method: None,
-        });
-        assert_eq!(snapshot_build_cpu(row), Some(20027.0));
-        row.metrics.resources.cpu.update_cpu_ns = None;
-        assert_eq!(snapshot_build_cpu(row), None);
-    }
-
     /// Newly shared optional dimensions receive the same numeric validation.
     #[test]
     fn optional_prepare_and_scan_measurements_are_validated() {
@@ -537,28 +462,21 @@ mod tests {
 
     /// Only the established frequency-sketch contract can omit preparation.
     #[test]
-    fn unmeasured_preparation_for_other_families_keeps_build_unknown() {
+    fn unmeasured_preparation_for_other_families_stays_unknown() {
         let (mut artifact, _, _) = fixture();
         let row = &mut artifact.records[0];
-        row.metrics.resources.cpu.build_cpu_ns = Some(Measurement {
-            value: 10.0,
-            stddev: None,
-            samples: 1,
-            method: None,
-        });
-        assert_eq!(snapshot_build_cpu(row), Some(20010.0));
         row.algorithm = SketchAlgorithm::CountSketch;
         assert_eq!(snapshot_prepare_cpu(row), Some(0.0));
         row.algorithm = SketchAlgorithm::Kll;
         row.params = SketchParams::Kll { k: 269 };
-        assert_eq!(snapshot_build_cpu(row), None);
+        assert_eq!(snapshot_prepare_cpu(row), None);
         row.metrics.resources.cpu.prepare_cpu_ns = Some(Measurement {
             value: 17.0,
             stddev: None,
             samples: 1,
             method: None,
         });
-        assert_eq!(snapshot_build_cpu(row), Some(20027.0));
+        assert_eq!(snapshot_prepare_cpu(row), Some(17.0));
     }
 
     fn fixture() -> (EvidenceArtifact, EvidenceContext, AggIntent) {

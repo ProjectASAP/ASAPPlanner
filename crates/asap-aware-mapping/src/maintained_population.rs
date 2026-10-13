@@ -336,15 +336,17 @@ mod tests {
     use crate::test_support::lower_promql;
     use asap_types::ir::cse::share_common_sub_dags;
     use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
-    use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+    use asap_types::ir::timing::{
+        apply_materialization_timings, MaterializationAssignment, TimingMemo,
+    };
 
-    /// Time `root` under the default lifecycle assignment (which runs the
+    /// Time `root` under the default materialization assignment (which runs the
     /// data-state / population-contract validation) and export it.
     fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
         root.validate_structure().map_err(|e| e.to_string())?;
-        let timed = apply_lifecycle_timings(
+        let timed = apply_materialization_timings(
             root,
-            &LifecycleAssignment::default_maintained(),
+            &MaterializationAssignment::default(),
             &mut TimingMemo::new(),
         )
         .map_err(|e| format!("{e:?}"))?;
@@ -517,31 +519,50 @@ mod tests {
         assert!(recognize(&per_job_limit_over_global_sort).is_none());
     }
 
-    // Population timing is a lifecycle choice: a retained or rebuilt
-    // population both validate, while its evaluation must stay at query time.
+    // Population timing is a materialization choice: the population follows
+    // its assignment (`NotMaterialized` by default), while its evaluation
+    // always runs at query time.
     #[test]
-    fn population_timing_is_not_structural() {
+    fn population_timing_follows_its_materialization() {
+        use asap_types::ir::{Materialization, Medium};
+        use asap_types::post_asap::ExecutionTiming::{IngestionTime, QueryTime};
         let root = lower("topk(5,a)");
         let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
             .candidate(&root)
             .unwrap();
-        use asap_types::post_asap::ExecutionTiming;
-        let with_timings = |population: ExecutionTiming, evaluation: ExecutionTiming| {
-            let mut node = (*candidate).clone();
-            node.timing = Some(evaluation);
-            let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &mut node.operator
-            else {
+        let Some(ASAPOp::EvaluatePopulation {
+            child: population, ..
+        }) = candidate.asap()
+        else {
+            unreachable!()
+        };
+        let on_disk = Materialization::MatAtIngestion(Medium::Disk);
+        let mut at_ingestion = MaterializationAssignment::default();
+        at_ingestion.set(population, on_disk);
+        for (assignment, timing, materialization) in [
+            (
+                MaterializationAssignment::default(),
+                QueryTime,
+                Materialization::NotMaterialized,
+            ),
+            (at_ingestion, IngestionTime, on_disk),
+        ] {
+            let timed =
+                apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new())
+                    .unwrap();
+            let dag = export_timed(&timed).unwrap();
+            let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
                 unreachable!()
             };
-            Rc::make_mut(child).timing = Some(population);
-            compile_physical_asap_dag(&Rc::new(node))
-        };
-        use ExecutionTiming::{IngestionTime, QueryTime};
-        assert!(with_timings(IngestionTime, QueryTime).is_ok());
-        assert!(with_timings(QueryTime, QueryTime).is_ok());
-        assert!(with_timings(IngestionTime, IngestionTime).is_err());
+            assert_eq!(population.output_state.timing, timing);
+            assert_eq!(population.materialization, materialization);
+            assert_eq!(evaluation.output_state.timing, QueryTime);
+        }
+        let mut evaluation_at_ingestion = (*candidate).clone();
+        evaluation_at_ingestion.timing = Some(IngestionTime);
+        assert!(compile_physical_asap_dag(&Rc::new(evaluation_at_ingestion)).is_err());
     }
-    // A evaluation cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
+    // An evaluation cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
     #[test]
     fn malformed_population_dags_fail_closed() {
         let root = lower("topk(5,a)");

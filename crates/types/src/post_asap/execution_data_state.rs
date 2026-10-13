@@ -2,7 +2,8 @@
 //!
 //! [`ExecutionTiming`] says when a node's value is produced (ingestion vs.
 //! query time); [`ExecutionDataState`] pairs it with the [`DataPrimitive`]
-//! the edge carries (raw values vs. summary state). The rules that assign
+//! the edge carries (raw values vs. summary state). [`Materialization`] is
+//! the per-sub-DAG choice a node's timing is derived from. The rules that assign
 //! and check them over a DAG live in [`crate::ir::timing`], which reports
 //! violations as [`ExecutionDataStateError`].
 
@@ -27,6 +28,40 @@ impl ExecutionTiming {
         match self {
             Self::IngestionTime => "ingestion_time",
             Self::QueryTime => "query_time",
+        }
+    }
+}
+
+/// Where a materialized output is stored (#509 §Materialization).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Medium {
+    Memory,
+    Disk,
+}
+
+/// The materialization option of one sub-DAG (#509 §Materialization,
+/// Algorithm 3): whether its output is stored across query executions, and
+/// whether it is computed at ingestion time or at query time.
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum Materialization {
+    /// Runs at query time for each execution; its output is discarded.
+    #[default]
+    NotMaterialized,
+    /// Runs as data arrives; its output is stored until a query reads it.
+    MatAtIngestion(Medium),
+    /// Runs when a query first needs it; its output is stored for later
+    /// executions and other queries of the batch.
+    MatAtQuery(Medium),
+}
+
+impl Materialization {
+    /// When the sub-DAG runs: only `MatAtIngestion` runs at ingestion time.
+    pub fn timing(self) -> ExecutionTiming {
+        match self {
+            Self::MatAtIngestion(_) => ExecutionTiming::IngestionTime,
+            Self::NotMaterialized | Self::MatAtQuery(_) => ExecutionTiming::QueryTime,
         }
     }
 }
@@ -119,10 +154,28 @@ pub enum ExecutionDataStateError {
         first: ExecutionDataState,
         second: ExecutionDataState,
     },
-    /// A maintenance-time value operation at the root of a plan:
-    /// nothing maintains state above it, so its output is never read.
-    #[error("A maintenance-time value operation cannot be a plan root: its update-path output feeds nothing")]
-    MaintenanceRowsAtRoot,
+    /// A plan root that runs at ingestion time without being stored there
+    /// (a timing fixed by a candidate builder): no query reads its rows. A
+    /// root assigned `MatAtIngestion` is valid; the query reads the stored
+    /// output.
+    #[error(
+        "{operator} root runs at ingestion time but is not MatAtIngestion: no query reads its \
+         output"
+    )]
+    UnstoredIngestionRoot { operator: &'static str },
+    /// An explicit materialization on a node whose timing a candidate builder
+    /// fixed (e.g. a query-time `FinalizeExactAccumulator` read boundary)
+    /// that needs the other timing.
+    #[error(
+        "{operator} is fixed at {} by its candidate; materialization {materialization:?} needs \
+         the other timing",
+        fixed.as_str()
+    )]
+    MaterializationConflictsWithFixedTiming {
+        operator: &'static str,
+        fixed: ExecutionTiming,
+        materialization: Materialization,
+    },
     #[error("unsupported maintenance binary schema or operator")]
     InvalidMaintenanceBinary,
     #[error("checked division requires one valid guard on a read-time division operator")]
@@ -137,9 +190,15 @@ pub enum ExecutionDataStateError {
     /// and `Extension`.
     #[error("{operator} has no execution timing contract yet")]
     UnimplementedOperator { operator: &'static str },
-    /// A node reached by export without a timing: the lifecycle timing pass
+    /// A node assigned `MatAtIngestion` over a sub-DAG that can only run at
+    /// query time (#509 Algorithm 3, line 13).
+    #[error("{operator}: upstream of ingestion-time node not at ingestion time")]
+    UpstreamNotAtIngestion { operator: &'static str },
+    /// A node reached by export without a timing: the materialization timing pass
     /// was not applied to the DAG first.
-    #[error("{operator} node has no execution timing; apply lifecycle timings before export")]
+    #[error(
+        "{operator} node has no execution timing; apply materialization timings before export"
+    )]
     UntimedNode { operator: &'static str },
     /// The exported physical DAG failed its own validation, e.g. an empty
     /// batch or a hand-timed plan the timing pass would have rejected.

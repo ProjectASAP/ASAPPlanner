@@ -4,8 +4,8 @@ use asap_types::ir::physical_export::{
     PhysicalASAPDAGValidationError,
 };
 use asap_types::ir::{
-    apply_lifecycle_timings, ASAPOp, LifecycleAssignment, NonASAPOp, Operator, OperatorNode,
-    QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
+    NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
 };
 use asap_types::post_asap::{
     ExactKind, ExactParams, ExecutionDataStateError, ExecutionTiming, SummaryUpdate,
@@ -41,15 +41,21 @@ fn plan() -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// Default lifecycle: the summary is maintained at ingestion time and read at query time.
+const ON_DISK: Materialization = Materialization::MatAtIngestion(Medium::Disk);
+
+/// `plan()` timed with its summary `MatAtIngestion` on disk.
+fn timed_at_ingestion() -> Rc<OperatorNode> {
+    let root = plan();
+    let mut assignment = MaterializationAssignment::default();
+    assignment.set(root.children()[0], ON_DISK);
+    apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap()
+}
+
+/// A summary materialized at ingestion time is read at query time, and the
+/// exported DAG says where to store it.
 #[test]
 fn timed_plan_exports_with_timing() {
-    let timed = apply_lifecycle_timings(
-        &plan(),
-        &LifecycleAssignment::default_maintained(),
-        &mut TimingMemo::new(),
-    )
-    .unwrap();
+    let timed = timed_at_ingestion();
     let dag = compile_physical_asap_dag(&timed).unwrap();
     let document = PhysicalASAPDAGDocument::new(dag.clone());
     document.validate().unwrap();
@@ -63,6 +69,15 @@ fn timed_plan_exports_with_timing() {
             ExecutionTiming::QueryTime
         ]
     );
+    let materializations: Vec<_> = dag.nodes.iter().map(|n| n.materialization).collect();
+    assert_eq!(
+        materializations,
+        vec![
+            Materialization::NotMaterialized,
+            ON_DISK,
+            Materialization::NotMaterialized
+        ]
+    );
     // Timing keeps what the summary covers.
     assert!(timed.children()[0].coverage().is_some());
 
@@ -74,19 +89,34 @@ fn timed_plan_exports_with_timing() {
 /// A query-time producer cannot feed an ingestion-time consumer.
 #[test]
 fn query_time_input_to_ingestion_is_rejected() {
-    let timed = apply_lifecycle_timings(
-        &plan(),
-        &LifecycleAssignment::default_maintained(),
-        &mut TimingMemo::new(),
-    )
-    .unwrap();
-    let mut dag = compile_physical_asap_dag(&timed).unwrap();
+    let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
     dag.nodes[0].output_state.timing = ExecutionTiming::QueryTime;
     dag.edges[0].data_state = dag.nodes[0].output_state;
     assert!(matches!(
         dag.validate(),
         Err(PhysicalASAPDAGValidationError::QueryDependencyInIngestion { .. })
     ));
+}
+
+/// A summary's timing must be the one its materialization implies: the
+/// deployment cannot run a `MatAtIngestion` state at query time.
+#[test]
+fn materialization_inconsistent_with_timing_is_rejected() {
+    let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
+    dag.nodes[1].output_state.timing = ExecutionTiming::QueryTime;
+    dag.edges[1].data_state = dag.nodes[1].output_state;
+    assert_eq!(
+        dag.validate(),
+        Err(
+            PhysicalASAPDAGValidationError::MaterializationTimingMismatch {
+                node: 1,
+                timing: ExecutionTiming::QueryTime,
+                materialization: ON_DISK,
+            }
+        )
+    );
+    dag.nodes[1].materialization = Materialization::MatAtQuery(Medium::Disk);
+    dag.validate().unwrap();
 }
 
 /// Untimed plans cannot be exported as physical plans.
@@ -105,11 +135,11 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
         child: state,
     }))
     .unwrap();
-    let assignment = LifecycleAssignment::default_maintained();
+    let assignment = MaterializationAssignment::default();
     let mut memo = TimingMemo::new();
     let timed: Vec<_> = [first, second]
         .iter()
-        .map(|root| apply_lifecycle_timings(root, &assignment, &mut memo).unwrap())
+        .map(|root| apply_materialization_timings(root, &assignment, &mut memo).unwrap())
         .collect();
     let roots: Vec<QueryRoot> = timed.into_iter().map(QueryRoot::Operator).collect();
     let dag = compile_physical_asap_workload(&roots).unwrap();
@@ -124,9 +154,9 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
 fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     use asap_types::ir::{ExprSemantics, ScalarExpr};
     use asap_types::pre_asap::ArithmeticOpKind;
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         &plan(),
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .unwrap();
@@ -156,6 +186,31 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     let mut scalar_only = dag.clone();
     scalar_only.roots.clear();
     scalar_only.validate().unwrap();
+    let valid_scalar_only = scalar_only.clone();
+    // Materialization is checked on the nodes a scalar reads, too.
+    let state = scalar_only
+        .nodes
+        .iter()
+        .position(|node| {
+            matches!(
+                node.payload,
+                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                    ASAPOp::SummaryAgg { .. }
+                )
+            )
+        })
+        .unwrap();
+    scalar_only.nodes[state].materialization = ON_DISK;
+    assert_eq!(
+        scalar_only.validate(),
+        Err(
+            PhysicalASAPDAGValidationError::MaterializationTimingMismatch {
+                node: scalar_only.nodes[state].id,
+                timing: ExecutionTiming::QueryTime,
+                materialization: ON_DISK,
+            }
+        )
+    );
 
     let mut missing = dag.clone();
     missing.scalar_roots[0].1 = ScalarExpr::PromqlScalarFromVector(99);
@@ -173,13 +228,13 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     // Keys must strictly ascend: a duplicate or a descending key is rejected.
     let literal: ScalarExpr<usize> =
         ScalarExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(2.0));
-    let mut duplicate = scalar_only.clone();
+    let mut duplicate = valid_scalar_only.clone();
     duplicate.scalar_roots.push((0, literal.clone()));
     assert_eq!(
         duplicate.validate(),
         Err(PhysicalASAPDAGValidationError::ScalarRootPosition(0))
     );
-    let mut descending = scalar_only.clone();
+    let mut descending = valid_scalar_only;
     descending.scalar_roots[0].0 = 1;
     descending.scalar_roots.push((0, literal));
     assert_eq!(
@@ -221,9 +276,9 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
         child: series("a"),
     }))
     .unwrap();
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         &project,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .unwrap();
@@ -262,9 +317,9 @@ fn swapped_edge_roles_are_rejected() {
         right: scan("b"),
     }))
     .unwrap();
-    let timed = apply_lifecycle_timings(
+    let timed = apply_materialization_timings(
         &join,
-        &LifecycleAssignment::default_maintained(),
+        &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )
     .unwrap();
@@ -335,9 +390,9 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     }))
     .unwrap();
     let mut memo = TimingMemo::new();
-    let timed =
-        apply_lifecycle_timings(&root, &LifecycleAssignment::default_maintained(), &mut memo)
-            .unwrap();
+    let at_ingestion =
+        MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory));
+    let timed = apply_materialization_timings(&root, &at_ingestion, &mut memo).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
     assert_eq!(

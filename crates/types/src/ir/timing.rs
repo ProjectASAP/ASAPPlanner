@@ -1,21 +1,37 @@
-//! Execution timing: written into every node from a lifecycle assignment,
-//! then validated against each operator's kind and its consuming edges.
+//! Execution timing: written into every node from a materialization
+//! assignment, then validated against each operator's kind and its consuming
+//! edges.
 //!
-//! The logical DAG carries no timing. Summary materialization chooses a
-//! lifecycle per summary state; [`LifecycleAssignment`] records that choice
-//! (ingestion-time maintenance or query-time recomputation per `SummaryAgg`)
-//! and [`apply_lifecycle_timings`] expands it into a timing on every node:
+//! The logical DAG carries no timing. Materialization (#509
+//! §Materialization) gives each sub-DAG one of three options:
+//! `NotMaterialized`, `MatAtIngestion(medium)` or `MatAtQuery(medium)`.
+//! [`MaterializationAssignment`] records that option per sub-DAG, named by
+//! the node whose output would be stored (any node: a summary state, a
+//! population, or e.g. the tumbling-window panes of #509 Example 4), and
+//! [`apply_materialization_timings`] expands it into a timing on every node:
 //!
-//! - a node of fixed kind takes its kind's timing (`SummaryEstimate` and
-//!   `EvaluatePopulation` run at query time, `MaintainPopulation` at ingestion
-//!   time);
-//! - a `SummaryAgg` takes the assignment's timing (default: ingestion time),
-//!   unless something below it can only exist at query time;
+//! - `SummaryEstimate` and `EvaluatePopulation` run at query time;
+//! - a node assigned `MatAtIngestion` runs at ingestion time, and one
+//!   assigned `MatAtQuery` at query time. A `SummaryAgg` or
+//!   `MaintainPopulation` without an assignment is `NotMaterialized` and runs
+//!   at query time. Every node upstream of an ingestion-time node also runs
+//!   at ingestion time, so `MatAtIngestion` (or an ingestion timing fixed by
+//!   a candidate builder) over something that can only exist at query time
+//!   is an error ([`ExecutionDataStateError::UpstreamNotAtIngestion`]);
 //! - a PromQL `BinaryOp` over per-series inputs that are not the same series
 //!   rows runs at query time, since maintenance cannot align them;
-//! - every other node runs when its consumer runs: everything that feeds a
-//!   maintained state runs at ingestion time, everything above a evaluation at
-//!   query time.
+//! - every other node is `NotMaterialized` and runs when its consumer runs:
+//!   everything that feeds an ingestion-time node runs at ingestion time,
+//!   everything above an evaluation at query time.
+//!
+//! A node whose timing a candidate builder fixed (e.g. the query-time
+//! `FinalizeExactAccumulator` of `finalize_query_candidate`) keeps that
+//! timing. An explicit assignment on it that agrees is kept; one that needs
+//! the other timing is an error
+//! ([`ExecutionDataStateError::MaterializationConflictsWithFixedTiming`]).
+//! A root may be `MatAtIngestion`: the query reads its stored output. A root
+//! of rows that runs at ingestion time without being stored there is an
+//! error ([`ExecutionDataStateError::UnstoredIngestionRoot`]).
 //!
 //! A node reached from two consumers that need different timings cannot be
 //! executed once for both; [`split_shared_by_phase`] copies such a sub-DAG
@@ -29,9 +45,9 @@
 //! | `SummaryAgg.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
 //! | `SummaryEstimate.summary_input` | Summary state at either phase |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
-//! | `EvaluatePopulation.child` | A `MaintainPopulation` at ingestion time |
-//! | `MaintainPopulation.child` | Ingestion-time rows matching the population's input |
-//! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing; ingestion work never reads a query-time value |
+//! | `EvaluatePopulation.child` | A timed `MaintainPopulation` |
+//! | `MaintainPopulation.child` | Rows at its own timing matching the population's input |
+//! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing, or a `MatAtIngestion` output read at query time; ingestion work never reads a query-time value |
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -41,40 +57,85 @@ use super::node::{Operator, OperatorNode};
 use super::non_asap::NonASAPOp;
 use crate::ir::operator_properties::BinaryOpKind;
 use crate::post_asap::execution_data_state::{
-    DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
+    DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming, Materialization,
+    Medium,
 };
 use crate::pre_asap::schema::{DataType, FieldDataType, Schema};
 
-/// The per-state lifecycle choice summary materialization made: for each
-/// `SummaryAgg` node (by identity), whether its state is maintained at
-/// ingestion time or recomputed at query time. A state absent from the map
-/// takes the default, ingestion-time maintenance.
+/// The materialization option of each sub-DAG (#509 §Materialization:
+/// "Materialization decides, for each sub-DAG, whether its output is
+/// stored"). A sub-DAG is named by the node whose output would be stored (by
+/// identity); any node may be assigned. A node without an assignment is not
+/// stored: a `SummaryAgg` or `MaintainPopulation` takes the default, every
+/// other node runs when its consumer runs. `Default` assigns
+/// `NotMaterialized` to every sub-DAG.
+///
+/// The assignment keeps every assigned node alive, so a later allocation
+/// cannot reuse its address and match a stale entry.
 #[derive(Debug, Clone, Default)]
-pub struct LifecycleAssignment {
-    summary_timings: HashMap<*const OperatorNode, ExecutionTiming>,
+pub struct MaterializationAssignment {
+    assigned: HashMap<*const OperatorNode, (Rc<OperatorNode>, Materialization)>,
+    unassigned: Materialization,
 }
 
-impl LifecycleAssignment {
-    /// The assignment under which every summary state is maintained at
-    /// ingestion time — the timings every plan carried before lifecycles
-    /// became a planning choice.
-    pub fn default_maintained() -> Self {
-        Self::default()
+impl MaterializationAssignment {
+    /// Every `SummaryAgg` or `MaintainPopulation` not [`set`](Self::set)
+    /// explicitly takes `materialization` where the DAG allows it: a
+    /// `MatAtIngestion` default over a sub-DAG that can only run at query
+    /// time leaves that sub-DAG `NotMaterialized`.
+    pub fn with_default(materialization: Materialization) -> Self {
+        Self {
+            assigned: HashMap::new(),
+            unassigned: materialization,
+        }
     }
 
-    pub fn set(&mut self, summary: &Rc<OperatorNode>, timing: ExecutionTiming) {
-        self.summary_timings.insert(Rc::as_ptr(summary), timing);
+    /// Assign `materialization` to the sub-DAG whose output `node` produces.
+    pub fn set(&mut self, node: &Rc<OperatorNode>, materialization: Materialization) {
+        self.assigned
+            .insert(Rc::as_ptr(node), (Rc::clone(node), materialization));
     }
 
-    pub fn summary_timing(&self, summary: &Rc<OperatorNode>) -> ExecutionTiming {
-        self.summary_timings
-            .get(&Rc::as_ptr(summary))
-            .copied()
-            .unwrap_or(ExecutionTiming::IngestionTime)
+    /// The explicit assignment of `node`, if any.
+    fn get(&self, node: &OperatorNode) -> Option<Materialization> {
+        self.assigned
+            .get(&(node as *const OperatorNode))
+            .map(|(_, m)| *m)
+    }
+
+    /// The option `node` gets when `upstream_at_query_time` says whether
+    /// something below it can only run at query time.
+    fn resolve(
+        &self,
+        node: &OperatorNode,
+        upstream_at_query_time: bool,
+    ) -> Result<Materialization, ExecutionDataStateError> {
+        let at_ingestion = |m: Materialization| m.timing() == ExecutionTiming::IngestionTime;
+        match self.get(node) {
+            Some(m) if at_ingestion(m) && upstream_at_query_time => {
+                Err(ExecutionDataStateError::UpstreamNotAtIngestion {
+                    operator: node.operator.kind_name(),
+                })
+            }
+            Some(m) => Ok(m),
+            None if at_ingestion(self.unassigned) && upstream_at_query_time => {
+                Ok(Materialization::NotMaterialized)
+            }
+            None => Ok(self.unassigned),
+        }
     }
 }
 
-/// Memo of one [`apply_lifecycle_timings`] pass: `input node → timed node`,
+/// Whether `operator`'s output is a sub-DAG output that materialization may
+/// store: a `SummaryAgg` or a `MaintainPopulation`.
+pub(crate) fn is_materialization_point<C>(operator: &Operator<C>) -> bool {
+    matches!(
+        operator,
+        Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::MaintainPopulation { .. })
+    )
+}
+
+/// Memo of one [`apply_materialization_timings`] pass: `input node → timed node`,
 /// shared by every root of a workload so a node shared by two roots stays
 /// one `Rc`. Re-reaching a node with a different timing is a conflict.
 #[derive(Default)]
@@ -106,27 +167,41 @@ pub fn data_state(node: &OperatorNode) -> Option<ExecutionDataState> {
 }
 
 /// Whether the sub-DAG below `node` contains a node that can only run at
-/// query time (an evaluation, or a summary state `assignment` recomputes at
-/// query time), which forces every consumer above it to query time as well.
+/// query time (an evaluation, or a sub-DAG `assignment` does not put at
+/// ingestion time), which forces every consumer above it to query time as well.
 /// A PromQL `BinaryOp` whose inputs are not the same per-series rows also runs
 /// at query time.
 fn forces_query_time(
     node: &OperatorNode,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     seen: &mut HashMap<*const OperatorNode, bool>,
 ) -> bool {
     let key = node as *const OperatorNode;
     if let Some(&cached) = seen.get(&key) {
         return cached;
     }
+    let upstream = |seen: &mut HashMap<*const OperatorNode, bool>| {
+        node.children()
+            .iter()
+            .any(|child| forces_query_time(child, assignment, seen))
+    };
     let forced = match &node.operator {
         _ if node.timing == Some(ExecutionTiming::QueryTime) => true,
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => true,
-        Operator::ASAP(ASAPOp::SummaryAgg { .. })
-            if assignment.summary_timings.get(&key) == Some(&ExecutionTiming::QueryTime) =>
+        _ if node.timing.is_none()
+            && (is_materialization_point(&node.operator) || assignment.get(node).is_some()) =>
         {
-            true
+            let upstream = upstream(seen);
+            match assignment.resolve(node, upstream) {
+                Ok(Materialization::NotMaterialized)
+                    if !is_materialization_point(&node.operator) =>
+                {
+                    upstream
+                }
+                Ok(m) => m.timing() == ExecutionTiming::QueryTime,
+                Err(_) => true,
+            }
         }
         Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. })
             if node
@@ -138,10 +213,7 @@ fn forces_query_time(
         {
             true
         }
-        _ => node
-            .children()
-            .iter()
-            .any(|child| forces_query_time(child, assignment, seen)),
+        _ => upstream(seen),
     };
     seen.insert(key, forced);
     forced
@@ -150,9 +222,9 @@ fn forces_query_time(
 /// Write the timings of `assignment` into every node reachable from `root`,
 /// top-down, then validate every edge. Returns the timed copy of `root`;
 /// `memo` carries the sharing across the roots of one workload.
-pub fn apply_lifecycle_timings(
+pub fn apply_materialization_timings(
     root: &Rc<OperatorNode>,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     memo: &mut TimingMemo,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
     let mut forced = HashMap::new();
@@ -163,44 +235,48 @@ pub fn apply_lifecycle_timings(
         memo,
         &mut forced,
     )?;
+    // A root stored at ingestion time is read by the query; one that runs at
+    // ingestion time without being stored there produces rows nothing reads.
     if timed.timing == Some(ExecutionTiming::IngestionTime)
+        && !matches!(timed.materialization, Materialization::MatAtIngestion(_))
         && data_state(&timed).map(|s| s.primitive) == Some(DataPrimitive::Raw)
     {
-        return Err(ExecutionDataStateError::MaintenanceRowsAtRoot);
+        return Err(ExecutionDataStateError::UnstoredIngestionRoot {
+            operator: timed.operator.kind_name(),
+        });
     }
     validate(&timed, &mut HashMap::new())?;
     Ok(timed)
 }
 
-/// Validate the sub-DAG below `root` under the default (every summary
-/// maintained) assignment, with `root` consumed at `root_timing`. For
-/// planning-time legality checks of a candidate before it is assembled into
-/// a workload DAG; nothing is kept.
-pub fn validate_default(
+/// Validate the sub-DAG below `root` with every sub-DAG `MatAtIngestion`
+/// where the DAG allows it ([`MaterializationAssignment::with_default`]) and
+/// `root` consumed at `root_timing`. For planning-time legality checks of a
+/// candidate before it is assembled into a workload DAG: a candidate must stay
+/// executable if materialization later puts its states at ingestion time.
+/// Nothing is kept.
+pub fn validate_at_ingestion(
     root: &Rc<OperatorNode>,
     root_timing: ExecutionTiming,
 ) -> Result<(), ExecutionDataStateError> {
-    let assignment = LifecycleAssignment::default_maintained();
+    let assignment = all_at_ingestion();
     let mut memo = TimingMemo::new();
     let mut forced = HashMap::new();
     let timed = write(root, root_timing, &assignment, &mut memo, &mut forced)?;
     validate(&timed, &mut HashMap::new())
 }
 
-/// The data state `node` produces under the default assignment when its
-/// consumer runs at `consumer` — the planning-time answer to "what does this
-/// candidate's output look like" before any assignment is applied.
+/// The data state `node` produces with every sub-DAG `MatAtIngestion` where
+/// the DAG allows it, when its consumer runs at `consumer` — the planning-time answer to
+/// "what does this candidate's output look like", consistent with
+/// [`validate_at_ingestion`].
 pub fn planned_data_state(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
 ) -> ExecutionDataState {
     let mut forced = HashMap::new();
-    let timing = own_timing(
-        node,
-        consumer,
-        &LifecycleAssignment::default_maintained(),
-        &mut forced,
-    );
+    let (timing, _) = placement(node, consumer, &all_at_ingestion(), &mut forced)
+        .expect("a default assignment never fails");
     ExecutionDataState {
         timing,
         primitive: match &node.operator {
@@ -211,42 +287,93 @@ pub fn planned_data_state(
     }
 }
 
-/// The timing `node` takes when its consumer runs at `consumer`.
-fn own_timing(
+/// The assignment of [`validate_at_ingestion`] and [`planned_data_state`].
+fn all_at_ingestion() -> MaterializationAssignment {
+    MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory))
+}
+
+/// The timing and materialization `node` takes when its consumer runs at
+/// `consumer`.
+fn placement(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     forced: &mut HashMap<*const OperatorNode, bool>,
-) -> ExecutionTiming {
+) -> Result<(ExecutionTiming, Materialization), ExecutionDataStateError> {
     // A placement fixed when the candidate was built (an exact-state read
     // boundary that must run at query time, or one that feeds maintenance)
     // is honored; a conflicting consumer is rejected by validation.
+    let upstream_at_query_time = |forced: &mut HashMap<*const OperatorNode, bool>| {
+        node.children()
+            .iter()
+            .any(|child| forces_query_time(child, assignment, forced))
+    };
     if let Some(placed) = node.timing {
-        return placed;
+        if placed == ExecutionTiming::IngestionTime && upstream_at_query_time(forced) {
+            return Err(ExecutionDataStateError::UpstreamNotAtIngestion {
+                operator: node.operator.kind_name(),
+            });
+        }
+        // An explicit assignment is never silently dropped: one that agrees
+        // with the fixed timing is kept, one that needs the other timing is
+        // an error.
+        return match assignment.get(node) {
+            Some(m) if m != Materialization::NotMaterialized && m.timing() != placed => Err(
+                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                    operator: node.operator.kind_name(),
+                    fixed: placed,
+                    materialization: m,
+                },
+            ),
+            Some(m) => Ok((placed, m)),
+            None => Ok((placed, node.materialization)),
+        };
     }
-    match &node.operator {
+    Ok(match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
-        | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => ExecutionTiming::QueryTime,
-        Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => ExecutionTiming::IngestionTime,
-        Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
-            if forces_query_time(child, assignment, forced) {
-                ExecutionTiming::QueryTime
-            } else {
-                assignment.summary_timing(node)
+        | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => match assignment.get(node) {
+            Some(m) if m.timing() == ExecutionTiming::IngestionTime => {
+                return Err(ExecutionDataStateError::UpstreamNotAtIngestion {
+                    operator: node.operator.kind_name(),
+                })
+            }
+            Some(m) => (ExecutionTiming::QueryTime, m),
+            None => (ExecutionTiming::QueryTime, Materialization::NotMaterialized),
+        },
+        _ if is_materialization_point(&node.operator) || assignment.get(node).is_some() => {
+            let upstream = upstream_at_query_time(forced);
+            match assignment.resolve(node, upstream)? {
+                Materialization::NotMaterialized if !is_materialization_point(&node.operator) => {
+                    (consumer, Materialization::NotMaterialized)
+                }
+                materialization => (materialization.timing(), materialization),
             }
         }
-        _ => consumer,
-    }
+        _ => (consumer, Materialization::NotMaterialized),
+    })
+}
+
+/// The timing `node` takes when its consumer runs at `consumer`, for
+/// [`split_shared_by_phase`]: an assignment that cannot be honored is
+/// reported later by [`apply_materialization_timings`].
+fn own_timing(
+    node: &Rc<OperatorNode>,
+    consumer: ExecutionTiming,
+    assignment: &MaterializationAssignment,
+    forced: &mut HashMap<*const OperatorNode, bool>,
+) -> ExecutionTiming {
+    placement(node, consumer, assignment, forced)
+        .map_or(ExecutionTiming::QueryTime, |(timing, _)| timing)
 }
 
 fn write(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
-    assignment: &LifecycleAssignment,
+    assignment: &MaterializationAssignment,
     memo: &mut TimingMemo,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
-    let timing = own_timing(node, consumer, assignment, forced);
+    let (timing, materialization) = placement(node, consumer, assignment, forced)?;
     if let Some(done) = memo.done.get(&Rc::as_ptr(node)) {
         let previous = done.timing.expect("memoized node is timed");
         if previous != timing {
@@ -280,7 +407,8 @@ fn write(
     let timed = Rc::new(
         OperatorNode::with_schema(operator, node.schema.clone())
             .with_guarantee(node.guarantee.clone())
-            .with_timing(Some(timing)),
+            .with_timing(Some(timing))
+            .with_materialization(materialization),
     );
     memo.done.insert(Rc::as_ptr(node), Rc::clone(&timed));
     Ok(timed)
@@ -462,7 +590,13 @@ fn validate_non_asap(
                 | NonASAPOp::Limit { .. }
         ) && s.primitive == DataPrimitive::SummaryState
             && is_exact_accumulator_state(&child.schema).is_ok();
-        if s.timing != timing || (s.primitive != DataPrimitive::Raw && !passes_state) {
+        // A query-time consumer may read the stored output of a sub-DAG
+        // materialized at ingestion time.
+        let reads_stored = timing == ExecutionTiming::QueryTime
+            && child.materialization.timing() == ExecutionTiming::IngestionTime;
+        if (s.timing != timing && !reads_stored)
+            || (s.primitive != DataPrimitive::Raw && !passes_state)
+        {
             return Err(ExecutionDataStateError::IllegalChildDataState {
                 edge: op.kind_name(),
                 child: s,
@@ -570,18 +704,20 @@ fn validate_non_asap(
 /// two different timings, so that a workload whose CSE shared a `Scan`
 /// between an ingestion-time summary and a query-time computation can still
 /// be timed. Only the conflicting sub-DAGs are copied; a sub-DAG reached with
-/// one timing stays one `Rc`. Returns the (possibly rewritten) root.
+/// one timing stays one `Rc`. Returns the (possibly rewritten) root and
+/// `assignment` remapped onto it: a rebuilt node keeps its original's
+/// explicit materialization.
 pub fn split_shared_by_phase(
     root: &Rc<OperatorNode>,
-    assignment: &LifecycleAssignment,
-) -> Rc<OperatorNode> {
+    assignment: &MaterializationAssignment,
+) -> (Rc<OperatorNode>, MaterializationAssignment) {
     // First pass: the set of timings each node is reached with.
     let mut reached: HashMap<*const OperatorNode, Vec<ExecutionTiming>> = HashMap::new();
     let mut forced = HashMap::new();
     fn collect(
         node: &Rc<OperatorNode>,
         consumer: ExecutionTiming,
-        assignment: &LifecycleAssignment,
+        assignment: &MaterializationAssignment,
         reached: &mut HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
         forced: &mut HashMap<*const OperatorNode, bool>,
     ) {
@@ -603,7 +739,7 @@ pub fn split_shared_by_phase(
         &mut forced,
     );
     if reached.values().all(|timings| timings.len() <= 1) {
-        return Rc::clone(root);
+        return (Rc::clone(root), assignment.clone());
     }
     // Second pass: rebuild, giving each (node, timing) pair its own copy.
     let mut copies: HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>> =
@@ -611,7 +747,7 @@ pub fn split_shared_by_phase(
     fn rebuild(
         node: &Rc<OperatorNode>,
         consumer: ExecutionTiming,
-        assignment: &LifecycleAssignment,
+        assignment: &MaterializationAssignment,
         reached: &HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
         copies: &mut HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>>,
         forced: &mut HashMap<*const OperatorNode, bool>,
@@ -634,7 +770,8 @@ pub fn split_shared_by_phase(
             Rc::new(
                 OperatorNode::with_schema(operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing),
+                    .with_timing(node.timing)
+                    .with_materialization(node.materialization),
             )
         } else {
             Rc::clone(node)
@@ -642,14 +779,21 @@ pub fn split_shared_by_phase(
         copies.insert(key, Rc::clone(&out));
         out
     }
-    rebuild(
+    let root = rebuild(
         root,
         ExecutionTiming::QueryTime,
         assignment,
         &reached,
         &mut copies,
         &mut forced,
-    )
+    );
+    let mut remapped = assignment.clone();
+    for ((original, _), copy) in &copies {
+        if let Some((_, materialization)) = assignment.assigned.get(original) {
+            remapped.set(copy, *materialization);
+        }
+    }
+    (root, remapped)
 }
 
 /// Maintenance arithmetic needs the same per-series population on both sides.
@@ -774,16 +918,87 @@ mod tests {
         )
     }
 
+    /// Apply with every sub-DAG `MatAtIngestion` where the DAG allows it, the
+    /// placement whose edge rules these tests exercise.
     fn apply(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
-        apply_lifecycle_timings(
-            root,
-            &LifecycleAssignment::default_maintained(),
-            &mut TimingMemo::new(),
-        )
+        apply_materialization_timings(root, &all_at_ingestion(), &mut TimingMemo::new())
     }
+
+    const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
 
     fn child(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         Rc::clone(node.children()[0])
+    }
+
+    /// Without a materialization decision, a summary is `NotMaterialized` and
+    /// it and its input run at query time; an explicit choice overrides the
+    /// default and is recorded on the timed node.
+    #[test]
+    fn default_assignment_materializes_nothing() {
+        let summary = agg(scan(), kll());
+        let root = apply_materialization_timings(
+            &summary,
+            &MaterializationAssignment::default(),
+            &mut TimingMemo::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            data_state(&root),
+            Some(ExecutionDataState {
+                timing: ExecutionTiming::QueryTime,
+                primitive: DataPrimitive::SummaryState,
+            })
+        );
+        assert_eq!(root.materialization, Materialization::NotMaterialized);
+        assert_eq!(
+            data_state(&child(&root)),
+            Some(ExecutionDataState::QUERY_ROWS)
+        );
+        for (materialization, timing) in [
+            (AT_INGESTION, ExecutionTiming::IngestionTime),
+            (
+                Materialization::MatAtQuery(Medium::Disk),
+                ExecutionTiming::QueryTime,
+            ),
+        ] {
+            let mut assignment = MaterializationAssignment::default();
+            assignment.set(&summary, materialization);
+            let root = apply_materialization_timings(&summary, &assignment, &mut TimingMemo::new())
+                .unwrap();
+            assert_eq!(root.timing, Some(timing));
+            assert_eq!(root.materialization, materialization);
+            assert_eq!(child(&root).timing, Some(timing));
+            assert_eq!(
+                child(&root).materialization,
+                Materialization::NotMaterialized
+            );
+        }
+    }
+
+    /// #509 Algorithm 3, line 13: an explicit `MatAtIngestion` over a state
+    /// that only exists at query time is an error, not a silent move to
+    /// query time.
+    #[test]
+    fn ingestion_time_node_over_query_time_upstream_is_rejected() {
+        let inner = agg(scan(), exact_sum());
+        let outer = agg(Rc::clone(&inner), kll());
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&outer, AT_INGESTION);
+        assert_eq!(
+            apply_materialization_timings(&estimate(outer), &assignment, &mut TimingMemo::new())
+                .err(),
+            Some(ExecutionDataStateError::UpstreamNotAtIngestion {
+                operator: "SummaryAgg"
+            })
+        );
+        assignment.set(&inner, AT_INGESTION);
+        let outer = agg(Rc::clone(&inner), kll());
+        assignment.set(&outer, AT_INGESTION);
+        let root =
+            apply_materialization_timings(&estimate(outer), &assignment, &mut TimingMemo::new())
+                .unwrap();
+        assert_eq!(child(&root).materialization, AT_INGESTION);
+        assert_eq!(child(&child(&root)).materialization, AT_INGESTION);
     }
 
     #[test]
@@ -805,18 +1020,21 @@ mod tests {
         assert!(apply(&estimate(agg(inner, kll()))).is_ok());
     }
 
-    /// A state recomputed at query time moves the summary that reads it to
-    /// query time too, as an evaluation below it would.
+    /// A state not at ingestion time leaves the summary that reads it, when
+    /// that summary has no explicit assignment, `NotMaterialized` at query
+    /// time, as an evaluation below it would.
     #[test]
     fn query_time_state_moves_its_consuming_summary_to_query_time() {
         let inner = agg(scan(), exact_sum());
         let outer = agg(Rc::clone(&inner), kll());
-        let mut assignment = LifecycleAssignment::default_maintained();
-        assignment.set(&inner, ExecutionTiming::QueryTime);
+        let mut assignment = all_at_ingestion();
+        assignment.set(&inner, Materialization::NotMaterialized);
         let root =
-            apply_lifecycle_timings(&estimate(outer), &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&estimate(outer), &assignment, &mut TimingMemo::new())
+                .unwrap();
         let outer = child(&root);
         assert_eq!(outer.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(outer.materialization, Materialization::NotMaterialized);
         assert_eq!(child(&outer).timing, Some(ExecutionTiming::QueryTime));
     }
 
@@ -827,7 +1045,7 @@ mod tests {
         assert_eq!(child(&root).timing, Some(ExecutionTiming::QueryTime));
     }
 
-    /// Any non-ASAP operator over a evaluation runs at query time.
+    /// Any non-ASAP operator over an evaluation runs at query time.
     #[test]
     fn query_time_operation_over_evaluation_is_legal_and_root_is_evaluation() {
         let evaluation = || estimate(agg(scan(), kll()));
@@ -855,7 +1073,9 @@ mod tests {
         let operation = placed_at_ingestion(max(scan()));
         assert_eq!(
             apply(&operation).err(),
-            Some(ExecutionDataStateError::MaintenanceRowsAtRoot)
+            Some(ExecutionDataStateError::UnstoredIngestionRoot {
+                operator: "Aggregate"
+            })
         );
         let root = apply(&estimate(agg(operation, kll()))).unwrap();
         let timed_operation = child(&child(&root));
@@ -868,13 +1088,12 @@ mod tests {
     #[test]
     fn function_over_evaluation_is_rejected() {
         let operation = placed_at_ingestion(max(estimate(agg(scan(), kll()))));
-        assert!(matches!(
-            apply(&estimate(agg(operation, kll()))),
-            Err(ExecutionDataStateError::IllegalChildDataState {
-                child: ExecutionDataState::QUERY_ROWS,
-                ..
+        assert_eq!(
+            apply(&estimate(agg(operation, kll()))).err(),
+            Some(ExecutionDataStateError::UpstreamNotAtIngestion {
+                operator: "Aggregate"
             })
-        ));
+        );
     }
 
     /// One shared sub-DAG reached as maintenance input and as query-time
@@ -898,8 +1117,177 @@ mod tests {
                 second: ExecutionDataState::QUERY_ROWS,
             })
         );
-        let split = split_shared_by_phase(&root, &LifecycleAssignment::default_maintained());
-        assert!(apply(&split).is_ok());
+        let (split, assignment) = split_shared_by_phase(&root, &all_at_ingestion());
+        assert!(apply_materialization_timings(&split, &assignment, &mut TimingMemo::new()).is_ok());
+    }
+
+    /// A finalize pinned to ingestion time (as fixed-window rate candidates
+    /// build it) over a state that is not `MatAtIngestion` names the missing
+    /// upstream, not an illegal edge.
+    #[test]
+    fn ingestion_pinned_finalize_over_query_time_state_is_upstream_not_at_ingestion() {
+        let finalize = placed_at_ingestion(
+            OperatorNode::new_shared(crate::ir::Operator::ASAP(
+                ASAPOp::FinalizeExactAccumulator {
+                    child: agg(scan(), exact_sum()),
+                },
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            apply_materialization_timings(
+                &estimate(agg(finalize, kll())),
+                &MaterializationAssignment::default(),
+                &mut TimingMemo::new()
+            )
+            .err(),
+            Some(ExecutionDataStateError::UpstreamNotAtIngestion {
+                operator: "FinalizeExactAccumulator"
+            })
+        );
+    }
+
+    /// Splitting rebuilds the ancestors of a copied sub-DAG; an explicit
+    /// assignment on one of them follows it onto the rebuilt node.
+    #[test]
+    fn split_keeps_explicit_assignments() {
+        let shared = scan();
+        let summary = agg(Rc::clone(&shared), kll());
+        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Concat {
+            children: vec![max(estimate(Rc::clone(&summary))), max(Rc::clone(&shared))],
+            discriminator_unique_key: None,
+        }))
+        .unwrap();
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&summary, AT_INGESTION);
+        let (split, assignment) = split_shared_by_phase(&root, &assignment);
+        let timed =
+            apply_materialization_timings(&split, &assignment, &mut TimingMemo::new()).unwrap();
+        let summary = child(&child(&child(&timed)));
+        assert!(matches!(
+            summary.operator,
+            Operator::ASAP(ASAPOp::SummaryAgg { .. })
+        ));
+        assert_eq!(summary.materialization, AT_INGESTION);
+        assert_eq!(summary.timing, Some(ExecutionTiming::IngestionTime));
+    }
+
+    /// Any node may be materialized, not only a summary state: stored rows
+    /// at ingestion time are read by a query-time consumer, and a node that
+    /// can only run at query time cannot be stored at ingestion time.
+    #[test]
+    fn any_node_may_be_materialized() {
+        let panes = max(scan());
+        let root = max(Rc::clone(&panes));
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&panes, AT_INGESTION);
+        let timed =
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(child(&timed).materialization, AT_INGESTION);
+        assert_eq!(child(&timed).timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(
+            child(&child(&timed)).timing,
+            Some(ExecutionTiming::IngestionTime)
+        );
+
+        let over_evaluation = max(estimate(agg(scan(), kll())));
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&over_evaluation, AT_INGESTION);
+        assert_eq!(
+            apply_materialization_timings(&over_evaluation, &assignment, &mut TimingMemo::new())
+                .err(),
+            Some(ExecutionDataStateError::UpstreamNotAtIngestion {
+                operator: "Aggregate"
+            })
+        );
+    }
+
+    fn finalize(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(crate::ir::Operator::ASAP(
+            ASAPOp::FinalizeExactAccumulator { child },
+        ))
+        .unwrap()
+    }
+
+    /// The materialization the exported DAG records for `node`'s operator kind.
+    fn exported(root: &Rc<OperatorNode>, kind: &str) -> Materialization {
+        let dag = crate::ir::physical_export::compile_physical_asap_dag(root).unwrap();
+        dag.validate().unwrap();
+        dag.nodes
+            .iter()
+            .find(|n| n.payload.kind_name() == kind)
+            .unwrap()
+            .materialization
+    }
+
+    /// A node whose timing its candidate fixed (the query-time read boundary
+    /// of `finalize_query_candidate`) keeps an explicit assignment that agrees
+    /// with that timing and rejects one that needs the other timing.
+    #[test]
+    fn fixed_timing_keeps_an_agreeing_assignment_and_rejects_a_conflict() {
+        let state = agg(scan(), exact_sum());
+        let read = Rc::new(
+            (*finalize(Rc::clone(&state)))
+                .clone()
+                .with_timing(Some(ExecutionTiming::QueryTime)),
+        );
+        let stored = Materialization::MatAtQuery(Medium::Disk);
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&read, stored);
+        let timed =
+            apply_materialization_timings(&read, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(timed.materialization, stored);
+        assert_eq!(exported(&timed, "FinalizeExactAccumulator"), stored);
+
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&state, AT_INGESTION);
+        assignment.set(&read, AT_INGESTION);
+        assert_eq!(
+            apply_materialization_timings(&read, &assignment, &mut TimingMemo::new()).err(),
+            Some(
+                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                    operator: "FinalizeExactAccumulator",
+                    fixed: ExecutionTiming::QueryTime,
+                    materialization: AT_INGESTION,
+                }
+            )
+        );
+    }
+
+    /// A root stored at ingestion time is valid: the query reads the stored
+    /// output. A root that runs at ingestion time without being stored there
+    /// is not.
+    #[test]
+    fn a_root_may_be_stored_at_ingestion_time() {
+        let root = max(scan());
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&root, AT_INGESTION);
+        let timed =
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(exported(&timed, "Aggregate"), AT_INGESTION);
+
+        let state = agg(scan(), exact_sum());
+        let root = finalize(Rc::clone(&state));
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&state, AT_INGESTION);
+        assignment.set(&root, AT_INGESTION);
+        let timed =
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(exported(&timed, "FinalizeExactAccumulator"), AT_INGESTION);
+
+        let mut assignment = MaterializationAssignment::default();
+        let root = placed_at_ingestion(max(scan()));
+        assignment.set(&root, Materialization::NotMaterialized);
+        assert_eq!(
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).err(),
+            Some(ExecutionDataStateError::UnstoredIngestionRoot {
+                operator: "Aggregate"
+            })
+        );
     }
 
     /// Both paired operands must be plain; an unrelated state column is not
@@ -921,11 +1309,11 @@ mod tests {
         };
         for operand in [1, 2] {
             assert!(matches!(
-                validate_default(&corr_over(operand), ExecutionTiming::QueryTime),
+                validate_at_ingestion(&corr_over(operand), ExecutionTiming::QueryTime),
                 Err(ExecutionDataStateError::NonPlainOperand { .. })
             ));
         }
-        validate_default(&corr_over(3), ExecutionTiming::QueryTime).unwrap();
+        validate_at_ingestion(&corr_over(3), ExecutionTiming::QueryTime).unwrap();
     }
     // Typed derived updates retain one opaque series identity only when both
     // operands cover the same series; arbitrary labels are never admitted.
@@ -984,7 +1372,7 @@ mod tests {
                 }),
                 schema,
             ));
-            validate_default(&placed_at_ingestion(binary), ExecutionTiming::IngestionTime)
+            validate_at_ingestion(&placed_at_ingestion(binary), ExecutionTiming::IngestionTime)
         };
         let mut schema = Schema::lifted(
             vec![

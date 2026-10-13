@@ -73,6 +73,7 @@ fn plan(
         id,
         payload,
         output_state: state,
+        materialization: Default::default(),
         output_schema: (**schema).clone(),
         guarantee: None,
     };

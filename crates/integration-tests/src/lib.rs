@@ -100,22 +100,44 @@ pub mod fixtures {
 /// Timing and export helpers for post-ASAP plans.
 pub mod post_asap {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
-    use asap_types::ir::{apply_lifecycle_timings, LifecycleAssignment, OperatorNode, TimingMemo};
+    use asap_types::ir::{
+        apply_materialization_timings, Materialization, MaterializationAssignment, Medium,
+        OperatorNode, TimingMemo,
+    };
     use std::rc::Rc;
 
-    /// Time `root` under the default (every summary maintained) lifecycle
-    /// assignment. Returns the timed copy; read `node.timing` on it.
+    /// Time `root` under the default assignment (every sub-DAG
+    /// `NotMaterialized`, so every summary computed at query time). Returns the timed copy; read `node.timing` on it.
     pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        apply_lifecycle_timings(
-            root,
-            &LifecycleAssignment::default_maintained(),
-            &mut TimingMemo::new(),
-        )
-        .expect("default lifecycle timing failed")
+        timed_with(root, &MaterializationAssignment::default())
     }
 
-    /// Time `root` (default assignment), then export the wire-6 DAG.
+    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows it.
+    pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        timed_with(
+            root,
+            &MaterializationAssignment::with_default(Materialization::MatAtIngestion(
+                Medium::Memory,
+            )),
+        )
+    }
+
+    fn timed_with(
+        root: &Rc<OperatorNode>,
+        assignment: &MaterializationAssignment,
+    ) -> Rc<OperatorNode> {
+        apply_materialization_timings(root, assignment, &mut TimingMemo::new())
+            .expect("materialization timing failed")
+    }
+
+    /// Time `root` (default assignment), then export the physical DAG.
     pub fn post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
         compile_physical_asap_dag(&timed(root)).expect("post-ASAP DAG export failed")
+    }
+
+    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows
+    /// it, then export the physical DAG.
+    pub fn at_ingestion_post_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
+        compile_physical_asap_dag(&at_ingestion(root)).expect("post-ASAP DAG export failed")
     }
 }

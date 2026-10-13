@@ -19,11 +19,12 @@ pub mod cse;
 pub mod flat;
 /// Physical ASAP DAG: the flattened operators plus execution timing.
 pub mod physical_export;
-/// Execution timing for physical plans: a lifecycle assignment expanded onto every node.
+/// Execution timing for physical plans: a materialization assignment expanded onto every node.
 pub mod timing;
+pub use crate::post_asap::execution_data_state::{Materialization, Medium};
 pub use timing::{
-    apply_lifecycle_timings, data_state, planned_data_state, split_shared_by_phase,
-    validate_default, LifecycleAssignment, TimingMemo,
+    apply_materialization_timings, data_state, planned_data_state, split_shared_by_phase,
+    validate_at_ingestion, MaterializationAssignment, TimingMemo,
 };
 pub mod schema_support;
 /// Semantic observation coverage, separate from field layout and physical timing.

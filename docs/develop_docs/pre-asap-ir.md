@@ -33,7 +33,7 @@ pub struct OperatorNode {
     pub result_kind: OperatorResultKind,      // Relation | InstantVector | RangeVector | State | Scalar
     pub schema: Schema,                       // output schema, derived at construction
     pub guarantee: Option<ResultGuarantee>,   // None until accuracy assessment establishes one
-    pub timing: Option<ExecutionTiming>,      // None until a lifecycle assignment is applied
+    pub timing: Option<ExecutionTiming>,      // None until a materialization assignment is applied
 }
 ```
 
@@ -47,7 +47,7 @@ pub struct OperatorNode {
   retain a more specific schema through `OperatorNode::with_schema`.
 - `guarantee` is `None` until accuracy assessment establishes one; `None` never means exact.
 - `timing` is `None` in every front-end DAG and every candidate. It is written by
-  `ir::timing::apply_lifecycle_timings` (see the Post-ASAP IR document); export rejects an
+  `ir::timing::apply_materialization_timings` (see the Post-ASAP IR document); export rejects an
   untimed node.
 
 `OperatorNode::children()` returns the operator's inputs in field order followed by the

@@ -387,6 +387,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
                 child: 0,
             }),
             output_state: ExecutionDataState::QUERY_ROWS,
+            materialization: Default::default(),
             output_schema: (*output).clone(),
             guarantee: None,
         };

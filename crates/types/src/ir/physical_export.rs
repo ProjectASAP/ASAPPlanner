@@ -1,11 +1,13 @@
 //! Physical ASAP DAG (planner-layering stage 2 output).
 //!
-//! The flattened operators of [`super::flat`], plus the execution timing
-//! (data state) of every node and edge. The input must already be timed
-//! ([`super::timing::apply_lifecycle_timings`]); export reads each node's
-//! timing and does not re-run data-state validation.
+//! The flattened operators of [`super::flat`], plus the materialization and
+//! execution timing (data state) of every node and edge. The input must
+//! already be timed ([`super::timing::apply_materialization_timings`]); export
+//! reads each node's timing and materialization and does not re-run
+//! data-state validation. The deployment executes the plan as given
+//! (#509 Assumption 8): it does not change materialization or timing.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -18,14 +20,14 @@ use super::non_asap::NonASAPOp;
 use super::operator_properties::Reduction;
 use super::query::QueryRoot;
 use super::scalar::ScalarExpr;
-use super::timing::data_state;
+use super::timing::{data_state, is_materialization_point};
 use crate::post_asap::execution_data_state::{
-    ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
+    ExecutionDataState, ExecutionDataStateError, ExecutionTiming, Materialization,
 };
 use crate::post_asap::guarantee::ResultGuarantee;
 use crate::pre_asap::schema::{FieldDataType, Schema};
 
-pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 9;
+pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -66,6 +68,11 @@ pub struct PhysicalASAPDAGNode {
     pub payload: PhysicalASAPOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
+    /// Whether and where the deployment stores this node's output: the
+    /// option the materialization assignment chose for the sub-DAG this node
+    /// produces. Any node may be stored (#509 §Materialization); a node with
+    /// no assignment is `NotMaterialized`.
+    pub materialization: Materialization,
     pub output_schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
 }
@@ -111,8 +118,14 @@ pub struct PhysicalASAPDAGDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PhysicalASAPDAGValidationError {
-    #[error("phase assignment must name every DAG node exactly once")]
-    IncompletePhaseAssignment,
+    #[error(
+        "node {node:?} runs at {timing:?}, which its materialization {materialization:?} does not"
+    )]
+    MaterializationTimingMismatch {
+        node: PhysicalASAPNodeId,
+        timing: ExecutionTiming,
+        materialization: Materialization,
+    },
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
     QueryDependencyInIngestion {
         producer: PhysicalASAPNodeId,
@@ -173,36 +186,25 @@ impl PhysicalASAPDAGDocument {
 }
 
 impl PhysicalASAPDAG {
-    /// Assign execution phases without changing operator semantics. Phase choices
-    /// do not prove deployment support: callers must bind concrete implementations
-    /// and storage boundaries before installing this plan.
-    pub fn with_execution_phases(
-        &self,
-        phases: &BTreeMap<PhysicalASAPNodeId, ExecutionTiming>,
-    ) -> Result<Self, PhysicalASAPDAGValidationError> {
-        self.validate()?;
-        if phases.len() != self.nodes.len()
-            || self.nodes.iter().any(|node| !phases.contains_key(&node.id))
-        {
-            return Err(PhysicalASAPDAGValidationError::IncompletePhaseAssignment);
-        }
-        let mut dag = self.clone();
-        for node in &mut dag.nodes {
-            node.output_state.timing = phases[&node.id];
-        }
-        let states: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n.output_state)).collect();
-        for edge in &mut dag.edges {
-            edge.data_state = states[&edge.producer];
-        }
-        dag.validate()?;
-        Ok(dag)
-    }
-
     pub fn validate(&self) -> Result<(), PhysicalASAPDAGValidationError> {
         let mut nodes = HashMap::new();
         for node in &self.nodes {
             if nodes.insert(node.id, node).is_some() {
                 return Err(PhysicalASAPDAGValidationError::DuplicateNodeId(node.id));
+            }
+            // A sub-DAG output runs when its materialization says; any other
+            // node is not stored and runs when its consumer runs.
+            if (is_materialization_point(&node.payload)
+                || node.materialization != Materialization::NotMaterialized)
+                && node.materialization.timing() != node.output_state.timing
+            {
+                return Err(
+                    PhysicalASAPDAGValidationError::MaterializationTimingMismatch {
+                        node: node.id,
+                        timing: node.output_state.timing,
+                        materialization: node.materialization,
+                    },
+                );
             }
             if let Operator::ASAP(ASAPOp::SummaryAgg {
                 family, grouping, ..
@@ -407,7 +409,7 @@ pub fn compile_physical_asap_dag(
 }
 
 /// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`super::timing::apply_lifecycle_timings`]); the data-state
+/// timing (see [`super::timing::apply_materialization_timings`]); the data-state
 /// rules were checked by that pass and are not re-run here.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
@@ -471,6 +473,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
             id,
             payload: flat_node.operator,
             output_state,
+            materialization: flat_node.materialization,
             output_schema: flat_node.schema,
             guarantee: flat_node.guarantee,
         });

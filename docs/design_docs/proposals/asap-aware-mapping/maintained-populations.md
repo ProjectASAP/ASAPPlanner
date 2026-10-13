@@ -69,14 +69,20 @@ columns and multi-measure aggregates need additional rules.
 **Replacement sub-DAG:**
 
 ```text
-KeepPreAsap(input)
-  -> MaintainPopulation { input, max_k, quantiles }  [lifecycle-timed]
-       -> ReadPopulation { Quantile(q1) }           [read]
-       -> ReadPopulation { Quantile(q2) }           [read]
-       -> ReadPopulation { TopK(k1) }               [read]
-       -> ReadPopulation { TopK(k2) }               [read]
-       -> ReadPopulation { Sum | Count | Average }  [read]
+input
+  -> MaintainPopulation { input, max_k, quantiles }
+       -> EvaluatePopulation { Quantile(q1) }
+       -> EvaluatePopulation { Quantile(q2) }
+       -> EvaluatePopulation { TopK(k1) }
+       -> EvaluatePopulation { TopK(k2) }
+       -> EvaluatePopulation { Sum | Count | Average }
 ```
+
+`EvaluatePopulation` runs at query time. `MaintainPopulation` has no fixed
+timing: like a `SummaryAgg`, it follows its materialization
+(`NotMaterialized`, `MatAtIngestion(medium)` or `MatAtQuery(medium)`, #509
+§Materialization), which Stage 2 chooses; it runs at ingestion time only when
+it is `MatAtIngestion`.
 
 The rule examines compatible workload roots, sets `max_k` to the largest requested
 k and enables quantile readout if any consumer needs it. It emits a candidate for
@@ -116,8 +122,8 @@ because their source names or numeric values happen to agree.
 ## Validation, selection and execution responsibilities
 
 Planner validates the declared input, the query-time readout and readout
-compatibility; the population's lifecycle decides whether it is maintained at
-ingestion or rebuilt per query. Its intended guarantee is exact membership and exact readout;
+compatibility; `MaintainPopulation` runs at the timing its materialization
+implies. Its intended guarantee is exact membership and exact readout;
 a physical implementation still must preserve the language's numeric and empty-input
 semantics. In particular, SQL global COUNT over an empty population returns a row
 with zero, while PromQL COUNT over an empty vector returns an empty vector.

@@ -62,11 +62,9 @@ Reserved (migrated but unimplemented; schema derivation rejects them with
 
 The earlier draft listed `SummaryCreate` and `SummaryInsert`. These are not
 separate variants. `SummaryAgg` describes the state-producing
-computation and its update input. The
-[summary-maintenance lifecycle](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
-separately describes when state is created, retained, shared, updated and retired.
-Physical binding and runtime execution implement the actual build and update
-operations. Not every summary family supports incremental maintenance.
+computation and its update input. Stage 2 materialization (#509) will decide
+whether and when that state is maintained. Physical binding and runtime
+execution implement the actual build and update operations. Not every summary family supports incremental maintenance.
 
 ## Exact work and composition
 
@@ -79,8 +77,8 @@ Exact work is represented by the ordinary operators, unchanged:
   assessed yet (`is_logical_rewrite`).
 - `BinaryOp` combines independently planned operands. Summary planning may set
   its typed division guards (`checked_finite_division`,
-  `checked_relative_division`); the operator's timing comes from the lifecycle
-  assignment, not from the operator.
+  `checked_relative_division`); the operator's timing comes from the
+  materialization assignment, not from the operator.
 - Aggregate, projection, filter, sort and limit over an evaluation are the ordinary
   `Aggregate`, `Project`, `Filter`, `Sort` and `Limit` operators reading an ASAP
   node. Exact-accumulator state may pass through the projection-like
@@ -108,29 +106,59 @@ one of these phases. Backend capability restrictions are implementation gaps,
 not definitions of the operator.
 
 The logical DAG carries no timing: `OperatorNode::timing` is `None` on every
-front-end node and every candidate, and `map_children` clears it. Summary
-materialization chooses a lifecycle per summary state and records it in a
-[`LifecycleAssignment`](../../../crates/types/src/ir/timing.rs) (ingestion-time
-maintenance or query-time recomputation per `SummaryAgg`; a state absent from
-the assignment defaults to ingestion-time maintenance).
-`apply_lifecycle_timings(root, &assignment, &mut TimingMemo)` then writes a
-timing into every node, top-down:
+front-end node and every candidate, and `map_children` clears it.
+Materialization ([#509 §Materialization](../proposals/planner-layering.md#materialization))
+gives each sub-DAG one of three options: `NotMaterialized`,
+`MatAtIngestion(medium)` or `MatAtQuery(medium)`, with `Medium::Memory` or
+`Medium::Disk`. A
+[`MaterializationAssignment`](../../../crates/types/src/ir/timing.rs) records
+the option per sub-DAG, named by the node whose output would be stored. Any
+node may be named: a summary state, a population, or, as in #509 Example 4,
+the tumbling-window panes a query reads. `set(node, materialization)` assigns
+one, and every other sub-DAG is `NotMaterialized`. Choosing the options is
+Stage 2's job (#604); until then the planner materializes nothing.
+`apply_materialization_timings(root, &assignment, &mut TimingMemo)` then writes a
+timing and a materialization into every node, top-down:
 
-- a node of fixed kind takes its kind's timing — `SummaryEstimate` and
-  `EvaluatePopulation` run at query time, `MaintainPopulation` at ingestion time;
-- a `SummaryAgg` takes the assignment's timing, unless something below it can
-  only exist at query time (an evaluation);
-- every other node runs when its consumer runs: everything that feeds a
-  maintained state runs at ingestion time, everything above an evaluation at
-  query time.
+- `SummaryEstimate` and `EvaluatePopulation` run at query time;
+- a node assigned `MatAtIngestion` runs at ingestion time, and one assigned
+  `MatAtQuery` at query time; a `SummaryAgg` or `MaintainPopulation` that is
+  `NotMaterialized` runs at query time. Every node upstream of an
+  ingestion-time node also runs at ingestion time, so `MatAtIngestion` over
+  something that can only exist at query time (an evaluation, or a state
+  that is not `MatAtIngestion`) fails with
+  `ExecutionDataStateError::UpstreamNotAtIngestion` ("upstream of
+  ingestion-time node not at ingestion time");
+- every other node is not stored and runs when its consumer runs: everything
+  that feeds an ingestion-time node runs at ingestion time, everything above
+  an evaluation at query time. A query-time consumer reads a `MatAtIngestion`
+  node's stored output.
+
+A node whose timing a candidate builder fixed (the query-time
+`FinalizeExactAccumulator` read boundary of `finalize_query_candidate`) keeps
+it: an explicit assignment that agrees with that timing is kept, and one that
+needs the other timing fails with
+`ExecutionDataStateError::MaterializationConflictsWithFixedTiming`; an
+explicit `MatAtIngestion` is never silently moved or dropped. A root may be
+`MatAtIngestion`, and the query reads its stored output; a root of rows that
+runs at ingestion time without being stored there fails with
+`ExecutionDataStateError::UnstoredIngestionRoot`.
 
 The pass then validates every edge (rows or exact-accumulator state into a
-`SummaryAgg`, state into an evaluation, an ingestion-time `MaintainPopulation` under
+`SummaryAgg`, state into an evaluation, a timed `MaintainPopulation` under
 an `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a
 node reached from two consumers that need different timings;
 `split_shared_by_phase` copies such a sub-DAG for one side before the
-assignment is applied. `validate_default` and `planned_data_state` answer the
-same questions for a candidate at planning time without keeping anything.
+assignment is applied. How long a materialized output is kept (retention) is
+also Stage 2's decision and is not in the assignment.
+
+`MaterializationAssignment::with_default(materialization)` gives every sub-DAG
+that is not set explicitly `materialization` where the DAG allows it; a
+`MatAtIngestion` default over a sub-DAG that can only run at query time leaves
+that sub-DAG `NotMaterialized` instead of failing (the default applies to
+`SummaryAgg` and `MaintainPopulation` nodes). `validate_at_ingestion` and
+`planned_data_state` use it to check, at planning time and without keeping
+anything, that a candidate stays valid when every sub-DAG is `MatAtIngestion`.
 
 ## Exported DAG
 
@@ -157,15 +185,19 @@ children as edges and no embedded sub-DAGs:
   producer's data state and grouping/window compatibility.
 - Each node records `output_state` (timing plus `Raw` or `SummaryState`),
   `output_schema` and `guarantee`. Export reads the timing written by
-  `apply_lifecycle_timings` and rejects an untimed node
+  `apply_materialization_timings` and rejects an untimed node
   (`ExecutionDataStateError::UntimedNode`); it does not re-run data-state
   validation.
 
-Phase is stored on the `PhysicalASAPDAG` node, independently of its payload.
-`PhysicalASAPDAG::with_execution_phases` reassigns a phase to every node and
-updates its edges; ingestion work cannot depend on a future query result.
-Deployments must separately check that they have an implementation and a
-valid data source for the chosen placement.
+Each node also records its `materialization`, including the medium, so the
+deployment knows which outputs to store and where; validation rejects a
+`SummaryAgg` or `MaintainPopulation` whose timing differs from the one its
+materialization implies, and any `MatAtIngestion` or `MatAtQuery` node at the
+other timing. Ingestion work cannot depend on a future query result. The
+deployment executes the plan as given and does not change its materialization
+or timing ([#509 Assumption 8](../proposals/planner-layering.md#assumptions)); it must
+separately check that it has an implementation and a valid data source for
+each placement.
 
 ## Weighted grouped TopK
 
@@ -195,9 +227,9 @@ failure probabilities are combined, and the score guarantee remains in the
 membership guarantee's child provenance. An exact request does not accept this
 approximate output path merely because its selected identities are certified.
 
-Deployment chooses ingestion time or query time for these operators. The
-lifecycle assignment writes the placement; `with_execution_phases` can
-reassign it on the exported DAG. Either deployment must give each evaluation a complete
+The materialization assignment decides whether these summaries run at
+ingestion time or at query time, and the exported DAG carries that placement.
+Either placement must give each evaluation a complete
 rate window and an isolated summary state, or maintain an equivalent replacement
 strategy. Appending successive rate snapshots to one cumulative state is invalid.
 An ingestion execution can compute a window before the query and store its state;

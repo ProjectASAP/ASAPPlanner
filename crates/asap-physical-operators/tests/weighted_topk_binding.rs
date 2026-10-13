@@ -87,13 +87,15 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         })
         .unwrap();
     let dag = compile_physical_asap_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {family:FieldDataType::Sketch(kind,_),..})if kind.algorithm()==&algorithm)).unwrap();
-    let rate_id = dag
-        .edges
-        .iter()
-        .find(|edge| edge.consumer == build.id)
-        .unwrap()
-        .producer;
+    let rate_id_of = |dag: &PhysicalASAPDAG| {
+        let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {family:FieldDataType::Sketch(kind,_),..})if kind.algorithm()==&algorithm)).unwrap();
+        dag.edges
+            .iter()
+            .find(|edge| edge.consumer == build.id)
+            .unwrap()
+            .producer
+    };
+    let rate_id = rate_id_of(&dag);
     let rates = Arc::new(
         dag.nodes
             .iter()
@@ -129,9 +131,11 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
     })
     .collect();
     let batch = Batch::try_new(rates.clone(), rows).unwrap();
-    for (phase, scope) in [
+    // The summaries `MatAtIngestion` run as data arrives; `NotMaterialized`
+    // (the default) runs everything when the query does.
+    for (placed, scope) in [
         (
-            ExecutionTiming::IngestionTime,
+            continuously_maintained_dag(&plan),
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 60_000,
@@ -139,16 +143,14 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
             },
         ),
         (
-            ExecutionTiming::QueryTime,
+            dag.clone(),
             Scope::Query {
                 evaluation_time_ms: 60_000,
                 revision: 1,
             },
         ),
     ] {
-        let placed = dag
-            .with_execution_phases(&dag.nodes.iter().map(|node| (node.id, phase)).collect())
-            .unwrap();
+        let rate_id = rate_id_of(&placed);
         let source = Box::new(Operator::source(rates.clone(), vec![batch.clone()]).unwrap())
             as Source<'static>;
         let compiled = compile(
@@ -813,102 +815,43 @@ fn spatial_topk_requires_the_limit_and_sort_partitions_to_agree() {
     assert!(candidates(&with_limit_partition(&global, by_job.clone())).is_empty());
 }
 
-/// Deployment-side lifecycle choice: every summary state of `candidate` is
-/// continuously maintained, and the chosen lifecycles set execution timing.
+/// `candidate` with every `SummaryAgg` `MatAtIngestion`, the materialization
+/// a continuously served query would get: each summary and every input it
+/// consumes run at ingestion time, the rest at query time. The candidate pins
+/// its finalize boundary to query time, which would put the summaries above
+/// it upstream of a query-time node, so the pin is lifted first.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
-    use asap_aware_mapping::{
-        cost_model::{Cost, CostModel},
-        enumerate_summary_maintenance_lifecycles, CostRate, Horizon,
-        SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
-        SummaryMaintenanceLifecycleCostInputs, WorkloadDemand,
+    use planner_types::ir::{
+        apply_materialization_timings, Materialization, MaterializationAssignment, Medium,
+        Operator as IrOperator, OperatorNode, TimingMemo,
     };
-    use planner_types::workload::{
-        DataArrival, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-    };
-    struct Costed;
-    impl CostModel for Costed {
-        fn rank_candidates(
-            &self,
-            _: &planner_types::pre_asap::agg_intent::AggIntent,
-            candidates: &[SketchAlgorithm],
-        ) -> Vec<SketchAlgorithm> {
-            candidates.to_vec()
+    fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        let mut copy = (**node).clone();
+        copy.operator = node.operator.map_children(unpinned);
+        if matches!(
+            copy.operator,
+            IrOperator::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
+        ) {
+            copy.timing = None;
         }
-        fn summary_maintenance_lifecycle_cost_inputs(
-            &self,
-            _: &planner_types::ir::OperatorNode,
-        ) -> SummaryMaintenanceLifecycleCostInputs {
-            SummaryMaintenanceLifecycleCostInputs {
-                build_cost: Some(Cost(10.)),
-                maintenance_cost_per_update: Some(Cost(1.)),
-                summary_read_cost: Some(Cost(1.)),
-                retention_cost_rate: Some(CostRate(0.1)),
-                retirement_cost: Some(Cost(1.)),
-            }
-        }
-        fn summary_maintenance_capabilities(
-            &self,
-            _: &planner_types::ir::OperatorNode,
-        ) -> SummaryMaintenanceCapabilities {
-            SummaryMaintenanceCapabilities {
-                incremental_update: true,
-                merge: true,
-                delete: true,
-            }
+        Rc::new(copy)
+    }
+    let candidate = unpinned(candidate);
+    let mut assignment = MaterializationAssignment::default();
+    for node in OperatorNode::reachable(&candidate) {
+        if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
+            assignment.set(&node, Materialization::MatAtIngestion(Medium::Memory));
         }
     }
-    const NOW_MS: u64 = 1_000_000;
-    let queries = QueryWorkload {
-        language: QueryLanguage::PromQL,
-        query_batch: None,
-        repeating_queries: Some(vec![RepeatingEntry {
-            query: Query("topk by(job)(2, rate(m[1m]))".into()),
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
-            requirements: QueryRequirements::default(),
-            predictability: Predictability::Predictable { known_at: None },
-            time_selection: TimeSelection::default(),
-        }]),
-    };
-    let data = DataWorkload {
-        arrival: DataArrival::ContinuouslyIngesting,
-        ingestion_rate: WorkloadEvidence {
-            value: Some(Rate(1.)),
-            source: planner_types::workload::EvidenceSource::Observed,
-            observed_at_ms: Some(NOW_MS),
-            valid_for_ms: Some(60_000),
-        },
-        ..Default::default()
-    };
-    let lifecycles = enumerate_summary_maintenance_lifecycles(
-        Rc::clone(candidate),
-        WorkloadDemand::new_with_data(&queries, &data, &[0]),
-        NOW_MS,
-        Some(Horizon(100.)),
-        SummaryMaintenanceLifecycleCapabilities::ALL,
-        &Costed,
-    )
-    .unwrap();
-    let choices = lifecycles
-        .deployments()
-        .iter()
-        .map(|deployment| {
-            (
-                deployment.post_asap_node_id,
-                SummaryMaintenanceLifecycle::ContinuouslyMaintained,
-            )
-        })
-        .collect::<Vec<_>>();
-    lifecycles
-        .select(&choices)
-        .unwrap()
-        .execution_timed_dag()
-        .unwrap()
+    let timed =
+        apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new()).unwrap();
+    planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap()
 }
 
 // A maintained heap over finalized per-series Rate is the fixed-window
-// placement: lifecycle timing, not a separate candidate, puts it in precompute.
+// placement: materialization timing, not a separate candidate, puts it in precompute.
 #[test]
-fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
+fn maintained_rate_heap_compiles_fixed_window_precompute() {
     use asap_physical_operators::physical_planner::{
         compile_candidate, promql_rows::with_series_identity,
     };

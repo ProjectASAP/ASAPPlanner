@@ -1,7 +1,7 @@
 //! Compile maintenance-selected frontiers without deployment-specific DAG rewrites.
 use super::*;
 
-/// One computation realization; lifecycle/window/revision requirements accompany
+/// One computation realization; materialization/window/revision requirements accompany
 /// it during optimization and deployment. Stored outputs have no storage identity.
 /// Deserialization validates the producer/reader boundary.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -86,7 +86,7 @@ pub fn cut_candidate(
     })
 }
 
-/// Materialization frontier implied by lifecycle-assigned timing: ingestion-time
+/// Materialization frontier implied by materialization-assigned timing: ingestion-time
 /// nodes read by a query-time node, plus each root, and each node a scalar
 /// root reads, that is ingestion-timed.
 /// `cut_candidate` of one [`compile`] result with this frontier realizes the
@@ -94,6 +94,8 @@ pub fn cut_candidate(
 /// That holds while timing-dependent lowering (an ingestion-time `Binary`
 /// aligns by value column) has the same timing at compile time as here.
 /// A query-time node feeding an ingestion-time node has no valid placement.
+/// Only ingestion timing is read: a `MatAtQuery` output is not stored by
+/// this frontier yet (choosing and storing it is Stage 2's job).
 pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error> {
     use planner_types::post_asap::ExecutionTiming::IngestionTime;
     let timing = dag
@@ -133,7 +135,7 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
 
 /// Enumerate bounded, reachable materialization frontiers above explicit inputs.
 /// Each frontier is an antichain: storing an output and its ancestor together
-/// would leave the ancestor unused by query execution. Lifecycle eligibility
+/// would leave the ancestor unused by query execution. Materialization eligibility
 /// and deployment feasibility are evaluated separately before cost selection.
 /// Exceeding the search budget returns an error, never a partial inventory.
 pub fn enumerate_frontiers(
@@ -378,9 +380,13 @@ mod tests {
             .assemble_selected_query(&space.roots[0].1)
             .unwrap()
             .unwrap();
-        let selected = planner_types::ir::apply_lifecycle_timings(
+        let selected = planner_types::ir::apply_materialization_timings(
             &selected,
-            &Default::default(),
+            &planner_types::ir::MaterializationAssignment::with_default(
+                planner_types::ir::Materialization::MatAtIngestion(
+                    planner_types::ir::Medium::Memory,
+                ),
+            ),
             &mut Default::default(),
         )
         .unwrap();
@@ -418,9 +424,21 @@ mod tests {
         dag: &PhysicalASAPDAG,
         timing: impl Fn(&PhysicalASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
     ) -> PhysicalASAPDAG {
+        use planner_types::post_asap::{ExecutionTiming, Materialization, Medium};
         let mut timed = dag.clone();
         for node in &mut timed.nodes {
             node.output_state.timing = timing(node);
+            // A stored sub-DAG output runs when its materialization says.
+            let stored = matches!(
+                node.payload,
+                Payload::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::MaintainPopulation { .. })
+            );
+            node.materialization = match node.output_state.timing {
+                ExecutionTiming::IngestionTime if stored => {
+                    Materialization::MatAtIngestion(Medium::Memory)
+                }
+                _ => Materialization::NotMaterialized,
+            };
         }
         for edge in &mut timed.edges {
             let producer = timed.nodes.iter().find(|node| node.id == edge.producer);
@@ -446,20 +464,20 @@ mod tests {
         )])
     }
 
-    /// Cutting one compilation by a retained-state timing and by the all
-    /// query-time timing (what ContinuouslyMaintained and Ephemeral assign)
+    /// Cutting one compilation by a `MatAtIngestion` timing and by the
+    /// `NotMaterialized` (all query-time) timing
     /// lowers each Planner node once and matches `compile_candidate`.
     #[test]
     fn timing_cuts_share_one_lowering() {
         use planner_types::post_asap::ExecutionTiming::QueryTime;
-        let (retained, _, root) = grouped_rate();
-        let ephemeral = with_timing(&retained, |_| QueryTime);
-        let inputs = raw_input(&retained);
+        let (mat_at_ingestion, _, root) = grouped_rate();
+        let not_materialized = with_timing(&mat_at_ingestion, |_| QueryTime);
+        let inputs = raw_input(&mat_at_ingestion);
         let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
         let before = lowered();
-        let compiled = compile(&ephemeral, inputs.clone(), &[root]).unwrap();
+        let compiled = compile(&not_materialized, inputs.clone(), &[root]).unwrap();
         let once = lowered() - before;
-        let cuts = [&retained, &ephemeral].map(|timed| {
+        let cuts = [&mat_at_ingestion, &not_materialized].map(|timed| {
             let frontier = frontier_from_timing(timed).unwrap();
             let cut = cut_candidate(&compiled, &frontier).unwrap();
             (timed, frontier, cut)
