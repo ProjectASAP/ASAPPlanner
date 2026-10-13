@@ -595,6 +595,20 @@ async fn scalar_queries_read_planned_summaries() {
     let refs = output.scalar_roots[1].1.operator_refs();
     assert_eq!(refs.len(), 1);
     assert!(Rc::ptr_eq(refs[0], &read.plan.root));
+
+    // The export keys each scalar query by its entry and points the scalar
+    // read at the node the operator query exports: one summary, read twice.
+    let dag = output.execution_timed_dag().unwrap();
+    let keys: Vec<_> = dag.scalar_roots.iter().map(|(i, _)| *i).collect();
+    assert_eq!(keys, vec![0, 1]);
+    assert_eq!(dag.roots.len(), 1);
+    assert_eq!(dag.scalar_roots[1].1.operator_refs(), vec![&dag.roots[0]]);
+    assert!(dag.nodes.iter().any(|node| matches!(
+        node.payload,
+        asap_types::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+        )
+    )));
 }
 
 /// A combination of approximate values may read summaries: each reference of
