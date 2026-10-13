@@ -170,7 +170,7 @@ fn logical(id: String, label: String, roots: Vec<QueryRoot>) -> Logical {
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
     let run = run_planning_stages(workload, roots).expect("planning stages run");
     let logical_candidates = run
-        .logical
+        .stage1_logical_asap_optimization
         .into_iter()
         .map(|c| {
             let roots = c
@@ -180,7 +180,7 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         })
         .collect();
     let physical = run
-        .physical
+        .stage2_physical_asap_optimization
         .into_iter()
         .map(|candidate| Physical {
             id: candidate.id.clone(),
@@ -198,11 +198,11 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         logical: logical_candidates,
         physical,
         pruned: run
-            .pruned
+            .stage2_pruned
             .into_iter()
             .map(|p| (p.from_logical, p.reason))
             .collect(),
-        selection: run.selection.expect("plan selection selects"),
+        selection: run.stage3_plan_selection.expect("plan selection selects"),
     }
 }
 

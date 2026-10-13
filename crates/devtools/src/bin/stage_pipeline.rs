@@ -110,21 +110,25 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
     let run = run_planning_stages(workload, roots)?;
     // The display keeps the first `max_displayed` candidates and the
     // selected one; plan selection has already ranked all of them.
-    let selected_logical = run.selection.as_ref().ok().and_then(|selection| {
-        run.physical
-            .iter()
-            .find(|p| p.id == selection.selected)
-            .map(|p| p.from_logical.as_str())
-    });
+    let selected_logical = run
+        .stage3_plan_selection
+        .as_ref()
+        .ok()
+        .and_then(|selection| {
+            run.stage2_physical_asap_optimization
+                .iter()
+                .find(|p| p.id == selection.selected)
+                .map(|p| p.from_logical.as_str())
+        });
     let shown: HashSet<&str> = run
-        .logical
+        .stage1_logical_asap_optimization
         .iter()
         .enumerate()
         .filter(|(index, c)| *index < max_displayed || Some(c.id.as_str()) == selected_logical)
         .map(|(_, c)| c.id.as_str())
         .collect();
     let shown_physical: HashSet<&str> = run
-        .physical
+        .stage2_physical_asap_optimization
         .iter()
         .filter(|p| shown.contains(p.from_logical.as_str()))
         .map(|p| p.id.as_str())
@@ -132,7 +136,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
     // A choice that composition cannot substitute yet is listed with its
     // error rather than ending the run.
     let candidates: Vec<_> = run
-        .logical
+        .stage1_logical_asap_optimization
         .iter()
         .filter(|c| shown.contains(c.id.as_str()))
         .map(|c| match &c.roots {
@@ -141,13 +145,13 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
         })
         .collect();
     let physical: Vec<_> = run
-        .physical
+        .stage2_physical_asap_optimization
         .iter()
         .filter(|p| shown_physical.contains(p.id.as_str()))
         .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
         .collect();
     let pruned: Vec<_> = run
-        .pruned
+        .stage2_pruned
         .iter()
         .filter(|p| shown.contains(p.from_logical.as_str()))
         .map(|p| json!({ "from_logical": p.from_logical, "label": p.label, "reason": p.reason }))
@@ -157,12 +161,12 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
         "workload": { "queries": workload_queries(workload) },
         "language_specific_frontends": { "dag": export(&run.stage0_query_language_frontends) },
         "logical_asap_optimization": {
-            "combinations": run.logical.len(),
-            "capped": candidates.len() < run.logical.len(),
+            "combinations": run.stage1_logical_asap_optimization.len(),
+            "capped": candidates.len() < run.stage1_logical_asap_optimization.len(),
             "candidates": candidates,
         },
         "physical_asap_optimization": { "candidates": physical, "pruned": pruned },
-        "plan_selection": plan_selection_json(&run.selection, |id| shown_physical.contains(id)),
+        "plan_selection": plan_selection_json(&run.stage3_plan_selection, |id| shown_physical.contains(id)),
     }))
 }
 

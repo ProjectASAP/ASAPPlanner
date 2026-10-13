@@ -191,8 +191,8 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
 fn example3a_selects_the_cheapest_of_all_candidates() {
     let workload = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
     let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap()).unwrap();
-    assert_eq!(run.logical.len(), 243);
-    let expected = run.selection.unwrap().selected;
+    assert_eq!(run.stage1_logical_asap_optimization.len(), 243);
+    let expected = run.stage3_plan_selection.unwrap().selected;
 
     let document = generate_example("planner-layering-3a", &[]);
     let selection = &document["plan_selection"];

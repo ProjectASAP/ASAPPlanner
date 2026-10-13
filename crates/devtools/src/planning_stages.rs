@@ -42,11 +42,11 @@ pub struct PrunedCandidate {
 pub struct PlanningStagesRun {
     /// The query-language frontends' roots, one per workload entry.
     pub stage0_query_language_frontends: Vec<QueryRoot>,
-    pub logical: Vec<LogicalCandidate>,
+    pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     /// `P<n>` implements `L<n>`.
-    pub physical: Vec<PhysicalCandidate>,
-    pub pruned: Vec<PrunedCandidate>,
-    pub selection: Result<Selection, SelectionError>,
+    pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
+    pub stage2_pruned: Vec<PrunedCandidate>,
+    pub stage3_plan_selection: Result<Selection, SelectionError>,
 }
 
 /// Lower a PromQL workload, each series' identity as a column (the row
@@ -135,10 +135,10 @@ pub fn run_planning_stages(
     let selection = select_plan(&physical, &targets, &data, PlanningModels::builtin());
     Ok(PlanningStagesRun {
         stage0_query_language_frontends: roots,
-        logical,
-        physical,
-        pruned,
-        selection,
+        stage1_logical_asap_optimization: logical,
+        stage2_physical_asap_optimization: physical,
+        stage2_pruned: pruned,
+        stage3_plan_selection: selection,
     })
 }
 
