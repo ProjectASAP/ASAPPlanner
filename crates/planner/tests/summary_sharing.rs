@@ -596,34 +596,3 @@ async fn scalar_queries_read_planned_summaries() {
     assert_eq!(refs.len(), 1);
     assert!(Rc::ptr_eq(refs[0], &read.plan.root));
 }
-
-/// A scalar combining several references is not a pass-through: the entry's
-/// target does not bound each reference on its own, so every reference is
-/// planned exact and reads no sketch.
-#[tokio::test]
-async fn combined_scalar_references_plan_exact() {
-    let output = plan_promql(
-        &[(
-            "scalar(quantile(0.99, rate(x[5m]))) - scalar(quantile(0.5, rate(x[5m])))",
-            0.01,
-        )],
-        &CHEAP_SUMMARY,
-    )
-    .await;
-    assert_eq!(output.scalar_plans.len(), 2);
-    for read in &output.scalar_plans {
-        let sketches = OperatorNode::reachable(&read.plan.root)
-            .into_iter()
-            .filter(|node| {
-                matches!(
-                    node.asap(),
-                    Some(ASAPOp::SummaryAgg {
-                        family: FieldDataType::Sketch(..),
-                        ..
-                    })
-                )
-            })
-            .count();
-        assert_eq!(sketches, 0, "{:#?}", read.plan.root);
-    }
-}

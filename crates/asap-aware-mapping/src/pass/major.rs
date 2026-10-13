@@ -9,7 +9,7 @@
 use asap_types::ir::cse::share_common_sub_dags;
 use std::rc::Rc;
 
-use asap_types::ir::{OperatorNode, ScalarExpr};
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan};
@@ -67,18 +67,13 @@ impl OptimizationPass for MajorPass {
                 refs
             })
             .collect();
-        // The entry's target bounds the scalar's value, so only a pass-through
-        // scalar hands it to its one reference; otherwise each reference is
-        // planned exact, since independent approximate references leave the
-        // combined value unbounded (e.g. a difference of two quantiles).
-        for ((index, expr), refs) in workload.scalar_roots().iter().zip(&scalar_refs) {
-            let target = if is_pass_through(expr) {
-                targets[*index].clone()
-            } else {
-                AccuracyTarget::Exact
-            };
+        // Each reference is planned against the entry's accuracy target. The
+        // guarantee of a combination of approximate values (e.g. a difference
+        // of two quantiles) is not composed here: guarantee composition is
+        // #575's, and Stage 3's accuracy model decides.
+        for ((index, _), refs) in workload.scalar_roots().iter().zip(&scalar_refs) {
             for node in refs {
-                roots.push((*index, Rc::clone(node), Some(target.clone())));
+                roots.push((*index, Rc::clone(node), Some(targets[*index].clone())));
             }
         }
 
@@ -252,20 +247,4 @@ impl MajorPass {
             detail: format!("entry {entry_index}: root has no candidate group"),
         }
     }
-}
-
-/// Whether a standalone scalar passes one operator reference through: `v`
-/// alone, or arithmetic and comparisons between that one reference and
-/// literals.
-fn is_pass_through(expr: &ScalarExpr) -> bool {
-    fn literal_ops(expr: &ScalarExpr) -> bool {
-        match expr {
-            ScalarExpr::Literal(_) | ScalarExpr::PromqlScalarFromVector(_) => true,
-            ScalarExpr::Negative { expr, .. } => literal_ops(expr),
-            ScalarExpr::Arithmetic { left, right, .. }
-            | ScalarExpr::Compare { left, right, .. } => literal_ops(left) && literal_ops(right),
-            _ => false,
-        }
-    }
-    expr.operator_refs().len() == 1 && literal_ops(expr)
 }
