@@ -188,6 +188,56 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     );
 }
 
+/// A `Project` reading the same node twice from its expressions has one
+/// `ScalarRef` edge to it, as cost lowering reads it once.
+#[test]
+fn a_reference_read_twice_is_one_scalar_ref_edge() {
+    use asap_types::ir::physical_export::EdgeRole;
+    use asap_types::ir::{ExprSemantics, ProjectItem, ScalarExpr};
+    use asap_types::pre_asap::ArithmeticOpKind;
+    let series = |metric: &str| {
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: metric.into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
+        }))
+        .unwrap()
+    };
+    let read = series("b");
+    let scalar = || ScalarExpr::PromqlScalarFromVector(Rc::clone(&read));
+    let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+        cols: vec![ProjectItem {
+            alias: Some("value".into()),
+            expr: ScalarExpr::Arithmetic {
+                op: ArithmeticOpKind::Mul,
+                left: Box::new(scalar()),
+                right: Box::new(scalar()),
+                semantics: ExprSemantics::Promql,
+            },
+        }],
+        qualifier: None,
+        child: series("a"),
+    }))
+    .unwrap();
+    let timed = apply_lifecycle_timings(
+        &project,
+        &LifecycleAssignment::default_maintained(),
+        &mut TimingMemo::new(),
+    )
+    .unwrap();
+    let dag = compile_physical_asap_dag(&timed).unwrap();
+    dag.validate().unwrap();
+    let roles: Vec<_> = dag
+        .edges
+        .iter()
+        .filter(|edge| edge.consumer == dag.roots[0])
+        .map(|edge| edge.role)
+        .collect();
+    assert_eq!(roles, vec![EdgeRole::Input, EdgeRole::ScalarRef]);
+}
+
 /// The roles of a binary operator's edges must match its inputs: swapping
 /// `Left` and `Right` would reorder the operands of `a - b`.
 #[test]

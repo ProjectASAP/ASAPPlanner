@@ -490,7 +490,11 @@ pub fn compile_physical_asap_workload_with_node_ids(
 
 /// Each child of `operator` with its edge role: the operator inputs, then the
 /// nodes read by its scalar expressions (the order of [`Operator::children`]).
-fn edge_roles<C: Copy>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
+/// Each input of `operator` with its role. A node referenced several times
+/// from the operator's scalar expressions is one `ScalarRef` input, as cost
+/// lowering reads it once; ids are per node pointer, so this dedupes by
+/// pointer.
+fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
     use EdgeRole::*;
     let inputs: Vec<EdgeRole> = match operator {
         Operator::NonASAP(op) => match op {
@@ -510,16 +514,14 @@ fn edge_roles<C: Copy>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
         },
     };
     let children = operator.children();
-    let scalar_refs = children.len() - inputs.len();
-    children
-        .into_iter()
-        .copied()
-        .zip(
-            inputs
-                .into_iter()
-                .chain(std::iter::repeat_n(ScalarRef, scalar_refs)),
-        )
-        .collect()
+    let (direct, scalar_refs) = children.split_at(inputs.len());
+    let mut edges: Vec<(C, EdgeRole)> = direct.iter().map(|c| **c).zip(inputs).collect();
+    for producer in scalar_refs {
+        if !edges.contains(&(**producer, ScalarRef)) {
+            edges.push((**producer, ScalarRef));
+        }
+    }
+    edges
 }
 
 fn grouping_compatibility<C>(
