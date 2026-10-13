@@ -32,8 +32,9 @@ names.
 | Physical evidence/comparison `boundaries` fields | `handoffs` |
 | `BoundaryEstimate::per_boundary` | `PhysicalHandoffEstimate::per_handoff` |
 | Internal `Models` | `CandidatePlanningInputs` |
-| `ASAPStrategies::with_models` | `ASAPStrategies::new_with_planning_inputs` |
-| `ASAPStrategies::with_models_and_evidence` | `ASAPStrategies::new_with_planning_inputs_and_evidence` |
+| `SketchAlgorithmStrategy::with_models` | `ASAPStrategies::new_with_planning_inputs` |
+| `SketchAlgorithmStrategy::with_models_and_evidence` | `ASAPStrategies::new_with_planning_inputs_and_evidence` |
+| `SketchAlgorithmStrategy` | `ASAPStrategies` |
 | `HydraGroupingStrategy::with_models_and_evidence` | `HydraGroupingStrategy::new_with_planning_inputs_and_evidence` |
 
 For example, `Binder::new().bind(&dag)` becomes
