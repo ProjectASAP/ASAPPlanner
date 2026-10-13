@@ -259,7 +259,7 @@ fn kll_k(plan: &QueryPlan) -> u32 {
     else {
         panic!("sketch state: {:?}", deployment.operator);
     };
-    let SketchParams::Kll { k } = kind.params() else {
+    let SketchParams::Kll { k, .. } = kind.params() else {
         panic!("KLL state: {kind:?}");
     };
     *k
@@ -267,7 +267,7 @@ fn kll_k(plan: &QueryPlan) -> u32 {
 
 /// The KLL `k` sized for `epsilon`.
 fn kll_k_for(epsilon: f64) -> u32 {
-    let SketchParams::Kll { k } = default_size_params(
+    let SketchParams::Kll { k, .. } = default_size_params(
         SketchAlgorithm::Kll,
         &default_quantile(0.5),
         epsilon,

@@ -7564,7 +7564,10 @@ mod tests {
             preferred(&approx),
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 269 },
+                SketchParams::Kll {
+                    k: 269,
+                    failure_probability: None
+                },
             ))
         );
 
@@ -7577,7 +7580,10 @@ mod tests {
             preferred(&looser),
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 52 },
+                SketchParams::Kll {
+                    k: 52,
+                    failure_probability: None
+                },
             ))
         );
     }
@@ -7733,7 +7739,10 @@ mod tests {
             preferred(&intent),
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 65_535 },
+                SketchParams::Kll {
+                    k: 65_535,
+                    failure_probability: None
+                },
             ))
         );
     }
@@ -9766,7 +9775,13 @@ mod tests {
         assert_eq!(
             family,
             &FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k: 269,
+                        failure_probability: None
+                    }
+                ),
                 GroupingStrategy::default()
             )
         );
@@ -9777,7 +9792,13 @@ mod tests {
         assert_eq!(
             field(&summary_input.schema, "value").dtype,
             FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k: 269,
+                        failure_probability: None
+                    }
+                ),
                 GroupingStrategy::default()
             )
         );

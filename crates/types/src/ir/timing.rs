@@ -850,7 +850,13 @@ mod tests {
 
     fn kll() -> FieldDataType {
         FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None,
+                },
+            ),
             GroupingStrategy::default(),
         )
     }

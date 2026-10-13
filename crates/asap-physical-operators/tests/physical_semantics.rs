@@ -559,7 +559,13 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
 
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
-        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 512 }),
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 512,
+                failure_probability: None,
+            },
+        ),
         Default::default(),
     );
     let mut dag = PhysicalDAG::default();

@@ -91,7 +91,13 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
     };
     use asap_types::pre_asap::{ColumnRef, Reduction};
     let family = FieldDataType::Sketch(
-        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 100 }),
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 100,
+                failure_probability: None,
+            },
+        ),
         GroupingStrategy::default(),
     );
     let state = Rc::new(
