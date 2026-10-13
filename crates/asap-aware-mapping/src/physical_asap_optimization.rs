@@ -13,6 +13,12 @@
 //! top-k, which it cannot run as `Aggregate{[TopK]}`. Stage 2 records that
 //! choice in the DAG by rewriting it to a per-group sort followed by a
 //! per-group limit, the shape the PromQL frontend uses for generic `topk`.
+//! A `Project` over the limited rows restores the logical `[keys.., topk_k]`
+//! columns, so an exact root has the same column names as a summary
+//! candidate's and as the frontend declares, and no input column leaks.
+//! `topk_k` carries the ranked value's type and nullability (the frontend
+//! declares a non-null `Utf8` placeholder); casting the value to `Utf8` would
+//! not make it the same answer.
 //! An `Aggregate{[TopK]}` with other measures, a filter or `HAVING` has no
 //! such rewrite, and its candidate fails.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
@@ -109,45 +115,39 @@ fn map_roots(
         .collect()
 }
 
-/// Each implemented node in two forms: as a query root, and as the input of
-/// another node. They differ only for exact top-k (see [`implement_topk`]).
-type Memo = HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>;
+/// Each node's implementation.
+type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
 fn implement(
     node: &Rc<OperatorNode>,
     memo: &mut Memo,
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    if let Some((as_root, _)) = memo.get(&Rc::as_ptr(node)) {
-        return Ok(as_root.clone());
+    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+        return Ok(done.clone());
     }
     for child in node.children() {
         implement(child, memo)?;
     }
-    let forms = match node.non_asap() {
+    let implemented = match node.non_asap() {
         Some(NonASAPOp::Aggregate { measures, .. })
             if measures.iter().any(|m| matches!(m, AggIntent::TopK { .. })) =>
         {
             implement_topk(node, memo)?
         }
-        _ => {
-            let rebuilt = rebuilt(node, memo)?;
-            (rebuilt.clone(), rebuilt)
-        }
+        _ => rebuilt(node, memo)?,
     };
-    let as_root = forms.0.clone();
-    memo.insert(Rc::as_ptr(node), forms);
-    Ok(as_root)
+    memo.insert(Rc::as_ptr(node), implemented.clone());
+    Ok(implemented)
 }
 
 /// Exact top-k as `Limit(Sort)` per group, which outputs the ranked rows of
-/// the child. That is the query result at a root; a node reading the top-k
-/// instead resolved its columns against the logical `[keys.., topk_k]`
-/// output, so it reads a `Project` restoring those names over the rows (the
-/// ranked value under `topk_k`).
+/// the child, under a `Project` restoring the logical `[keys.., topk_k]`
+/// output (the ranked value under `topk_k`): a root returns those columns,
+/// and a node reading the top-k resolved its columns against them.
 fn implement_topk(
     node: &Rc<OperatorNode>,
     memo: &Memo,
-) -> Result<(Rc<OperatorNode>, Rc<OperatorNode>), PhysicalASAPOptimizationError> {
+) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
     let unsupported = |why: &str| PhysicalASAPOptimizationError::ExactTopK(why.to_string());
     let Some(NonASAPOp::Aggregate {
         reduction,
@@ -172,7 +172,7 @@ fn implement_topk(
     if having.is_some() {
         return Err(unsupported("HAVING"));
     }
-    let child = memo[&Rc::as_ptr(child)].1.clone();
+    let child = memo[&Rc::as_ptr(child)].clone();
     let value = ranked_column(&child)?;
     let sorted = Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Sort {
@@ -215,15 +215,14 @@ fn implement_topk(
         alias: Some(ranked.name.clone()),
         expr: ScalarExpr::Column(value),
     });
-    let as_input = Rc::new(
+    Ok(Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
             cols,
             qualifier: None,
-            child: limited.clone(),
+            child: limited,
         }))?
         .with_guarantee(node.guarantee.clone()),
-    );
-    Ok((limited, as_input))
+    ))
 }
 
 /// The column exact top-k ranks `child` by. Over a one-measure grouped
@@ -277,7 +276,7 @@ fn rebuilt(
     node: &Rc<OperatorNode>,
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    let input = |child: &Rc<OperatorNode>| memo[&Rc::as_ptr(child)].1.clone();
+    let input = |child: &Rc<OperatorNode>| memo[&Rc::as_ptr(child)].clone();
     let changed = node
         .children()
         .iter()
@@ -309,6 +308,18 @@ mod tests {
         }
     }
 
+    fn names(node: &OperatorNode) -> Vec<String> {
+        node.schema.fields.iter().map(|f| f.name.clone()).collect()
+    }
+
+    /// The `Limit` under an exact top-k's restoring `Project`.
+    fn topk_limit(project: &OperatorNode) -> Rc<OperatorNode> {
+        let NonASAPOp::Project { child, .. } = project.expect_non_asap() else {
+            panic!("project, found {}", project.operator.kind_name())
+        };
+        child.clone()
+    }
+
     /// The single sort key of the `Sort` under the `Limit` at `limit`.
     fn topk_sort_key(limit: &OperatorNode) -> (ScalarExpr, bool) {
         let NonASAPOp::Limit { child: sort, .. } = limit.expect_non_asap() else {
@@ -331,8 +342,10 @@ mod tests {
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::Exact,
         );
-        let candidate = optimize_physical_asap("L1", &[root.into()]).unwrap();
-        let limit = operator_root(&candidate, 0);
+        let candidate = optimize_physical_asap("L1", &[root.clone().into()]).unwrap();
+        let physical = operator_root(&candidate, 0);
+        assert_eq!(names(&physical), names(&root));
+        let limit = topk_limit(&physical);
         assert_eq!(limit.schema.fields[1].name, "value");
         assert_eq!(topk_sort_key(&limit), (ScalarExpr::Column(1), false));
     }
@@ -342,14 +355,10 @@ mod tests {
     fn promql_topk_over_grouped_aggregate_sorts_by_its_measure() {
         let root = lower_promql("topk(5, sum by (job) (m))", AccuracyTarget::Exact);
         let candidate = optimize_physical_asap("L1", &[root.into()]).unwrap();
-        let limit = operator_root(&candidate, 0);
-        let names: Vec<_> = limit
-            .schema
-            .fields
-            .iter()
-            .map(|f| f.name.as_str())
-            .collect();
-        assert_eq!(names, ["job", "sum"]);
+        let physical = operator_root(&candidate, 0);
+        assert_eq!(names(&physical), ["topk_5"]);
+        let limit = topk_limit(&physical);
+        assert_eq!(names(&limit), ["job", "sum"]);
         assert_eq!(topk_sort_key(&limit), (ScalarExpr::Column(1), false));
     }
 
@@ -364,9 +373,6 @@ mod tests {
         );
         let candidate = optimize_physical_asap("L1", &[root.clone().into()]).unwrap();
         let physical = operator_root(&candidate, 0);
-        let names = |node: &OperatorNode| -> Vec<String> {
-            node.schema.fields.iter().map(|f| f.name.clone()).collect()
-        };
         assert_eq!(names(&physical), names(&root));
         let NonASAPOp::Aggregate { child: input, .. } = physical.expect_non_asap() else {
             panic!("sum root")
@@ -462,9 +468,9 @@ mod tests {
             partition_by,
             child: sort,
             ..
-        } = root(0).expect_non_asap().clone()
+        } = topk_limit(&root(0)).expect_non_asap().clone()
         else {
-            panic!("limit root")
+            panic!("limit under the root")
         };
         assert!(!partition_by.keys().is_empty());
         let NonASAPOp::Sort {
@@ -496,12 +502,6 @@ mod tests {
             Payload::NonASAP(NonASAPOp::Limit { .. }) => "limit",
             _ => "other",
         };
-        let sort_id = dag
-            .edges
-            .iter()
-            .find(|e| kind(e.producer) == "sort" && e.consumer == dag.roots[0])
-            .expect("sort -> limit edge")
-            .producer;
         let producer_of = |consumer| {
             dag.edges
                 .iter()
@@ -509,6 +509,10 @@ mod tests {
                 .unwrap()
                 .producer
         };
+        let limit_id = producer_of(dag.roots[0]);
+        assert_eq!(kind(limit_id), "limit");
+        let sort_id = producer_of(limit_id);
+        assert_eq!(kind(sort_id), "sort");
         assert_eq!(producer_of(sort_id), producer_of(dag.roots[1]));
     }
 

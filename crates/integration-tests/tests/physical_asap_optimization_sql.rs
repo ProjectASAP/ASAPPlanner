@@ -20,10 +20,16 @@ fn approximate() -> AccuracyTarget {
     }
 }
 
+fn names(node: &OperatorNode) -> Vec<String> {
+    node.schema.fields.iter().map(|f| f.name.clone()).collect()
+}
+
 /// The `(sort column name, ascending)` of an exact top-k's `Sort`, if `root`
 /// is one (a heavy-hitter summary candidate has none).
 fn exact_topk_sort(root: &OperatorNode) -> Option<(String, bool)> {
-    let limit = root;
+    let NonASAPOp::Project { child: limit, .. } = root.non_asap()? else {
+        return None;
+    };
     let NonASAPOp::Limit {
         n: Some(5),
         child: sort,
@@ -46,9 +52,14 @@ fn exact_topk_sort(root: &OperatorNode) -> Option<(String, bool)> {
 
 /// Every Pass 1 choice of `sql` under `accuracy`, composed and physically
 /// optimized: each must succeed, every exact top-k must sort by `ranked`
-/// descending. Returns how many
+/// descending, and every root must output `root_names`. Returns how many
 /// candidates had an exact top-k.
-async fn check_every_choice(sql: &str, accuracy: AccuracyTarget, ranked: &str) -> usize {
+async fn check_every_choice(
+    sql: &str,
+    accuracy: AccuracyTarget,
+    ranked: &str,
+    root_names: &[&str],
+) -> usize {
     let catalog = SqlCatalog::new().with_table(
         "metrics",
         Schema::new(vec![
@@ -107,6 +118,7 @@ async fn check_every_choice(sql: &str, accuracy: AccuracyTarget, ranked: &str) -
         let QueryRoot::Operator(physical) = &candidate.roots[0] else {
             panic!("operator root")
         };
+        assert_eq!(names(physical), root_names, "{sql}, choice {choice:?}");
         if let Some(sort) = exact_topk_sort(physical) {
             assert_eq!(
                 sort,
@@ -121,9 +133,9 @@ async fn check_every_choice(sql: &str, accuracy: AccuracyTarget, ranked: &str) -
 
 /// Each query under an exact and an approximate target; every exact top-k
 /// sorts by the ranked measure.
-async fn check(sql: &str, ranked: &str) {
+async fn check(sql: &str, ranked: &str, root_names: &[&str]) {
     for accuracy in [AccuracyTarget::Exact, approximate()] {
-        let exact = check_every_choice(sql, accuracy.clone(), ranked).await;
+        let exact = check_every_choice(sql, accuracy.clone(), ranked, root_names).await;
         assert!(
             exact > 0,
             "{sql} under {accuracy:?}: an exact top-k candidate"
@@ -137,6 +149,7 @@ async fn group_key_named_value_ranks_by_count() {
     check(
         "SELECT value, COUNT(*) AS c FROM metrics GROUP BY value ORDER BY c DESC LIMIT 5",
         "count(Int64(1))",
+        &["topk_5"],
     )
     .await;
 }
@@ -147,6 +160,7 @@ async fn integer_group_key_ranks_by_count() {
     check(
         "SELECT port, COUNT(*) AS c FROM metrics GROUP BY port ORDER BY c DESC LIMIT 5",
         "count(Int64(1))",
+        &["topk_5"],
     )
     .await;
 }
@@ -158,6 +172,7 @@ async fn multi_key_ranks_by_count() {
         "SELECT host, port, COUNT(*) AS c FROM metrics GROUP BY host, port \
          ORDER BY c DESC LIMIT 5",
         "count(Int64(1))",
+        &["topk_5"],
     )
     .await;
 }
@@ -168,6 +183,7 @@ async fn sum_ranking_ranks_by_sum() {
     check(
         "SELECT port, SUM(value) AS s FROM metrics GROUP BY port ORDER BY s DESC LIMIT 5",
         "sum(metrics.value)",
+        &["topk_5"],
     )
     .await;
 }

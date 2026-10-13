@@ -3847,6 +3847,56 @@
               "producer": 10,
               "role": "Input",
               "window": "NotApplicable"
+            },
+            {
+              "consumer": 12,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 11,
+              "role": "Input",
+              "window": "NotApplicable"
             }
           ],
           "nodes": [
@@ -4793,11 +4843,79 @@
                   }
                 }
               }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "id": 12,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 11,
+                    "cols": [
+                      {
+                        "alias": "job",
+                        "expr": {
+                          "Column": 2
+                        }
+                      },
+                      {
+                        "alias": "topk_10",
+                        "expr": {
+                          "Column": 1
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              }
             }
           ],
           "roots": [
             5,
-            11
+            12
           ],
           "scalar_roots": []
         },
@@ -7906,6 +8024,10 @@
             "cost": 0.001,
             "detail": "limit to 1000 rows"
           },
+          "12": {
+            "cost": 0.001,
+            "detail": "operator: pass 1000 rows"
+          },
           "2": {
             "cost": 4.0,
             "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1"
@@ -7940,7 +8062,7 @@
           }
         },
         "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 79.40110000000001,
+        "total": 79.40210000000002,
         "unit": "cpu_ms_per_workload_evaluation"
       }
     },
