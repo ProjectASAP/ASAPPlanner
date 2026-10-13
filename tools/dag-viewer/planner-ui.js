@@ -66,7 +66,7 @@ function addPlannerRow(query = {}) {
   const row = document.createElement('div');
   row.className = 'plannerRow';
   row.innerHTML = `
-    <input class="plannerInclude" type="checkbox" ${query.include === false ? '' : 'checked'} title="Include in workload (one language per plan)" />
+    <input class="plannerInclude" type="checkbox" checked title="Include in workload" />
     <input class="plannerName" value="${escapeHtml(query.name || `q${plannerRows.children.length + 1}`)}" aria-label="Query name" />
     <select class="plannerLanguage" aria-label="Language"><option value="sql">SQL</option><option value="promql">PromQL</option></select>
     <div class="plannerSchemas" aria-label="Input schemas"></div>
@@ -136,7 +136,6 @@ addPlannerRow({ name: 'count_by_service', schemas: ['metrics'] });
 addPlannerRow({ name: 'avg_latency', schemas: ['metrics'], text: 'SELECT service, AVG(latency) FROM metrics GROUP BY service' });
 addPlannerRow({
   name: 'q3',
-  include: false,
   language: 'promql',
   text: 'topk(5, rate(http_requests_total[5m]))',
 });
@@ -148,7 +147,6 @@ addPlannerRow({
 });
 addPlannerRow({
   name: 'q4',
-  include: false,
   language: 'promql',
   text: 'topk(10, rate(http_requests_total[5m]))',
 });

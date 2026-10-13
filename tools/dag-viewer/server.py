@@ -12,7 +12,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from render import STAGE_PIPELINE_FORMAT, prepare_workload
+from render import load_document
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -28,15 +28,14 @@ def build_planner() -> None:
 
 
 def plan_args(payload: dict, out: str) -> list[str]:
-    """The `stage_pipeline` arguments for a Query planner request: one
-    language per plan, SQL tables declared with `--table`."""
+    """The `stage_pipeline` arguments for a Query planner request: SQL and
+    PromQL queries in order, each with its name; SQL tables declared with
+    `--table`."""
     queries = payload.get("queries")
     if not isinstance(queries, list) or not queries or len(queries) > 50:
         raise ValueError("queries must contain 1–50 entries")
-    languages = {query.get("language", "sql") if isinstance(query, dict) else None for query in queries}
-    if len(languages) != 1 or not languages <= {"sql", "promql"}:
-        raise ValueError("a plan is one language: select only SQL or only PromQL queries")
-    language = languages.pop()
+    if not all(isinstance(query, dict) for query in queries):
+        raise ValueError("each query must be an object")
 
     schemas = payload.get("schemas", [])
     if not isinstance(schemas, list) or len(schemas) > 50:
@@ -55,9 +54,17 @@ def plan_args(payload: dict, out: str) -> list[str]:
         schema_names.add(name)
         if not isinstance(columns, list) or not columns or len(columns) > 500:
             raise ValueError(f"schema #{index}: columns must contain 1–500 entries")
-        if language == "sql":
+        if any(query.get("language", "sql") == "sql" for query in queries):
             args.extend(["--table", json.dumps(schema, separators=(",", ":"))])
+    names: set[str] = set()
     for index, query in enumerate(queries, 1):
+        language = query.get("language", "sql")
+        if language not in {"sql", "promql"}:
+            raise ValueError(f"query #{index}: language must be sql or promql")
+        name = str(query.get("name") or "").strip() or f"q{index}"
+        if name in names:
+            raise ValueError(f"query #{index}: duplicate name {name}")
+        names.add(name)
         text = query.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 100_000:
             raise ValueError(f"query #{index}: text must contain 1–100000 characters")
@@ -67,7 +74,7 @@ def plan_args(payload: dict, out: str) -> list[str]:
             or any(schema not in schema_names for schema in selected_schemas)
         ):
             raise ValueError(f"query #{index}: selected schemas must all be enabled")
-        args.extend([f"--{language}", text])
+        args.extend([f"--{language}", text, "--name", name])
 
     epsilon = payload.get("epsilon")
     if epsilon is not None:
@@ -119,10 +126,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         if self.path == "/api/example":
             try:
-                example = json.loads((HERE / "dag.example.json").read_text(encoding="utf-8"))
-                if example.get("format") != STAGE_PIPELINE_FORMAT:
-                    example = prepare_workload(example)
-                self._send_json(HTTPStatus.OK, example)
+                self._send_json(HTTPStatus.OK, load_document(HERE / "dag.example.json"))
             except Exception as error:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
             return

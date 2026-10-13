@@ -235,3 +235,40 @@ fn sql_queries_over_declared_tables_are_planned() {
     validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
     assert!(document["stage3_plan_selection"]["selected"].is_string());
 }
+
+/// One run mixes SQL (over declared tables) and PromQL queries, in the
+/// order given, each named with `--name`.
+#[test]
+fn mixed_sql_and_promql_queries_are_planned_with_their_names() {
+    let out =
+        std::env::temp_dir().join(format!("stage_pipeline_{}_mixed.json", std::process::id()));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--table",
+            r#"{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp", "nullable": false},
+                {"name": "service", "type": "utf8", "nullable": false}], "time_index": 0}"#,
+            "--sql",
+            "SELECT service, COUNT(*) FROM metrics GROUP BY service",
+            "--name",
+            "count_by_service",
+            "--promql",
+            "topk(5, rate(http_requests_total[5m]))",
+            "--epsilon",
+            "0.01",
+            "--out",
+        ])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    let queries = document["workload"]["queries"].as_array().unwrap();
+    let described: Vec<_> = queries
+        .iter()
+        .map(|q| (q["id"].as_str().unwrap(), q["language"].as_str().unwrap()))
+        .collect();
+    assert_eq!(described, [("count_by_service", "sql"), ("q2", "promql")]);
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
+    assert!(document["stage3_plan_selection"]["selected"].is_string());
+}

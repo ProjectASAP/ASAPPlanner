@@ -9,7 +9,8 @@ use asap_aware_mapping::stage3_plan_selection::{Selection, SelectionError};
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
-use asap_types::workload::PlanningWorkload;
+use asap_types::types::AccuracyTarget;
+use asap_types::workload::{DataWorkload, PlanningWorkload};
 
 #[derive(Debug)]
 pub struct PlanningStagesRun {
@@ -71,17 +72,28 @@ pub fn run_planning_stages(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
 ) -> Result<PlanningStagesRun, String> {
-    validate(&roots)?;
     let targets: Vec<_> = workload
         .query_workload
         .entries()
-        .map(|entry| Some(entry.requirements.accuracy.target()))
+        .map(|entry| entry.requirements.accuracy.target())
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
+    run_planning_stages_over(roots, &targets, &data)
+}
+
+/// [`run_planning_stages`] over roots lowered from any mix of query
+/// languages: query `i` is `roots[i]` with accuracy target `targets[i]`.
+pub fn run_planning_stages_over(
+    roots: Vec<QueryRoot>,
+    targets: &[AccuracyTarget],
+    data: &DataWorkload,
+) -> Result<PlanningStagesRun, String> {
+    validate(&roots)?;
+    let targets: Vec<_> = targets.iter().cloned().map(Some).collect();
     let run = run_stage1_to_stage3(
         roots.iter().cloned().enumerate().collect(),
         &targets,
-        &data,
+        data,
         PlanningModels::builtin(),
     )
     .map_err(|e| format!("Pass 1: {e}"))?;
