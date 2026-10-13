@@ -3346,7 +3346,7 @@
     "capped": false,
     "combinations": 3
   },
-  "stage2_physical_asap": {
+  "physical_asap_optimization": {
     "candidates": [
       {
         "dag": {
@@ -7886,7 +7886,7 @@
     ],
     "pruned": []
   },
-  "stage3_selection": {
+  "plan_selection": {
     "costs": {
       "P1": {
         "per_node": {
@@ -7952,7 +7952,7 @@
       },
       {
         "id": "P3",
-        "reason": "q2: the output has no guarantee, and the accuracy model has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
         "valid": false
       }
     ],

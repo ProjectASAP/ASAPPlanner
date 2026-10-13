@@ -35,7 +35,7 @@ use thiserror::Error;
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
-use crate::physical_candidates::PhysicalCandidate;
+use crate::physical_asap_optimization::PhysicalCandidate;
 use crate::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
@@ -106,7 +106,7 @@ pub enum SelectionError {
 /// target, price the rest and
 /// select the cheapest (the first on ties). `targets[i]` is the requirement
 /// of `candidate.roots[i]`; `None` imposes none.
-pub fn stage3_select(
+pub fn select_plan(
     cands: &[PhysicalCandidate],
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
@@ -555,7 +555,7 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
 mod tests {
     use super::*;
     use crate::accuracy::AccuracyEvidenceProvider;
-    use crate::physical_candidates::stage2_physical;
+    use crate::physical_asap_optimization::optimize_physical_asap;
     use crate::test_support::lower_promql;
     use asap_types::ir::ExprSemantics;
     use asap_types::post_asap::{BoundExpr, ErrorMetric, ProbabilityExpr};
@@ -607,7 +607,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-                let mut candidate = stage2_physical("L", &roots).unwrap();
+                let mut candidate = optimize_physical_asap("L", &roots).unwrap();
                 candidate.id = format!("P{}", index + 1);
                 candidate
             })
@@ -623,7 +623,7 @@ mod tests {
             epsilon: 1e-6,
             delta: 1e-9,
         };
-        let selection = stage3_select(
+        let selection = select_plan(
             &candidates,
             &[Some(strict)],
             &data(),
@@ -654,7 +654,7 @@ mod tests {
             epsilon: 0.01,
             delta: 0.001,
         };
-        let selection = stage3_select(
+        let selection = select_plan(
             &candidates(),
             &[Some(target)],
             &data(),
@@ -675,7 +675,7 @@ mod tests {
             epsilon: 0.01,
             delta: 0.001,
         };
-        let selection = stage3_select(
+        let selection = select_plan(
             &candidates,
             &[Some(target)],
             &data(),
@@ -731,7 +731,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-                let mut candidate = stage2_physical("L", &roots).unwrap();
+                let mut candidate = optimize_physical_asap("L", &roots).unwrap();
                 candidate.id = format!("P{}", index + 1);
                 candidate
             })
@@ -776,7 +776,7 @@ mod tests {
             .collect();
         assert!(!summaries.is_empty());
 
-        let builtin = stage3_select(
+        let builtin = select_plan(
             &candidates,
             &[Some(target.clone())],
             &data(),
@@ -794,7 +794,7 @@ mod tests {
         }
         assert!(!summaries.contains(&builtin.selected.as_str()));
 
-        let measured = stage3_select(
+        let measured = select_plan(
             &candidates,
             &[Some(target)],
             &data(),

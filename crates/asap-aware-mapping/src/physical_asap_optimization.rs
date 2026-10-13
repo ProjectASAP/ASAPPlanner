@@ -6,7 +6,7 @@
 //! candidate. Enumerating
 //! `MatAtIngestion(medium)` and `MatAtQuery(medium)` per sub-DAG
 //! (Algorithm 3) comes in #604. A candidate this stage cannot implement
-//! fails with a [`Stage2Error`], and the caller prunes that candidate alone,
+//! fails with a [`PhysicalASAPOptimizationError`], and the caller prunes that candidate alone,
 //! with the error as its reason.
 //!
 //! The runtime has one implementation per logical operator except exact
@@ -45,7 +45,7 @@ pub struct PhysicalCandidate {
 }
 
 #[derive(Debug, Error)]
-pub enum Stage2Error {
+pub enum PhysicalASAPOptimizationError {
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
     #[error(transparent)]
@@ -59,10 +59,10 @@ pub enum Stage2Error {
 /// sub-DAG `NotMaterialized`. `id` and `label` are left empty for the caller
 /// to name. Sharing between `roots` is preserved: one memo serves the whole
 /// workload.
-pub fn stage2_physical(
+pub fn optimize_physical_asap(
     from_logical: &str,
     roots: &[QueryRoot],
-) -> Result<PhysicalCandidate, Stage2Error> {
+) -> Result<PhysicalCandidate, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     let assignment = MaterializationAssignment::with_default(Materialization::NotMaterialized);
@@ -87,8 +87,8 @@ pub fn stage2_physical(
 /// `roots` with every operator node they read replaced by `f`'s result.
 fn map_roots(
     roots: &[QueryRoot],
-    f: &mut impl FnMut(&Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Stage2Error>,
-) -> Result<Vec<QueryRoot>, Stage2Error> {
+    f: &mut impl FnMut(&Rc<OperatorNode>) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError>,
+) -> Result<Vec<QueryRoot>, PhysicalASAPOptimizationError> {
     roots
         .iter()
         .map(|root| match root {
@@ -108,7 +108,10 @@ fn map_roots(
 
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
-fn implement(node: &Rc<OperatorNode>, memo: &mut Memo) -> Result<Rc<OperatorNode>, Stage2Error> {
+fn implement(
+    node: &Rc<OperatorNode>,
+    memo: &mut Memo,
+) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
     if let Some(done) = memo.get(&Rc::as_ptr(node)) {
         return Ok(done.clone());
     }
@@ -127,7 +130,7 @@ fn implement(node: &Rc<OperatorNode>, memo: &mut Memo) -> Result<Rc<OperatorNode
             [AggIntent::TopK { k, .. }] => {
                 let child = memo[&Rc::as_ptr(child)].clone();
                 let value = resolve_column_ref(&ColumnRef::SampleValue, &child.schema)
-                    .map_err(|e| Stage2Error::NoValueColumn(e.to_string()))?;
+                    .map_err(|e| PhysicalASAPOptimizationError::NoValueColumn(e.to_string()))?;
                 let guarantee = child.guarantee.clone();
                 let sorted = Rc::new(
                     OperatorNode::new(Operator::NonASAP(NonASAPOp::Sort {
@@ -160,7 +163,10 @@ fn implement(node: &Rc<OperatorNode>, memo: &mut Memo) -> Result<Rc<OperatorNode
 }
 
 /// `node` over its implemented children; the same `Rc` when none changed.
-fn rebuilt(node: &Rc<OperatorNode>, memo: &Memo) -> Result<Rc<OperatorNode>, Stage2Error> {
+fn rebuilt(
+    node: &Rc<OperatorNode>,
+    memo: &Memo,
+) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
     let changed = node
         .children()
         .iter()
@@ -197,7 +203,7 @@ mod tests {
             panic!("topk aggregate")
         };
         let sum = Rc::new(sum.with_new_children(|_| shared.clone()).unwrap());
-        let candidate = stage2_physical("L1", &[topk.into(), sum.into()]).unwrap();
+        let candidate = optimize_physical_asap("L1", &[topk.into(), sum.into()]).unwrap();
         let root = |i: usize| match &candidate.roots[i] {
             QueryRoot::Operator(node) => node.clone(),
             QueryRoot::Scalar(_) => panic!("operator root"),
@@ -285,7 +291,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-        let candidate = stage2_physical("L1", &roots).unwrap();
+        let candidate = optimize_physical_asap("L1", &roots).unwrap();
         assert!(candidate
             .dag
             .nodes

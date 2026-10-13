@@ -81,10 +81,10 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         }
     }
 
-    let physical = document["stage2_physical_asap"]["candidates"]
+    let physical = document["physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
-    let pruned = document["stage2_physical_asap"]["pruned"]
+    let pruned = document["physical_asap_optimization"]["pruned"]
         .as_array()
         .unwrap();
     assert!(pruned
@@ -104,11 +104,11 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         PhysicalASAPDAGDocument::new(dag).validate().unwrap();
     }
 
-    let stage3 = &document["stage3_selection"];
-    let costs = stage3["costs"].as_object().unwrap();
-    let selected = stage3["selected"].as_str().unwrap();
+    let selection = &document["plan_selection"];
+    let costs = selection["costs"].as_object().unwrap();
+    let selected = selection["selected"].as_str().unwrap();
     let mut accounted = HashSet::from([selected]);
-    for rejection in stage3["rejected"].as_array().unwrap() {
+    for rejection in selection["rejected"].as_array().unwrap() {
         let id = rejection["id"].as_str().unwrap();
         assert!(accounted.insert(id), "{id} accounted for once");
         assert!(!rejection["reason"].as_str().unwrap().is_empty());

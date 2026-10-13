@@ -11,11 +11,11 @@
 //     product), in enumeration order and capped by `--max-candidates`
 //     (default 64). A candidate that cannot be composed carries `error`
 //     instead of `dag`;
-//   - stage2_physical_asap: one physical candidate per composed logical
+//   - physical_asap_optimization: one physical candidate per composed logical
 //     candidate (operator implementation; every sub-DAG NotMaterialized), no
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
 //     under `pruned` with the reason;
-//   - stage3_selection: per-candidate costs, the selected candidate, and
+//   - plan_selection: per-candidate costs, the selected candidate, and
 //     every other candidate as rejected (`valid: false`) or costlier.
 //
 // `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
@@ -28,8 +28,8 @@ use asap_aware_mapping::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     PerComputationCandidates,
 };
-use asap_aware_mapping::physical_candidates::stage2_physical;
-use asap_aware_mapping::plan_selection::{stage3_select, Selection};
+use asap_aware_mapping::physical_asap_optimization::optimize_physical_asap;
+use asap_aware_mapping::plan_selection::{select_plan, Selection};
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema_support::with_promql_series_identity;
@@ -133,7 +133,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             Ok(roots) => {
                 let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
                 candidate["dag"] = json!(export(&roots)?);
-                match stage2_physical(&id, &roots) {
+                match optimize_physical_asap(&id, &roots) {
                     Ok(mut physical_candidate) => {
                         physical_candidate.id = format!("P{}", index + 1);
                         physical_candidate.label = label;
@@ -162,9 +162,9 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         .map(|entry| Some(entry.requirements.accuracy.target()))
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let selection = stage3_select(&physical, &targets, &data, PlanningModels::builtin())
+    let selection = select_plan(&physical, &targets, &data, PlanningModels::builtin())
         .map_err(|e| format!("Stage 3: {e}"))?;
-    let stage2: Vec<_> = physical
+    let physical_json: Vec<_> = physical
         .iter()
         .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
         .collect();
@@ -177,12 +177,12 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             "capped": combinations > max_candidates,
             "candidates": candidates,
         },
-        "stage2_physical_asap": { "candidates": stage2, "pruned": pruned },
-        "stage3_selection": stage3_json(&selection),
+        "physical_asap_optimization": { "candidates": physical_json, "pruned": pruned },
+        "plan_selection": plan_selection_json(&selection),
     }))
 }
 
-fn stage3_json(selection: &Selection) -> Value {
+fn plan_selection_json(selection: &Selection) -> Value {
     let costs: serde_json::Map<_, _> = selection
         .costs
         .iter()
