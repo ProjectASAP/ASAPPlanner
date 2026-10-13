@@ -27,16 +27,20 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::{
-    ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, SchemaDerivationError,
+    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate,
+    ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
 };
 use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Materialization,
     NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchStatistic, SummaryInputExpr,
     SummaryUpdate, WeightDomain,
 };
-use asap_types::pre_asap::{resolve_column_ref, AggIntent, ColumnRef, Schema};
+use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
+use asap_types::pre_asap::{
+    resolve_column_ref, AggIntent, ColumnRef, CompareOpKind, DataType, ScalarValue, Schema,
+};
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
@@ -399,12 +403,16 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
 }
 
 /// Build one whole-workload candidate (end of Pass 1): `choice[i]` indexes
-/// `inventory.targets[i].choices.candidates`. A target whose chosen
-/// candidate is not `Exact` is replaced by `SummaryAgg` followed by
-/// `SummaryEstimate` (summary) or `FinalizeExactAccumulator` (exact
-/// accumulator). A summary is sized here for its measure's accuracy
-/// requirement; Pass 1 leaves it unsized. Untouched sub-DAGs keep their
-/// identity, so sharing between roots is preserved.
+/// `inventory.targets[i].choices.candidates`. An aggregate with a chosen
+/// candidate other than `Exact` is replaced measure by measure: an exact
+/// accumulator by `SummaryAgg` → `FinalizeExactAccumulator`, a summary by
+/// `SummaryAgg` → `SummaryEstimate`, `avg` by its `sum` and `count`
+/// accumulators divided, and any other measure by its own single-measure
+/// aggregate; several measures are joined back on the group keys. A summary
+/// is sized here for its measure's accuracy requirement; Pass 1 leaves it
+/// unsized. A measure filter becomes `SummaryAgg.filter`; `HAVING` is
+/// applied as its target records. Untouched sub-DAGs keep their identity, so
+/// sharing between roots is preserved.
 pub fn compose_logical_candidate<Id: Clone>(
     inventory: &PerComputationCandidates<Id>,
     choice: &[usize],
@@ -424,21 +432,30 @@ pub fn compose_logical_candidate<Id: Clone>(
             .or_default()
             .push((target, candidate));
     }
+    // Consumer `Filter`s whose key-only `HAVING` moves below a realized
+    // aggregate: each is replaced by its input.
+    let pushed_below: HashSet<_> = chosen
+        .values()
+        .filter(|targets| realized(targets))
+        .flat_map(|targets| &targets[0].0.having)
+        .filter(|entry| entry.placement == HavingPlacement::BelowAggregate)
+        .filter_map(|entry| entry.filter.as_ref().map(Rc::as_ptr))
+        .collect();
     let mut memo = HashMap::new();
+    let mut rewrite = |node: &Rc<OperatorNode>| rewrite(node, &chosen, &pushed_below, &mut memo);
     inventory
         .roots
         .iter()
         .map(|(id, root)| {
             let root = match root {
-                QueryRoot::Operator(node) => {
-                    QueryRoot::Operator(rewrite(node, &chosen, &mut memo)?)
-                }
+                QueryRoot::Operator(node) => QueryRoot::Operator(rewrite(node)?),
                 QueryRoot::Scalar(expr) => {
+                    let mut rewritten = HashMap::new();
                     for node in expr.operator_refs() {
-                        rewrite(node, &chosen, &mut memo)?;
+                        rewritten.insert(Rc::as_ptr(node), rewrite(node)?);
                     }
                     QueryRoot::Scalar(
-                        expr.map_operator_refs(&mut |node| memo[&Rc::as_ptr(node)].clone()),
+                        expr.map_operator_refs(&mut |node| rewritten[&Rc::as_ptr(node)].clone()),
                     )
                 }
             };
@@ -452,28 +469,34 @@ type Chosen<'a> =
     HashMap<*const OperatorNode, Vec<(&'a ComputationTarget, &'a ComputationCandidate)>>;
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
+/// Whether any measure of the aggregate is realized by something other than
+/// its plain exact computation.
+fn realized(targets: &[(&ComputationTarget, &ComputationCandidate)]) -> bool {
+    targets
+        .iter()
+        .any(|(_, candidate)| **candidate != ComputationCandidate::Exact)
+}
+
 fn rewrite(
     node: &Rc<OperatorNode>,
     chosen: &Chosen<'_>,
+    pushed_below: &HashSet<*const OperatorNode>,
     memo: &mut Memo,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     if let Some(done) = memo.get(&Rc::as_ptr(node)) {
         return Ok(done.clone());
     }
     for child in node.children() {
-        rewrite(child, chosen, memo)?;
+        rewrite(child, chosen, pushed_below, memo)?;
     }
     let changed = node
         .children()
         .iter()
         .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
-    let rebuilt = match chosen.get(&Rc::as_ptr(node)) {
-        Some(targets)
-            if targets
-                .iter()
-                .any(|(_, candidate)| **candidate != ComputationCandidate::Exact) =>
-        {
-            realize(node, targets, memo)?
+    let rebuilt = match (chosen.get(&Rc::as_ptr(node)), node.non_asap()) {
+        (Some(targets), _) if realized(targets) => realize(node, targets, memo)?,
+        (_, Some(NonASAPOp::Filter { child, .. })) if pushed_below.contains(&Rc::as_ptr(node)) => {
+            memo[&Rc::as_ptr(child)].clone()
         }
         _ if changed => Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?),
         _ => node.clone(),
@@ -482,6 +505,9 @@ fn rewrite(
     Ok(rebuilt)
 }
 
+/// Replace an aggregate whose measures are `targets`' (or exact, for a
+/// measure that is no target) by its realization, with the same output
+/// columns.
 fn realize(
     target: &OperatorNode,
     targets: &[(&ComputationTarget, &ComputationCandidate)],
@@ -492,7 +518,6 @@ fn realize(
         reduction,
         measures,
         filters,
-        having,
         ..
     }) = target.non_asap()
     else {
@@ -500,49 +525,246 @@ fn realize(
             "target is not an aggregate",
         ));
     };
-    let ([intent], [(_, candidate)]) = (measures.as_slice(), targets) else {
+    // A key-only `HAVING` is a row predicate over the input: rows of a
+    // dropped group never reach the state.
+    let having = &targets[0].0.having;
+    let mut input = memo[&Rc::as_ptr(child)].clone();
+    for entry in having {
+        if entry.placement == HavingPlacement::BelowAggregate {
+            let keys = reduction.group_keys().map_or(&[][..], |by| by.keys());
+            let pred = Predicate(entry.predicate.0.map_columns(&mut |column| keys[column]));
+            input = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+                pred,
+                child: input,
+            }))?;
+        }
+    }
+    let parts = measures
+        .iter()
+        .enumerate()
+        .map(|(measure, intent)| {
+            let candidate = targets
+                .iter()
+                .find(|(target, _)| target.measure == measure)
+                .map_or(&ComputationCandidate::Exact, |(_, candidate)| *candidate);
+            let filter = filters.get(measure).cloned().flatten();
+            realize_measure(target, intent, candidate, filter, &input)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut output = match <[_; 1]>::try_from(parts) {
+        Ok([part]) => part,
+        Err(parts) => join_measures(target, parts)?,
+    };
+    for entry in having {
+        if entry.placement == HavingPlacement::AboveOutput && entry.filter.is_none() {
+            output = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+                pred: entry.predicate.clone(),
+                child: output,
+            }))?;
+        }
+    }
+    Ok(output)
+}
+
+/// One measure of `target` over `input`: its group keys, then its value.
+fn realize_measure(
+    target: &OperatorNode,
+    intent: &AggIntent,
+    candidate: &ComputationCandidate,
+    filter: Option<Predicate>,
+    input: &Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
+        unreachable!("realize checked the aggregate")
+    };
+    let state = |family: FieldDataType, intent: &AggIntent| {
+        Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                child: input.clone(),
+                input: summary_update(intent, &family, reduction, &input.schema)?,
+                family,
+                reduction: reduction.clone(),
+                grouping: GroupingStrategy::default(),
+                filter: filter.clone(),
+            },
+        ))?)
+    };
+    let finalized = |kind: ExactKind, params: ExactParams, intent: &AggIntent| {
+        let state = state(FieldDataType::ExactAggregate(kind, params), intent)?;
+        Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
+            ASAPOp::FinalizeExactAccumulator { child: state },
+        ))?)
+    };
+    Ok(match candidate {
+        ComputationCandidate::Exact => {
+            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
+                child: input.clone(),
+                reduction: reduction.clone(),
+                measures: vec![intent.clone()],
+                output_names: vec![],
+                filters: vec![filter.clone()],
+                having: None,
+            }))?
+        }
+        ComputationCandidate::ExactAccumulator { kind, params } => {
+            finalized(kind.clone(), params.clone(), intent)?
+        }
+        ComputationCandidate::Summary(algorithm) => {
+            let family =
+                FieldDataType::Sketch(sized(algorithm, intent), GroupingStrategy::default());
+            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: state(family, intent)?,
+                query: statistic(intent)?,
+            }))?
+        }
+        ComputationCandidate::AvgAsSumCount => {
+            let AggIntent::Avg { col } = intent else {
+                return Err(PerComputationCandidateError::Unsupported(
+                    "sum/count of a non-avg",
+                ));
+            };
+            let mut sum = finalized(
+                ExactKind::Sum,
+                ExactParams::Sum,
+                &AggIntent::Sum { col: *col },
+            )?;
+            let count = finalized(
+                ExactKind::Count,
+                ExactParams::Count,
+                &AggIntent::Count {
+                    accuracy: AccuracyTarget::Exact,
+                },
+            )?;
+            // `avg` is Float64 whatever the summed type, as `Avg`'s output is.
+            if sum.schema.fields.last().map(|field| &field.dtype)
+                != Some(&FieldDataType::Plain(DataType::Float64))
+            {
+                let Reduction::Reduce(by) = reduction else {
+                    return Err(PerComputationCandidateError::Unsupported(
+                        "non-Float64 per-series avg",
+                    ));
+                };
+                let mut cols = key_items(by.len());
+                cols.push(ProjectItem {
+                    alias: None,
+                    expr: ScalarExpr::Cast {
+                        expr: Box::new(ScalarExpr::Column(by.len())),
+                        to: DataType::Float64,
+                        try_cast: false,
+                    },
+                });
+                sum = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+                    cols,
+                    qualifier: None,
+                    child: sum,
+                }))?;
+            }
+            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    checked_relative_division: false,
+                    // A per-series window may hold no finite sum to divide.
+                    checked_finite_division: matches!(reduction, Reduction::PerEntity),
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                    vector_match: None,
+                },
+                return_bool: false,
+                lhs: sum,
+                rhs: count,
+            }))?
+        }
+    })
+}
+
+/// Join single-measure `parts` (each: group keys, then one value) on their
+/// group keys and project `target`'s output columns. Every part has the same
+/// groups, so an inner join keeps them all; NULL keys match each other, as
+/// grouping treats them.
+fn join_measures(
+    target: &OperatorNode,
+    parts: Vec<Rc<OperatorNode>>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let Some(NonASAPOp::Aggregate {
+        reduction: Reduction::Reduce(by),
+        ..
+    }) = target.non_asap()
+    else {
         return Err(PerComputationCandidateError::Unsupported(
-            "multi-measure aggregate",
+            "multi-measure aggregate without `by` keys",
         ));
     };
-    if filters.iter().any(Option::is_some) || having.is_some() {
+    if by.is_without() {
         return Err(PerComputationCandidateError::Unsupported(
-            "filtered or HAVING aggregate",
+            "multi-measure aggregate without `by` keys",
         ));
     }
-    let child = memo[&Rc::as_ptr(child)].clone();
-    let (family, query) = match candidate {
-        ComputationCandidate::ExactAccumulator { kind, params } => (
-            FieldDataType::ExactAggregate(kind.clone(), params.clone()),
-            None,
-        ),
-        ComputationCandidate::Summary(algorithm) => (
-            FieldDataType::Sketch(sized(algorithm, intent), GroupingStrategy::default()),
-            Some(statistic(intent)?),
-        ),
-        _ => {
-            return Err(PerComputationCandidateError::Unsupported(
-                "Pass 1 candidate",
-            ))
-        }
-    };
-    let input = summary_update(intent, &family, reduction, &child.schema)?;
-    let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-        child: child.clone(),
-        family,
-        input,
-        reduction: reduction.clone(),
-        grouping: GroupingStrategy::default(),
-        filter: None,
-    }))?;
-    let evaluation = match query {
-        Some(query) => ASAPOp::SummaryEstimate {
-            summary_input: state,
-            query,
+    let keys = by.len();
+    let width = keys + 1;
+    let mut parts = parts.into_iter();
+    let mut joined = parts.next().expect("an aggregate has measures");
+    for part in parts {
+        let left = joined.schema.fields.len();
+        let column = |id| Box::new(ScalarExpr::Column(id));
+        let matches = (0..keys)
+            .map(|key| {
+                let equal = ScalarExpr::Compare {
+                    left: column(key),
+                    op: CompareOpKind::Eq,
+                    right: column(left + key),
+                    semantics: ExprSemantics::Sql,
+                };
+                if part.schema.fields[key].nullable {
+                    ScalarExpr::BoolOr(vec![
+                        equal,
+                        ScalarExpr::BoolAnd(vec![
+                            ScalarExpr::IsNull(column(key)),
+                            ScalarExpr::IsNull(column(left + key)),
+                        ]),
+                    ])
+                } else {
+                    equal
+                }
+            })
+            .collect::<Vec<_>>();
+        let (kind, pred) = match matches.len() {
+            0 => (
+                JoinKind::Cross,
+                ScalarExpr::Literal(ScalarValue::Boolean(true)),
+            ),
+            _ => (JoinKind::Inner, ScalarExpr::BoolAnd(matches)),
+        };
+        joined = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Join {
+            kind,
+            pred: Predicate(pred),
+            left: joined,
+            right: part,
+        }))?;
+    }
+    let mut cols = key_items(keys);
+    cols.extend(
+        (0..target.schema.fields.len() - keys).map(|measure| ProjectItem {
+            alias: None,
+            expr: ScalarExpr::Column(measure * width + keys),
+        }),
+    );
+    for (item, field) in cols.iter_mut().zip(&target.schema.fields) {
+        item.alias = Some(field.name.clone());
+    }
+    Ok(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: joined,
         },
-        None => ASAPOp::FinalizeExactAccumulator { child: state },
-    };
-    Ok(OperatorNode::new_shared(Operator::ASAP(evaluation))?)
+    ))?)
+}
+
+fn key_items(keys: usize) -> Vec<ProjectItem> {
+    (0..keys)
+        .map(|key| ProjectItem {
+            alias: None,
+            expr: ScalarExpr::Column(key),
+        })
+        .collect()
 }
 
 /// `algorithm` sized for `intent`'s accuracy requirement.

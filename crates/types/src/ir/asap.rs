@@ -270,10 +270,20 @@ impl ASAPOp {
                 {
                     dtype = DataType::Float64;
                 }
+                // A filtered quantile is NULL for a group without a matching
+                // row, as the filtered aggregate it realizes is.
+                let nullable = matches!(query, SketchStatistic::Quantile { .. })
+                    && matches!(
+                        summary_input.asap(),
+                        Some(SummaryAgg {
+                            filter: Some(_),
+                            ..
+                        })
+                    );
                 let mut schema = input.clone();
                 for field in &mut schema.fields {
                     if !field.is_plain() {
-                        *field = Field::plain(name, dtype.clone(), false);
+                        *field = Field::plain(name, dtype.clone(), nullable);
                     }
                 }
                 schema
@@ -284,6 +294,7 @@ impl ASAPOp {
                     family: FieldDataType::ExactAggregate(kind, _),
                     input,
                     reduction,
+                    filter,
                     ..
                 }) = child.asap()
                 {
@@ -320,7 +331,9 @@ impl ASAPOp {
                                     reduction: reduction.clone(),
                                     measures: vec![measure],
                                     output_names: vec![],
-                                    filters: vec![],
+                                    // A filtered SUM/MIN/MAX is NULL for a
+                                    // group without a matching row.
+                                    filters: vec![filter.clone()],
                                     having: None,
                                 }
                                 .output_schema()
