@@ -53,3 +53,11 @@ async fn global_constant_having_stays_above() {
     let targets = targets("SELECT count(*) FROM flows HAVING false").await;
     assert_eq!(placements(&targets), vec![HavingPlacement::AboveOutput]);
 }
+
+#[tokio::test]
+async fn mixed_key_and_value_having_stays_above() {
+    let targets =
+        targets("SELECT src, count(*) FROM flows GROUP BY src HAVING src = 'a' AND count(*) > 10")
+            .await;
+    assert_eq!(placements(&targets), vec![HavingPlacement::AboveOutput]);
+}

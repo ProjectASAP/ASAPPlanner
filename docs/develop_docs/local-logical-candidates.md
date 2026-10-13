@@ -49,24 +49,28 @@ the target keeps every candidate and records how the predicate is applied:
 - `HAVING` is recorded as `LocalLogicalTarget.having`, one `HavingEntry`
   (consumer `Filter`, predicate, placement) each. Only the adjacent form is
   recorded for push-down: the aggregate's own `having` (an entry with no
-  `Filter`) and a `Filter` directly above the aggregate, which is how the SQL
-  frontend lowers `HAVING`. A predicate that reads only `by(...)` group keys
-  is `HavingPlacement::BelowAggregate`: it is pushed below the aggregate as a
-  row predicate, like a measure filter. A consumer `Filter`'s predicate is
-  pushed below only when every consumer of the aggregate applies the same
-  predicate; otherwise another consumer would lose rows. Any other `HAVING`,
-  and every `HAVING` of a global aggregate (no group keys, so its one output
-  row exists even with no input rows), is `HavingPlacement::AboveOutput`: it
-  stays a `Filter` above the finalize/estimate output, and approximate
-  candidates of the target carry `guarantee = None`, since membership near
-  the threshold may change. A value predicate anywhere above an approximate
-  output, adjacent or not, gets `guarantee = None` through guarantee
-  propagation (#575); multi-level push-down is tracked in #664.
+  `Filter`) and a `Filter` whose input is the aggregate, which is how the SQL
+  frontend lowers `HAVING`. A `Filter` that reads the aggregate only from a
+  scalar expression (for example PromQL `scalar(...)`) is not its `HAVING`,
+  though it still counts as a consumer. A predicate that reads only `by(...)`
+  group keys is `HavingPlacement::BelowAggregate`: it is pushed below the
+  aggregate as a row predicate, like a measure filter. A consumer `Filter`'s
+  predicate is pushed below only when every consumer of the aggregate applies
+  the same predicate; otherwise another consumer would lose rows. Any other
+  `HAVING`, and every `HAVING` of a global aggregate (no group keys, so its
+  one output row exists even with no input rows), is
+  `HavingPlacement::AboveOutput`: it stays a `Filter` above the
+  finalize/estimate output, and approximate candidates of the target carry
+  `guarantee = None`, since membership near the threshold may change. A value
+  predicate anywhere above an approximate output, adjacent or not, gets
+  `guarantee = None` through guarantee propagation (#575); multi-level
+  push-down is tracked in #664.
 
 For example, an approximate single-column distinct count offers exact execution,
 HLL, Theta, KMV and UnivMon; an approximate `count` offers its exact `Count`
-accumulator, CMS, Count Sketch and UnivMon, but not plain `Exact`. These are candidate choices, not assessed accuracy
-certificates. Catalog order is stable and has no cost/preference meaning.
+accumulator, CMS, Count Sketch and UnivMon, but not plain `Exact`. These are
+candidate choices, not assessed accuracy certificates. Catalog order is stable
+and has no cost/preference meaning.
 
 ## Pruning
 
@@ -97,9 +101,8 @@ sub-DAG, including applying measure filters and `HAVING` as recorded on the
 target, and validating its structure is still Pass 1 work, done later when
 candidates are realized (#575); Pass 2 then retains independent and shared
 alternatives before physical planning and complete workload selection. The
-descriptors are not
-executable plans, and callers must not execute the first choice as a selection
-policy.
+descriptors are not executable plans, and callers must not execute the first
+choice as a selection policy.
 
 Opaque deployment extensions retain exact execution here; additional local
 alternatives require an explicit logical rule rather than a cost model making a

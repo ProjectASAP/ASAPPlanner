@@ -141,10 +141,12 @@ pub enum LogicalCandidateError {
     AssignedPhysicalAnnotation,
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
-    /// `root` and `measure` locate the target; [`local_candidates_for_intent`]
-    /// alone leaves them `None`.
+    /// `root` (the root id's `Debug` form) and `measure` locate the target;
+    /// [`local_candidates_for_intent`] alone leaves them `None`.
     #[error(
-        "approximate accuracy of root {root:?}, measure {measure:?} requires epsilon and delta in (0, 1)"
+        "approximate accuracy of root {}, measure {} requires epsilon and delta in (0, 1)",
+        root.as_deref().unwrap_or("?"),
+        measure.map_or_else(|| "?".to_string(), |measure| measure.to_string())
     )]
     InvalidAccuracy {
         root: Option<String>,
@@ -312,14 +314,20 @@ pub fn enumerate_local_logical_candidates<Id: std::fmt::Debug>(
             })
             .collect();
         let parents = &consumers[&Rc::as_ptr(&node)];
-        let filters_above: Vec<(&Rc<OperatorNode>, &Predicate)> = parents
-            .iter()
-            .flatten()
-            .filter_map(|parent| match parent.non_asap() {
-                Some(NonASAPOp::Filter { pred, .. }) => Some((parent, pred)),
-                _ => None,
-            })
-            .collect();
+        // Only a `Filter` whose input is this aggregate is its `HAVING`; one
+        // that reads it from a scalar expression stays a plain consumer.
+        let mut filters_above: Vec<(&Rc<OperatorNode>, &Predicate)> = Vec::new();
+        for parent in parents.iter().flatten() {
+            if let Some(NonASAPOp::Filter { child, pred }) = parent.non_asap() {
+                if Rc::ptr_eq(child, &node)
+                    && !filters_above
+                        .iter()
+                        .any(|(filter, _)| Rc::ptr_eq(filter, parent))
+                {
+                    filters_above.push((parent, pred));
+                }
+            }
+        }
         for (filter, predicate) in &filters_above {
             let shared_by_all = filters_above.len() == parents.len()
                 && filters_above.iter().all(|(_, other)| other == predicate);

@@ -254,7 +254,10 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     .clone();
     producer.timing = Some(asap_types::post_asap::ExecutionTiming::QueryTime);
     assert!(matches!(
-        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(producer)))]),
+        enumerate_local_logical_candidates(vec![(
+            0,
+            QueryRoot::Operator(Rc::new(producer.clone()))
+        )]),
         Err(LogicalCandidateError::AssignedPhysicalAnnotation)
     ));
     let mut stored = (*aggregate(AggIntent::Count {
@@ -264,9 +267,17 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     stored.materialization =
         asap_types::post_asap::Materialization::MatAtQuery(asap_types::post_asap::Medium::Memory);
     assert!(matches!(
-        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(stored)))]),
+        enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(Rc::new(stored.clone())))]),
         Err(LogicalCandidateError::AssignedPhysicalAnnotation)
     ));
+    // An annotated node below an unannotated root is rejected too.
+    for annotated in [producer, stored] {
+        let root = having_filter(Rc::new(annotated), always());
+        assert!(matches!(
+            enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))]),
+            Err(LogicalCandidateError::AssignedPhysicalAnnotation)
+        ));
+    }
     let summary = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan(false),
         family: FieldDataType::Sketch(
@@ -330,6 +341,10 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
             } if root == "\"q\""
         ),
         "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("root \"q\", measure 1 "),
+        "{error}"
     );
 }
 
@@ -673,4 +688,154 @@ fn example_1_exact_q2_prunes_topk_heaps() {
         }]
         && choices.pruned.is_empty()));
     assert_eq!(found.len(), 2, "{found:#?}");
+}
+
+/// The `HAVING` entries of the target whose measure satisfies `is`.
+fn having_of(
+    targets: &[asap_aware_mapping::logical_candidates::LocalLogicalTarget],
+    is: impl Fn(&AggIntent) -> bool,
+) -> Vec<HavingEntry> {
+    let target = targets
+        .iter()
+        .find(|target| match target.target.non_asap() {
+            Some(NonASAPOp::Aggregate { measures, .. }) => is(&measures[target.measure]),
+            _ => false,
+        })
+        .expect("target");
+    target.having.clone()
+}
+
+/// `Column(column) > ScalarSubquery(subquery)`.
+fn above_scalar(column: usize, subquery: Rc<OperatorNode>) -> Predicate {
+    Predicate(ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(column)),
+        op: CompareOpKind::Gt,
+        right: Box::new(ScalarExpr::ScalarSubquery(subquery)),
+        semantics: ExprSemantics::Sql,
+    })
+}
+
+/// A `Filter` that reads an aggregate only from its predicate is not that
+/// aggregate's `HAVING`; one that also filters the aggregate gives one entry.
+#[test]
+fn scalar_reference_filter_is_not_having() {
+    let count = || {
+        vec![AggIntent::Count {
+            accuracy: approximate(),
+        }]
+    };
+    let agg = aggregate_over(scan(false), count(), vec![], None);
+    let root = having_filter(scan(false), above_scalar(1, agg.clone()));
+    let targets = enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))])
+        .unwrap()
+        .targets;
+    assert_eq!(targets.len(), 1);
+    assert!(Rc::ptr_eq(&targets[0].target, &agg));
+    assert!(targets[0].having.is_empty(), "{:?}", targets[0].having);
+
+    let agg = aggregate_over(scan(false), count(), vec![], None);
+    let root = having_filter(agg.clone(), above_scalar(0, agg.clone()));
+    let targets = enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root.clone()))])
+        .unwrap()
+        .targets;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0].having,
+        vec![HavingEntry {
+            filter: Some(root),
+            predicate: above_scalar(0, agg),
+            placement: HavingPlacement::AboveOutput,
+        }]
+    );
+}
+
+/// PromQL `scalar(...)` operands are scalar references, not `HAVING`.
+#[test]
+fn promql_scalar_operand_is_not_having() {
+    let roots = implicit_exact_promql("http_requests_total > scalar(sum(http_requests_total))");
+    let targets = enumerate_local_logical_candidates(roots.into_iter().enumerate().collect())
+        .unwrap()
+        .targets;
+    assert!(!targets.is_empty());
+    for target in &targets {
+        assert!(target.having.is_empty(), "{:?}", target.having);
+    }
+
+    let roots = implicit_exact_promql("sum by (job) (x) > scalar(count(x))");
+    let targets = enumerate_local_logical_candidates(roots.into_iter().enumerate().collect())
+        .unwrap()
+        .targets;
+    assert!(having_of(&targets, |intent| matches!(intent, AggIntent::Count { .. })).is_empty());
+    let sum = having_of(&targets, |intent| matches!(intent, AggIntent::Sum { .. }));
+    assert_eq!(sum.len(), 1, "{sum:?}");
+    assert_eq!(sum[0].placement, HavingPlacement::AboveOutput);
+}
+
+/// A non-root, non-`Filter` consumer keeps a key-only `HAVING` above.
+#[test]
+fn having_shared_with_a_project_consumer_stays_above() {
+    let node = grouped_count(None);
+    let key = equals(0, ScalarValue::Utf8("a".into()));
+    let filtered = having_filter(node.clone(), key);
+    let project = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+        cols: vec![asap_types::ir::ProjectItem {
+            alias: None,
+            expr: ScalarExpr::Column(0),
+        }],
+        qualifier: None,
+        child: node,
+    }))
+    .unwrap();
+    let targets = enumerate_local_logical_candidates(vec![
+        (0, QueryRoot::Operator(filtered)),
+        (1, QueryRoot::Operator(project)),
+    ])
+    .unwrap()
+    .targets;
+    assert_eq!(targets.len(), 1);
+    let placements: Vec<_> = targets[0]
+        .having
+        .iter()
+        .map(|entry| entry.placement)
+        .collect();
+    assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
+}
+
+/// `without(...)` and per-entity aggregates have no fixed key prefix, so a
+/// `HAVING` over column 0 stays above.
+#[test]
+fn without_and_per_entity_having_stays_above() {
+    for reduction in [
+        Reduction::Reduce(asap_types::ir::operator_properties::GroupKeys::without(
+            vec![1],
+        )),
+        Reduction::PerEntity,
+    ] {
+        let node = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
+            child: scan(false),
+            reduction: reduction.clone(),
+            measures: vec![AggIntent::Count {
+                accuracy: approximate(),
+            }],
+            output_names: vec![],
+            filters: vec![],
+            having: None,
+        }))
+        .unwrap();
+        let root = having_filter(node, equals(0, ScalarValue::Utf8("a".into())));
+        let targets = enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))])
+            .unwrap()
+            .targets;
+        assert_eq!(targets.len(), 1, "{reduction:?}");
+        let placements: Vec<_> = targets[0]
+            .having
+            .iter()
+            .map(|entry| entry.placement)
+            .collect();
+        assert_eq!(
+            placements,
+            vec![HavingPlacement::AboveOutput],
+            "{reduction:?}"
+        );
+    }
 }
