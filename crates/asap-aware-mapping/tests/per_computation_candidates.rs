@@ -1107,3 +1107,34 @@ fn composed_guarantees() {
     assert!(guarantee(child).is_some());
     assert!(guarantee(&roots[2]).is_none());
 }
+
+/// The aggregate's own value `having` stays a `Filter` above the output, and
+/// a subquery in it reads the subquery's substitution.
+#[test]
+fn own_having_subquery_is_substituted() {
+    use asap_aware_mapping::per_computation_candidates::compose_logical_candidate;
+    let inner = aggregate(AggIntent::Count {
+        accuracy: approximate(),
+    });
+    let outer = grouped_count(Some(above_scalar(1, inner.clone())));
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(outer.clone()))]).unwrap();
+    assert_eq!(inventory.targets.len(), 2);
+    let cms = 1;
+    let composed = compose_logical_candidate(&inventory, &[cms, cms]).unwrap();
+    let QueryRoot::Operator(root) = &composed[0].1 else {
+        panic!("operator root expected")
+    };
+    let Some(NonASAPOp::Filter { pred, child }) = root.non_asap() else {
+        panic!("own HAVING above the estimate expected, got {root:#?}")
+    };
+    assert!(matches!(child.asap(), Some(ASAPOp::SummaryEstimate { .. })));
+    let [subquery] = <[_; 1]>::try_from(pred.0.operator_refs()).unwrap();
+    assert!(
+        matches!(subquery.asap(), Some(ASAPOp::SummaryEstimate { .. })),
+        "{subquery:#?}"
+    );
+    assert!(OperatorNode::reachable(root)
+        .iter()
+        .all(|node| !matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. }))));
+}
