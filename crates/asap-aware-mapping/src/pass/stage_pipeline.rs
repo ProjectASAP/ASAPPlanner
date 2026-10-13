@@ -88,6 +88,15 @@ impl<Id> StagePipelineRun<Id> {
         let selected = &self.selection.as_ref().ok()?.selected;
         self.physical.iter().find(|p| &p.id == selected)
     }
+
+    /// The composed roots of the logical candidate the selected physical
+    /// candidate implements: the plan before physical operator
+    /// implementation and materialization.
+    pub fn selected_logical(&self) -> Option<&[QueryRoot]> {
+        let from = &self.selected()?.from_logical;
+        let logical = self.logical.iter().find(|l| &l.id == from)?;
+        logical.roots.as_deref().ok()
+    }
 }
 
 /// Run the planning stages over the frontends' `roots`, enumerating at most

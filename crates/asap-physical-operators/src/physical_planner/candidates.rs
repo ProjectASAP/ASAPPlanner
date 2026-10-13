@@ -374,14 +374,22 @@ mod tests {
             .unwrap()
             .remove(0);
         let root = promql_rows::with_series_identity(&root).unwrap();
-        let space = asap_aware_mapping::search_workload(vec![("q", root)]).unwrap();
-        let selected = space
-            .global_selection(&asap_aware_mapping::cost_model::DefaultCostModel)
-            .assemble_selected_query(&space.roots[0].1)
-            .unwrap()
-            .unwrap();
+        // The logical plan the planner pipeline selects, materialized at
+        // ingestion time.
+        let run = asap_aware_mapping::plan_stages(
+            vec![(0, planner_types::ir::QueryRoot::Operator(root))],
+            &[Some(planner_types::types::AccuracyTarget::Exact)],
+            &workload.data_workload.unwrap(),
+            asap_aware_mapping::PlanningModels::builtin(),
+            asap_aware_mapping::pass::MAX_ENUMERATED_CANDIDATES,
+        )
+        .unwrap();
+        let [planner_types::ir::QueryRoot::Operator(selected)] = run.selected_logical().unwrap()
+        else {
+            panic!("one operator root");
+        };
         let selected = planner_types::ir::apply_materialization_timings(
-            &selected,
+            selected,
             &planner_types::ir::MaterializationAssignment::with_default(
                 planner_types::ir::Materialization::MatAtIngestion(
                     planner_types::ir::Medium::Memory,
