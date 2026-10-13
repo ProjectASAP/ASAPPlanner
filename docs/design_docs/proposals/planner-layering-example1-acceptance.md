@@ -143,6 +143,11 @@ Invariants:
 Ignored until Pass 2 (#588): for each Q2 option, the shared-input candidate
 costs no more than its separate counterpart.
 
+When #588's shared-input candidates land, each Q2 option has two
+candidates. The tests already pick a Q2 option's candidate by (option,
+queries share no node) and check only that every invalid candidate is a
+heap one, not that exactly two are invalid, so they need no change.
+
 The doc's typical winners need window forms or materialization, and its
 "Raw with a shared input" needs Pass 2. Latency bounds are not checked, so
 whether an exact Q2 misses 100 ms is not tested.

@@ -93,11 +93,13 @@ fn classify(dag: &impl ExportedDag, query_roots: &[NodeId]) -> (Q2Option, bool) 
     (option, !c1.is_disjoint(&c2))
 }
 
+/// The candidate with Q2 `option` whose queries share no node (#588 adds a
+/// shared-input variant of each).
 fn physical_with(run: &Run, option: Q2Option) -> &Physical {
     let mut found = run
         .physical
         .iter()
-        .filter(|p| classify(p.dag(), &p.query_roots).0 == option);
+        .filter(|p| classify(p.dag(), &p.query_roots) == (option, false));
     let p = found.next().unwrap_or_else(|| panic!("no {option:?}"));
     assert!(found.next().is_none(), "one {option:?} candidate");
     p
@@ -462,7 +464,15 @@ fn stage3_plan_selection_selects_exact_q2_and_rejects_both_heaps() {
         physical_with(&run, Q2Option::Exact).id
     );
     let invalid = run.invalid();
-    assert_eq!(invalid.len(), 2, "{invalid:?}");
+    // Only heap candidates are invalid (with or without a shared input).
+    for id in invalid.keys() {
+        let p = run.physical(id);
+        assert_ne!(
+            classify(p.dag(), &p.query_roots).0,
+            Q2Option::Exact,
+            "{invalid:?}"
+        );
+    }
     let cms = &physical_with(&run, Q2Option::CountMinHeapPerJob).id;
     assert!(
         invalid[cms.as_str()].contains("non-negative"),
