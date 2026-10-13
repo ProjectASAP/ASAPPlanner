@@ -34,10 +34,11 @@
 //! groups × k. State is priced by its bytes: a sketch by its parameters, a
 //! fixed-size exact accumulator (sum, count, min, max, rate, ...) as one
 //! value per group, and exact state that grows with the data (quantile,
-//! top-k, distinct count, entropy keep every value or item) as one value per
-//! input row of its group, assuming rows spread evenly over groups and, for
-//! distinct items, that every row may be distinct. These numbers are illustrative, not calibrated: a binary,
-//! join or concat node is priced from its first input only (MVP; follow-up).
+//! top-k, distinct count, L2, entropy keep every value or item) as one value
+//! per input row of its group, assuming rows spread evenly over groups and,
+//! for distinct items, that every row may be distinct. These numbers are
+//! illustrative, not calibrated: a binary, join or concat node is priced from
+//! its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
 //! bad declared rates. Latency bounds and deployment capabilities are not
 //! checked yet.
@@ -888,6 +889,7 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
         AggIntent::Quantile { .. }
             | AggIntent::TopK { .. }
             | AggIntent::Cardinality { .. }
+            | AggIntent::FrequencyL2 { .. }
             | AggIntent::FrequencyEntropy { .. }
     )
 }
@@ -1276,6 +1278,31 @@ mod tests {
                 "{query}: {selection:?}"
             );
         }
+    }
+
+    /// Exact L2 state keeps one counter per distinct value of its group, so
+    /// it is priced like exact quantile state, which keeps every value.
+    #[test]
+    fn exact_l2_state_is_priced_like_exact_quantile_state() {
+        let aggregate_cost = |query: &str| {
+            let candidates = all_candidates(query, &AccuracyTarget::Exact);
+            let selection =
+                select_plan(&candidates, &[None], &data(), PlanningModels::builtin()).unwrap();
+            let exact = candidates
+                .iter()
+                .find(|c| !has_summary_estimate(c))
+                .unwrap();
+            selection.costs[&exact.id]
+                .per_node
+                .values()
+                .find(|n| n.detail.starts_with("hash aggregate"))
+                .unwrap()
+                .cost
+        };
+        assert_eq!(
+            aggregate_cost("l2_over_time(x[5m])"),
+            aggregate_cost("quantile_over_time(0.99, x[5m])")
+        );
     }
 
     /// A candidate that ties the selected one is rejected for losing on
