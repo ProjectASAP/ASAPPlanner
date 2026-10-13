@@ -1,5 +1,9 @@
-//! DataFusion planning adapters. Types come from the canonical signature rules;
-//! physical evaluation deliberately remains the query engine's responsibility.
+//! Planning-only DataFusion UDFs for ClickHouse's collection functions:
+//! `map(...)`, `mapConcat`, `arrayElement` and `tupleElement` over Map, List
+//! and Struct values. They let DataFusion's SQL planner resolve these calls,
+//! with return types from the canonical signature rules; lowering turns them
+//! into IR scalar functions, and DataFusion never executes them (evaluation
+//! is the query engine's responsibility).
 use super::types::{arrow_to_dtype, dtype_to_arrow, scalar_value_to_asap};
 use asap_types::ir::scalar::{element_access_type, struct_field_type};
 use asap_types::ir::ScalarExpr;
@@ -18,10 +22,10 @@ use std::sync::Arc;
 /// The name ClickHouse's `map(...)` is planned under. DataFusion's SQL planner
 /// reserves `map` for its own constructor (and rejects `map()`), so
 /// `clickhouse_ast::normalize` renames the call and lowering restores `map`.
-pub(super) const MAP_PLANNING_NAME: &str = "asap_map_construct";
+pub(super) const MAP_UDF_NAME: &str = "asap_map_construct";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlanningFunction {
+enum CollectionFunction {
     Map(MapScalarFunction),
     Element,
     StructField,
@@ -30,28 +34,28 @@ enum PlanningFunction {
 pub(super) fn register(context: &SessionContext) {
     for (name, function) in [
         (
-            MAP_PLANNING_NAME,
-            PlanningFunction::Map(MapScalarFunction::Construct),
+            MAP_UDF_NAME,
+            CollectionFunction::Map(MapScalarFunction::Construct),
         ),
         (
             "mapconcat",
-            PlanningFunction::Map(MapScalarFunction::Concat),
+            CollectionFunction::Map(MapScalarFunction::Concat),
         ),
-        ("arrayelement", PlanningFunction::Element),
-        ("tupleelement", PlanningFunction::StructField),
+        ("arrayelement", CollectionFunction::Element),
+        ("tupleelement", CollectionFunction::StructField),
     ] {
-        context.register_udf(ScalarUDF::from(CollectionPlanningFunction {
+        context.register_udf(ScalarUDF::from(CollectionUdf {
             name,
             function,
             signature: match function {
-                PlanningFunction::Map(MapScalarFunction::Construct) => Signature::one_of(
+                CollectionFunction::Map(MapScalarFunction::Construct) => Signature::one_of(
                     vec![TypeSignature::Exact(vec![]), TypeSignature::VariadicAny],
                     Volatility::Immutable,
                 ),
-                PlanningFunction::Map(MapScalarFunction::Access)
-                | PlanningFunction::Element
-                | PlanningFunction::StructField => Signature::any(2, Volatility::Immutable),
-                PlanningFunction::Map(MapScalarFunction::Concat) => {
+                CollectionFunction::Map(MapScalarFunction::Access)
+                | CollectionFunction::Element
+                | CollectionFunction::StructField => Signature::any(2, Volatility::Immutable),
+                CollectionFunction::Map(MapScalarFunction::Concat) => {
                     Signature::variadic_any(Volatility::Immutable)
                 }
             },
@@ -59,20 +63,20 @@ pub(super) fn register(context: &SessionContext) {
     }
 }
 #[derive(Debug, PartialEq, Eq)]
-struct CollectionPlanningFunction {
+struct CollectionUdf {
     name: &'static str,
-    function: PlanningFunction,
+    function: CollectionFunction,
     signature: Signature,
 }
 // `function` is determined by `name` at registration, so hashing the name and
 // signature agrees with the derived `Eq`.
-impl Hash for CollectionPlanningFunction {
+impl Hash for CollectionUdf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.signature.hash(state);
     }
 }
-impl CollectionPlanningFunction {
+impl CollectionUdf {
     fn output(
         &self,
         args: &[DataType],
@@ -90,7 +94,7 @@ impl CollectionPlanningFunction {
             .collect::<Result<Vec<_>>>()?;
         let (dtype, nullable) = if matches!(
             self.function,
-            PlanningFunction::Element | PlanningFunction::StructField
+            CollectionFunction::Element | CollectionFunction::StructField
         ) {
             // DataFusion asks for argument-dependent types before canonical
             // expression binding. Reuse the shared resolver over typed argument
@@ -116,11 +120,11 @@ impl CollectionPlanningFunction {
                 })
                 .collect::<Result<Vec<_>>>()?;
             match self.function {
-                PlanningFunction::Element => element_access_type(&args, &schema),
-                PlanningFunction::StructField => struct_field_type(&args, &schema),
-                PlanningFunction::Map(_) => unreachable!(),
+                CollectionFunction::Element => element_access_type(&args, &schema),
+                CollectionFunction::StructField => struct_field_type(&args, &schema),
+                CollectionFunction::Map(_) => unreachable!(),
             }
-        } else if let PlanningFunction::Map(function) = self.function {
+        } else if let CollectionFunction::Map(function) = self.function {
             function.output_type(&inputs)
         } else {
             unreachable!()
@@ -129,7 +133,7 @@ impl CollectionPlanningFunction {
         Ok((dtype_to_arrow(&dtype), nullable))
     }
 }
-impl ScalarUDFImpl for CollectionPlanningFunction {
+impl ScalarUDFImpl for CollectionUdf {
     fn name(&self) -> &str {
         self.name
     }
@@ -162,7 +166,10 @@ impl ScalarUDFImpl for CollectionPlanningFunction {
         Ok(Arc::new(ArrowField::new(self.name, dtype, nullable)))
     }
     fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        Err(DataFusionError::NotImplemented("collection planning adapter cannot execute; use a capable query engine or external exact sub-DAG".into()))
+        Err(DataFusionError::NotImplemented(
+            "collection UDF cannot execute; use a capable query engine or external exact sub-DAG"
+                .into(),
+        ))
     }
 }
 
@@ -170,10 +177,10 @@ impl ScalarUDFImpl for CollectionPlanningFunction {
 mod tests {
     use super::*;
     #[test]
-    fn planning_adapter_explicitly_refuses_physical_execution() {
-        let adapter = CollectionPlanningFunction {
-            name: MAP_PLANNING_NAME,
-            function: PlanningFunction::Map(MapScalarFunction::Construct),
+    fn collection_udf_explicitly_refuses_physical_execution() {
+        let udf = CollectionUdf {
+            name: MAP_UDF_NAME,
+            function: CollectionFunction::Map(MapScalarFunction::Construct),
             signature: Signature::any(0, Volatility::Immutable),
         };
         let args = ScalarFunctionArgs {
@@ -184,10 +191,10 @@ mod tests {
             config_options: Default::default(),
         };
         assert!(matches!(
-            adapter.invoke_with_args(args),
+            udf.invoke_with_args(args),
             Err(DataFusionError::NotImplemented(_))
         ));
-        let result = adapter.return_type(&[]).unwrap();
+        let result = udf.return_type(&[]).unwrap();
         let (expected, _) = MapScalarFunction::Construct.output_type(&[]).unwrap();
         assert_eq!(result, dtype_to_arrow(&expected));
     }

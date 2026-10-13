@@ -14,7 +14,7 @@ The final guarantee records both input ranges and their contract identifiers. Th
 
 ## Candidate generation without evidence
 
-The default `SketchAlgorithmStrategy` permits a direct DDSketch quantile-ratio
+The default `ASAPStrategies` permits a direct DDSketch quantile-ratio
 candidate when domain evidence is absent, but leaves the root guarantee unset.
 This is useful for the v1 integration path; it does not turn missing evidence
 into evidence. Other approximate divisions still require their own composition

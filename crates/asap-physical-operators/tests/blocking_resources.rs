@@ -8,7 +8,7 @@ use asap_physical_operators::{
 };
 use futures::{executor::block_on, FutureExt, StreamExt};
 use planner_types::ir::Predicate;
-use planner_types::ir::ScalarExpr as QueryExpr;
+use planner_types::ir::ScalarExpr;
 use planner_types::{
     post_asap::{Field, FieldDataType},
     pre_asap::{DataType, JoinKind, ScalarValue},
@@ -62,7 +62,7 @@ fn cross_join() -> Operator {
         schema(1),
         schema(1),
         JoinKind::Cross,
-        &Predicate(QueryExpr::Literal(ScalarValue::Boolean(true))),
+        &Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
         schema(2),
     )
     .unwrap()

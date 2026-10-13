@@ -77,7 +77,7 @@
 //!   binds (single intent, no `HAVING`), every entry becomes its own bound
 //!   candidate.
 //! - [`SharedSubDAGStrategy`] wraps
-//!   `asap_types::pre_asap::cse::share_common_sub_dags`'s sharing decision.
+//!   `asap_types::ir::cse::share_common_sub_dags`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
 //!   `share_common_sub_dags` already collapsed two or more workload
 //!   locations onto the same `Rc<OperatorNode>` — [`discover_targets`] below
@@ -144,7 +144,7 @@
 //! 1. **Per-target candidates, not flat plans.** [`TargetSubDAGCandidates`]
 //!    stores the alternatives for one distinct [`TargetSubDAG`] (identified by
 //!    its own `Rc<OperatorNode>` pointer identity — the same currency
-//!    [`asap_types::pre_asap::cse::share_common_sub_dags`] already
+//!    [`asap_types::ir::cse::share_common_sub_dags`] already
 //!    established across the workload) holding every
 //!    [`ReplacementSubDAG`] alternative discovered for it. [`CandidateLogicalASAPDAGs`] is
 //!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
@@ -153,8 +153,8 @@
 //!    targets are just two different entries in two different groups,
 //!    sharing every other node in the workload by construction (they *are*
 //!    the same `Rc`s — nothing was copied to make a second "plan").
-//! 2. **Dedup by structural hash + `PartialEq`, reusing `pre_asap::cse`'s own
-//!    discipline.** [`asap_types::pre_asap::cse::structural_hash`] (made
+//! 2. **Dedup by structural hash + `PartialEq`, reusing `ir::cse`'s own
+//!    discipline.** [`asap_types::ir::cse::structural_hash`] (made
 //!    `pub` for exactly this reuse) is only ever a candidate-narrowing
 //!    filter; [`TargetSubDAGCandidates::add_candidate`]'s actual duplicate check is
 //!    `OperatorNode`'s derived `PartialEq` — the same "hash is a filter,
@@ -175,7 +175,7 @@
 //! line above stands for: every `TargetSubDAG` this pass discovers is one
 //! iteration of that loop. It walks every workload root's whole DAG (the
 //! same **relational-skeleton** operator-child scope
-//! `asap_types::pre_asap::cse::share_common_sub_dags` itself uses — see
+//! `asap_types::ir::cse::share_common_sub_dags` itself uses — see
 //! that module's "Algorithm" section), discovering one `TargetSubDAG` per
 //! distinct `Rc` and a *real* `consumer_count`: how many operator-child
 //! positions anywhere in the workload reference that exact `Rc`, not just

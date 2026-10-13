@@ -1,5 +1,4 @@
-//! Unified operator and scalar representation from #511.
-//! Legacy consumers remain on their existing representation until the planner cutover.
+//! The operator IR from #511: one operator DAG for every planning stage.
 pub mod aggregate_schema;
 pub mod asap;
 pub mod error;

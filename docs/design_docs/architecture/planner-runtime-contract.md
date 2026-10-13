@@ -53,7 +53,7 @@ backend still owns how the selected algorithms are physically realized.
 The same contract applies when ASAPPlanner selects a summary algorithm. Planner
 can choose KLL rather than DDSketch, while downstream chooses the concrete KLL
 implementation and runtime configuration that satisfies the selected parameter
-and accuracy contract. Empirical KLL error, update work, state size, and readout
+and accuracy contract. Empirical KLL error, update work, state size, and evaluation
 work observed on a particular workload can be fed back as evidence for later
 Planner comparisons.
 
@@ -124,7 +124,7 @@ The ASAPQuery configuration and MIP formulations can supply physical
 alternatives and coefficients. Their general principles also inform Planner
 costing: arrival rate scales ingestion work, overlapping active windows
 multiply update work and live state, retained windows consume memory, and
-merge/subtract/readout work scales with query recurrence. Disagreement between
+merge/subtract/evaluation work scales with query recurrence. Disagreement between
 formulations must become distinct explicit alternatives, not hidden assumptions
 in one cost formula.
 

@@ -325,82 +325,6 @@ impl TryFrom<SchemaWire> for Schema {
 /// label map. `$` cannot occur in a user PromQL label name.
 pub const PROMQL_SERIES_IDENTITY: &str = "$promql_series_identity";
 
-/// Resolve a PromQL root to rows carrying [`PROMQL_SERIES_IDENTITY`] before
-/// candidate search. `closed` describes physical columns here: the final
-/// column contains every dynamic source label. It does not assert that the
-/// query's projected labels are the full label set.
-///
-/// This realization supports explicit `by` grouping and per-series computation.
-/// Operators that rewrite or implicitly match dynamic label sets require their
-/// own realization; they must not accidentally treat the opaque identity as a
-/// user label or silently discard it.
-pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::QueryExpr, String> {
-    use super::{QueryExpr, Source};
-    use std::rc::Rc;
-    let mut root = root.clone();
-    fn visit(node: &mut QueryExpr) -> Result<(), String> {
-        match node {
-            QueryExpr::Scan {
-                source: Source::TimeSeries { .. },
-                schema,
-                ..
-            } => {
-                if schema
-                    .fields
-                    .iter()
-                    .any(|column| column.name == PROMQL_SERIES_IDENTITY)
-                {
-                    return Err("source already contains a physical series identity".into());
-                }
-                if schema.closed {
-                    return Err("dynamic series identity requires an open PromQL source".into());
-                }
-                schema
-                    .fields
-                    .push(Field::plain(PROMQL_SERIES_IDENTITY, DataType::Utf8, false));
-                schema.closed = true;
-                Ok(())
-            }
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::TimeShift { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::PromqlScalarFromVector(child)
-            | QueryExpr::PromqlRelabel { child, .. } => visit(Rc::make_mut(child)),
-            // Constants read no series.
-            QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::EvalTimestamp
-            | QueryExpr::Literal(super::ScalarValue::Float64(_)) => Ok(()),
-            QueryExpr::PromqlVectorFromScalar(child) => visit(Rc::make_mut(child)),
-            QueryExpr::BinaryOp { lhs, rhs, .. } => {
-                visit(Rc::make_mut(lhs))?;
-                visit(Rc::make_mut(rhs))
-            }
-            QueryExpr::Concat { children, .. } => {
-                for child in children {
-                    visit(child)?;
-                }
-                Ok(())
-            }
-            QueryExpr::Aggregate { child, .. } => visit(Rc::make_mut(child)),
-            QueryExpr::Sort {
-                child,
-                partition_by,
-                ..
-            } => {
-                if partition_by.is_without() {
-                    return Err("dynamic without ranking requires label-set projection".into());
-                }
-                visit(Rc::make_mut(child))
-            }
-            _ => Err("operator has no dynamic series-identity realization".into()),
-        }
-    }
-    visit(&mut root)?;
-    root.output_schema().map_err(|error| error.to_string())?;
-    Ok(root)
-}
-
 impl Schema {
     pub fn has_promql_series_identity(&self) -> bool {
         self.closed
@@ -604,13 +528,5 @@ mod tests {
         let back: Field = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
         assert_eq!(back.table.as_deref(), Some("hosts"));
-    }
-    // Direct scalar literals remain valid vector inputs when series typing runs.
-    #[test]
-    fn series_identity_accepts_direct_vector_literal() {
-        let root = super::super::QueryExpr::PromqlVectorFromScalar(std::rc::Rc::new(
-            super::super::QueryExpr::Literal(super::super::ScalarValue::Float64(1.0)),
-        ));
-        assert!(with_promql_series_identity(&root).is_ok());
     }
 }

@@ -295,3 +295,114 @@ fn an_empty_batch_is_an_error() {
         ))
     ));
 }
+
+/// A summary over another summary exports a typed maintenance edge between
+/// them, and the document round-trips and rejects unknown fields and versions.
+#[test]
+fn exports_summary_over_summary_as_typed_precompute_edges() {
+    use asap_types::ir::physical_export::{
+        compile_physical_asap_dag_with_node_ids, GroupingEdgeCompatibility, WindowEdgeCompatibility,
+    };
+    use asap_types::post_asap::ExecutionDataState;
+    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "m".into() },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        ),
+    }))
+    .unwrap();
+    let sum = |child, column| {
+        OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+            child,
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(column),
+            reduction: Reduction::by(vec![]),
+            grouping: Default::default(),
+            filter: None,
+        }))
+        .unwrap()
+    };
+    let inner = sum(scan, ColumnRef::SampleValue);
+    let outer = sum(Rc::clone(&inner), ColumnRef::Named("state".into()));
+    let root = OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+        child: outer,
+    }))
+    .unwrap();
+    let mut memo = TimingMemo::new();
+    let timed =
+        apply_lifecycle_timings(&root, &LifecycleAssignment::default_maintained(), &mut memo)
+            .unwrap();
+    let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
+    assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
+    assert_eq!(
+        compiled.node_ids.node_id(memo.timed(&inner).unwrap()),
+        Some(1)
+    );
+    let dag = compiled.dag;
+    assert_eq!(dag.roots, vec![3]);
+    assert_eq!(
+        dag.nodes[1].output_state,
+        ExecutionDataState::INGESTION_SUMMARY
+    );
+    assert_eq!(
+        dag.nodes[2].output_state,
+        ExecutionDataState::INGESTION_SUMMARY
+    );
+    let dependency = dag
+        .edges
+        .iter()
+        .find(|e| e.producer == 1 && e.consumer == 2)
+        .unwrap();
+    assert_eq!(dependency.data_state, ExecutionDataState::INGESTION_SUMMARY);
+    assert_eq!(dependency.grouping, GroupingEdgeCompatibility::Identical);
+    assert_eq!(
+        dependency.window,
+        WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual
+    );
+    assert!(matches!(
+        dependency.intermediate_schema.fields[0].dtype,
+        FieldDataType::ExactAggregate(ExactKind::Sum, _)
+    ));
+    assert!(matches!(
+        dag.nodes[2].payload,
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            reduction: Reduction::Reduce(_),
+            ..
+        })
+    ));
+
+    let document = PhysicalASAPDAGDocument::new(dag);
+    let decoded: PhysicalASAPDAGDocument =
+        serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
+    assert_eq!(decoded, document);
+    decoded.validate().unwrap();
+    let mut old_version = document.clone();
+    old_version.schema_version = 1;
+    assert_eq!(
+        old_version.validate(),
+        Err(PhysicalASAPDAGValidationError::UnsupportedVersion(1))
+    );
+    let mut unknown = serde_json::to_value(&document).unwrap();
+    unknown["unexpected"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<PhysicalASAPDAGDocument>(unknown).is_err());
+}
+
+/// Node-id-keyed bindings serialize in numeric id order.
+#[test]
+fn physical_node_ids_serialize_in_deterministic_binding_order() {
+    use asap_types::ir::physical_export::PhysicalASAPNodeId;
+    let mut bindings = std::collections::BTreeMap::<PhysicalASAPNodeId, &str>::new();
+    bindings.insert(10, "materialization-10");
+    bindings.insert(2, "query-2");
+    assert_eq!(
+        serde_json::to_string(&bindings).unwrap(),
+        r#"{"2":"query-2","10":"materialization-10"}"#
+    );
+}

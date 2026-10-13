@@ -12,7 +12,7 @@ names.
 | `replacement::ImplementError` | `replacement::RealizationError` |
 | `ReplacementProvenance::SummaryImplementation` | `ReplacementProvenance::SummaryRealization` |
 | `implementations_for_with` (internal) | `realizations_for_intent` |
-| `pre_asap::binder` | `pre_asap::schema_resolver` |
+| `pre_asap::binder` | `asap_frontend_common::schema_resolver` |
 | `Binder` | `SchemaResolver` |
 | `Binder::bind` | `SchemaResolver::resolve_schema` |
 | `Binder::bind_with_inherited` | `SchemaResolver::resolve_schema_with_inherited` |
@@ -32,8 +32,9 @@ names.
 | Physical evidence/comparison `boundaries` fields | `handoffs` |
 | `BoundaryEstimate::per_boundary` | `PhysicalHandoffEstimate::per_handoff` |
 | Internal `Models` | `CandidatePlanningInputs` |
-| `SketchAlgorithmStrategy::with_models` | `SketchAlgorithmStrategy::new_with_planning_inputs` |
-| `SketchAlgorithmStrategy::with_models_and_evidence` | `SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence` |
+| `SketchAlgorithmStrategy::with_models` | `ASAPStrategies::new_with_planning_inputs` |
+| `SketchAlgorithmStrategy::with_models_and_evidence` | `ASAPStrategies::new_with_planning_inputs_and_evidence` |
+| `SketchAlgorithmStrategy` | `ASAPStrategies` |
 | `HydraGroupingStrategy::with_models_and_evidence` | `HydraGroupingStrategy::new_with_planning_inputs_and_evidence` |
 
 For example, `Binder::new().bind(&dag)` becomes
