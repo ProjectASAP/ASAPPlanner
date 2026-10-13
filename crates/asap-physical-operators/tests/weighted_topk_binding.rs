@@ -763,27 +763,38 @@ fn spatial_topk_requires_the_limit_and_sort_partitions_to_agree() {
     use asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity;
     use planner_types::ir::{NonASAPOp, Operator as IrOperator, OperatorNode};
     use planner_types::pre_asap::GroupKeys;
-    let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
-    let root = Rc::new(with_series_identity(&logical).unwrap());
-    let Some(NonASAPOp::Limit {
-        n,
-        offset,
-        partition_by,
-        child,
-    }) = root.non_asap()
-    else {
-        panic!("expected a Limit root, got {root:?}");
+    let series_root = |query: &str| {
+        let logical = lower_promql(query, AccuracyTarget::Epsilon(0.1)).unwrap();
+        Rc::new(with_series_identity(&logical).unwrap())
     };
-    assert!(!partition_by.is_empty());
-    let global_limit = Rc::new(OperatorNode::with_schema(
-        IrOperator::NonASAP(NonASAPOp::Limit {
-            n: *n,
-            offset: *offset,
-            partition_by: GroupKeys::none(),
-            child: Rc::clone(child),
-        }),
-        root.schema.clone(),
-    ));
+    // `root`, a `Limit`, with its partition replaced by `partition_by`.
+    let with_limit_partition = |root: &Rc<OperatorNode>, partition_by: GroupKeys| {
+        let Some(NonASAPOp::Limit {
+            n, offset, child, ..
+        }) = root.non_asap()
+        else {
+            panic!("expected a Limit root, got {root:?}");
+        };
+        Rc::new(OperatorNode::with_schema(
+            IrOperator::NonASAP(NonASAPOp::Limit {
+                n: *n,
+                offset: *offset,
+                partition_by,
+                child: Rc::clone(child),
+            }),
+            root.schema.clone(),
+        ))
+    };
+    let per_job = series_root("topk by(job)(1, m)");
+    let global = series_root("topk(1, m)");
+    let Some(NonASAPOp::Limit {
+        partition_by: by_job,
+        ..
+    }) = per_job.non_asap()
+    else {
+        panic!("expected a Limit root, got {per_job:?}");
+    };
+    assert!(!by_job.is_empty());
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
@@ -795,8 +806,12 @@ fn spatial_topk_requires_the_limit_and_sort_partitions_to_agree() {
             .current_series_topk_candidates(root, &AccuracyTarget::Epsilon(0.1))
             .candidates
     };
-    assert!(!candidates(&root).is_empty());
-    assert!(candidates(&global_limit).is_empty());
+    assert!(!candidates(&per_job).is_empty());
+    assert!(!candidates(&global).is_empty());
+    // A global Limit over a per-job Sort, and a per-job Limit over a global
+    // Sort.
+    assert!(candidates(&with_limit_partition(&per_job, GroupKeys::none())).is_empty());
+    assert!(candidates(&with_limit_partition(&global, by_job.clone())).is_empty());
 }
 
 /// Deployment-side lifecycle choice: every summary state of `candidate` is

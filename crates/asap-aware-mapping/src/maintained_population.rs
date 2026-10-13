@@ -471,6 +471,7 @@ mod tests {
         assert_eq!(p.grouping, ["instance"]);
         assert_eq!(p.matchers[0].operation, CurrentSeriesMatch::Regex);
     }
+
     /// `root`, a `Limit`, with its partition replaced by `partition_by`.
     fn with_limit_partition(
         root: &Rc<OperatorNode>,

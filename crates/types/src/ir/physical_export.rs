@@ -488,12 +488,11 @@ pub fn compile_physical_asap_workload_with_node_ids(
     })
 }
 
-/// Each child of `operator` with its edge role: the operator inputs, then the
+/// Each input of `operator` with its edge role: the operator inputs, then the
 /// nodes read by its scalar expressions (the order of [`Operator::children`]).
-/// Each input of `operator` with its role. A node referenced several times
-/// from the operator's scalar expressions is one `ScalarRef` input, as cost
-/// lowering reads it once; ids are per node pointer, so this dedupes by
-/// pointer.
+/// A node referenced several times from the scalar expressions is one
+/// `ScalarRef` input, as cost lowering reads it once; ids are per node
+/// pointer, so this dedupes by pointer.
 fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
     use EdgeRole::*;
     let inputs: Vec<EdgeRole> = match operator {
