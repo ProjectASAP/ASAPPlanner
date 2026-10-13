@@ -896,7 +896,9 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 
 /// Update operations per input row and bytes per state. A KLL sketch keeps
 /// at most about `3k` items (its level capacities shrink geometrically by
-/// 2/3); other sketches without a sizing rule here are assumed 1 KiB.
+/// 2/3); a DDSketch keeps one 8-byte count per bin it touches
+/// ([`ddsketch_bins`]); other sketches without a sizing rule here are
+/// assumed 1 KiB.
 fn summary_shape(family: &FieldDataType) -> (u64, u64) {
     match family {
         FieldDataType::Sketch(kind, _) => match kind.params() {
@@ -917,10 +919,30 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
                 8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
             ),
             SketchParams::Kll { k, .. } => (1, 8 * 3 * u64::from(*k)),
+            SketchParams::DDSketch { alpha } => (1, ddsketch_bins(*alpha).saturating_mul(8)),
             _ => (1, 1_024),
         },
         _ => (1, 8),
     }
+}
+
+/// Ratio of the largest to the smallest positive value a DDSketch is assumed
+/// to see: nine decades, e.g. latencies from 1 ns to 1 s.
+const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
+
+/// Bins a DDSketch with relative accuracy `alpha` touches over
+/// [`DDSKETCH_ASSUMED_VALUE_RANGE`]: its bins grow geometrically by
+/// `gamma = (1 + alpha) / (1 - alpha)`, so `ceil(ln(range) / ln(gamma))`.
+/// `asap_sketchlib`'s store has no bin limit; the cap is the bins spanning
+/// every value it can index.
+fn ddsketch_bins(alpha: f64) -> u64 {
+    let log_gamma = ((1.0 + alpha) / (1.0 - alpha)).ln();
+    let (min, max) = asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(alpha);
+    let indexable = (max.ln() - min.ln()) / log_gamma;
+    (DDSKETCH_ASSUMED_VALUE_RANGE.ln() / log_gamma)
+        .min(indexable)
+        .ceil()
+        .max(1.0) as u64
 }
 
 #[cfg(test)]
@@ -930,7 +952,9 @@ mod tests {
     use crate::stage2_physical_asap_optimization::optimize_physical_asap;
     use crate::test_support::lower_promql;
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    use asap_types::post_asap::{BoundExpr, ErrorMetric, ProbabilityExpr};
+    use asap_types::post_asap::{
+        BoundExpr, ErrorMetric, GroupingStrategy, ProbabilityExpr, SketchKind,
+    };
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::workload::{Evidence, Rate};
 
@@ -1244,17 +1268,19 @@ mod tests {
         }
     }
 
-    /// Exact quantile state keeps every value of its group, so it costs more
-    /// than a quantile sketch sized for ε = 0.01, δ = 0.01, which is selected.
+    /// Exact quantile state keeps every value of its group: over one group of
+    /// 10 000 values it costs more than a quantile sketch sized for
+    /// ε = 0.01, δ = 0.01, which is selected; over 100 groups of 100 values it
+    /// is smaller than the sketch and is selected.
     #[test]
-    fn exact_quantile_state_costs_more_than_a_sketch() {
+    fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
         let target = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
             delta: 0.01,
         };
-        for query in [
-            "quantile(0.99, rate(x[5m]))",
-            "quantile by (job) (0.99, rate(x[5m]))",
+        for (query, sketch_wins) in [
+            ("quantile(0.99, rate(x[5m]))", true),
+            ("quantile by (job) (0.99, rate(x[5m]))", false),
         ] {
             let candidates = all_candidates(query, &target);
             let selection = select_plan(
@@ -1264,17 +1290,13 @@ mod tests {
                 PlanningModels::builtin(),
             )
             .unwrap();
-            let exact = candidates
-                .iter()
-                .find(|c| !has_summary_estimate(c))
-                .unwrap();
             let selected = candidates
                 .iter()
                 .find(|c| c.id == selection.selected)
                 .unwrap();
-            assert!(has_summary_estimate(selected), "{query}: {selection:?}");
-            assert!(
-                selection.costs[&selected.id].total < selection.costs[&exact.id].total,
+            assert_eq!(
+                has_summary_estimate(selected),
+                sketch_wins,
                 "{query}: {selection:?}"
             );
         }
@@ -1302,6 +1324,30 @@ mod tests {
         assert_eq!(
             aggregate_cost("l2_over_time(x[5m])"),
             aggregate_cost("quantile_over_time(0.99, x[5m])")
+        );
+    }
+
+    /// DDSketch state grows as its relative accuracy α tightens.
+    #[test]
+    fn ddsketch_state_grows_as_alpha_shrinks() {
+        let bytes = |alpha| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
+                GroupingStrategy::default(),
+            ))
+            .1
+        };
+        assert!(
+            bytes(0.1) < bytes(0.01),
+            "{} vs {}",
+            bytes(0.1),
+            bytes(0.01)
+        );
+        assert!(
+            bytes(0.01) < bytes(0.001),
+            "{} vs {}",
+            bytes(0.01),
+            bytes(0.001)
         );
     }
 
