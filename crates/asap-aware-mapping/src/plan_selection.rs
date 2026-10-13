@@ -9,9 +9,19 @@
 //! over weights proven non-negative; a query without one constrains nothing.
 //! A miss rejects the candidate as invalid, with a reason; only this stage
 //! discards valid candidates.
-//! Every valid candidate is priced node by node over its physical DAG, so a
-//! node shared by several queries is charged once, and the cheapest is
-//! selected. The rest are reported valid but costlier.
+//! Every valid candidate is priced node by node over its physical DAG, and
+//! the cheapest is selected. The rest are reported valid but costlier.
+//!
+//! A node is charged once per computation (#509): a materialized node
+//! (`MatAtIngestion` or `MatAtQuery`) once, since its output is stored and
+//! reused; a `NotMaterialized` node once per consumer that computes it, since
+//! it is recomputed for each use and not stored. Its consumers are the
+//! queries whose sub-DAG reaches it and the materialized nodes above it,
+//! counted without looking through a materialized node: a node below one is
+//! computed when that node is, so the materialized node counts as one
+//! consumer. Stage 2 does not duplicate a shared node; the multiplier is
+//! recorded on its cost ([`NodeCost::multiplier`]). Every node is
+//! `NotMaterialized` until #604, so a shared node is charged once per query.
 //!
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
@@ -21,7 +31,7 @@
 //! A cost error on any candidate aborts selection; it is reachable only from
 //! bad declared rates. Latency bounds and deployment capabilities are not
 //! checked yet.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::physical_export::{
@@ -29,7 +39,8 @@ use asap_types::ir::physical_export::{
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::post_asap::{
-    FieldDataType, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
+    FieldDataType, Materialization, ResultGuarantee, SketchAlgorithm, SketchParams,
+    SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{DataType, Reduction, Schema};
 use asap_types::types::AccuracyTarget;
@@ -55,9 +66,12 @@ const DEFAULT_SERIES: u64 = 1_000;
 const DEFAULT_ROWS_PER_SECOND: f64 = 1_000.0;
 const DEFAULT_LOOKBACK_MS: u64 = 60_000;
 
+/// `cost` is one computation's price times `multiplier`, the times the
+/// node is computed per workload evaluation ([`computations`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeCost {
     pub cost: f64,
+    pub multiplier: u64,
     pub detail: String,
 }
 
@@ -269,8 +283,70 @@ struct Shape {
     rows_per_ms: f64,
 }
 
-/// Price every node of `dag` once. Nodes are exported children first, so
-/// each node's input statistics are known when it is reached.
+/// How many times each node of `dag` is computed per workload evaluation:
+/// 1 for a materialized node; for a `NotMaterialized` one, the number of
+/// consumers that reach it, where a consumer is a query (operator or scalar
+/// root) or a materialized node, and a walk stops at the first materialized
+/// node it meets. A node read several times within one query's walk counts
+/// once for it.
+fn computations(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, u64> {
+    let materialized: HashSet<_> = dag
+        .nodes
+        .iter()
+        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .map(|n| n.id)
+        .collect();
+    let inputs = |id: PhysicalASAPNodeId| {
+        dag.edges
+            .iter()
+            .filter(move |e| e.consumer == id)
+            .map(|e| e.producer)
+    };
+    // Each consumer's starting nodes: what a query reads, or a materialized
+    // node's inputs.
+    let consumers = dag
+        .roots
+        .iter()
+        .map(|root| vec![*root])
+        .chain(
+            dag.scalar_roots
+                .iter()
+                .map(|(_, expr)| expr.operator_refs().into_iter().copied().collect()),
+        )
+        .chain(
+            dag.nodes
+                .iter()
+                .filter(|n| materialized.contains(&n.id))
+                .map(|n| inputs(n.id).collect()),
+        );
+    let mut count: HashMap<_, u64> = HashMap::new();
+    for start in consumers {
+        let mut seen = HashSet::new();
+        let mut stack: Vec<PhysicalASAPNodeId> = start;
+        while let Some(id) = stack.pop() {
+            if materialized.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            *count.entry(id).or_default() += 1;
+            stack.extend(inputs(id));
+        }
+    }
+    dag.nodes
+        .iter()
+        .map(|n| {
+            let times = if materialized.contains(&n.id) {
+                1
+            } else {
+                count.get(&n.id).copied().unwrap_or(0)
+            };
+            (n.id, times)
+        })
+        .collect()
+}
+
+/// Price every node of `dag` once per computation ([`computations`]). Nodes
+/// are exported children first, so each node's input statistics are known
+/// when it is reached.
 fn price(
     dag: &PhysicalASAPDAG,
     data: &DataWorkload,
@@ -295,6 +371,7 @@ fn price(
         version: "illustrative-v1".into(),
     };
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
+    let multipliers = computations(dag);
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     for node in &dag.nodes {
@@ -492,8 +569,16 @@ fn price(
         let cost = estimate
             .and_then(|estimate| estimate.calibrated_cost(&calibration))
             .map_err(|error| (node.id, error))?;
+        let multiplier = multipliers[&node.id];
         output.insert(node.id, out);
-        per_node.insert(node.id, NodeCost { cost, detail });
+        per_node.insert(
+            node.id,
+            NodeCost {
+                cost: cost * multiplier as f64,
+                multiplier,
+                detail,
+            },
+        );
     }
     Ok(CandidateCost {
         total: per_node.values().map(|n| n.cost).sum(),
@@ -688,7 +773,7 @@ mod tests {
         assert!(selection.rejected.iter().all(|r| r.valid));
     }
 
-    /// Each node is priced once, under its DAG id, and the total is the sum;
+    /// Each node is priced under its DAG id, and the total is the sum;
     /// every candidate is either selected or rejected as costlier. The
     /// CountSketch+heap estimate has no analytical guarantee, so deployment
     /// evidence admits it.
@@ -721,6 +806,52 @@ mod tests {
         let costlier: Vec<_> = selection.rejected.iter().filter(|r| r.valid).collect();
         assert_eq!(costlier.len(), 1);
         assert_ne!(costlier[0].id, selection.selected);
+    }
+
+    /// Query 1 is `sum(...)` over query 2's output. Every node reached by
+    /// both queries is `NotMaterialized`, so recomputed for each: charged
+    /// twice. Materializing query 2's root (`MatAtQuery`) charges it once,
+    /// and the nodes below it once, since they run only when it does.
+    #[test]
+    fn not_materialized_shared_nodes_are_charged_per_query() {
+        let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::Exact);
+        let inner = outer.children()[0].clone();
+        let mut candidate = optimize_physical_asap(
+            "L",
+            &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
+        )
+        .unwrap();
+        let [outer, inner] = candidate.dag.roots[..] else {
+            panic!("two roots")
+        };
+        let cost = price(&candidate.dag, &data()).unwrap();
+        let multipliers: BTreeMap<_, _> = cost
+            .per_node
+            .iter()
+            .map(|(id, c)| (*id, c.multiplier))
+            .collect();
+        assert_eq!(multipliers[&outer], 1);
+        assert_eq!(multipliers[&inner], 2);
+        assert!(multipliers.len() > 2, "nodes below the shared root");
+        for (id, times) in &multipliers {
+            if *id != outer {
+                assert_eq!(*times, 2, "node {id} is read by both queries");
+            }
+        }
+
+        let node = candidate
+            .dag
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == inner)
+            .unwrap();
+        node.materialization = Materialization::MatAtQuery(asap_types::ir::Medium::Memory);
+        let stored = price(&candidate.dag, &data()).unwrap();
+        for (id, c) in &stored.per_node {
+            assert_eq!(c.multiplier, 1, "node {id} is computed once");
+            assert_eq!(c.cost, cost.per_node[id].cost / multipliers[id] as f64);
+        }
+        assert!(stored.total < cost.total);
     }
 
     /// Every combination of Pass 1 candidates of one query, as Stage 2

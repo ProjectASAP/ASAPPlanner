@@ -19,8 +19,9 @@
 //! `topk_k` carries the ranked value's type and nullability (the frontend
 //! declares a non-null `Utf8` placeholder); casting the value to `Utf8` would
 //! not make it the same answer.
-//! An `Aggregate{[TopK]}` with other measures, a filter or `HAVING` has no
-//! such rewrite, and its candidate fails.
+//! An `Aggregate{[TopK]}` over a per-entity reduction, or with other
+//! measures, a filter or `HAVING`, has no such rewrite, and its candidate
+//! fails.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
 use std::collections::HashMap;

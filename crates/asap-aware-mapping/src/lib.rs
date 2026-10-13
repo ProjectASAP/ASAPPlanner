@@ -221,6 +221,7 @@ pub mod per_computation_candidates;
 /// producing the CandidatePhysicalASAPDAGs.
 pub mod physical_asap_optimization;
 
-/// #509 Stage 3, plan selection (MVP): accuracy check, analytical pricing,
-/// cheapest valid plan.
+/// #509 Stage 3, plan selection (MVP): accuracy check, analytical pricing
+/// (a `NotMaterialized` node once per query that reads it, a materialized
+/// one once), cheapest valid plan.
 pub mod plan_selection;

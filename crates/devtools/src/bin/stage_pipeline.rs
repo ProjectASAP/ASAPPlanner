@@ -16,7 +16,11 @@
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
 //     under `pruned` with the reason;
 //   - plan_selection: per-candidate costs, the selected candidate, and
-//     every other candidate as rejected (`valid: false`) or costlier. When
+//     every other candidate as rejected (`valid: false`) or costlier. Each
+//     node's `cost` is one computation's price times `multiplier`, the
+//     times it is computed: once if materialized, else once per query (or
+//     materialized node) that reads it, so a shared NotMaterialized node is
+//     charged once per query. When
 //     selection fails, `selected` is null, with the rejections, or with
 //     `error` for any other failure.
 //
@@ -203,7 +207,7 @@ fn plan_selection_json(selection: &Result<Selection, SelectionError>) -> Value {
                 .map(|(node, c)| {
                     (
                         node.to_string(),
-                        json!({ "cost": c.cost, "detail": c.detail }),
+                        json!({ "cost": c.cost, "multiplier": c.multiplier, "detail": c.detail }),
                     )
                 })
                 .collect();
