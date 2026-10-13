@@ -5,7 +5,8 @@
 //! guarantee does (theoretical: Stage 1 composes it with the built-in
 //! accuracy model), or when the deployment's empirical evidence shows this
 //! candidate's output does (`AccuracyEvidenceProvider::output_guarantee`,
-//! read only here). Count-Min is admitted only over weights proven non-negative.
+//! read only here). For a query with a target, Count-Min is admitted only
+//! over weights proven non-negative; a query without one constrains nothing.
 //! A miss rejects the candidate as invalid, with a reason; only this stage
 //! discards valid candidates.
 //! Every valid candidate is priced node by node over its physical DAG, so a
@@ -15,8 +16,11 @@
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
-//! groups × k. These numbers are illustrative, not calibrated. Latency
-//! bounds and deployment capabilities are not checked yet.
+//! groups × k. These numbers are illustrative, not calibrated: a binary,
+//! join or concat node is priced from its first input only (MVP; follow-up).
+//! A cost error on any candidate aborts selection; it is reachable only from
+//! bad declared rates. Latency bounds and deployment capabilities are not
+//! checked yet.
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
@@ -654,8 +658,8 @@ mod tests {
         }
     }
 
-    /// Count-Min over weights not proven non-negative is invalid whatever
-    /// the target.
+    /// For a query with a target, Count-Min over weights not proven
+    /// non-negative is invalid.
     #[test]
     fn count_min_over_signed_weights_is_rejected_as_invalid() {
         let target = AccuracyTarget::EpsilonDelta {
@@ -672,6 +676,16 @@ mod tests {
         let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
         assert!(!p2.valid);
         assert!(p2.reason.contains("non-negative"), "{}", p2.reason);
+    }
+
+    /// A query without a target constrains nothing: the Count-Min
+    /// candidate is admitted and priced.
+    #[test]
+    fn count_min_is_admitted_without_a_target() {
+        let selection =
+            select_plan(&candidates(), &[None], &data(), PlanningModels::builtin()).unwrap();
+        assert!(selection.costs.contains_key("P2"));
+        assert!(selection.rejected.iter().all(|r| r.valid));
     }
 
     /// Each node is priced once, under its DAG id, and the total is the sum;
