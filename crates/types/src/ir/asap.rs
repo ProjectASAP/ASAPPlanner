@@ -270,10 +270,20 @@ impl ASAPOp {
                 {
                     dtype = DataType::Float64;
                 }
+                // A filtered quantile is NULL for a group without a matching
+                // row, as the filtered aggregate it realizes is.
+                let nullable = matches!(query, SketchStatistic::Quantile { .. })
+                    && matches!(
+                        summary_input.asap(),
+                        Some(SummaryAgg {
+                            filter: Some(_),
+                            ..
+                        })
+                    );
                 let mut schema = input.clone();
                 for field in &mut schema.fields {
                     if !field.is_plain() {
-                        *field = Field::plain(name, dtype.clone(), false);
+                        *field = Field::plain(name, dtype.clone(), nullable);
                     }
                 }
                 schema
@@ -284,6 +294,7 @@ impl ASAPOp {
                     family: FieldDataType::ExactAggregate(kind, _),
                     input,
                     reduction,
+                    filter,
                     ..
                 }) = child.asap()
                 {
@@ -320,7 +331,9 @@ impl ASAPOp {
                                     reduction: reduction.clone(),
                                     measures: vec![measure],
                                     output_names: vec![],
-                                    filters: vec![],
+                                    // A filtered SUM/MIN/MAX is NULL for a
+                                    // group without a matching row.
+                                    filters: vec![filter.clone()],
                                     having: None,
                                 }
                                 .output_schema()
@@ -340,6 +353,9 @@ impl ASAPOp {
                 for f in &mut out.fields {
                     if let FieldDataType::ExactAggregate(kind, _) = &f.dtype {
                         if let Some(result) = &value_result {
+                            // The finalized value replaces the aggregate it
+                            // realizes, so it takes that aggregate's column.
+                            f.name = result.name.clone();
                             f.dtype = result.dtype.clone();
                             f.nullable = result.nullable;
                         } else {

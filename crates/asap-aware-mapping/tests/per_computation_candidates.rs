@@ -850,3 +850,291 @@ fn without_and_per_entity_having_stays_above() {
         );
     }
 }
+
+/// A workload candidate replaces only chosen targets, derives the summary's
+/// coverage from its subtree, and keeps unchosen plans as they are, now
+/// with an exact guarantee.
+#[test]
+fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
+    use asap_aware_mapping::per_computation_candidates::compose_logical_candidate;
+    let producer = aggregate(AggIntent::Cardinality {
+        cols: vec![0],
+        accuracy: approximate(),
+    });
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(producer.clone()))])
+            .unwrap();
+    let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
+    let QueryRoot::Operator(kept) = &exact[0].1 else {
+        panic!("operator root expected")
+    };
+    assert_eq!(kept.operator.kind_name(), producer.operator.kind_name());
+    assert_eq!(kept.schema, producer.schema);
+    assert!(kept.guarantee.as_ref().is_some_and(|g| g.is_exact()));
+
+    let hll = compose_logical_candidate(&inventory, &[1]).unwrap();
+    let QueryRoot::Operator(estimate) = &hll[0].1 else {
+        panic!("operator root expected")
+    };
+    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
+        panic!("summary evaluation expected")
+    };
+    // The state takes every row of its source: one unrestricted selection box.
+    let coverage = summary_input.coverage().unwrap();
+    assert!(OperatorNode::reachable(&coverage.definition).iter().any(|node| matches!(
+        node.non_asap(),
+        Some(NonASAPOp::Scan { source: Source::Table { table_ref }, .. }) if table_ref == "flows"
+    )));
+    assert_eq!(coverage.selection.len(), 1);
+    assert!(
+        coverage.selection[0].columns.is_empty() && coverage.selection[0].relative_time.is_none()
+    );
+    hll[0].1.validate_structure().unwrap();
+    assert!(compose_logical_candidate(&inventory, &[99]).is_err());
+}
+
+/// The one root of the workload candidate composed from `roots` and `choice`.
+fn composed(roots: Vec<Rc<OperatorNode>>, choice: &[usize]) -> Vec<Rc<OperatorNode>> {
+    use asap_aware_mapping::per_computation_candidates::compose_logical_candidate;
+    let inventory = generate_per_computation_candidates(
+        roots
+            .into_iter()
+            .enumerate()
+            .map(|(id, node)| (id, QueryRoot::Operator(node)))
+            .collect(),
+    )
+    .unwrap();
+    compose_logical_candidate(&inventory, choice)
+        .unwrap()
+        .into_iter()
+        .map(|(_, root)| {
+            root.validate_structure().unwrap();
+            match root {
+                QueryRoot::Operator(node) => node,
+                QueryRoot::Scalar(_) => panic!("operator root expected"),
+            }
+        })
+        .collect()
+}
+/// Output columns as (name, type, nullable).
+fn columns(node: &OperatorNode) -> Vec<(String, FieldDataType, bool)> {
+    node.schema
+        .fields
+        .iter()
+        .map(|field| (field.name.clone(), field.dtype.clone(), field.nullable))
+        .collect()
+}
+fn summary_agg(node: &OperatorNode) -> &ASAPOp {
+    match node.asap() {
+        Some(ASAPOp::SummaryEstimate { summary_input, .. }) => summary_agg(summary_input),
+        Some(ASAPOp::FinalizeExactAccumulator { child }) => summary_agg(child),
+        Some(agg @ ASAPOp::SummaryAgg { .. }) => agg,
+        _ => panic!("summary evaluation expected, got {node:#?}"),
+    }
+}
+
+/// A summary is sized when the workload candidate is composed, for its
+/// measure's accuracy requirement.
+#[test]
+fn composed_summary_is_sized_for_its_measure() {
+    use asap_aware_mapping::replacement::default_size_params;
+    let intent = AggIntent::Count {
+        accuracy: approximate(),
+    };
+    let [root] = <[_; 1]>::try_from(composed(vec![aggregate(intent.clone())], &[1])).unwrap();
+    let ASAPOp::SummaryAgg {
+        family: FieldDataType::Sketch(kind, _),
+        ..
+    } = summary_agg(&root)
+    else {
+        panic!("sketch state expected")
+    };
+    assert_eq!(*kind.algorithm(), SketchAlgorithm::Cms);
+    assert_eq!(
+        kind.params(),
+        &default_size_params(SketchAlgorithm::Cms, &intent, 0.05, 0.01)
+    );
+}
+
+/// A measure filter becomes the state's filter; a key-only `HAVING` applied
+/// by every consumer moves below the state; a value `HAVING` stays a `Filter`
+/// above the estimate.
+#[test]
+fn composed_filters_and_having() {
+    let cms = 1;
+    let filtered = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
+        child: scan(false),
+        reduction: Reduction::by(vec![0]),
+        measures: vec![AggIntent::Count {
+            accuracy: approximate(),
+        }],
+        output_names: vec![],
+        filters: vec![Some(always())],
+        having: None,
+    }))
+    .unwrap();
+    let [root] = <[_; 1]>::try_from(composed(vec![filtered.clone()], &[cms])).unwrap();
+    assert!(
+        matches!(summary_agg(&root), ASAPOp::SummaryAgg { filter: Some(f), child, .. }
+            if *f == always() && child.non_asap().is_some_and(|op| matches!(op, NonASAPOp::Scan { .. })))
+    );
+    assert_eq!(columns(&root)[0], columns(&filtered)[0]);
+
+    let key = equals(0, ScalarValue::Utf8("a".into()));
+    let [root] = <[_; 1]>::try_from(composed(
+        vec![having_filter(grouped_count(None), key.clone())],
+        &[cms],
+    ))
+    .unwrap();
+    let ASAPOp::SummaryAgg { child, filter, .. } = summary_agg(&root) else {
+        unreachable!()
+    };
+    assert_eq!(*filter, None);
+    assert!(matches!(child.non_asap(), Some(NonASAPOp::Filter { pred, .. }) if *pred == key));
+
+    let value = || equals(1, ScalarValue::Int64(10));
+    for root in composed(
+        vec![
+            having_filter(grouped_count(None), value()),
+            grouped_count(Some(value())),
+        ],
+        &[cms, cms],
+    ) {
+        let Some(NonASAPOp::Filter { pred, child }) = root.non_asap() else {
+            panic!("value HAVING above the estimate expected, got {root:#?}")
+        };
+        assert_eq!(*pred, value());
+        assert!(matches!(child.asap(), Some(ASAPOp::SummaryEstimate { .. })));
+    }
+}
+
+/// SQL `avg` joins its finalized `sum` and `count` accumulator states on the
+/// group keys and divides them.
+#[test]
+fn composed_avg_divides_sum_and_count_states() {
+    let avg = aggregate_over(
+        scan(false),
+        vec![AggIntent::Avg { col: Some(1) }],
+        vec![],
+        None,
+    );
+    let [root] = <[_; 1]>::try_from(composed(vec![avg.clone()], &[0])).unwrap();
+    // The quotient is renamed to the aggregate's column.
+    assert_eq!(columns(&root), columns(&avg));
+    let join = OperatorNode::reachable(&root)
+        .into_iter()
+        .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Join { .. })))
+        .unwrap_or_else(|| panic!("sum joined with count expected, got {root:#?}"));
+    let Some(NonASAPOp::Join { left, right, .. }) = join.non_asap() else {
+        unreachable!()
+    };
+    for (side, kind) in [(left, ExactKind::Sum), (right, ExactKind::Count)] {
+        assert!(matches!(
+            summary_agg(side),
+            ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(found, _), .. } if *found == kind
+        ));
+    }
+}
+
+/// Each measure of a multi-measure aggregate is substituted on its own and the
+/// measures are joined back on the group keys, with the aggregate's columns.
+#[test]
+fn composed_multi_measure_aggregate_joins_its_measures() {
+    for reduction in [Reduction::by(vec![0]), Reduction::by(vec![])] {
+        let node = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
+            child: scan(false),
+            reduction,
+            measures: vec![
+                AggIntent::Sum { col: Some(1) },
+                AggIntent::Count {
+                    accuracy: approximate(),
+                },
+                AggIntent::StdDev {
+                    col: Some(1),
+                    population: true,
+                },
+            ],
+            output_names: vec![],
+            filters: vec![],
+            having: None,
+        }))
+        .unwrap();
+        let [root] = <[_; 1]>::try_from(composed(vec![node.clone()], &[0, 1])).unwrap();
+        assert!(matches!(root.non_asap(), Some(NonASAPOp::Project { .. })));
+        let reached = OperatorNode::reachable(&root);
+        let joins = reached
+            .iter()
+            .filter(|node| matches!(node.non_asap(), Some(NonASAPOp::Join { .. })))
+            .count();
+        assert_eq!(joins, 2);
+        assert!(reached
+            .iter()
+            .any(|node| matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. }))));
+        let names = |node: &OperatorNode| -> Vec<_> {
+            columns(node)
+                .into_iter()
+                .map(|(name, dtype, _)| (name, dtype))
+                .collect()
+        };
+        assert_eq!(names(&root), names(&node));
+    }
+}
+
+/// A summary estimate carries its sized family's bound; an exact accumulator
+/// is exact; anything computed from an approximate value, a value `HAVING`
+/// included, has no guarantee.
+#[test]
+fn composed_guarantees() {
+    let value = equals(1, ScalarValue::Int64(10));
+    let roots = composed(
+        vec![
+            aggregate(AggIntent::Cardinality {
+                cols: vec![0],
+                accuracy: approximate(),
+            }),
+            aggregate(AggIntent::Sum { col: Some(1) }),
+            having_filter(grouped_count(None), value),
+        ],
+        &[1, 0, 1],
+    );
+    let guarantee = |node: &OperatorNode| node.guarantee.clone();
+    let hll = guarantee(&roots[0]).expect("HLL bound");
+    assert!(!hll.is_exact());
+    assert!(guarantee(&roots[1]).is_some_and(|g| g.is_exact()));
+    let Some(NonASAPOp::Filter { child, .. }) = roots[2].non_asap() else {
+        panic!("value HAVING above the estimate expected")
+    };
+    assert!(guarantee(child).is_some());
+    assert!(guarantee(&roots[2]).is_none());
+}
+
+/// The aggregate's own value `having` stays a `Filter` above the output, and
+/// a subquery in it reads the subquery's substitution.
+#[test]
+fn own_having_subquery_is_substituted() {
+    use asap_aware_mapping::per_computation_candidates::compose_logical_candidate;
+    let inner = aggregate(AggIntent::Count {
+        accuracy: approximate(),
+    });
+    let outer = grouped_count(Some(above_scalar(1, inner.clone())));
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(outer.clone()))]).unwrap();
+    assert_eq!(inventory.targets.len(), 2);
+    let cms = 1;
+    let composed = compose_logical_candidate(&inventory, &[cms, cms]).unwrap();
+    let QueryRoot::Operator(root) = &composed[0].1 else {
+        panic!("operator root expected")
+    };
+    let Some(NonASAPOp::Filter { pred, child }) = root.non_asap() else {
+        panic!("own HAVING above the estimate expected, got {root:#?}")
+    };
+    assert!(matches!(child.asap(), Some(ASAPOp::SummaryEstimate { .. })));
+    let [subquery] = <[_; 1]>::try_from(pred.0.operator_refs()).unwrap();
+    assert!(
+        matches!(subquery.asap(), Some(ASAPOp::SummaryEstimate { .. })),
+        "{subquery:#?}"
+    );
+    assert!(OperatorNode::reachable(root)
+        .iter()
+        .all(|node| !matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. }))));
+}

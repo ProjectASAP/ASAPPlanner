@@ -68,10 +68,11 @@ impl OptimizationPass for MajorPass {
         // Each reference is planned against the entry's accuracy target, so a
         // combination of approximate values (e.g. a difference of two
         // quantiles) keeps its summary candidates. The combined guarantee is
-        // not composed in this pass (it is effectively `None`): composition is
-        // designed in #669 and implemented in #575, Stage 3's accuracy model
-        // checks it, and in the MVP a rank-interval guarantee counts as
-        // `None`. The same holds for scalar references inside Project/Filter
+        // not composed (it is `None`, #669), so the vector form's candidate is
+        // kept but selected automatically only with evidence about its output:
+        // a root guarantee that meets the target, or the deployment's
+        // empirical accuracy model (plan selection, #576). In the MVP a rank-interval
+        // guarantee counts as `None`. The same holds for scalar references inside Project/Filter
         // expressions, which are planned as interior sites.
         for ((index, _), refs) in workload.scalar_roots().iter().zip(&scalar_refs) {
             for node in refs {

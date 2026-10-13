@@ -579,6 +579,52 @@ async fn combined_scalar_references_read_summaries() {
     }
 }
 
+/// The vector form of a combination of approximate values keeps its summary
+/// candidates (nothing prunes them), but its output has no composed guarantee
+/// (#669) and the built-in models have no empirical output-level evidence
+/// (plan selection, #576), so it is not selected automatically: the exact plan is.
+#[tokio::test]
+async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
+    let sketches = |root: &Rc<OperatorNode>| {
+        OperatorNode::reachable(root).into_iter().any(|node| {
+            matches!(
+                node.asap(),
+                Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(..),
+                    ..
+                })
+            )
+        })
+    };
+    for query in [
+        "quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))",
+        "quantile(0.99, rate(x[5m])) > quantile(0.5, rate(x[5m]))",
+    ] {
+        let root = lower_promql_workload(&promql_workload(&[(query, 0.01)]), NOW_MS)
+            .unwrap()
+            .remove(0);
+        let space = search_workload_with_targets(
+            vec![("q", root, Some(AccuracyTarget::Epsilon(0.01)))],
+            &asap_aware_mapping::default_strategies(),
+            &DefaultAccuracyModel,
+        )
+        .unwrap();
+        let group = space.candidates_for_target(&space.roots[0].1).unwrap();
+        assert!(
+            group.candidates.iter().any(|candidate| matches!(
+                &candidate.replacement,
+                Replacement::SubDAG(node) if sketches(node)
+                    && node.guarantee.is_none()
+                    && candidate.has_missing_accuracy_evidence()
+            )),
+            "{query}: summary candidate expected"
+        );
+
+        let output = plan_promql_with(&[(query, 0.01)], &PREFER_LARGE_KLL).await;
+        assert!(!sketches(&output.plans[0].root), "{query}");
+    }
+}
+
 /// Front ends build structurally identical references as separate nodes and
 /// planning merges them: such a scalar plans each distinct reference once and
 /// satisfies the plan contract.
