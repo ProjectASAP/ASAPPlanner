@@ -254,7 +254,7 @@ async fn language_specific_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
 
 /// Once the SQL forms are recognized, the SQL workload has the stand-in's Pass 1 options.
 #[tokio::test]
-#[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598) and SQL COUNT(*) candidates that compose on flows(ts, src_ip) (#603)"]
+#[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598)"]
 async fn logical_asap_optimization_sql_has_the_standin_options() {
     let workload = sql_workload();
     let sql = run_stages(&workload, lower_sql(&workload).await);

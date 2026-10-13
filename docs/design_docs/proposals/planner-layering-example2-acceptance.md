@@ -61,7 +61,7 @@ with Q1–Q3's targets and a 15-s ingestion interval (PromQL needs one).
 
 | Invariant | Test | Status |
 |---|---|---|
-| Once recognized, the SQL workload has the stand-in's Pass 1 options | `logical_asap_optimization_sql_has_the_standin_options` | ignored: #598, and #603 (ambiguity 9) |
+| Once recognized, the SQL workload has the stand-in's Pass 1 options | `logical_asap_optimization_sql_has_the_standin_options` | ignored: #598 (ambiguity 9) |
 | Each statistic has an exact and a UnivMon option | `logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic` | passes |
 | Q1 has a specialized distinct-count summary (HLL, Theta or KMV) | `logical_asap_optimization_pass1_offers_a_distinct_count_summary` | passes |
 | Q2 and Q3 have a specialized entropy and norm summary | `logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | ignored: no PR yet |
@@ -132,11 +132,11 @@ strictest size.
    option set.
 8. **Data workload.** Only `input_cardinality` and `data_ingestion_interval`
    change, so the ingestion rate stays about 66,667/s with 10,000,000 keys.
-9. **SQL candidates that fail to compose.** On `flows(ts, src_ip)`, sketch
-   candidates for `COUNT(*) … GROUP BY src_ip` reference
-   `ColumnRef::SampleValue`, and the schema has no `value` column, so
-   composition fails (#603). This is a Pass 1 defect independent of this
-   example.
+9. **SQL candidates compose.** On `flows(ts, src_ip)`, every logical
+   candidate of the SQL workload composes, including the CMS and CountSketch
+   candidates for Q2's and Q3's `COUNT(*) … GROUP BY src_ip`. Until #598
+   recognizes the Entropy and L2 idioms, those per-source counts are what
+   Pass 1 sees, so the SQL options differ from the stand-in's.
 
 ## Devtool
 
@@ -144,6 +144,5 @@ No `--example planner-layering-2` yet. It needs:
 
 * SQL `Entropy` and `L2` recognition (#598), so the demo shows the doc's
   workload rather than exact relational plans;
-* the Pass 1 fix in ambiguity 9 (#603);
 * a SQL lowering path with the `flows` catalog in `stage_pipeline` (devtool
   only; it lowers PromQL only today).
