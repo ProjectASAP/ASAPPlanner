@@ -126,6 +126,8 @@ async fn sql_candidates_compose() {
         "SELECT count(*) FILTER (WHERE bytes > 10), approx_percentile_cont(bytes, 0.99) FROM flows",
         "SELECT avg(bytes) FROM flows",
         "SELECT sum(flows.bytes) FROM flows",
+        "SELECT src, approx_percentile_cont(bytes, 0.99) FILTER (WHERE bytes > 10) FROM flows GROUP BY src",
+        "SELECT approx_percentile_cont(bytes, 0.99) FILTER (WHERE bytes > 10) FROM flows",
     ] {
         assert!(compose_all(query, sql(query).await) >= 1, "{query}");
     }

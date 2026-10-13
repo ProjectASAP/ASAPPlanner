@@ -517,8 +517,19 @@ impl NonASAPOp {
             } => {
                 let mut output =
                     aggregate_output_schema(&child.schema, reduction, measures, output_names)?;
+                let offset = reduction.group_keys().map_or(0, |keys| keys.len());
+                // A filtered quantile is NULL for a group without a matching
+                // row, as its summary estimate is.
+                for (index, measure) in measures.iter().enumerate() {
+                    if matches!(measure, AggIntent::Quantile { .. })
+                        && filters.get(index).is_some_and(Option::is_some)
+                    {
+                        if let Some(field) = output.fields.get_mut(offset + index) {
+                            field.nullable = true;
+                        }
+                    }
+                }
                 if child.result_kind == OperatorResultKind::Relation {
-                    let offset = reduction.group_keys().map_or(0, |keys| keys.len());
                     for (index, measure) in measures.iter().enumerate() {
                         if matches!(
                             measure,
