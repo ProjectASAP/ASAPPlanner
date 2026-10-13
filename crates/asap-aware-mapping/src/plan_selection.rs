@@ -1,9 +1,11 @@
 //! #509 Stage 3, plan selection (MVP): the only stage that computes cost.
 //!
 //! Each CandidatePhysicalASAPDAG from Stage 2 is checked against every
-//! query's accuracy target: the query's output meets it when its root guarantee (composed in Stage 1)
-//! does, or when the deployment's accuracy model shows this candidate's
-//! output does. Count-Min is admitted only over weights proven non-negative.
+//! query's accuracy target: the query's output meets it when its root
+//! guarantee does (theoretical: Stage 1 composes it with the built-in
+//! accuracy model), or when the deployment's empirical evidence shows this
+//! candidate's output does (`AccuracyEvidenceProvider::output_guarantee`,
+//! read only here). Count-Min is admitted only over weights proven non-negative.
 //! A miss rejects the candidate as invalid, with a reason; only this stage
 //! discards valid candidates.
 //! Every valid candidate is priced node by node over its physical DAG, so a
@@ -21,7 +23,7 @@ use std::rc::Rc;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::post_asap::{
     FieldDataType, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
@@ -162,9 +164,10 @@ pub fn stage3_select(
 }
 
 /// The first query whose output is not shown to meet its target, as a
-/// reason. An output meets its target when its root guarantee (composed in
-/// Stage 1) satisfies it, or when the deployment's accuracy model shows that
-/// this candidate's output does ([`crate::accuracy::AccuracyModel::output_guarantee`]). A
+/// reason. An output meets its target when its theoretical root guarantee
+/// (composed in Stage 1 with the built-in model) satisfies it, or when the
+/// deployment's empirical evidence shows that this candidate's output does
+/// ([`crate::accuracy::AccuracyEvidenceProvider::output_guarantee`]). A
 /// certified estimate inside the plan is not enough on its own: a difference
 /// or ratio of certified estimates can be unbounded. Count-Min is admitted
 /// only over update weights proven non-negative, which its bound assumes.
@@ -198,7 +201,7 @@ fn accuracy_violation(
         let meets = |g: &ResultGuarantee| models.accuracy.satisfies(g, target);
         if guarantee.as_ref().is_some_and(meets)
             || models
-                .accuracy
+                .evidence
                 .output_guarantee(root)
                 .as_ref()
                 .is_some_and(meets)
@@ -208,12 +211,12 @@ fn accuracy_violation(
         return Some(match guarantee {
             Some(g) => format!(
                 "q{query}: the output guarantees bound {:?}, failure probability {:?}, which \
-                 misses target {target:?}, and the accuracy model has no evidence that it meets it",
+                 misses target {target:?}, and the deployment has no evidence that it meets it",
                 g.bound.evaluate(),
                 g.failure_probability.evaluate(),
             ),
             None => format!(
-                "q{query}: the output has no guarantee, and the accuracy model has no evidence \
+                "q{query}: the output has no guarantee, and the deployment has no evidence \
                  that it meets target {target:?}"
             ),
         });
@@ -229,12 +232,13 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     }
 }
 
-/// The theoretical guarantee of a query's output: the root node's own; a
-/// scalar root is exact when every operator it reads is, and has none
-/// otherwise (#669).
+/// The theoretical guarantee of a query's output: the root node's own;
+/// `scalar(v)` alone inherits `v`'s; any other scalar root is exact when
+/// every operator it reads is, and has none otherwise (#669).
 fn root_guarantee(root: &QueryRoot) -> Option<ResultGuarantee> {
     match root {
         QueryRoot::Operator(node) => node.guarantee.clone(),
+        QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node)) => node.guarantee.clone(),
         QueryRoot::Scalar(expr) => expr
             .operator_refs()
             .into_iter()
@@ -550,10 +554,12 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
+    use crate::accuracy::AccuracyEvidenceProvider;
     use crate::physical_candidates::stage2_physical;
     use crate::test_support::lower_promql;
-    use asap_types::post_asap::{AccuracyError, CompositionOperator};
+    use asap_types::ir::ExprSemantics;
+    use asap_types::post_asap::{BoundExpr, ErrorMetric, ProbabilityExpr};
+    use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::workload::{Evidence, Rate};
 
     fn data() -> DataWorkload {
@@ -740,29 +746,10 @@ mod tests {
             .any(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryEstimate { .. })))
     }
 
-    /// A deployment whose empirical accuracy shows every output exact.
+    /// Deployment evidence that every output was measured exact.
     struct EveryOutputMeasuredExact;
 
-    impl AccuracyModel for EveryOutputMeasuredExact {
-        fn local_guarantee(
-            &self,
-            family: &FieldDataType,
-            query: &SketchStatistic,
-        ) -> Option<ResultGuarantee> {
-            DefaultAccuracyModel.local_guarantee(family, query)
-        }
-        fn propagate(
-            &self,
-            op: &CompositionOperator,
-            inputs: &[ResultGuarantee],
-            local: Option<&ResultGuarantee>,
-            stats: &PropagationStats,
-        ) -> Result<ResultGuarantee, AccuracyError> {
-            DefaultAccuracyModel.propagate(op, inputs, local, stats)
-        }
-        fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
-            DefaultAccuracyModel.satisfies(guarantee, target)
-        }
+    impl AccuracyEvidenceProvider for EveryOutputMeasuredExact {
         fn output_guarantee(&self, _output: &QueryRoot) -> Option<ResultGuarantee> {
             Some(ResultGuarantee::exact("measured"))
         }
@@ -811,11 +798,45 @@ mod tests {
             &candidates,
             &[Some(target)],
             &data(),
-            PlanningModels::builtin().with_accuracy(&EveryOutputMeasuredExact),
+            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
         .unwrap();
         for id in &summaries {
             assert!(measured.costs.contains_key(*id), "{id} is valid");
         }
+    }
+
+    /// `scalar(v)` alone inherits `v`'s guarantee; any other scalar
+    /// expression over an approximate operand has none until #669; one over
+    /// exact operands only is exact.
+    #[test]
+    fn scalar_of_one_vector_inherits_its_guarantee_and_nothing_else_does() {
+        let node = lower_promql("sum(m)", AccuracyTarget::Exact);
+        let approximate = ResultGuarantee {
+            metric: ErrorMetric::AbsoluteValue,
+            bound: BoundExpr::Constant { value: 0.01 },
+            failure_probability: ProbabilityExpr::Constant { value: 0.001 },
+            provenance: vec![],
+        };
+        let with = |guarantee: Option<ResultGuarantee>| {
+            ScalarExpr::PromqlScalarFromVector(Rc::new((*node).clone().with_guarantee(guarantee)))
+        };
+        let doubled = |operand: ScalarExpr| {
+            QueryRoot::Scalar(ScalarExpr::Arithmetic {
+                op: ArithmeticOpKind::Mul,
+                left: Box::new(operand),
+                right: Box::new(ScalarExpr::literal_f64(2.0)),
+                semantics: ExprSemantics::Promql,
+            })
+        };
+        assert_eq!(
+            root_guarantee(&QueryRoot::Scalar(with(Some(approximate.clone())))),
+            Some(approximate.clone())
+        );
+        assert_eq!(root_guarantee(&doubled(with(Some(approximate)))), None);
+        assert!(
+            root_guarantee(&doubled(with(Some(ResultGuarantee::exact("exact")))))
+                .is_some_and(|g| g.is_exact())
+        );
     }
 }

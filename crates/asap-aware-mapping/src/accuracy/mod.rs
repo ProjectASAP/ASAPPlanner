@@ -20,7 +20,7 @@ pub use evidence::{
     QuantileInputDomain, WorkloadAccuracyEvidence,
 };
 
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
     ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic,
@@ -64,16 +64,6 @@ pub trait AccuracyModel {
         local: Option<&ResultGuarantee>,
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError>;
-
-    /// The deployment's empirical accuracy for one candidate's whole query
-    /// output, as a guarantee. Plan selection (#509 Stage 3) accepts a
-    /// candidate whose output has no theoretical guarantee that meets the
-    /// target, e.g. a difference of two quantile estimates, only when this
-    /// shows the output meets it. The built-in model has no empirical
-    /// evidence.
-    fn output_guarantee(&self, _output: &QueryRoot) -> Option<ResultGuarantee> {
-        None
-    }
 
     /// Compare the dimensions requested by `target`. Unknown required
     /// dimensions fail; selection separately excludes missing accuracy evidence.
