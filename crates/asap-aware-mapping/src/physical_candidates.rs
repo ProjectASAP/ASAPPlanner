@@ -1,7 +1,9 @@
-//! #509 Stage 2 (MVP): physical operator implementation of one logical
-//! candidate. Materialization offers one option for now: every sub-DAG is
-//! `Materialization::NotMaterialized` and runs at query time, so each
-//! logical candidate yields exactly one physical candidate. Enumerating
+//! #509 Stage 2, physical ASAP-aware optimization (MVP): turns one
+//! CandidateLogicalASAPDAG into CandidatePhysicalASAPDAGs by materialization
+//! and physical operator implementation. Materialization offers one option
+//! for now: every sub-DAG is `Materialization::NotMaterialized` and runs at
+//! query time, so each logical candidate yields exactly one physical
+//! candidate. Enumerating
 //! `MatAtIngestion(medium)` and `MatAtQuery(medium)` (Algorithm 3) comes
 //! later.
 //!
@@ -27,7 +29,8 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::{AggIntent, Reduction};
 use thiserror::Error;
 
-/// One Stage 2 candidate, derived from exactly one Stage 1 candidate.
+/// One CandidatePhysicalASAPDAG (Stage 2 output), derived from exactly one
+/// CandidateLogicalASAPDAG (Stage 1 output).
 /// `roots` are the timed query roots (one per query, in workload order)
 /// that `dag` exports.
 #[derive(Debug, Clone)]
@@ -49,7 +52,8 @@ pub enum Stage2Error {
     NoValueColumn(String),
 }
 
-/// Implement every operator of one logical candidate and time it with every
+/// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
+/// (physical operator implementation) and time it with every
 /// sub-DAG `NotMaterialized`. `id` and `label` are left empty for the caller
 /// to name. Sharing between `roots` is preserved: one memo serves the whole
 /// workload.
@@ -267,7 +271,7 @@ mod tests {
             vec![(0, QueryRoot::Operator(root))],
         )
         .unwrap();
-        // A summary (the last alternative) for every target.
+        // A summary (the last candidate) for every target.
         let choice: Vec<_> = inventory
             .targets
             .iter()

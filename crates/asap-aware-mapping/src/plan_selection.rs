@@ -1,7 +1,7 @@
-//! #509 Stage 3 (MVP): plan selection, the only stage that computes cost.
+//! #509 Stage 3, plan selection (MVP): the only stage that computes cost.
 //!
-//! Each Stage 2 candidate is checked against every query's accuracy target:
-//! the query's output meets it when its root guarantee (composed in Stage 1)
+//! Each CandidatePhysicalASAPDAG from Stage 2 is checked against every
+//! query's accuracy target: the query's output meets it when its root guarantee (composed in Stage 1)
 //! does, or when the deployment's accuracy model shows this candidate's
 //! output does. Count-Min is admitted only over weights proven non-negative.
 //! A miss rejects the candidate as invalid, with a reason; only this stage
@@ -100,7 +100,8 @@ pub enum SelectionError {
     NoValidCandidate(Vec<Rejection>),
 }
 
-/// Reject candidates that miss a query's accuracy target, price the rest and
+/// Stage 3 (plan selection): reject candidates that miss a query's accuracy
+/// target, price the rest and
 /// select the cheapest (the first on ties). `targets[i]` is the requirement
 /// of `candidate.roots[i]`; `None` imposes none.
 pub fn stage3_select(
@@ -590,9 +591,9 @@ mod tests {
             .unwrap();
         [0, 1, 2]
             .into_iter()
-            .map(|alternative| {
+            .map(|index| {
                 let mut choice = vec![0; inventory.targets.len()];
-                choice[topk] = alternative;
+                choice[topk] = index;
                 let roots: Vec<_> = crate::per_computation_candidates::compose_logical_candidate(
                     &inventory, &choice,
                 )
@@ -601,7 +602,7 @@ mod tests {
                 .map(|(_, root)| root)
                 .collect();
                 let mut candidate = stage2_physical("L", &roots).unwrap();
-                candidate.id = format!("P{}", alternative + 1);
+                candidate.id = format!("P{}", index + 1);
                 candidate
             })
             .collect()
@@ -692,7 +693,7 @@ mod tests {
         assert_ne!(costlier[0].id, selection.selected);
     }
 
-    /// Every combination of Pass 1 alternatives of one query, as Stage 2
+    /// Every combination of Pass 1 candidates of one query, as Stage 2
     /// candidates `P1`, `P2`, ...
     fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalCandidate> {
         let root = lower_promql(query, target.clone());
@@ -705,9 +706,9 @@ mod tests {
             choices = choices
                 .into_iter()
                 .flat_map(|choice: Vec<usize>| {
-                    (0..target.choices.candidates.len()).map(move |alternative| {
+                    (0..target.choices.candidates.len()).map(move |index| {
                         let mut choice = choice.clone();
-                        choice.push(alternative);
+                        choice.push(index);
                         choice
                     })
                 })
