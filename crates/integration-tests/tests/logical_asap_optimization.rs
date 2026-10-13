@@ -2,21 +2,33 @@
 //! a query is a valid DAG with the query's output columns (names, types and
 //! nullability).
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use asap_aware_mapping::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates,
+    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_physical_operators::{
+    physical_planner::{compile, InputContract, Source},
+    runtime::{Limits, RunContext, Scope},
+    sources::{DataSources, MemorySource},
+    values::{Batch, Value},
+};
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::ColumnRef;
+use asap_types::pre_asap::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query,
     QueryLanguage, QueryRequirements, QueryWorkload,
 };
+use futures::StreamExt;
+
+mod physical_common;
 
 fn accuracy() -> AccuracyTarget {
     AccuracyTarget::EpsilonDelta {
@@ -252,9 +264,7 @@ async fn subquery_in_a_measure_filter_is_substituted() {
                 .target
                 .non_asap()
                 .and_then(|op| match op {
-                    asap_types::ir::NonASAPOp::Aggregate { reduction, .. } => {
-                        reduction.group_keys()
-                    }
+                    NonASAPOp::Aggregate { reduction, .. } => reduction.group_keys(),
                     _ => None,
                 })
                 .is_some_and(|by| by.keys().is_empty())
@@ -293,4 +303,254 @@ async fn subquery_in_a_measure_filter_is_substituted() {
         approximate_inner |= !inputs_exact;
     }
     assert!(approximate_inner);
+}
+
+/// Run the logical DAG `root` over `rows` of its one scanned table, each row
+/// given by column name. Rows come back shown and sorted.
+fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<String>> {
+    let dag = physical_common::compile_physical_asap_dag(root).unwrap();
+    let scan = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+            )
+        })
+        .expect("one scan");
+    let PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { source, .. }) = &scan.payload else {
+        unreachable!()
+    };
+    let schema = Arc::new(scan.output_schema.clone());
+    let plan = compile(
+        &dag,
+        BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+        &[dag.roots[0] as u64],
+    )
+    .unwrap();
+    let rows = rows
+        .iter()
+        .map(|row| {
+            schema
+                .fields
+                .iter()
+                .map(|field| {
+                    row.iter()
+                        .find(|(name, _)| *name == field.name)
+                        .map(|(_, value)| value.clone())
+                        .expect("value for every column")
+                })
+                .collect()
+        })
+        .collect();
+    let expression = OperatorNode::reachable(root)
+        .into_iter()
+        .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { source: s, .. }) if s == source))
+        .unwrap();
+    let mut sources = DataSources::default();
+    sources
+        .register(
+            source.clone(),
+            Arc::new(
+                MemorySource::new(
+                    schema.clone(),
+                    vec![Batch::try_new(schema.clone(), rows).unwrap()],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let bound = plan
+        .instantiate(BTreeMap::from([(
+            scan.id as u64,
+            Box::new(sources.bind(&expression).unwrap()) as Source<'_>,
+        )]))
+        .unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+            revision: 1,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let show = |value: &Value| match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Utf8(value) => format!("{value:?}"),
+        other => format!("{other:?}"),
+    };
+    let mut out: Vec<Vec<String>> = futures::executor::block_on(async {
+        let mut stream = bound.execute(plan.roots(), context).unwrap().remove(0);
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.next().await {
+            rows.extend(
+                batch
+                    .unwrap()
+                    .rows()
+                    .iter()
+                    .map(|row| row.iter().map(show).collect()),
+            );
+        }
+        rows
+    });
+    out.sort();
+    out
+}
+
+/// SQL `avg` from its `sum` and `count` states, composed for the query.
+async fn avg_as_sum_and_count(
+    catalog: &SqlCatalog,
+    query: &str,
+) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
+    let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(exact.clone()))]).unwrap();
+    let choice: Vec<_> = inventory
+        .targets
+        .iter()
+        .map(|target| {
+            target
+                .choices
+                .candidates
+                .iter()
+                .position(|c| *c == ComputationCandidate::AvgAsSumCount)
+                .expect("avg as sum and count")
+        })
+        .collect();
+    let composed =
+        compose_logical_candidate(&inventory, &choice).unwrap_or_else(|e| panic!("{query}: {e}"));
+    let QueryRoot::Operator(root) = &composed[0].1 else {
+        panic!("operator root expected")
+    };
+    assert!(
+        OperatorNode::reachable(root)
+            .iter()
+            .any(|node| matches!(node.non_asap(), Some(NonASAPOp::Join { .. }))),
+        "{query}: sum joined with count expected"
+    );
+    assert_eq!(
+        output_columns(&QueryRoot::Operator(root.clone())),
+        output_columns(&QueryRoot::Operator(exact.clone())),
+        "{query}"
+    );
+    (exact, root.clone())
+}
+
+fn avg_table() -> SqlCatalog {
+    SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain("k", DataType::Utf8, true),
+            Field::plain("ok", DataType::Bool, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+    )
+}
+
+/// SQL `avg` as `sum` and `count` states executes as the exact aggregate:
+/// NULL and '' groups stay apart, a non-Utf8 key works, and an empty global
+/// input averages to NULL. The measured column is `value`: the runtime binds
+/// a `count(*)` state's update to that name.
+#[tokio::test]
+async fn sql_avg_from_sum_and_count_executes_as_avg() {
+    let catalog = avg_table();
+    let row = |k: Option<&str>, ok: bool, value: f64| {
+        vec![
+            ("k", k.map_or(Value::Null, |k| Value::Utf8(k.into()))),
+            ("ok", Value::Bool(ok)),
+            ("value", Value::Float64(value)),
+        ]
+    };
+    let rows = vec![
+        row(None, true, 2.),
+        row(None, true, 4.),
+        row(Some(""), false, 10.),
+        row(Some("a"), false, 200.),
+        row(Some("a"), true, 1.),
+    ];
+    let rows_of = |rows: &[&[&str]]| -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+            .collect()
+    };
+    for (query, input, want) in [
+        (
+            "SELECT k, avg(value) FROM t GROUP BY k",
+            rows.clone(),
+            rows_of(&[&["\"\"", "10"], &["\"a\"", "100.5"], &["NULL", "3"]]),
+        ),
+        (
+            "SELECT ok, avg(value) FROM t GROUP BY ok",
+            rows.clone(),
+            rows_of(&[&["false", "105"], &["true", "2.3333333333333335"]]),
+        ),
+        (
+            "SELECT avg(value) FROM t",
+            rows.clone(),
+            rows_of(&[&["43.4"]]),
+        ),
+        ("SELECT avg(value) FROM t", vec![], rows_of(&[&["NULL"]])),
+    ] {
+        let (exact, root) = avg_as_sum_and_count(&catalog, query).await;
+        assert_eq!(execute(&exact, &input), want, "{query}");
+        assert_eq!(execute(&root, &input), want, "{query}");
+    }
+}
+
+/// A filtered SQL `avg` is NULL where no row passes the filter: its quotient
+/// is NULL when the count is 0. The runtime executes no filtered state yet,
+/// so the shape is checked.
+#[tokio::test]
+async fn filtered_sql_avg_is_null_without_matching_rows() {
+    let catalog = avg_table();
+    for query in [
+        "SELECT k, avg(value) FILTER (WHERE value > 100) FROM t GROUP BY k",
+        "SELECT avg(value) FILTER (WHERE value > 100) FROM t",
+    ] {
+        let (_, root) = avg_as_sum_and_count(&catalog, query).await;
+        assert!(root.schema.fields.last().unwrap().nullable, "{query}");
+        let null_when_no_count = OperatorNode::reachable(&root).iter().any(|node| {
+            let Some(NonASAPOp::Project { cols, child, .. }) = node.non_asap() else {
+                return false;
+            };
+            let count = child.schema.fields.len() - 1;
+            matches!(
+                &cols.last().unwrap().expr,
+                ScalarExpr::Case { branches, .. } if matches!(
+                    &branches[..],
+                    [(ScalarExpr::Compare { left, op: CompareOpKind::Eq, right, .. },
+                      ScalarExpr::Literal(ScalarValue::Null))]
+                        if **left == ScalarExpr::Column(count)
+                            && **right == ScalarExpr::Literal(ScalarValue::Int64(0))
+                )
+            )
+        });
+        assert!(null_when_no_count, "{query}: {root:#?}");
+    }
+}
+
+/// PromQL `avg` divides its `sum` and `count` vectors with a `BinaryOp`.
+#[test]
+fn promql_avg_divides_sum_and_count_vectors() {
+    let inventory =
+        generate_per_computation_candidates(vec![(0, promql("avg by (job) (m)"))]).unwrap();
+    assert_eq!(
+        inventory.targets[0].choices.candidates[0],
+        ComputationCandidate::AvgAsSumCount
+    );
+    let composed = compose_logical_candidate(&inventory, &[0]).unwrap();
+    let QueryRoot::Operator(root) = &composed[0].1 else {
+        panic!("operator root expected")
+    };
+    let kinds: Vec<_> = OperatorNode::reachable(root)
+        .iter()
+        .map(|node| node.operator.kind_name())
+        .collect();
+    assert!(
+        kinds.contains(&"BinaryOp") && !kinds.contains(&"Join"),
+        "{kinds:?}"
+    );
 }

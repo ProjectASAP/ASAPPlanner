@@ -37,7 +37,9 @@
 //! - `ExactAccumulator`: `SummaryAgg` with the exact family →
 //!   `FinalizeExactAccumulator`.
 //! - `Summary`: `SummaryAgg` → `SummaryEstimate`.
-//! - `AvgAsSumCount`: the finalized `sum` and `count` accumulators divided.
+//! - `AvgAsSumCount`: the finalized `sum` and `count` accumulators divided:
+//!   a PromQL `BinaryOp`, or for SQL rows a join on the group keys (NULL keys
+//!   match) and a SQL division, NULL where the count is 0.
 //! - `Exact` (or a measure that is no target): a single-measure `Aggregate`.
 //!
 //! The substituted output keeps the aggregate's column names. The measures
@@ -67,8 +69,8 @@ use std::rc::Rc;
 
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::{
-    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate,
-    ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
+    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
+    Predicate, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
 };
 use asap_types::post_asap::guarantee::ResultGuarantee;
 use asap_types::post_asap::{
@@ -816,6 +818,9 @@ fn substitute_measure(
                     accuracy: AccuracyTarget::Exact,
                 },
             )?;
+            if input.result_kind == OperatorResultKind::Relation {
+                return sql_avg(reduction, filter.is_some(), sum, count);
+            }
             // `avg` is Float64 whatever the summed type, as `Avg`'s output is.
             if sum.schema.fields.last().map(|field| &field.dtype)
                 != Some(&FieldDataType::Plain(DataType::Float64))
@@ -856,6 +861,117 @@ fn substitute_measure(
     })
 }
 
+/// SQL `avg` from its finalized `sum` and `count`: joined on the group keys
+/// (NULL keys match), then `sum / count` as Float64. A group with no row
+/// passing the measure filter, or an empty global input, counts 0 and its
+/// `avg` is NULL.
+fn sql_avg(
+    reduction: &Reduction,
+    filtered: bool,
+    sum: Rc<OperatorNode>,
+    count: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let Reduction::Reduce(by) = reduction else {
+        return Err(PerComputationCandidateError::Unsupported(
+            "SQL avg without `by` keys",
+        ));
+    };
+    if by.is_without() {
+        return Err(PerComputationCandidateError::Unsupported(
+            "SQL avg without `by` keys",
+        ));
+    }
+    let keys = by.len();
+    let float = |column| {
+        Box::new(ScalarExpr::Cast {
+            expr: Box::new(ScalarExpr::Column(column)),
+            to: DataType::Float64,
+            try_cast: false,
+        })
+    };
+    let count_column = keys + 1 + keys;
+    let mut avg = ScalarExpr::Arithmetic {
+        op: ArithmeticOpKind::Div,
+        left: float(keys),
+        right: float(count_column),
+        semantics: ExprSemantics::Sql,
+    };
+    if filtered || keys == 0 {
+        avg = ScalarExpr::Case {
+            operand: None,
+            branches: vec![(
+                ScalarExpr::Compare {
+                    left: Box::new(ScalarExpr::Column(count_column)),
+                    op: CompareOpKind::Eq,
+                    right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(0))),
+                    semantics: ExprSemantics::Sql,
+                },
+                ScalarExpr::Literal(ScalarValue::Null),
+            )],
+            else_expr: Some(Box::new(avg)),
+        };
+    }
+    let mut cols = key_items(keys);
+    cols.push(ProjectItem {
+        alias: None,
+        expr: avg,
+    });
+    Ok(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: join_on_keys(keys, sum, count)?,
+        },
+    ))?)
+}
+
+/// `left` joined with `right` on their leading `keys` columns; NULL keys
+/// match each other, as grouping treats them.
+fn join_on_keys(
+    keys: usize,
+    left: Rc<OperatorNode>,
+    right: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let width = left.schema.fields.len();
+    let column = |id| Box::new(ScalarExpr::Column(id));
+    let matches = (0..keys)
+        .map(|key| {
+            let equal = ScalarExpr::Compare {
+                left: column(key),
+                op: CompareOpKind::Eq,
+                right: column(width + key),
+                semantics: ExprSemantics::Sql,
+            };
+            if right.schema.fields[key].nullable {
+                ScalarExpr::BoolOr(vec![
+                    equal,
+                    ScalarExpr::BoolAnd(vec![
+                        ScalarExpr::IsNull(column(key)),
+                        ScalarExpr::IsNull(column(width + key)),
+                    ]),
+                ])
+            } else {
+                equal
+            }
+        })
+        .collect::<Vec<_>>();
+    let (kind, pred) = match matches.len() {
+        0 => (
+            JoinKind::Cross,
+            ScalarExpr::Literal(ScalarValue::Boolean(true)),
+        ),
+        _ => (JoinKind::Inner, ScalarExpr::BoolAnd(matches)),
+    };
+    Ok(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Join {
+            kind,
+            pred: Predicate(pred),
+            left,
+            right,
+        },
+    ))?)
+}
+
 /// Join single-measure `parts` (each: group keys, then one value) on their
 /// group keys and project `target`'s output columns. Every part has the same
 /// groups, so an inner join keeps them all; NULL keys match each other, as
@@ -883,42 +999,7 @@ fn join_measures(
     let mut parts = parts.into_iter();
     let mut joined = parts.next().expect("an aggregate has measures");
     for part in parts {
-        let left = joined.schema.fields.len();
-        let column = |id| Box::new(ScalarExpr::Column(id));
-        let matches = (0..keys)
-            .map(|key| {
-                let equal = ScalarExpr::Compare {
-                    left: column(key),
-                    op: CompareOpKind::Eq,
-                    right: column(left + key),
-                    semantics: ExprSemantics::Sql,
-                };
-                if part.schema.fields[key].nullable {
-                    ScalarExpr::BoolOr(vec![
-                        equal,
-                        ScalarExpr::BoolAnd(vec![
-                            ScalarExpr::IsNull(column(key)),
-                            ScalarExpr::IsNull(column(left + key)),
-                        ]),
-                    ])
-                } else {
-                    equal
-                }
-            })
-            .collect::<Vec<_>>();
-        let (kind, pred) = match matches.len() {
-            0 => (
-                JoinKind::Cross,
-                ScalarExpr::Literal(ScalarValue::Boolean(true)),
-            ),
-            _ => (JoinKind::Inner, ScalarExpr::BoolAnd(matches)),
-        };
-        joined = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Join {
-            kind,
-            pred: Predicate(pred),
-            left: joined,
-            right: part,
-        }))?;
+        joined = join_on_keys(keys, joined, part)?;
     }
     let mut cols = key_items(keys);
     cols.extend(

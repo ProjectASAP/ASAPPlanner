@@ -1008,7 +1008,8 @@ fn composed_filters_and_having() {
     }
 }
 
-/// `avg` divides its finalized `sum` and `count` accumulator states.
+/// SQL `avg` joins its finalized `sum` and `count` accumulator states on the
+/// group keys and divides them.
 #[test]
 fn composed_avg_divides_sum_and_count_states() {
     let avg = aggregate_over(
@@ -1020,16 +1021,14 @@ fn composed_avg_divides_sum_and_count_states() {
     let [root] = <[_; 1]>::try_from(composed(vec![avg.clone()], &[0])).unwrap();
     // The quotient is renamed to the aggregate's column.
     assert_eq!(columns(&root), columns(&avg));
-    let Some(NonASAPOp::Project {
-        child: quotient, ..
-    }) = root.non_asap()
-    else {
-        panic!("renaming projection expected, got {root:#?}")
+    let join = OperatorNode::reachable(&root)
+        .into_iter()
+        .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Join { .. })))
+        .unwrap_or_else(|| panic!("sum joined with count expected, got {root:#?}"));
+    let Some(NonASAPOp::Join { left, right, .. }) = join.non_asap() else {
+        unreachable!()
     };
-    let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = quotient.non_asap() else {
-        panic!("sum / count expected, got {quotient:#?}")
-    };
-    for (side, kind) in [(lhs, ExactKind::Sum), (rhs, ExactKind::Count)] {
+    for (side, kind) in [(left, ExactKind::Sum), (right, ExactKind::Count)] {
         assert!(matches!(
             summary_agg(side),
             ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(found, _), .. } if *found == kind
