@@ -580,13 +580,14 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
             .as_ref()
             .is_some_and(ResultGuarantee::is_exact)
     };
+    // A summary state's input rows and any subquery in its filter.
+    let exact_inputs = |state: &OperatorNode| state.children().into_iter().all(|c| exact(c));
     match &node.operator {
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap() {
             Some(ASAPOp::SummaryAgg {
-                child: input,
                 family: FieldDataType::ExactAggregate(..),
                 ..
-            }) if exact(input) => {
+            }) if exact_inputs(child) => {
                 Some(ResultGuarantee::exact("exact accumulator over exact input"))
             }
             _ => None,
@@ -596,11 +597,10 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
             query,
         }) => match summary_input.asap() {
             Some(ASAPOp::SummaryAgg {
-                child: input,
                 family,
                 input: update,
                 ..
-            }) if exact(input) && estimate_has_bound(family, update, query) => {
+            }) if exact_inputs(summary_input) && estimate_has_bound(family, update, query) => {
                 DefaultAccuracyModel.local_guarantee(family, query)
             }
             _ => None,
@@ -662,6 +662,14 @@ fn substitute(
     // A key-only `HAVING` is a row predicate over the input: rows of a
     // dropped group never reach the state.
     let having = &targets[0].0.having;
+    // Operator refs in a predicate (a subquery) are this aggregate's
+    // children, already rewritten.
+    let rewritten = |pred: &Predicate| {
+        Predicate(
+            pred.0
+                .map_operator_refs(&mut |node| memo[&Rc::as_ptr(node)].clone()),
+        )
+    };
     let mut input = memo[&Rc::as_ptr(child)].clone();
     for entry in having {
         if entry.placement == HavingPlacement::BelowAggregate {
@@ -681,7 +689,7 @@ fn substitute(
                 .iter()
                 .find(|(target, _)| target.measure == measure)
                 .map_or(&ComputationCandidate::Exact, |(_, candidate)| *candidate);
-            let filter = filters.get(measure).cloned().flatten();
+            let filter = filters.get(measure).and_then(Option::as_ref).map(rewritten);
             substitute_measure(target, intent, candidate, filter, &input)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -692,7 +700,7 @@ fn substitute(
     for entry in having {
         if entry.placement == HavingPlacement::AboveOutput && entry.filter.is_none() {
             output = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
-                pred: entry.predicate.clone(),
+                pred: rewritten(&entry.predicate),
                 child: output,
             }))?;
         }

@@ -232,3 +232,63 @@ fn topk_over_an_aggregate_ranks_its_labels() {
         );
     }
 }
+
+/// A subquery inside a measure filter is substituted too: each choice for
+/// the inner count gives its own DAG, and an approximate inner count clears
+/// the outer measure's guarantee.
+#[tokio::test]
+async fn subquery_in_a_measure_filter_is_substituted() {
+    let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT count(*) FROM flows)) \
+                 FROM flows GROUP BY src";
+    let inventory = generate_per_computation_candidates(vec![(0, sql(query).await)]).unwrap();
+    assert_eq!(inventory.targets.len(), 2);
+    let inner = inventory
+        .targets
+        .iter()
+        .position(|target| {
+            target
+                .target
+                .non_asap()
+                .and_then(|op| match op {
+                    asap_types::ir::NonASAPOp::Aggregate { reduction, .. } => {
+                        reduction.group_keys()
+                    }
+                    _ => None,
+                })
+                .is_some_and(|by| by.keys().is_empty())
+        })
+        .expect("inner count");
+    let candidates = &inventory.targets[inner].choices.candidates;
+    assert!(candidates.len() > 1);
+    let (mut seen, mut approximate_inner) = (Vec::new(), false);
+    for (index, candidate) in candidates.iter().enumerate() {
+        let mut choice = vec![0; 2];
+        choice[inner] = index;
+        let composed = compose_logical_candidate(&inventory, &choice).unwrap();
+        let QueryRoot::Operator(root) = &composed[0].1 else {
+            panic!("operator root expected")
+        };
+        let shown = format!("{root:?}");
+        assert!(!seen.contains(&shown), "{candidate:?} composes as another");
+        seen.push(shown);
+        let finalize = OperatorNode::reachable(root)
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    node.asap(),
+                    Some(ASAPOp::FinalizeExactAccumulator { child })
+                        if matches!(child.asap(), Some(ASAPOp::SummaryAgg { filter: Some(_), .. }))
+                )
+            })
+            .expect("filtered outer count");
+        let Some(ASAPOp::FinalizeExactAccumulator { child }) = finalize.asap() else {
+            unreachable!()
+        };
+        let exact = |node: &OperatorNode| node.guarantee.as_ref().is_some_and(|g| g.is_exact());
+        // The state's children: its input rows, then the subquery.
+        let inputs_exact = child.children().into_iter().all(|node| exact(node));
+        assert_eq!(exact(&finalize), inputs_exact, "{candidate:?}");
+        approximate_inner |= !inputs_exact;
+    }
+    assert!(approximate_inner);
+}
