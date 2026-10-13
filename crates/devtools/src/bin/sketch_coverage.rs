@@ -1,34 +1,22 @@
-// cargo run -p asap-devtools --bin sketch_coverage [-- --epsilon <f64>]
+// cargo run -p asap-devtools --bin sketch_coverage -- --data-ingestion-interval-ms <ms> [--epsilon <f64>]
 //
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
 // corpus list exactly, so the two reports are directly comparable) with an
-// *approximate* `AccuracyTarget`, runs `asap_aware_mapping::explain_replacements`
-// over each corpus as one workload, and reports the MVP demo's query-coverage
-// metric: of the queries that lowered successfully, what fraction got
-//
-//   - a `SketchApproximation` candidate (a genuine sketch alternative was
-//     found for at least one aggregate in the query — the KLL-vs-DDSketch
-//     kind of degree of freedom), and/or
-//   - a `CommonSubexpressionReuse` candidate (the query shares a sub-DAG,
-//     inside itself or with another query in the same corpus, that a
-//     build-once-and-share candidate was found for).
+// *approximate* `AccuracyTarget`, runs Pass 1 of logical ASAP-aware
+// optimization (`generate_per_computation_candidates`) over each query, and
+// reports which summary candidates Pass 1 offers for it, plus the fraction of
+// lowered queries with at least one.
 //
 // `--epsilon <f64>` (default 0.01) sets the `AccuracyTarget` every query in
-// every corpus lowers with. Without an approximate target,
-// `ASAPStrategies` never has a genuine sketch alternative to
-// report — see `dag_export`'s own `--epsilon` doc comment for the same
-// point, made there per-query instead of per-run.
-//
-// This is a workload-level count (`explain_replacements` runs
-// `search_workload` once per corpus, over every query in it together), not
-// just a per-query re-run of the single-target path — so cross-query CSE
-// reuse inside one corpus shows up here the same way it would in the
-// dag-viewer's Union mode.
+// every corpus lowers with. Without an approximate target, Pass 1 offers no
+// summary candidate.
 
-use asap_aware_mapping::{explain_replacements, ExplanationKind};
+use asap_aware_mapping::per_computation_candidates::{
+    generate_per_computation_candidates, ComputationCandidate,
+};
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_types::ir::OperatorNode;
+use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -124,9 +112,10 @@ struct CorpusCoverage {
     name: &'static str,
     lowered: usize,
     failed: usize,
-    sketch_covered: usize,
-    cse_covered: usize,
-    either_covered: usize,
+    /// Lowered queries Pass 1 rejected.
+    rejected: usize,
+    /// Per lowered query Pass 1 accepted, the summary candidates it offers.
+    summaries: Vec<(String, BTreeSet<String>)>,
 }
 
 fn pct(n: usize, total: usize) -> String {
@@ -137,86 +126,64 @@ fn pct(n: usize, total: usize) -> String {
     }
 }
 
-/// `explain_replacements`' `location` is a comma-joined list of breadcrumbs
-/// (`collect_locations` in `explanation.rs`), one per path from a workload
-/// root to the target — e.g. `root "q3"` or `root "q3" > lhs`. A location
-/// "covers" `label` (a bare `root "qN"` breadcrumb) if `label` is exactly one
-/// of those comma-separated entries or the prefix of one that goes deeper —
-/// i.e. the explanation's target is reachable from that query's root at all.
-fn covers(location: &str, label: &str) -> bool {
-    location
-        .split(", ")
-        .any(|loc| loc == label || loc.starts_with(&format!("{label} > ")))
-}
-
-fn root_label(id: &str) -> String {
-    format!("root {id:?}")
-}
-
-/// Run `explain_replacements` over one corpus's already-lowered roots as one
-/// workload, then attribute each finding back to the query root(s) it's
-/// reachable from.
+/// Run Pass 1 over each of one corpus's already-lowered queries and collect
+/// the summary candidates it offers for any of the query's targets.
 fn analyze_corpus(
     name: &'static str,
     roots: Vec<(String, Rc<OperatorNode>)>,
     failed: usize,
 ) -> CorpusCoverage {
     let lowered = roots.len();
-    let labels: Vec<String> = roots.iter().map(|(id, _)| root_label(id)).collect();
-    let explanations = explain_replacements(roots).expect("front ends emit pre-ASAP DAGs");
-
-    let mut sketch_covered: BTreeSet<usize> = BTreeSet::new();
-    let mut cse_covered: BTreeSet<usize> = BTreeSet::new();
-    for explanation in &explanations {
-        for (i, label) in labels.iter().enumerate() {
-            if !covers(&explanation.location, label) {
-                continue;
-            }
-            match explanation.kind {
-                ExplanationKind::SketchApproximation => {
-                    sketch_covered.insert(i);
-                }
-                ExplanationKind::CommonSubexpressionReuse => {
-                    cse_covered.insert(i);
-                }
-                // `#[non_exhaustive]`: a future kind just doesn't count
-                // toward either bucket here until this tool is taught about it.
-                _ => {}
-            }
-        }
+    let mut rejected = 0;
+    let mut summaries = Vec::new();
+    for (id, root) in roots {
+        let Ok(inventory) =
+            generate_per_computation_candidates(vec![(id.clone(), QueryRoot::Operator(root))])
+        else {
+            rejected += 1;
+            continue;
+        };
+        let offered = inventory
+            .targets
+            .iter()
+            .flat_map(|target| &target.choices.candidates)
+            .filter_map(|candidate| match candidate {
+                ComputationCandidate::Summary(algorithm) => Some(format!("{algorithm:?}")),
+                _ => None,
+            })
+            .collect();
+        summaries.push((id, offered));
     }
-    let either_covered = sketch_covered.union(&cse_covered).count();
-
     CorpusCoverage {
         name,
         lowered,
         failed,
-        sketch_covered: sketch_covered.len(),
-        cse_covered: cse_covered.len(),
-        either_covered,
+        rejected,
+        summaries,
     }
+}
+
+fn covered(r: &CorpusCoverage) -> usize {
+    r.summaries.iter().filter(|(_, s)| !s.is_empty()).count()
 }
 
 fn report(r: &CorpusCoverage) {
     println!("--- {} ---", r.name);
-    println!("lowered: {}, failed: {}", r.lowered, r.failed);
     println!(
-        "sketch-approximable: {}/{} ({})",
-        r.sketch_covered,
-        r.lowered,
-        pct(r.sketch_covered, r.lowered)
+        "lowered: {}, failed: {}, rejected by Pass 1: {}",
+        r.lowered, r.failed, r.rejected
     );
+    for (id, offered) in &r.summaries {
+        if !offered.is_empty() {
+            let offered: Vec<_> = offered.iter().map(String::as_str).collect();
+            println!("  {id}: {}", offered.join(", "));
+        }
+    }
     println!(
-        "CSE-shareable:       {}/{} ({})",
-        r.cse_covered,
+        "summary-approximable: {}/{} ({})",
+        covered(r),
         r.lowered,
-        pct(r.cse_covered, r.lowered)
-    );
-    println!(
-        "either (coverage):   {}/{} ({})",
-        r.either_covered,
-        r.lowered,
-        pct(r.either_covered, r.lowered)
+        pct(covered(r), r.lowered)
     );
     println!();
 }
@@ -333,22 +300,15 @@ async fn main() {
 
     let total_lowered: usize = results.iter().map(|r| r.lowered).sum();
     let total_failed: usize = results.iter().map(|r| r.failed).sum();
-    let total_sketch: usize = results.iter().map(|r| r.sketch_covered).sum();
-    let total_cse: usize = results.iter().map(|r| r.cse_covered).sum();
-    let total_either: usize = results.iter().map(|r| r.either_covered).sum();
+    let total_rejected: usize = results.iter().map(|r| r.rejected).sum();
+    let total_covered: usize = results.iter().map(covered).sum();
 
     println!("=== global (epsilon = {epsilon}) ===");
-    println!("total lowered: {total_lowered}, total failed: {total_failed}");
     println!(
-        "sketch-approximable: {total_sketch}/{total_lowered} ({})",
-        pct(total_sketch, total_lowered)
+        "total lowered: {total_lowered}, total failed: {total_failed}, rejected by Pass 1: {total_rejected}"
     );
     println!(
-        "CSE-shareable:       {total_cse}/{total_lowered} ({})",
-        pct(total_cse, total_lowered)
-    );
-    println!(
-        "either (coverage):   {total_either}/{total_lowered} ({})",
-        pct(total_either, total_lowered)
+        "summary-approximable: {total_covered}/{total_lowered} ({})",
+        pct(total_covered, total_lowered)
     );
 }
