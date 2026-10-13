@@ -11,10 +11,10 @@ calibration, and ranking remain in the mapping crate. handoff traffic/write work
 is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
 collapsed into the generic CPU/byte resource container.
 
-`asap_aware_mapping::physical_handoff_cost::estimate_physical_handoffs` prices a
-deployment-supplied `PhysicalHandoffProfile`. Stage 3 does not read it: the
-physical-plan adapter that did (`PhysicalPlanCostModel`) was removed with the
-legacy cost model (#622). With no profile, these dimensions remain unestimated.
+The physical-plan adapter accepts an optional `PhysicalHandoffProfile` in the
+immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json` accepts
+the same profile in a top-level `boundaries` field. With no profile, these
+dimensions remain unestimated and the existing resource objective is preserved.
 
 The profile's `plans` list binds handoffs to complete physical alternatives.
 Each plan supplies its `root` and a `nodes` map containing every physical node,
@@ -95,5 +95,6 @@ Verification:
 
 ```sh
 cargo test -p asap-aware-mapping --test physical_handoff_cost
+cargo test -p asap-devtools --bin dag_export handoff_bytes_export_and_change_plan_selection
 python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
 ```

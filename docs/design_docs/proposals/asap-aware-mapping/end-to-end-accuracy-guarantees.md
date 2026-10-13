@@ -1,11 +1,7 @@
 # Design: End-to-End Accuracy Guarantees
 
-> Status: partially implemented design. Typed guarantees and accuracy gating
-> are implemented: Stage 1 gives each summary estimate over exact input its
-> family's guarantee, and Stage 3 checks each query output's guarantee. The
-> composition rules through operators and budget allocation were implemented
-> by the legacy search and removed with it (#635); composing through operators
-> again is #669. Empirical-input and combined
+> Status: partially implemented design. Typed guarantees, supported composition
+> rules and accuracy gating are implemented. Empirical-input and combined
 > parameter configuration remain extensions as described below. The
 > [implementation companion](../../../develop_docs/end-to-end-accuracy-guarantees.md)
 > describes current contracts and validation.

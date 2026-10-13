@@ -1,10 +1,6 @@
 # ASAPQuery rule coverage
 
 > Status: proposal and coverage analysis. Check the implementation and tests before relying on it as a supported-behavior catalog.
-> `ASAPStrategies` and `HydraGroupingStrategy` named below were removed with
-> the legacy search (#635); Stage 1's Pass 1 (`realization`,
-> `per_computation_candidates`) now enumerates realizations and Hydra
-> alternatives.
 
 This document compares ASAPPlanner's rule system with the Rust planner in
 ASAPQuery at upstream commit `2586400b3b0436a5414c901ebce07065d20b5223`.

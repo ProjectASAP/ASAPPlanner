@@ -1,9 +1,5 @@
 # Planner vocabulary migration (#427)
 
-> **Historical:** the `ASAPStrategies` / `HydraGroupingStrategy` constructors,
-> `replacement::Realization` and the `CostModel` below were removed with the
-> legacy search (#635). Kept as a migration record.
-
 This is a Rust source API rename. Update imports and call sites using the table
 below. Planning, ranking, schema resolution, cost arithmetic, and window coverage
 rules are unchanged. Old Rust names are removed rather than retained as a second

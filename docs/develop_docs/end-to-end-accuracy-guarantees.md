@@ -10,57 +10,60 @@ workflow.
 
 ## How one candidate moves through the implementation
 
-The planning stages check accuracy per query output:
+The implementation follows one candidate from a query requirement to either a
+proven Post-ASAP node or a structured rejection. The direct DDSketch ratio
+exception described below also permits an unproven candidate for backend inspection:
 
 ```text
 aggregate intent and AccuracyTarget
-    -> Stage 1 lists summary implementations; composing a candidate sizes
-       each summary from its target (realization::default_size_params) and
-       gives each node a theoretical guarantee (exact over exact inputs, the
-       family's bound for a summary estimate over exact input, else None)
-    -> Stage 2 builds the physical candidates
-    -> Stage 3 checks each query output's guarantee against its
-       AccuracyTarget (AccuracyModel::satisfies), or accepts the deployment's
-       evidence (AccuracyEvidenceProvider::output_guarantee)
-    -> rejects the candidate otherwise; Count-Min also needs non-negative
-       update weights
-    -> prices the remaining candidates (pricing does not prove accuracy)
+    -> enumerate a summary implementation
+    -> choose and commit concrete summary parameters
+    -> derive the local guarantee from those committed parameters
+    -> realize the child and obtain its finalized guarantee
+    -> propagate guarantees through the registered composition rule
+    -> check the final guarantee against AccuracyTarget
+    -> keep legal candidate or record AccuracyError
+    -> rank retained candidates with CostModel (ranking does not prove accuracy)
 ```
 
-The stage pipeline does not yet compose guarantees through operators over
-approximate values (#669): such an output has guarantee `None` unless the
-deployment's evidence covers it. The legacy replacement search did, with the
-composition rules below; it was removed (#635). `AccuracyTarget` is the
-requirement; `ResultGuarantee` is the evidence produced for one concrete
-candidate.
+For a single summary, the child is exact and propagation leaves the local
+summary guarantee as the final guarantee. For nested summaries, child and local
+guarantees are combined. `AccuracyTarget` is the requirement; `ResultGuarantee`
+is the evidence produced for one concrete candidate.
 
 The design document's
 [end-to-end example](../design_docs/proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md#end-to-end-example)
-is the numeric walkthrough of the composition design.
+is the canonical numeric walkthrough from allocation through legality
+checking.
 
 The main implementation locations are:
 
 | Concern | Location |
 | --- | --- |
 | Guarantee and error vocabulary | `asap_types::post_asap::guarantee` |
-| Accuracy model and evidence | `asap_aware_mapping::accuracy` (`AccuracyModel`, `AccuracyEvidenceProvider`) |
-| Node guarantees in Stage 1 | `asap_aware_mapping::per_computation_candidates` |
-| Parameter sizing | `asap_aware_mapping::realization::default_size_params`, `asap_aware_mapping::accuracy::estimators` |
-| Target check and rejection reasons | `asap_aware_mapping::stage3_plan_selection` (`Selection::rejected`) |
+| Accuracy model and built-in propagation | `asap_aware_mapping::accuracy` |
+| Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
+| Parameter sizing hooks | `asap_aware_mapping::cost_model` |
+| Guarantee and rejection export | `asap_types::dag_export` and the `dag_export` devtool |
 
 Read the sections below when changing one of those contracts.
 
 ## Realization model
 
-Accuracy reasoning is separate from cost modeling:
+Accuracy reasoning and allocation are separate from cost modeling:
 
 ```rust
 trait AccuracyModel {
-    fn local_guarantee(
+    fn local_guarantee(/* family, query, parameters */)
+        -> Option<ResultGuarantee>;
+
+    fn propagate(
         &self,
-        family: &FieldDataType,
-        query: &SketchStatistic,
-    ) -> Option<ResultGuarantee>;
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        local: Option<&ResultGuarantee>,
+        stats: &PropagationStats,
+    ) -> Result<ResultGuarantee, AccuracyError>;
 
     fn satisfies(
         &self,
@@ -70,16 +73,16 @@ trait AccuracyModel {
 }
 ```
 
-An output with no guarantee, or one that misses the target, is rejected for an
-accuracy-targeted query unless the deployment's evidence shows it meets the
-target. Presence and cost are not accuracy certification.
+`AccuracyBudgetAllocator` proposes finite parameter allocations for nested
+approximate layers. Every candidate must then be resized, propagated, and
+checked before being treated as satisfying the target. This is distinct from
+candidate visibility: direct DDSketch ratios lacking domain evidence remain in
+`CandidateLogicalASAPDAGs` with `guarantee: None` and can appear in `cost_sorted`, but automatic
+`global_selection` skips them. Presence and cost are not accuracy certification.
 See the [workflow design](../design_docs/architecture/input-output-workflow.md#planning-evidence-inputs)
 for this boundary.
 
 ## Composition contracts
-
-These rules were implemented by the removed legacy search
-(`accuracy::composition`); the stage pipeline does not apply them yet (#669).
 
 ### Exact values
 
@@ -236,15 +239,15 @@ ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
 It imports `asap_sketchlib` DDSketch mapping bounds for ratio certification;
 see [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md). This dependency
 does not make Planner a query executor. Data- or runtime-dependent evidence enters
-only through `AccuracyEvidenceProvider::output_guarantee`, as a guarantee for a
-candidate's whole output; `NoAccuracyEvidence` is the default and supplies none.
-The typed propagation evidence (`PropagationStats`, quantile input domains,
-estimator contracts) was removed with the legacy search, its only reader.
-Guarantee derivation remains conservative.
+through an `AccuracyEvidenceProvider`, is exposed to propagation as typed
+`PropagationStats`, and is recorded in provenance. `NoAccuracyEvidence` is the
+default: it supplies no missing facts. Guarantee derivation remains conservative;
+the direct DDSketch ratio exception above retains a candidate without claiming
+its accuracy is proven.
 
 ### TopK membership
 
-Not implemented in the stage pipeline. A certificate would need:
+`PropagationStats` supplies:
 
 - the lower confidence bound of the kth selected item;
 - the greatest upper confidence bound among excluded items; and
@@ -302,7 +305,7 @@ provenance. For a new composition, specify compatible input and output metrics,
 the bound rule, failure composition, required statistics, and unsupported
 cases. Missing evidence must stay symbolic or produce a structured rejection.
 
-Update the `stage_pipeline` devtool output whenever new guarantee or rejection data is introduced.
+Update DAG export whenever new guarantee or rejection data is introduced.
 
 ## Validation
 
@@ -316,8 +319,8 @@ Tests must cover:
 - accepted separated and rejected overlapping TopK intervals;
 - Hydra inner-plus-shared-grid composition;
 - implementation-qualified KLL/HLL/KMV/Theta confidence behavior;
-- rejection before Stage 3 prices a candidate; and
-- frontend-to-plan integration.
+- rejection before cost ranking and global selection; and
+- DAG export and frontend-to-post-ASAP integration.
 
 For a new target or summary, add a positive guarantee case and boundary cases for
 missing evidence, invalid values, incompatible metrics, and insufficient

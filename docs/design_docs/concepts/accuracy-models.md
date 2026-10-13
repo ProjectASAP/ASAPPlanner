@@ -1,12 +1,5 @@
 # Accuracy model design
 
-> **Status:** guarantee propagation through operators, budget allocation
-> (`AccuracyBudgetAllocator`) and accuracy reconciliation described below were
-> implemented by the legacy search and removed with it (#635). Today Stage 1
-> gives each summary estimate over exact input its family's guarantee, and
-> Stage 3 (plan selection) checks each query output's guarantee with the
-> `AccuracyModel`. Composing guarantees through operators again is #669.
-
 ## Purpose and ownership
 
 The accuracy model answers whether a candidate computation can satisfy the
@@ -124,6 +117,7 @@ The built-in models currently include:
 | KLL | Normalized rank error at the model's fixed 99% empirical calibration; tighter confidence is not inferred from increasing `k` alone |
 | DDSketch | Relative value error from alpha under the supported estimator/domain contract; sensitive compositions require additional domain evidence |
 | Generic HLL | RSE magnitude with unknown failure probability; not a general confidence theorem |
+| Bounded Classic HLL | Source-conditioned relative-error/failure-probability bound and precision sizing for the linear-counting branch |
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
 | KMV / Theta | Parameter-derived cardinality bounds using the registered variance/Chebyshev model at 99% confidence |
@@ -136,11 +130,14 @@ another implementation with the same algorithm name. In particular, a named
 empirical calibration is different from an arbitrary benchmark's maximum
 observed error; both its confidence and applicability must remain explicit.
 
-Stage 1 sizes every sketch through the estimator modules
-(`asap_aware_mapping::realization::default_size_params`); no cost model
-proposes parameters. Accuracy validation (Stage 3's `AccuracyModel`) is
-independent of sizing. The design boundary is that parameter proposals never
-grant accuracy authority to the cost model.
+The current interfaces still expose general parameter proposal through
+`CostModel::size_params`. Default sizing is dispatched to the estimator modules through the existing
+public candidate-construction entry point. Accuracy validation is independent of those proposals. The new
+source-contract path centralizes HLL sizing and guarantee derivation in
+Planner's accuracy module, overriding the generic proposal when the applicable
+contract is supplied. It does not yet move every algorithm's sizing interface
+out of CostModel. The design boundary is that parameter proposals never grant
+accuracy authority to the cost model.
 
 ## Composing guarantees through a DAG
 
@@ -194,15 +191,12 @@ configuration or candidate is needed.
 
 ## Evidence and trust boundaries
 
-`AccuracyEvidenceProvider::output_guarantee` supplies the deployment's
-empirical accuracy for one candidate's whole query output. Stage 3 accepts an
-output whose theoretical guarantee misses the target only when this evidence
-shows it meets it. The estimator contracts, quantile input domains and
-propagation evidence the provider used to supply were removed with the legacy
-search, their only reader (#635). Evidence must cover the population to which
-the claimed guarantee applies: sources, filters, grouping, evaluation windows
-and all merged panes. Evidence for a narrower population cannot silently
-certify a wider one.
+`AccuracyEvidenceProvider` supplies estimator contracts, quantile input domains
+and propagation evidence. The evidence must cover the population to which the
+claimed guarantee applies: sources, filters, grouping, evaluation windows and
+all merged panes. Evidence for a narrower population cannot silently certify
+a wider one. The workload-backed provider checks freshness before exposing
+its supported data characteristics.
 
 Source contracts are assertions that the source or deployment must establish
 and enforce. They are not inferred from observed cardinality or sampled value
@@ -216,12 +210,24 @@ certification. If a model uses an empirical accuracy calibration, the contract
 must identify its confidence level and scope rather than silently promoting
 an observation into a guarantee.
 
-### HLL confidence
+### Example: bounded Classic HLL
 
-Generic HLL has no modeled confidence: its failure probability is unknown, so
-it can meet `Epsilon` but not `EpsilonDelta`. The bounded classic-HLL contract
-(`EstimatorContract::ClassicHll`) that certified a confidence was reachable
-only through the removed evidence API and was removed with it.
+A deployment supplies `EstimatorContract::ClassicHll` for the complete aggregate
+expression. It asserts the classic estimator, independent uniform bucket
+hashing and an enforced maximum distinct population per evaluation, including
+all merged panes. Planner combines this contract with the query or allocated
+local target, selects a supported precision, derives the guarantee and uses
+the normal propagation and selection checks.
+
+The current model supports maxima from 1 to 4096 and precisions from 4 to 18,
+and certifies only configurations that remain in the linear-counting branch.
+It bounds collisions across every integer cardinality in the declared domain
+and bounds overestimation deterministically. It is not an RSE-to-normal
+conversion, nor does it cover HIP/MLE or arbitrary unbounded populations.
+
+Missing evidence leaves generic HLL confidence unknown. Invalid or infeasible
+contracts cannot authorize the result. The contract does not certify another
+estimator, another expression or an unsupported shared-grid grouping.
 
 ## Sharing across consumers
 

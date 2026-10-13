@@ -1,11 +1,7 @@
 # Error–Resource Profile (ERP)
 
-> **Historical:** the planner-side consumer (`asap_aware_mapping::erp`) was
-> removed (#630); it had no caller. The planner does not read ERP artifacts
-> today. This document records the format for producers and a future consumer.
-
 > Status: implemented ERP v1 with proposed extensions. The
-> ERP module (`erp.rs`, since removed) consumed discrete
+> [ERP module](../../../crates/asap-aware-mapping/src/erp.rs) consumes discrete
 > empirical profiles; benchmark observations are not worst-case accuracy proofs.
 > See the status, supported selection modes and remaining work below.
 

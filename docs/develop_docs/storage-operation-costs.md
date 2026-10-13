@@ -1,10 +1,10 @@
 # Storage operation estimates
 
-`asap_aware_mapping::storage_io::estimate_storage_io` prices a
-deployment-supplied `StorageIoProfile` for one physical DAG. Stage 3 does not
-read it: the physical-plan ranking adapter that did (`PhysicalPlanCostModel`)
-was removed with the legacy cost model (#622). Without a profile, operation
-counts are unestimated, not inferred to be zero.
+The physical-plan ranking adapter accepts an optional `StorageIoProfile` in
+its immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json`
+accepts the same profile in the document's top-level `storage_io` field.
+Omitting the profile preserves the existing CPU/memory/scan-byte objective;
+operation counts are unestimated, not inferred to be zero.
 
 A supplied profile must cover every reachable physical node, with an explicit
 empty `accesses` list for nodes doing no storage I/O. Entries bind the complete
@@ -84,4 +84,5 @@ Verification:
 ```sh
 cargo test -p asap-aware-mapping --test storage_io
 cargo test -p asap-aware-mapping --lib storage_io
+cargo test -p asap-devtools --bin dag_export storage_requests_export_and_change_plan_selection
 ```

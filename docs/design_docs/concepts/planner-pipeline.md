@@ -1,27 +1,26 @@
 # Planner pipeline
 
-ASAPPlanner accepts a planning workload and produces the selected Post-ASAP
-plan through the planning stages (#509).
+ASAPPlanner accepts a planning workload and produces `CandidateLogicalASAPDAGs`, a compact
+representation of candidate Post-ASAP DAGs. Ranking and selection are operations
+over that output, not mandatory stages of candidate search.
 
     SQL / PromQL / MetricsQL queries
-            | Stage 0, query-language frontends: parse and canonicalize
+            | parse and canonicalize
             v
     Pre-ASAP IR: exact, language-independent query intent
-            | Stage 1, logical ASAP-aware optimization: summary-aware
-            |   alternatives per computation (Pass 1), composed per query
+            | enumerate legal summary-aware alternatives
             v
-    Stage 2, physical ASAP-aware optimization: physical candidates
-            v
-    Stage 3, plan selection: accuracy checks, pricing, selection
-            v
-    Selected plan + selection report
+    CandidateLogicalASAPDAGs: candidate Post-ASAP DAGs
+            |
+            +--> inspect candidates, optionally using cost_sorted
+            +--> select and assemble logical DAGs
 
-Stage 2 does not yet decide materialization: every sub-DAG runs at query time.
-Pass 2 (ASAP-aware CSE) is not implemented yet. All physical binding,
-deployment, and execution remain downstream responsibilities.
+Stage 2 materialization (#509) will decide per sub-DAG whether to materialize
+and whether at ingestion or query time; until then every summary runs at query
+time. All physical binding, deployment, and execution remain downstream
+responsibilities.
 
-The [library API](../../develop_docs/library-api.md) shows the calls, and
-[input, output, and workflows](../architecture/input-output-workflow.md)
-defines the workload inputs.
+The [input, output, and workflows](../architecture/input-output-workflow.md)
+document defines the public boundary and helper call order.
 
 The [Pre-ASAP IR](pre-asap-ir.md) captures what a query means without any summary implementation. The [Post-ASAP IR](post-asap-ir.md) represents the same intent using possible ASAP primitives. See the [architecture overview](../architecture/README.md) for the full component flow and boundary details.
