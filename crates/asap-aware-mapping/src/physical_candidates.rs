@@ -4,8 +4,10 @@
 //! for now: every sub-DAG is `Materialization::NotMaterialized` and runs at
 //! query time, so each logical candidate yields exactly one physical
 //! candidate. Enumerating
-//! `MatAtIngestion(medium)` and `MatAtQuery(medium)` (Algorithm 3) comes
-//! later.
+//! `MatAtIngestion(medium)` and `MatAtQuery(medium)` per sub-DAG
+//! (Algorithm 3) comes in #604. A candidate this stage cannot implement
+//! fails with a [`Stage2Error`], and the caller prunes that candidate alone,
+//! with the error as its reason.
 //!
 //! The runtime has one implementation per logical operator except exact
 //! top-k, which it cannot run as `Aggregate{[TopK]}`. Stage 2 records that

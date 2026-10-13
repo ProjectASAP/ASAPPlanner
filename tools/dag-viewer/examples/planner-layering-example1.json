@@ -7883,7 +7883,8 @@
         "id": "P3",
         "label": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc)"
       }
-    ]
+    ],
+    "pruned": []
   },
   "stage3_selection": {
     "costs": {

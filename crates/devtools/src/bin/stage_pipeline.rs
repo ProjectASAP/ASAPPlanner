@@ -12,7 +12,9 @@
 //     (default 64). A candidate that cannot be composed carries `error`
 //     instead of `dag`;
 //   - stage2_physical_asap: one physical candidate per composed logical
-//     candidate (operator implementation; every sub-DAG NotMaterialized), no cost;
+//     candidate (operator implementation; every sub-DAG NotMaterialized), no
+//     cost; a composed logical candidate Stage 2 cannot implement is listed
+//     under `pruned` with the reason;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
 //     every other candidate as rejected (`valid: false`) or costlier.
 //
@@ -117,6 +119,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     let owners = target_owners(&inventory);
     let mut candidates = Vec::new();
     let mut physical = Vec::new();
+    let mut pruned = Vec::new();
     let mut choice = vec![0; inventory.targets.len()];
     for index in 0..combinations.min(max_candidates) {
         let (id, label) = (
@@ -130,11 +133,16 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             Ok(roots) => {
                 let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
                 candidate["dag"] = json!(export(&roots)?);
-                let mut physical_candidate =
-                    stage2_physical(&id, &roots).map_err(|e| format!("Stage 2 {id}: {e}"))?;
-                physical_candidate.id = format!("P{}", index + 1);
-                physical_candidate.label = label;
-                physical.push(physical_candidate);
+                match stage2_physical(&id, &roots) {
+                    Ok(mut physical_candidate) => {
+                        physical_candidate.id = format!("P{}", index + 1);
+                        physical_candidate.label = label;
+                        physical.push(physical_candidate);
+                    }
+                    Err(e) => pruned.push(
+                        json!({ "from_logical": id, "label": label, "reason": e.to_string() }),
+                    ),
+                }
             }
             Err(error) => candidate["error"] = json!(error.to_string()),
         }
@@ -169,7 +177,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             "capped": combinations > max_candidates,
             "candidates": candidates,
         },
-        "stage2_physical_asap": { "candidates": stage2 },
+        "stage2_physical_asap": { "candidates": stage2, "pruned": pruned },
         "stage3_selection": stage3_json(&selection),
     }))
 }

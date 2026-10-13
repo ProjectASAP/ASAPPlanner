@@ -47,10 +47,10 @@ fn validated_dag(value: &Value, queries: usize) {
 }
 
 /// Every logical DAG is a well-formed flat DAG and every physical DAG validates;
-/// each has one root per query; ids are unique;
-/// Stage 2 maps the composed logical candidates one-to-one with no cost;
-/// Stage 3 accounts for every Stage 2 candidate once and costs exactly the
-/// valid ones; the committed fixture is current.
+/// each has one root per query; ids are unique; Stage 2 implements or prunes
+/// (with a reason) each composed logical candidate, with no cost; Stage 3
+/// accounts for every Stage 2 candidate once and costs exactly the valid ones;
+/// the committed fixture is current.
 #[test]
 fn example1_document_is_valid_and_committed_fixture_is_current() {
     let document = generate(&[]);
@@ -84,11 +84,18 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
     let physical = document["stage2_physical_asap"]["candidates"]
         .as_array()
         .unwrap();
+    let pruned = document["stage2_physical_asap"]["pruned"]
+        .as_array()
+        .unwrap();
+    assert!(pruned
+        .iter()
+        .all(|p| !p["reason"].as_str().unwrap().is_empty()));
     let sources: HashSet<_> = physical
         .iter()
+        .chain(pruned)
         .map(|p| p["from_logical"].as_str().unwrap())
         .collect();
-    assert_eq!(physical.len(), composed.len());
+    assert_eq!(physical.len() + pruned.len(), composed.len());
     assert_eq!(sources, composed);
     for candidate in physical {
         assert!(candidate.get("cost").is_none(), "Stage 2 has no cost");
