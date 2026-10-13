@@ -1262,7 +1262,10 @@ mod tests {
                 PlanningModels::builtin(),
             )
             .unwrap();
-            let exact = candidates.iter().find(|c| !has_summary_estimate(c)).unwrap();
+            let exact = candidates
+                .iter()
+                .find(|c| !has_summary_estimate(c))
+                .unwrap();
             let selected = candidates
                 .iter()
                 .find(|c| c.id == selection.selected)
@@ -1293,6 +1296,34 @@ mod tests {
                 && reason.contains("enumeration order"),
             "{reason}"
         );
+    }
+
+    /// At δ = 0.001 a KLL candidate meets the target and is valid.
+    #[test]
+    fn kll_candidate_meets_a_failure_probability_below_one_percent() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let candidates = all_candidates("quantile(0.99, rate(x[5m]))", &target);
+        let selection = select_plan(
+            &candidates,
+            &[Some(target)],
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        let kll = candidates
+            .iter()
+            .find(|c| {
+                c.dag.nodes.iter().any(|n| {
+                    matches!(&n.payload, Payload::ASAP(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _), ..
+                    }) if *kind.algorithm() == SketchAlgorithm::Kll)
+                })
+            })
+            .unwrap();
+        assert!(selection.costs.contains_key(&kll.id), "{selection:?}");
     }
 
     /// `scalar(v)` inherits `v`'s guarantee; arithmetic over it composes

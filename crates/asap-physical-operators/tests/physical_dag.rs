@@ -321,7 +321,13 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
 
     let input = schema(&[("value", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
-        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 512 }),
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 512,
+                failure_probability: None,
+            },
+        ),
         GroupingStrategy::PerSubpopulationInstance,
     );
     let build = Operator::summary_build(input.clone(), family, 0, None, vec![]).unwrap();

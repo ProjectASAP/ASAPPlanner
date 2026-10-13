@@ -150,7 +150,7 @@ fn stage1_logical_asap_optimization_a_keeps_five_independent_klls() {
     let sizes: BTreeSet<_> = builds
         .iter()
         .map(|(_, _, params)| match params {
-            SketchParams::Kll { k } => *k,
+            SketchParams::Kll { k, .. } => *k,
             other => panic!("{other:?}"),
         })
         .collect();

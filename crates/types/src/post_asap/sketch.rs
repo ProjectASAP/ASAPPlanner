@@ -87,6 +87,10 @@ pub enum SketchParams {
     },
     Kll {
         k: u32,
+        /// The failure probability `k` was sized for, when below the
+        /// empirical 99% calibration's 0.01; `None` is that calibration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_probability: Option<f64>,
     },
     Cms {
         width: u32,
@@ -470,7 +474,7 @@ pub fn default_hydra_params(
     per_subpopulation_params: &SketchParams,
 ) -> Option<HydraParams> {
     match (kind, per_subpopulation_params) {
-        (HydraKind::HydraKll, SketchParams::Kll { k }) => Some(HydraParams::HydraKll {
+        (HydraKind::HydraKll, SketchParams::Kll { k, .. }) => Some(HydraParams::HydraKll {
             k: *k,
             shared_buckets: *k,
         }),
@@ -658,7 +662,13 @@ mod tests {
 
     #[test]
     fn sketch_kind_classifies_a_valid_algorithm_and_params_pair() {
-        let kind = SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 });
+        let kind = SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+        );
         assert_eq!(kind.category(), SketchCategory::Quantile);
         assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
     }
@@ -707,7 +717,13 @@ mod tests {
     #[test]
     fn default_hydra_params_carries_over_per_subpopulation_params_by_kind() {
         assert_eq!(
-            default_hydra_params(HydraKind::HydraKll, &SketchParams::Kll { k: 200 }),
+            default_hydra_params(
+                HydraKind::HydraKll,
+                &SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None
+                }
+            ),
             Some(HydraParams::HydraKll {
                 k: 200,
                 shared_buckets: 200,
@@ -752,7 +768,13 @@ mod tests {
         // came from must agree. Degrades to `None` rather than panicking,
         // matching this module's conservative stance elsewhere.
         assert_eq!(
-            default_hydra_params(HydraKind::HydraCms, &SketchParams::Kll { k: 200 }),
+            default_hydra_params(
+                HydraKind::HydraCms,
+                &SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None
+                }
+            ),
             None
         );
     }

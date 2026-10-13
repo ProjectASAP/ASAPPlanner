@@ -26,7 +26,13 @@ use std::{
 
 fn family(k: u32) -> FieldDataType {
     FieldDataType::Sketch(
-        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k,
+                failure_probability: None,
+            },
+        ),
         Default::default(),
     )
 }

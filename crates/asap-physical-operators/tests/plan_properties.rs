@@ -167,7 +167,13 @@ fn summary_capability_levels_are_distinct() {
     )
     .is_err());
     let kll = FieldDataType::Sketch(
-        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 128 }),
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 128,
+                failure_probability: None,
+            },
+        ),
         grouping,
     );
     assert!(validate_native_family(&kll).is_ok());

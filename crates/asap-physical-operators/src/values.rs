@@ -291,7 +291,7 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
             .downcast_ref::<ExactAccumulator>()
             .is_some_and(|s| s.family() == family && !s.is_keyed()),
         SummaryFamilyType::Sketch(kind, _) => match kind.params() {
-            SketchParams::Kll { k } => state
+            SketchParams::Kll { k, .. } => state
                 .as_any()
                 .downcast_ref::<DatasketchesKLLAccumulator>()
                 .is_some_and(|s| u32::from(s.inner.k()) == *k),

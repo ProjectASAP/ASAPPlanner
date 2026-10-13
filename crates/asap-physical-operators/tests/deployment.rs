@@ -9,7 +9,13 @@ use asap_physical_operators::{factory::create_planner_accumulator, AggregateCore
 
 fn family(k: u32) -> FieldDataType {
     FieldDataType::Sketch(
-        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k,
+                failure_probability: None,
+            },
+        ),
         GroupingStrategy::PerSubpopulationInstance,
     )
 }
