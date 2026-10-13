@@ -24,6 +24,15 @@
 //!   everything that feeds an ingestion-time node runs at ingestion time,
 //!   everything above an evaluation at query time.
 //!
+//! A node whose timing a candidate builder fixed (e.g. the query-time
+//! `FinalizeExactAccumulator` of `finalize_query_candidate`) keeps that
+//! timing. An explicit assignment on it that agrees is kept; one that needs
+//! the other timing is an error
+//! ([`ExecutionDataStateError::MaterializationConflictsWithFixedTiming`]).
+//! A root may be `MatAtIngestion`: the query reads its stored output. A root
+//! of rows that runs at ingestion time without being stored there is an
+//! error ([`ExecutionDataStateError::UnstoredIngestionRoot`]).
+//!
 //! A node reached from two consumers that need different timings cannot be
 //! executed once for both; [`split_shared_by_phase`] copies such a sub-DAG
 //! for one side before the assignment is applied, and the pass itself
@@ -226,10 +235,15 @@ pub fn apply_materialization_timings(
         memo,
         &mut forced,
     )?;
+    // A root stored at ingestion time is read by the query; one that runs at
+    // ingestion time without being stored there produces rows nothing reads.
     if timed.timing == Some(ExecutionTiming::IngestionTime)
+        && !matches!(timed.materialization, Materialization::MatAtIngestion(_))
         && data_state(&timed).map(|s| s.primitive) == Some(DataPrimitive::Raw)
     {
-        return Err(ExecutionDataStateError::MaintenanceRowsAtRoot);
+        return Err(ExecutionDataStateError::UnstoredIngestionRoot {
+            operator: timed.operator.kind_name(),
+        });
     }
     validate(&timed, &mut HashMap::new())?;
     Ok(timed)
@@ -300,7 +314,20 @@ fn placement(
                 operator: node.operator.kind_name(),
             });
         }
-        return Ok((placed, node.materialization));
+        // An explicit assignment is never silently dropped: one that agrees
+        // with the fixed timing is kept, one that needs the other timing is
+        // an error.
+        return match assignment.get(node) {
+            Some(m) if m != Materialization::NotMaterialized && m.timing() != placed => Err(
+                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                    operator: node.operator.kind_name(),
+                    fixed: placed,
+                    materialization: m,
+                },
+            ),
+            Some(m) => Ok((placed, m)),
+            None => Ok((placed, node.materialization)),
+        };
     }
     Ok(match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
@@ -1046,7 +1073,9 @@ mod tests {
         let operation = placed_at_ingestion(max(scan()));
         assert_eq!(
             apply(&operation).err(),
-            Some(ExecutionDataStateError::MaintenanceRowsAtRoot)
+            Some(ExecutionDataStateError::UnstoredIngestionRoot {
+                operator: "Aggregate"
+            })
         );
         let root = apply(&estimate(agg(operation, kll()))).unwrap();
         let timed_operation = child(&child(&root));
@@ -1169,6 +1198,93 @@ mod tests {
             apply_materialization_timings(&over_evaluation, &assignment, &mut TimingMemo::new())
                 .err(),
             Some(ExecutionDataStateError::UpstreamNotAtIngestion {
+                operator: "Aggregate"
+            })
+        );
+    }
+
+    fn finalize(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(crate::ir::Operator::ASAP(
+            ASAPOp::FinalizeExactAccumulator { child },
+        ))
+        .unwrap()
+    }
+
+    /// The materialization the exported DAG records for `node`'s operator kind.
+    fn exported(root: &Rc<OperatorNode>, kind: &str) -> Materialization {
+        let dag = crate::ir::physical_export::compile_physical_asap_dag(root).unwrap();
+        dag.validate().unwrap();
+        dag.nodes
+            .iter()
+            .find(|n| n.payload.kind_name() == kind)
+            .unwrap()
+            .materialization
+    }
+
+    /// A node whose timing its candidate fixed (the query-time read boundary
+    /// of `finalize_query_candidate`) keeps an explicit assignment that agrees
+    /// with that timing and rejects one that needs the other timing.
+    #[test]
+    fn fixed_timing_keeps_an_agreeing_assignment_and_rejects_a_conflict() {
+        let state = agg(scan(), exact_sum());
+        let read = Rc::new(
+            (*finalize(Rc::clone(&state)))
+                .clone()
+                .with_timing(Some(ExecutionTiming::QueryTime)),
+        );
+        let stored = Materialization::MatAtQuery(Medium::Disk);
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&read, stored);
+        let timed =
+            apply_materialization_timings(&read, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(timed.materialization, stored);
+        assert_eq!(exported(&timed, "FinalizeExactAccumulator"), stored);
+
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&state, AT_INGESTION);
+        assignment.set(&read, AT_INGESTION);
+        assert_eq!(
+            apply_materialization_timings(&read, &assignment, &mut TimingMemo::new()).err(),
+            Some(
+                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                    operator: "FinalizeExactAccumulator",
+                    fixed: ExecutionTiming::QueryTime,
+                    materialization: AT_INGESTION,
+                }
+            )
+        );
+    }
+
+    /// A root stored at ingestion time is valid: the query reads the stored
+    /// output. A root that runs at ingestion time without being stored there
+    /// is not.
+    #[test]
+    fn a_root_may_be_stored_at_ingestion_time() {
+        let root = max(scan());
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&root, AT_INGESTION);
+        let timed =
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(exported(&timed, "Aggregate"), AT_INGESTION);
+
+        let state = agg(scan(), exact_sum());
+        let root = finalize(Rc::clone(&state));
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&state, AT_INGESTION);
+        assignment.set(&root, AT_INGESTION);
+        let timed =
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+        assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(exported(&timed, "FinalizeExactAccumulator"), AT_INGESTION);
+
+        let mut assignment = MaterializationAssignment::default();
+        let root = placed_at_ingestion(max(scan()));
+        assignment.set(&root, Materialization::NotMaterialized);
+        assert_eq!(
+            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).err(),
+            Some(ExecutionDataStateError::UnstoredIngestionRoot {
                 operator: "Aggregate"
             })
         );

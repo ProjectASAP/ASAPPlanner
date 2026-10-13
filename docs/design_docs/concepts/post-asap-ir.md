@@ -134,6 +134,16 @@ timing and a materialization into every node, top-down:
   an evaluation at query time. A query-time consumer reads a `MatAtIngestion`
   node's stored output.
 
+A node whose timing a candidate builder fixed (the query-time
+`FinalizeExactAccumulator` read boundary of `finalize_query_candidate`) keeps
+it: an explicit assignment that agrees with that timing is kept, and one that
+needs the other timing fails with
+`ExecutionDataStateError::MaterializationConflictsWithFixedTiming`; an
+explicit `MatAtIngestion` is never silently moved or dropped. A root may be
+`MatAtIngestion`, and the query reads its stored output; a root of rows that
+runs at ingestion time without being stored there fails with
+`ExecutionDataStateError::UnstoredIngestionRoot`.
+
 The pass then validates every edge (rows or exact-accumulator state into a
 `SummaryAgg`, state into an evaluation, a timed `MaintainPopulation` under
 an `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a

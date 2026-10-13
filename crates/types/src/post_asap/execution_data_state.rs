@@ -154,10 +154,28 @@ pub enum ExecutionDataStateError {
         first: ExecutionDataState,
         second: ExecutionDataState,
     },
-    /// A maintenance-time value operation at the root of a plan:
-    /// nothing maintains state above it, so its output is never read.
-    #[error("A maintenance-time value operation cannot be a plan root: its update-path output feeds nothing")]
-    MaintenanceRowsAtRoot,
+    /// A plan root that runs at ingestion time without being stored there
+    /// (a timing fixed by a candidate builder): no query reads its rows. A
+    /// root assigned `MatAtIngestion` is valid; the query reads the stored
+    /// output.
+    #[error(
+        "{operator} root runs at ingestion time but is not MatAtIngestion: no query reads its \
+         output"
+    )]
+    UnstoredIngestionRoot { operator: &'static str },
+    /// An explicit materialization on a node whose timing a candidate builder
+    /// fixed (e.g. a query-time `FinalizeExactAccumulator` read boundary)
+    /// that needs the other timing.
+    #[error(
+        "{operator} is fixed at {} by its candidate; materialization {materialization:?} needs \
+         the other timing",
+        fixed.as_str()
+    )]
+    MaterializationConflictsWithFixedTiming {
+        operator: &'static str,
+        fixed: ExecutionTiming,
+        materialization: Materialization,
+    },
     #[error("unsupported maintenance binary schema or operator")]
     InvalidMaintenanceBinary,
     #[error("checked division requires one valid guard on a read-time division operator")]
