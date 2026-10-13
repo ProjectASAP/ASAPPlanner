@@ -16,14 +16,14 @@ pub fn compile_physical_asap_dag(
     Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
 }
 
-/// The logical DAG the planner pipeline (`plan_stages`) selects for the
+/// The logical DAG the planner pipeline (`run_stage1_to_stage3`) selects for the
 /// single query `root` at `accuracy`, over a continuously ingested source,
 /// with the built-in models.
 pub fn selected_dag(
     root: Rc<OperatorNode>,
     accuracy: planner_types::types::AccuracyTarget,
 ) -> Rc<OperatorNode> {
-    let run = plan_stages(root, accuracy);
+    let run = run_stage1_to_stage3(root, accuracy);
     let [QueryRoot::Operator(selected)] = run.selected_logical().expect("a plan is selected")
     else {
         panic!("one operator root");
@@ -38,8 +38,8 @@ pub fn logical_candidates(
     root: Rc<OperatorNode>,
     accuracy: planner_types::types::AccuracyTarget,
 ) -> Vec<Rc<OperatorNode>> {
-    plan_stages(root, accuracy)
-        .logical
+    run_stage1_to_stage3(root, accuracy)
+        .stage1_logical_asap_optimization
         .into_iter()
         .filter_map(|candidate| match candidate.roots.ok()?.remove(0) {
             QueryRoot::Operator(node) => Some(node),
@@ -48,10 +48,10 @@ pub fn logical_candidates(
         .collect()
 }
 
-fn plan_stages(
+fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: planner_types::types::AccuracyTarget,
-) -> asap_aware_mapping::StagePipelineRun<usize> {
+) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
     use planner_types::workload::{DataArrival, DataWorkload, Evidence, EvidenceSource, Rate};
     let data = DataWorkload {
         arrival: DataArrival::ContinuouslyIngesting,
@@ -62,7 +62,7 @@ fn plan_stages(
         },
         ..Default::default()
     };
-    asap_aware_mapping::plan_stages(
+    asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],
         &[Some(accuracy)],
         &data,

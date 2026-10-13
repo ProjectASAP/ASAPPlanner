@@ -4,8 +4,8 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::pass::{
-    plan_stages, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels,
-    StagePipeline,
+    run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
+    PlanningModels, Stage1ToStage3Pass,
 };
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
@@ -89,9 +89,9 @@ async fn plans_every_query_in_entry_order() {
 }
 
 /// The facade selects what the planning stages select over the frontends'
-/// roots ([`plan_stages`]), and reports that selection.
+/// roots ([`run_stage1_to_stage3`]), and reports that selection.
 #[tokio::test]
-async fn facade_plans_match_plan_stages() {
+async fn facade_plans_match_run_stage1_to_stage3() {
     let workload = sql_workload(
         vec![
             batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem"),
@@ -128,11 +128,17 @@ async fn facade_plans_match_plan_stages() {
         targets.push(Some(accuracy));
     }
     let data = workload.data_workload.clone().unwrap();
-    let run = plan_stages(roots, &targets, &data, models).unwrap();
-    let selection = run.selection.as_ref().expect("a candidate is selected");
+    let run = run_stage1_to_stage3(roots, &targets, &data, models).unwrap();
+    let selection = run
+        .stage3_plan_selection
+        .as_ref()
+        .expect("a candidate is selected");
     let selected = run.selected().expect("the selected candidate is listed");
 
-    assert!(run.physical.len() > 1, "the stages chose among candidates");
+    assert!(
+        run.stage2_physical_asap_optimization.len() > 1,
+        "the stages chose among candidates"
+    );
     assert_eq!(output.selection.as_ref(), Some(selection));
     assert_eq!(output.roots(), selected.roots);
 }
@@ -222,7 +228,7 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
             "mangling"
         }
         fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
-            let mut output = StagePipeline.optimize(input)?;
+            let mut output = Stage1ToStage3Pass.optimize(input)?;
             for plan in output.plans.iter_mut() {
                 plan.entry_index += 1;
             }

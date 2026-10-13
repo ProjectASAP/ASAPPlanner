@@ -6,14 +6,14 @@
 //! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
-//! one implementation, [`StagePipeline`]: the planning stages in order
-//! ([`plan_stages`]).
+//! one implementation, [`Stage1ToStage3Pass`]: the planning stages in order
+//! ([`run_stage1_to_stage3`]).
 //!
 //! Call [`optimize`] rather than [`OptimizationPass::optimize`] directly: it
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
-mod stage_pipeline;
+mod stage1_to_stage3;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -34,8 +34,8 @@ use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::per_computation_candidates::PerComputationCandidateError;
 use crate::stage3_plan_selection::{Selection, SelectionError};
 
-pub use stage_pipeline::{
-    plan_stages, LogicalCandidate, PrunedCandidate, StagePipeline, StagePipelineRun,
+pub use stage1_to_stage3::{
+    run_stage1_to_stage3, LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
@@ -48,7 +48,7 @@ static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 /// a built-in default, evidence about a particular deployment cannot.
 ///
 /// Plan selection reads `accuracy` and `evidence`. It prices candidates with
-/// its own analytical model, so [`StagePipeline`] does not read `cost`.
+/// its own analytical model, so [`Stage1ToStage3Pass`] does not read `cost`.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
@@ -401,11 +401,11 @@ impl PassRegistry {
         Self::default()
     }
 
-    /// Only [`StagePipeline`], under the name `stage-pipeline`.
+    /// Only [`Stage1ToStage3Pass`], under the name `stage1-to-stage3`.
     pub fn with_builtin() -> Self {
         let mut registry = Self::new();
         registry
-            .register(Box::new(StagePipeline))
+            .register(Box::new(Stage1ToStage3Pass))
             .expect("empty registry cannot conflict");
         registry
     }
@@ -589,17 +589,17 @@ mod tests {
         assert_eq!(err.0, "greedy");
     }
 
-    /// The builtin registry resolves `stage-pipeline`, and names come back
+    /// The builtin registry resolves `stage1-to-stage3`, and names come back
     /// sorted so a sweep over every registered pass is reproducible.
     #[test]
     fn registry_resolves_builtin_and_lists_names_in_order() {
         let mut registry = PassRegistry::with_builtin();
         registry.register(Box::new(Stub("alpha"))).unwrap();
-        assert!(registry.get("stage-pipeline").is_some());
+        assert!(registry.get("stage1-to-stage3").is_some());
         assert!(registry.get("absent").is_none());
         assert_eq!(
             registry.names().collect::<Vec<_>>(),
-            vec!["alpha", "stage-pipeline"]
+            vec!["alpha", "stage1-to-stage3"]
         );
     }
 }

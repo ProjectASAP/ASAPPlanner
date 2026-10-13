@@ -436,7 +436,7 @@ fn compile_in_runtime(p: &Physical) -> Result<(), String> {
     let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
     compile(dag, inputs, &roots)
         .map(|_| ())
-        .map_err(|e| format!("{} ({}): {e}", p.id, p.candidate.label))
+        .map_err(|e| format!("{} ({}): {e}", p.id, p.candidate.display_name))
 }
 
 /// Runtime capability check (added by the implementer, not part of the

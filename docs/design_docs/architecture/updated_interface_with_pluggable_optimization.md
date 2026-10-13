@@ -43,7 +43,7 @@ flowchart TD
         direction TB
         L["lowering"]
         O["OptimizationInput"]
-        PASS["OptimizationPass: StagePipeline, or another implementation"]
+        PASS["OptimizationPass: Stage1ToStage3Pass, or another implementation"]
         L --> O --> PASS
     end
 
@@ -62,8 +62,8 @@ Details of these types are provided below.
 |---|---|
 | `workload` | `&PlanningWorkload` |
 | `frontend_specific` | `Sql { catalog }` / `Promql { now_ms, histograms }` / `Metricsql`; fixed by `query_workload.language` |
-| `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults. `StagePipeline` reads the accuracy model and the evidence provider, not the cost model |
-| `pass` | `None` uses `StagePipeline` |
+| `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults. `Stage1ToStage3Pass` reads the accuracy model and the evidence provider, not the cost model |
+| `pass` | `None` uses `Stage1ToStage3Pass` |
 
 ### `OptimizationInput`
 
@@ -92,7 +92,7 @@ pub struct QueryPlan {
 }
 ```
 
-`StagePipeline` returns the selected physical candidate's roots, with every
+`Stage1ToStage3Pass` returns the selected physical candidate's roots, with every
 sub-DAG `NotMaterialized`; `PlanOutput::execution_timed_dag()` exports them
 with that same assignment. Physical ASAP-aware optimization decides per
 sub-DAG whether to materialize, and whether at ingestion or query time, from
@@ -103,26 +103,27 @@ sub-DAG whether to materialize, and whether at ingestion or query time, from
 ## 3. The pluggable optimization pass
 
 The optimization pass is fully pluggable, as long as the end-to-end behavior is satisfied.
-The `StagePipeline` described below is used by default.
+The `Stage1ToStage3Pass` described below is used by default.
 
-### 3.1 `StagePipeline` — the planning stages
+### 3.1 `Stage1ToStage3Pass` — Stage 1 to Stage 3
 
-`StagePipeline` runs the planning stages of
+`Stage1ToStage3Pass` runs Stage 1 (logical ASAP-aware optimization), Stage 2
+(physical ASAP-aware optimization) and Stage 3 (plan selection) of
 [planner-layering.md](../proposals/planner-layering.md) in order and is
-registered under the name `stage-pipeline`. It replaced `MajorPass`, the
+registered under the name `stage1-to-stage3`. It replaced `MajorPass`, the
 legacy replacement search; the coverage this gives up until Pass 2 is
 tracked in #580.
 
 | Step | Call |
 |---|---|
 | Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
-| Logical ASAP-aware optimization | `generate_per_computation_candidates` (Pass 1), then `compose_logical_candidate` for every combination of per-computation candidates |
-| Physical ASAP-aware optimization | `optimize_physical_asap` for every composed candidate |
-| Plan selection | `select_plan`: reject candidates that miss an accuracy target, price the rest, select the cheapest |
+| Stage 1: logical ASAP-aware optimization | `generate_per_computation_candidates` (Pass 1), then `compose_logical_candidate` for every combination of per-computation candidates |
+| Stage 2: physical ASAP-aware optimization | `optimize_physical_asap` for every composed candidate |
+| Stage 3: plan selection | `select_plan`: reject candidates that miss an accuracy target, price the rest, select the cheapest |
 
-`plan_stages` runs these steps over the frontends' roots and returns every
-stage's candidates as well as the selection; the `stage_pipeline` devtool
-shows them. Every combination is enumerated and plan selection prices
+`run_stage1_to_stage3` runs these steps over the query-language frontends'
+roots (Stage 0) and returns every stage's candidates as well as the
+selection; the `stage_pipeline` devtool shows them. Every combination is enumerated and plan selection prices
 every candidate; nothing is capped. A search that avoids building every
 candidate is future work (#671).
 
@@ -157,7 +158,7 @@ let output = e2e_plan(user_input.with_pass(&my_pass)).await?;  // the whole pipe
 Or through an optimization pass registry:
 
 ```rust
-let mut registry = PassRegistry::with_builtin();   // holds "stage-pipeline"
+let mut registry = PassRegistry::with_builtin();   // holds "stage1-to-stage3"
 registry.register(Box::new(my_pass))?;
 for name in registry.names() {
     optimize(registry.get(name).unwrap(), optimization_input)?;
@@ -227,7 +228,7 @@ pass no longer runs these steps; another pass need not run any of them.
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `StagePipeline`, `plan_stages` |
+| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_stage1_to_stage3` |
 | `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch |
 
 ```text

@@ -1411,8 +1411,8 @@
             }
           ]
         },
-        "id": "L1",
-        "label": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc)"
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc)",
+        "id": "L1"
       },
       {
         "dag": {
@@ -2375,8 +2375,8 @@
             }
           ]
         },
-        "id": "L2",
-        "label": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap (Sum acc)"
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap (Sum acc)",
+        "id": "L2"
       },
       {
         "dag": {
@@ -3339,8 +3339,8 @@
             }
           ]
         },
-        "id": "L3",
-        "label": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc)"
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc)",
+        "id": "L3"
       }
     ],
     "capped": false,
@@ -4919,9 +4919,9 @@
           ],
           "scalar_roots": []
         },
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc)",
         "from_logical": "L1",
-        "id": "P1",
-        "label": "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc)"
+        "id": "P1"
       },
       {
         "dag": {
@@ -6458,9 +6458,9 @@
           ],
           "scalar_roots": []
         },
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap (Sum acc)",
         "from_logical": "L2",
-        "id": "P2",
-        "label": "Q1 exact (Sum acc, Rate acc) · Q2 CMS+heap (Sum acc)"
+        "id": "P2"
       },
       {
         "dag": {
@@ -7997,9 +7997,9 @@
           ],
           "scalar_roots": []
         },
+        "display_name": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc)",
         "from_logical": "L3",
-        "id": "P3",
-        "label": "Q1 exact (Sum acc, Rate acc) · Q2 CountSketch+heap (Sum acc)"
+        "id": "P3"
       }
     ],
     "pruned": []

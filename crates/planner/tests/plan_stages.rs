@@ -1,7 +1,7 @@
-//! The planner pipeline ([`plan_stages`]): the planning stages in order over
+//! The planner pipeline ([`run_stage1_to_stage3`]): the planning stages in order over
 //! the frontends' roots, enumerating every whole-workload candidate.
 
-use asap_aware_mapping::pass::{plan_stages, PlanningModels, StagePipelineRun};
+use asap_aware_mapping::pass::{run_stage1_to_stage3, PlanningModels, Stage1ToStage3Run};
 use asap_frontend_promql::lower_promql_query_workload;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -11,7 +11,7 @@ use asap_types::workload::{
 
 const NOW_MS: u64 = 1_700_000_000_000;
 
-fn promql_stages(query: &str, epsilon: f64) -> StagePipelineRun<usize> {
+fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
     let target = AccuracyTarget::Epsilon(epsilon);
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
@@ -38,7 +38,7 @@ fn promql_stages(query: &str, epsilon: f64) -> StagePipelineRun<usize> {
         }),
     };
     let roots = lower_promql_query_workload(&workload, NOW_MS).expect("lowers");
-    plan_stages(
+    run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
         &[Some(target)],
         &workload.data_workload.unwrap(),
@@ -54,23 +54,32 @@ fn promql_stages(query: &str, epsilon: f64) -> StagePipelineRun<usize> {
 fn enumerates_every_combination_and_selects_one() {
     let run = promql_stages("count(a) + count(b)", 0.01);
     let sizes: Vec<_> = run
-        .per_computation
+        .stage1_pass1_per_computation
         .targets
         .iter()
         .map(|target| target.choices.candidates.len())
         .collect();
     assert_eq!(sizes.len(), 2);
     assert_eq!(run.combinations, sizes[0] * sizes[1]);
-    assert_eq!(run.logical.len(), run.combinations);
-    assert_eq!(run.logical[0].choice, vec![0, 0]);
-    assert_eq!(run.logical[1].choice, vec![0, 1]);
-    assert_eq!(run.logical[sizes[1]].choice, vec![1, 0]);
+    assert_eq!(run.stage1_logical_asap_optimization.len(), run.combinations);
+    assert_eq!(run.stage1_logical_asap_optimization[0].choice, vec![0, 0]);
+    assert_eq!(run.stage1_logical_asap_optimization[1].choice, vec![0, 1]);
     assert_eq!(
-        run.physical.len() + run.pruned.len(),
-        run.logical.iter().filter(|l| l.roots.is_ok()).count()
+        run.stage1_logical_asap_optimization[sizes[1]].choice,
+        vec![1, 0]
     );
-    let selection = run.selection.as_ref().unwrap();
+    assert_eq!(
+        run.stage2_physical_asap_optimization.len() + run.stage2_pruned.len(),
+        run.stage1_logical_asap_optimization
+            .iter()
+            .filter(|l| l.roots.is_ok())
+            .count()
+    );
+    let selection = run.stage3_plan_selection.as_ref().unwrap();
     let selected = run.selected().expect("the selected candidate is listed");
     assert_eq!(selected.id, selection.selected);
-    assert_eq!(selection.rejected.len(), run.physical.len() - 1);
+    assert_eq!(
+        selection.rejected.len(),
+        run.stage2_physical_asap_optimization.len() - 1
+    );
 }

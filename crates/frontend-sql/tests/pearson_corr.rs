@@ -148,7 +148,7 @@ async fn corr_filter_is_a_measure_filter() {
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
-    let run = asap_aware_mapping::plan_stages(
+    let run = asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
         &[Some(asap_types::types::AccuracyTarget::Exact)],
         &Default::default(),

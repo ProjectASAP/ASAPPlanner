@@ -142,7 +142,7 @@ pub mod post_asap {
     }
 }
 
-/// Plans and candidates from the planner pipeline (`plan_stages`) for one
+/// Plans and candidates from the planner pipeline (`run_stage1_to_stage3`) for one
 /// query, with the built-in models.
 pub mod planning {
     use asap_types::ir::{OperatorNode, QueryRoot};
@@ -151,11 +151,11 @@ pub mod planning {
     use std::rc::Rc;
 
     /// Every planning stage's output for the single query `root`.
-    pub fn plan_stages(
+    pub fn run_stage1_to_stage3(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
-    ) -> asap_aware_mapping::StagePipelineRun<usize> {
-        asap_aware_mapping::plan_stages(
+    ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
+        asap_aware_mapping::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
             &[Some(accuracy)],
             &DataWorkload::default(),
@@ -167,7 +167,7 @@ pub mod planning {
     /// The logical DAG the planner pipeline selects for the single query
     /// `root` at `accuracy`.
     pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-        match plan_stages(root, accuracy).selected_logical() {
+        match run_stage1_to_stage3(root, accuracy).selected_logical() {
             Some([QueryRoot::Operator(node)]) => Rc::clone(node),
             other => panic!("one selected operator root: {other:?}"),
         }
@@ -180,8 +180,8 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        plan_stages(root, accuracy)
-            .logical
+        run_stage1_to_stage3(root, accuracy)
+            .stage1_logical_asap_optimization
             .into_iter()
             .filter_map(|candidate| match candidate.roots.ok()?.remove(0) {
                 QueryRoot::Operator(node) => Some(node),

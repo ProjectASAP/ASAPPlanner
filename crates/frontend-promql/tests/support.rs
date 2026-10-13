@@ -113,11 +113,11 @@ pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
 /// Every planning stage's output for the single query `root` at `accuracy`,
 /// with the built-in models.
 #[allow(dead_code)]
-pub fn plan_stages(
+pub fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: AccuracyTarget,
-) -> asap_aware_mapping::StagePipelineRun<usize> {
-    asap_aware_mapping::plan_stages(
+) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
+    asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
         &[Some(accuracy)],
         &DataWorkload::default(),
@@ -130,7 +130,7 @@ pub fn plan_stages(
 /// at `accuracy`.
 #[allow(dead_code)]
 pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let run = plan_stages(root, accuracy);
+    let run = run_stage1_to_stage3(root, accuracy);
     match run.selected_logical().expect("a plan is selected") {
         [asap_types::ir::QueryRoot::Operator(node)] => Rc::clone(node),
         other => panic!("one operator root: {other:?}"),
@@ -145,8 +145,8 @@ pub fn logical_candidates(
     root: Rc<OperatorNode>,
     accuracy: AccuracyTarget,
 ) -> Vec<Rc<OperatorNode>> {
-    plan_stages(root, accuracy)
-        .logical
+    run_stage1_to_stage3(root, accuracy)
+        .stage1_logical_asap_optimization
         .into_iter()
         .filter_map(|candidate| match candidate.roots.ok()?.remove(0) {
             asap_types::ir::QueryRoot::Operator(node) => Some(node),
@@ -162,7 +162,7 @@ pub fn logical_candidates(
 /// compose (a candidate its input cannot feed), and selection skips it.
 #[allow(dead_code)]
 pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
-    let run = asap_aware_mapping::plan_stages(
+    let run = asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
         &[None],
         &DataWorkload::default(),
@@ -174,13 +174,13 @@ pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String>
         asap_types::ir::QueryRoot::Scalar(_) => unreachable!("an operator root stays one"),
     };
     let summarized = run
-        .logical
+        .stage1_logical_asap_optimization
         .iter()
         .filter_map(|candidate| candidate.roots.as_deref().ok().map(operator))
         .find(|node| node.contains_asap());
     match summarized {
         Some(node) => Ok(node),
-        None => run.logical[0]
+        None => run.stage1_logical_asap_optimization[0]
             .roots
             .as_deref()
             .map(operator)

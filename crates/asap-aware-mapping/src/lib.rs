@@ -29,14 +29,15 @@
 //!
 //! ## Planning workflows
 //!
-//! The planner runs the planning stages in order: logical ASAP-aware
-//! optimization ([`per_computation_candidates`]: Pass 1 and composition),
-//! physical ASAP-aware optimization ([`stage2_physical_asap_optimization`]) and plan
-//! selection ([`stage3_plan_selection`]).
+//! The planner runs Stage 1 to Stage 3 in order: Stage 1, logical ASAP-aware
+//! optimization ([`per_computation_candidates`]: Pass 1 and composition);
+//! Stage 2, physical ASAP-aware optimization
+//! ([`stage2_physical_asap_optimization`]); Stage 3, plan selection
+//! ([`stage3_plan_selection`]).
 //!
 //! - Run them for a parsed workload through [`optimize`] with
-//!   [`StagePipeline`], the default pass.
-//! - Call [`plan_stages`] over the frontends' roots to read every stage's
+//!   [`Stage1ToStage3Pass`], the default pass.
+//! - Call [`run_stage1_to_stage3`] over the frontends' roots to read every stage's
 //!   candidates as well as the selected plan.
 //!
 //! The planner no longer calls the legacy candidate search
@@ -187,9 +188,9 @@ pub use explanation::{
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use pass::{
-    optimize, plan_stages, OptimizationInput, OptimizationInputError, OptimizationPass,
+    optimize, run_stage1_to_stage3, OptimizationInput, OptimizationInputError, OptimizationPass,
     OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
-    StagePipeline, StagePipelineRun,
+    Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,

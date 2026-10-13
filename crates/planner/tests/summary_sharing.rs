@@ -8,7 +8,7 @@ use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
 
 use asap_aware_mapping::pass::{
-    plan_stages, PlanOutput, PlanningModels, QueryPlan, StagePipelineRun,
+    run_stage1_to_stage3, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
 };
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::lower_promql_query_workload;
@@ -85,14 +85,14 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
 }
 
 /// Every planning stage's output for `queries`, run over the frontend's roots.
-fn promql_stages(queries: &[(&str, f64)]) -> StagePipelineRun<usize> {
+fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload, NOW_MS).expect("lowers");
     let targets: Vec<_> = queries
         .iter()
         .map(|(_, epsilon)| Some(AccuracyTarget::Epsilon(*epsilon)))
         .collect();
-    plan_stages(
+    run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
         &targets,
         &workload.data_workload.clone().unwrap(),
@@ -434,14 +434,14 @@ fn combined_scalar_references_keep_summary_candidates() {
         0.01,
     )]);
     let both = run
-        .physical
+        .stage2_physical_asap_optimization
         .iter()
         .find(|candidate| {
             let refs = root_operators(&candidate.roots[0]);
             refs.len() == 2 && refs.into_iter().all(reads_sketch)
         })
         .expect("a candidate reads a sketch in both references");
-    let selection = run.selection.as_ref().unwrap();
+    let selection = run.stage3_plan_selection.as_ref().unwrap();
     let rejection = selection
         .rejected
         .iter()
@@ -467,7 +467,7 @@ async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
     ] {
         let run = promql_stages(&[(query, 0.01)]);
         let summary = run
-            .physical
+            .stage2_physical_asap_optimization
             .iter()
             .find(|candidate| {
                 root_operators(&candidate.roots[0])
@@ -480,7 +480,7 @@ async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
         };
         assert!(root.guarantee.is_none(), "{query}");
         assert_ne!(
-            run.selection.as_ref().unwrap().selected,
+            run.stage3_plan_selection.as_ref().unwrap().selected,
             summary.id,
             "{query}"
         );
