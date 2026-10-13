@@ -254,10 +254,12 @@ async fn sql_window_and_filtered_aggregate_types() {
     }
 }
 
-/// A real query batch selects one shared SUM producer, retains two result roots,
-/// and executes both selected plans. No replacement dag is constructed by the test.
+/// A real query batch replaces each SUM by its exact accumulator state,
+/// retains two result roots, and executes both selected plans. Each query
+/// reads its own state until Pass 2 shares identical producers (#580). No
+/// replacement dag is constructed by the test.
 #[tokio::test]
-async fn batch_planning_replaces_and_shares_summary_operators() {
+async fn batch_planning_replaces_summary_operators() {
     use asap_aware_mapping::pass::PlanningModels;
     use asap_physical_operators::{
         physical_planner::{compile, InputContract},
@@ -315,13 +317,13 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
         .into_iter()
         .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
         .collect();
-    assert_eq!(states.len(), 1, "the batch owns one shared SUM state");
-    for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
+    assert_eq!(states.len(), 2, "one SUM state per query");
+    for ((plan, expected), state) in output.plans.iter().zip([31.0, 60.0]).zip(&states) {
         let root = &plan.root;
         root.validate_structure().unwrap();
         assert!(OperatorNode::reachable(root)
             .iter()
-            .any(|n| Rc::ptr_eq(n, &states[0])));
+            .any(|n| Rc::ptr_eq(n, state)));
         let wire = physical_common::compile_physical_asap_dag(root).unwrap();
         let scan = wire
             .nodes
@@ -365,8 +367,8 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
             rows
         );
     }
-    // The batch exports as one physical DAG: a root per query and the shared
-    // SUM state once.
+    // The batch exports as one physical DAG: a root per query and each
+    // query's SUM state.
     let workload_dag = output.execution_timed_dag().unwrap();
     assert_eq!(workload_dag.roots.len(), 2);
     assert_ne!(workload_dag.roots[0], workload_dag.roots[1]);
@@ -381,6 +383,6 @@ async fn batch_planning_replaces_and_shares_summary_operators() {
                 )
             ))
             .count(),
-        1
+        2
     );
 }
