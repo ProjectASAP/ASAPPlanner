@@ -2577,17 +2577,17 @@
       "P1": {
         "per_node": {
           "0": {
-            "cost": 0.039,
+            "cost": 0.0390016,
             "detail": "scan 15000 samples",
             "multiplier": 1
           },
           "1": {
-            "cost": 0.015,
+            "cost": 0.015001599999999999,
             "detail": "time range 15s: pass 15000 rows",
             "multiplier": 1
           },
           "10": {
-            "cost": 0.015,
+            "cost": 0.01508,
             "detail": "build exact Sum accumulator into 100 states: 15000 rows x depth 1",
             "multiplier": 1
           },
@@ -2597,7 +2597,7 @@
             "multiplier": 1
           },
           "2": {
-            "cost": 0.015,
+            "cost": 0.0150008,
             "detail": "build exact Sum accumulator into 1 states: 15000 rows x depth 1",
             "multiplier": 1
           },
@@ -2607,17 +2607,17 @@
             "multiplier": 1
           },
           "4": {
-            "cost": 0.063,
+            "cost": 0.0630032,
             "detail": "scan 15000 samples",
             "multiplier": 1
           },
           "5": {
-            "cost": 0.015,
+            "cost": 0.0150032,
             "detail": "time range 15s: pass 15000 rows",
             "multiplier": 1
           },
           "6": {
-            "cost": 0.015,
+            "cost": 0.0150008,
             "detail": "build exact Sum accumulator into 1 states: 15000 rows x depth 1",
             "multiplier": 1
           },
@@ -2627,18 +2627,18 @@
             "multiplier": 1
           },
           "8": {
-            "cost": 0.087,
+            "cost": 0.0870048,
             "detail": "scan 15000 samples",
             "multiplier": 1
           },
           "9": {
-            "cost": 0.015,
+            "cost": 0.015004799999999999,
             "detail": "time range 15s: pass 15000 rows",
             "multiplier": 1
           }
         },
         "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 0.279102,
+        "total": 0.2792028,
         "unit": "cpu_ms_per_workload_evaluation"
       }
     },
