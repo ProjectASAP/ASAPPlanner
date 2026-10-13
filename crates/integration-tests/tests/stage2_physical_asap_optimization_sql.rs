@@ -6,7 +6,7 @@
 use asap_aware_mapping::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
 };
-use asap_aware_mapping::physical_asap_optimization::optimize_physical_asap;
+use asap_aware_mapping::stage2_physical_asap_optimization::optimize_physical_asap;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};

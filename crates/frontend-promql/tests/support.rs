@@ -122,7 +122,6 @@ pub fn plan_stages(
         &[Some(accuracy)],
         &DataWorkload::default(),
         asap_aware_mapping::PlanningModels::builtin(),
-        asap_aware_mapping::pass::MAX_ENUMERATED_CANDIDATES,
     )
     .expect("Pass 1 accepts the query")
 }
@@ -157,7 +156,7 @@ pub fn logical_candidates(
 }
 
 /// One logical candidate of the single query `root`: the first composed
-/// candidate (of up to 64, in enumeration order) that reads a summary, else
+/// candidate (in enumeration order) that reads a summary, else
 /// the exact one (the first). `Err` when Pass 1 rejects the query or the
 /// exact candidate does not compose; another candidate may legitimately not
 /// compose (a candidate its input cannot feed), and selection skips it.
@@ -168,7 +167,6 @@ pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String>
         &[None],
         &DataWorkload::default(),
         asap_aware_mapping::PlanningModels::builtin(),
-        64,
     )
     .map_err(|e| e.to_string())?;
     let operator = |roots: &[asap_types::ir::QueryRoot]| match &roots[0] {

@@ -8,7 +8,7 @@ use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
 
 use asap_aware_mapping::pass::{
-    plan_stages, PlanOutput, PlanningModels, QueryPlan, StagePipelineRun, MAX_ENUMERATED_CANDIDATES,
+    plan_stages, PlanOutput, PlanningModels, QueryPlan, StagePipelineRun,
 };
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::lower_promql_query_workload;
@@ -97,7 +97,6 @@ fn promql_stages(queries: &[(&str, f64)]) -> StagePipelineRun<usize> {
         &targets,
         &workload.data_workload.clone().unwrap(),
         PlanningModels::builtin(),
-        MAX_ENUMERATED_CANDIDATES,
     )
     .expect("Pass 1 accepts the workload")
 }

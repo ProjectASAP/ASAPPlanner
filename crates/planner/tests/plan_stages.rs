@@ -1,6 +1,5 @@
 //! The planner pipeline ([`plan_stages`]): the planning stages in order over
-//! the frontends' roots, with the enumeration of whole-workload candidates
-//! capped.
+//! the frontends' roots, enumerating every whole-workload candidate.
 
 use asap_aware_mapping::pass::{plan_stages, PlanningModels, StagePipelineRun};
 use asap_frontend_promql::lower_promql_query_workload;
@@ -12,7 +11,7 @@ use asap_types::workload::{
 
 const NOW_MS: u64 = 1_700_000_000_000;
 
-fn promql_stages(query: &str, epsilon: f64, max_candidates: usize) -> StagePipelineRun<usize> {
+fn promql_stages(query: &str, epsilon: f64) -> StagePipelineRun<usize> {
     let target = AccuracyTarget::Epsilon(epsilon);
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
@@ -44,7 +43,6 @@ fn promql_stages(query: &str, epsilon: f64, max_candidates: usize) -> StagePipel
         &[Some(target)],
         &workload.data_workload.unwrap(),
         PlanningModels::builtin(),
-        max_candidates,
     )
     .expect("Pass 1 accepts the query")
 }
@@ -54,7 +52,7 @@ fn promql_stages(query: &str, epsilon: f64, max_candidates: usize) -> StagePipel
 /// selected and every other one is reported.
 #[test]
 fn enumerates_every_combination_and_selects_one() {
-    let run = promql_stages("count(a) + count(b)", 0.01, usize::MAX);
+    let run = promql_stages("count(a) + count(b)", 0.01);
     let sizes: Vec<_> = run
         .per_computation
         .targets
@@ -63,7 +61,6 @@ fn enumerates_every_combination_and_selects_one() {
         .collect();
     assert_eq!(sizes.len(), 2);
     assert_eq!(run.combinations, sizes[0] * sizes[1]);
-    assert!(!run.capped);
     assert_eq!(run.logical.len(), run.combinations);
     assert_eq!(run.logical[0].choice, vec![0, 0]);
     assert_eq!(run.logical[1].choice, vec![0, 1]);
@@ -76,25 +73,4 @@ fn enumerates_every_combination_and_selects_one() {
     let selected = run.selected().expect("the selected candidate is listed");
     assert_eq!(selected.id, selection.selected);
     assert_eq!(selection.rejected.len(), run.physical.len() - 1);
-}
-
-/// The enumeration stops at the cap, and a product too large for `usize`
-/// saturates instead of overflowing. The first candidate takes every
-/// target's exact option, so selection still has the exact plan.
-#[test]
-fn a_capped_enumeration_keeps_the_exact_plan() {
-    // Each `count` target has several candidates; 40 of them overflow `usize`.
-    let query = (0..40)
-        .map(|i| format!("count(m{i})"))
-        .collect::<Vec<_>>()
-        .join(" + ");
-    let run = promql_stages(&query, 0.01, 1);
-    assert_eq!(run.per_computation.targets.len(), 40);
-    assert_eq!(run.combinations, usize::MAX);
-    assert!(run.capped);
-    let [logical] = &run.logical[..] else {
-        panic!("one enumerated candidate");
-    };
-    assert!(logical.choice.iter().all(|&choice| choice == 0));
-    assert_eq!(run.selection.as_ref().unwrap().selected, "P1");
 }

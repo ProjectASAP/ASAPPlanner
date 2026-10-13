@@ -7,19 +7,19 @@
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
 // four planner stages (#509 MVP):
-//   - language_specific_frontends: the frontends' workload DAG, one root per query;
-//   - logical_asap_optimization: Pass 1 whole-workload candidates, one per
+//   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
+//   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
 //     product), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)
 //     and the selected one, with `combinations` (how many exist) and
 //     `capped` (whether some are not shown). A candidate that cannot be
 //     composed carries `error` instead of `dag`;
-//   - physical_asap_optimization: one physical candidate per composed logical
+//   - stage2_physical_asap_optimization: one physical candidate per composed logical
 //     candidate (operator implementation; every sub-DAG NotMaterialized), no
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
 //     under `pruned` with the reason;
-//   - plan_selection: the selected candidate, chosen among all candidates;
+//   - stage3_plan_selection: the selected candidate, chosen among all candidates;
 //     the shown candidates' costs, and every other shown candidate as
 //     rejected (`valid: false`) or costlier. Each node's `cost` is one
 //     computation's price times `multiplier`, the times it is computed:
@@ -34,7 +34,7 @@
 
 use std::collections::HashSet;
 
-use asap_aware_mapping::plan_selection::{Rejection, Selection, SelectionError};
+use asap_aware_mapping::stage3_plan_selection::{Rejection, Selection, SelectionError};
 use asap_devtools::planner_layering_examples::{
     declared, example1, pattern_a, pattern_b, PatternARecurrence,
 };
@@ -159,14 +159,14 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
     Ok(json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": workload_queries(workload) },
-        "language_specific_frontends": { "dag": export(&run.stage0_query_language_frontends) },
-        "logical_asap_optimization": {
+        "stage0_query_language_frontends": { "dag": export(&run.stage0_query_language_frontends) },
+        "stage1_logical_asap_optimization": {
             "combinations": run.stage1_logical_asap_optimization.len(),
             "capped": candidates.len() < run.stage1_logical_asap_optimization.len(),
             "candidates": candidates,
         },
-        "physical_asap_optimization": { "candidates": physical, "pruned": pruned },
-        "plan_selection": plan_selection_json(&run.stage3_plan_selection, |id| shown_physical.contains(id)),
+        "stage2_physical_asap_optimization": { "candidates": physical, "pruned": pruned },
+        "stage3_plan_selection": plan_selection_json(&run.stage3_plan_selection, |id| shown_physical.contains(id)),
     }))
 }
 
@@ -324,13 +324,17 @@ mod tests {
     fn display_cap_keeps_the_selected_candidate() {
         let workload = promql_batch(&["sum(m)".into()], AccuracyTarget::Exact, 15_000);
         let document = stage_pipeline(&workload, 0).unwrap();
-        let selected = document["plan_selection"]["selected"].as_str().unwrap();
-        let physical = document["physical_asap_optimization"]["candidates"]
+        let selected = document["stage3_plan_selection"]["selected"]
+            .as_str()
+            .unwrap();
+        let physical = document["stage2_physical_asap_optimization"]["candidates"]
             .as_array()
             .unwrap();
         assert_eq!(physical.len(), 1);
         assert_eq!(physical[0]["id"], selected);
-        assert!(document["plan_selection"]["costs"].get(selected).is_some());
-        assert_eq!(document["plan_selection"]["rejected"], json!([]));
+        assert!(document["stage3_plan_selection"]["costs"]
+            .get(selected)
+            .is_some());
+        assert_eq!(document["stage3_plan_selection"]["rejected"], json!([]));
     }
 }

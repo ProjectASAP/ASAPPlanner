@@ -11,15 +11,12 @@
 //!    ([`optimize_physical_asap`]);
 //! 3. plan selection over the physical candidates ([`select_plan`]).
 //!
-//! The language-specific frontends run before it (the `asap-planner` facade
+//! The query-language frontends run before it (the `asap-planner` facade
 //! lowers the workload). Pass 2 (ASAP-aware CSE) is not planned yet.
 //!
-//! Plan selection prices every enumerated candidate; there is no search
-//! strategy that avoids building them (issue #671 surveys the options). The
-//! enumeration is capped at `max_candidates`: a workload with more
-//! combinations is selected among the first `max_candidates` in enumeration
-//! order, and [`StagePipelineRun::capped`] says so. The first combination
-//! takes every target's exact option, so the exact plan is always among them.
+//! Every combination is enumerated and plan selection prices every
+//! candidate; nothing is capped. A search that avoids building every
+//! candidate is future work (issue #671 surveys the options).
 
 use std::rc::Rc;
 
@@ -34,12 +31,9 @@ use crate::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     PerComputationCandidateError, PerComputationCandidates,
 };
-use crate::physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
-use crate::plan_selection::{select_plan, Selection, SelectionError};
+use crate::stage2_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
+use crate::stage3_plan_selection::{select_plan, Selection, SelectionError};
 use crate::PlanningModels;
-
-/// The enumeration cap [`StagePipeline`] uses.
-pub const MAX_ENUMERATED_CANDIDATES: usize = 4096;
 
 /// One whole-workload CandidateLogicalASAPDAG: `choice[t]` indexes
 /// `targets[t].choices.candidates` of the Pass 1 inventory. `roots` are the
@@ -71,9 +65,7 @@ pub struct StagePipelineRun<Id> {
     /// Size of the Cartesian product of the targets' candidates, saturating
     /// at `usize::MAX`.
     pub combinations: usize,
-    /// Whether `combinations` exceeded the enumeration cap.
-    pub capped: bool,
-    /// The enumerated logical candidates, in enumeration order.
+    /// Every logical candidate, in enumeration order.
     pub logical: Vec<LogicalCandidate>,
     /// One physical candidate (`P<n>` from `L<n>`) per logical candidate that
     /// composed and was implemented.
@@ -99,8 +91,8 @@ impl<Id> StagePipelineRun<Id> {
     }
 }
 
-/// Run the planning stages over the frontends' `roots`, enumerating at most
-/// `max_candidates` whole-workload candidates. `targets[i]` is the accuracy
+/// Run the planning stages over the frontends' `roots`, enumerating every
+/// whole-workload candidate. `targets[i]` is the accuracy
 /// requirement of `roots[i]` (`None` imposes none). Only a Pass 1 failure is
 /// an error; a candidate that does not compose or cannot be implemented is
 /// listed with its reason, and a failed selection is reported in the run.
@@ -109,7 +101,6 @@ pub fn plan_stages<Id: Clone + std::fmt::Debug>(
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-    max_candidates: usize,
 ) -> Result<StagePipelineRun<Id>, PerComputationCandidateError> {
     let per_computation = generate_per_computation_candidates(roots)?;
     let combinations = per_computation
@@ -122,7 +113,7 @@ pub fn plan_stages<Id: Clone + std::fmt::Debug>(
     let mut physical = Vec::new();
     let mut pruned = Vec::new();
     let mut choice = vec![0; per_computation.targets.len()];
-    for index in 0..combinations.min(max_candidates) {
+    for index in 0usize.. {
         let id = format!("L{}", index + 1);
         let label = label(&per_computation, &owners, &choice);
         let roots = compose_logical_candidate(&per_computation, &choice)
@@ -147,20 +138,25 @@ pub fn plan_stages<Id: Clone + std::fmt::Debug>(
             choice: choice.clone(),
             roots,
         });
-        // Mixed-radix increment: the last target varies fastest.
+        // Mixed-radix increment: the last target varies fastest; a carry
+        // out of the first target ends the enumeration.
+        let mut carry = true;
         for (digit, target) in choice.iter_mut().zip(&per_computation.targets).rev() {
             *digit += 1;
             if *digit < target.choices.candidates.len() {
+                carry = false;
                 break;
             }
             *digit = 0;
+        }
+        if carry {
+            break;
         }
     }
     let selection = select_plan(&physical, targets, data, models);
     Ok(StagePipelineRun {
         per_computation,
         combinations,
-        capped: combinations > max_candidates,
         logical,
         physical,
         pruned,
@@ -246,9 +242,8 @@ fn label<Id>(
 /// workload's roots in entry order, PromQL roots with each series' full
 /// identity as a column (the row representation per-series state needs at
 /// runtime; a root with no such representation is planned over its labels
-/// alone), through [`plan_stages`] with every entry's accuracy target and
-/// at most [`MAX_ENUMERATED_CANDIDATES`] candidates. The output is the
-/// selected physical candidate's roots.
+/// alone), through [`plan_stages`] with every entry's accuracy target. The
+/// output is the selected physical candidate's roots.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StagePipeline;
 
@@ -285,13 +280,7 @@ impl OptimizationPass for StagePipeline {
             .map(|entry| Some(entry.requirements.accuracy.target()))
             .collect();
         let data = workload.data_workload().cloned().unwrap_or_default();
-        let run = plan_stages(
-            roots,
-            &targets,
-            &data,
-            input.models,
-            MAX_ENUMERATED_CANDIDATES,
-        )?;
+        let run = plan_stages(roots, &targets, &data, input.models)?;
         let StagePipelineRun {
             physical,
             selection,

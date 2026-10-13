@@ -7,7 +7,7 @@ use std::path::Path;
 /// `src/`.
 const OPTIMIZATION_MODULES: &[&str] = &[
     "per_computation_candidates.rs",
-    "physical_asap_optimization.rs",
+    "stage2_physical_asap_optimization.rs",
 ];
 
 /// The modules that price plans.
@@ -16,7 +16,7 @@ const COST_MODULES: &[&str] = &[
     "recurrence",
     "analytical_cost",
     "physical_operator_statistics",
-    "plan_selection",
+    "stage3_plan_selection",
 ];
 
 /// The source lines outside `#[cfg(test)]` items and comments, numbered.

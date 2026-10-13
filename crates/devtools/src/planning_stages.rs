@@ -8,8 +8,10 @@ use asap_aware_mapping::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     PerComputationCandidates,
 };
-use asap_aware_mapping::physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
-use asap_aware_mapping::plan_selection::{select_plan, Selection, SelectionError};
+use asap_aware_mapping::stage2_physical_asap_optimization::{
+    optimize_physical_asap, PhysicalCandidate,
+};
+use asap_aware_mapping::stage3_plan_selection::{select_plan, Selection, SelectionError};
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};

@@ -67,7 +67,6 @@ fn plan_stages(
         &[Some(accuracy)],
         &data,
         asap_aware_mapping::PlanningModels::builtin(),
-        asap_aware_mapping::pass::MAX_ENUMERATED_CANDIDATES,
     )
     .expect("Pass 1 accepts the query")
 }

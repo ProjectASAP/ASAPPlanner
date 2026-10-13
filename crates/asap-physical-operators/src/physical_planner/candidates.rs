@@ -381,7 +381,6 @@ mod tests {
             &[Some(planner_types::types::AccuracyTarget::Exact)],
             &workload.data_workload.unwrap(),
             asap_aware_mapping::PlanningModels::builtin(),
-            asap_aware_mapping::pass::MAX_ENUMERATED_CANDIDATES,
         )
         .unwrap();
         let [planner_types::ir::QueryRoot::Operator(selected)] = run.selected_logical().unwrap()

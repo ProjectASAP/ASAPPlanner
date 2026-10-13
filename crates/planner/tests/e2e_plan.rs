@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use asap_aware_mapping::pass::{
     plan_stages, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels,
-    StagePipeline, MAX_ENUMERATED_CANDIDATES,
+    StagePipeline,
 };
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
@@ -128,7 +128,7 @@ async fn facade_plans_match_plan_stages() {
         targets.push(Some(accuracy));
     }
     let data = workload.data_workload.clone().unwrap();
-    let run = plan_stages(roots, &targets, &data, models, MAX_ENUMERATED_CANDIDATES).unwrap();
+    let run = plan_stages(roots, &targets, &data, models).unwrap();
     let selection = run.selection.as_ref().expect("a candidate is selected");
     let selected = run.selected().expect("the selected candidate is listed");
 

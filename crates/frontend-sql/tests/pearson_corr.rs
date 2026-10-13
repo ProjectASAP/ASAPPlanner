@@ -153,7 +153,6 @@ async fn corr_survives_exact_plan_compilation() {
         &[Some(asap_types::types::AccuracyTarget::Exact)],
         &Default::default(),
         asap_aware_mapping::PlanningModels::builtin(),
-        asap_aware_mapping::pass::MAX_ENUMERATED_CANDIDATES,
     )
     .unwrap();
     let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_logical().unwrap() else {

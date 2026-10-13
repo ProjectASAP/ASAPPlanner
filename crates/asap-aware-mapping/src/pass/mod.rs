@@ -32,11 +32,10 @@ use crate::accuracy::{
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::per_computation_candidates::PerComputationCandidateError;
-use crate::plan_selection::{Selection, SelectionError};
+use crate::stage3_plan_selection::{Selection, SelectionError};
 
 pub use stage_pipeline::{
     plan_stages, LogicalCandidate, PrunedCandidate, StagePipeline, StagePipelineRun,
-    MAX_ENUMERATED_CANDIDATES,
 };
 
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;

@@ -165,7 +165,7 @@ pub enum PlanError {
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
-/// Lower every query (the language-specific frontends), then run the
+/// Lower every query (the query-language frontends), then run the
 /// optimization pass over the result: by default [`StagePipeline`], the
 /// planning stages in order.
 ///
