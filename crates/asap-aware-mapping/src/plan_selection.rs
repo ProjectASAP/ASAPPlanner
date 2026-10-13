@@ -1,8 +1,11 @@
 //! #509 Stage 3 (MVP): plan selection, the only stage that computes cost.
 //!
-//! Each Stage 2 candidate is checked against every query's accuracy target
-//! with the accuracy model, and Count-Min is admitted only over weights proven
-//! non-negative; a miss rejects the candidate as invalid, with a reason.
+//! Each Stage 2 candidate is checked against every query's accuracy target:
+//! the query's output meets it when its root guarantee (composed in Stage 1)
+//! does, or when the deployment's accuracy model shows this candidate's
+//! output does. Count-Min is admitted only over weights proven non-negative.
+//! A miss rejects the candidate as invalid, with a reason; only this stage
+//! discards valid candidates.
 //! Every valid candidate is priced node by node over its physical DAG, so a
 //! node shared by several queries is charged once, and the cheapest is
 //! selected. The rest are reported valid but costlier.
@@ -12,15 +15,15 @@
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. These numbers are illustrative, not calibrated. Latency
 //! bounds and deployment capabilities are not checked yet.
-use asap_types::ir::NonASAPOp;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::post_asap::{
-    FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
+    FieldDataType, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{DataType, Reduction, Schema};
 use asap_types::types::AccuracyTarget;
@@ -157,56 +160,90 @@ pub fn stage3_select(
     })
 }
 
-/// The first summary estimate that misses its query's target, as a reason.
+/// The first query whose output is not shown to meet its target, as a
+/// reason. An output meets its target when its root guarantee (composed in
+/// Stage 1) satisfies it, or when the deployment's accuracy model shows that
+/// this candidate's output does ([`crate::accuracy::AccuracyModel::output_guarantee`]). A
+/// certified estimate inside the plan is not enough on its own: a difference
+/// or ratio of certified estimates can be unbounded. Count-Min is admitted
+/// only over update weights proven non-negative, which its bound assumes.
 fn accuracy_violation(
     candidate: &PhysicalCandidate,
     targets: &[Option<AccuracyTarget>],
     models: &PlanningModels<'_>,
 ) -> Option<String> {
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
+        let query = query + 1;
         let Some(target) = target else { continue };
-        for node in OperatorNode::reachable(root) {
-            let Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input,
-                query: statistic,
-            }) = &node.operator
-            else {
+        for node in root_operators(root)
+            .iter()
+            .flat_map(|node| OperatorNode::reachable(node))
+        {
+            let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &node.operator else {
                 continue;
             };
-            let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &summary_input.operator
-            else {
-                return Some(format!("q{}: estimate over a non-summary input", query + 1));
-            };
-            let name = family_name(family);
-            // Count-Min's one-sided error bound assumes no negative updates.
             if matches!(family, FieldDataType::Sketch(kind, _)
                     if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
                 && !matches!(input.weight_domain, WeightDomain::NonNegative { .. })
             {
                 return Some(format!(
-                    "q{}: {name} needs non-negative update weights, and these are not proven \
+                    "q{query}: {} needs non-negative update weights, and these are not proven \
                      non-negative",
-                    query + 1
-                ));
-            }
-            let Some(guarantee) = models.accuracy.local_guarantee(family, statistic) else {
-                return Some(format!(
-                    "q{}: no accuracy model for {name}; target {target:?}",
-                    query + 1
-                ));
-            };
-            if !models.accuracy.satisfies(&guarantee, target) {
-                return Some(format!(
-                    "q{}: {name} guarantees bound {:?}, failure probability {:?}, which misses \
-                     target {target:?} (analytical guarantee; no accuracy evidence)",
-                    query + 1,
-                    guarantee.bound.evaluate(),
-                    guarantee.failure_probability.evaluate(),
+                    family_name(family)
                 ));
             }
         }
+        let guarantee = root_guarantee(root);
+        let meets = |g: &ResultGuarantee| models.accuracy.satisfies(g, target);
+        if guarantee.as_ref().is_some_and(meets)
+            || models
+                .accuracy
+                .output_guarantee(root)
+                .as_ref()
+                .is_some_and(meets)
+        {
+            continue;
+        }
+        return Some(match guarantee {
+            Some(g) => format!(
+                "q{query}: the output guarantees bound {:?}, failure probability {:?}, which \
+                 misses target {target:?}, and the accuracy model has no evidence that it meets it",
+                g.bound.evaluate(),
+                g.failure_probability.evaluate(),
+            ),
+            None => format!(
+                "q{query}: the output has no guarantee, and the accuracy model has no evidence \
+                 that it meets target {target:?}"
+            ),
+        });
     }
     None
+}
+
+/// The operator nodes a query root reads.
+fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
+    match root {
+        QueryRoot::Operator(node) => vec![node],
+        QueryRoot::Scalar(expr) => expr.operator_refs(),
+    }
+}
+
+/// The theoretical guarantee of a query's output: the root node's own; a
+/// scalar root is exact when every operator it reads is, and has none
+/// otherwise (#669).
+fn root_guarantee(root: &QueryRoot) -> Option<ResultGuarantee> {
+    match root {
+        QueryRoot::Operator(node) => node.guarantee.clone(),
+        QueryRoot::Scalar(expr) => expr
+            .operator_refs()
+            .into_iter()
+            .all(|node| {
+                node.guarantee
+                    .as_ref()
+                    .is_some_and(ResultGuarantee::is_exact)
+            })
+            .then(|| ResultGuarantee::exact("scalar over exact inputs")),
+    }
 }
 
 fn family_name(family: &FieldDataType) -> String {
@@ -512,9 +549,10 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
     use crate::physical_candidates::stage2_physical;
     use crate::test_support::lower_promql;
-    use asap_types::ir::QueryRoot;
+    use asap_types::post_asap::{AccuracyError, CompositionOperator};
     use asap_types::workload::{Evidence, Rate};
 
     fn data() -> DataWorkload {
@@ -548,7 +586,7 @@ mod tests {
         let topk = inventory
             .targets
             .iter()
-            .position(|t| t.candidates.len() > 2)
+            .position(|t| t.choices.candidates.len() > 2)
             .unwrap();
         [0, 1, 2]
             .into_iter()
@@ -560,10 +598,7 @@ mod tests {
                 )
                 .unwrap()
                 .into_iter()
-                .map(|(_, root)| match root {
-                    QueryRoot::Operator(node) => node,
-                    QueryRoot::Scalar(_) => panic!("operator root"),
-                })
+                .map(|(_, root)| root)
                 .collect();
                 let mut candidate = stage2_physical("L", &roots).unwrap();
                 candidate.id = format!("P{}", alternative + 1);
@@ -655,5 +690,131 @@ mod tests {
         let costlier: Vec<_> = selection.rejected.iter().filter(|r| r.valid).collect();
         assert_eq!(costlier.len(), 1);
         assert_ne!(costlier[0].id, selection.selected);
+    }
+
+    /// Every combination of Pass 1 alternatives of one query, as Stage 2
+    /// candidates `P1`, `P2`, ...
+    fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalCandidate> {
+        let root = lower_promql(query, target.clone());
+        let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+        )
+        .unwrap();
+        let mut choices = vec![vec![]];
+        for target in &inventory.targets {
+            choices = choices
+                .into_iter()
+                .flat_map(|choice: Vec<usize>| {
+                    (0..target.choices.candidates.len()).map(move |alternative| {
+                        let mut choice = choice.clone();
+                        choice.push(alternative);
+                        choice
+                    })
+                })
+                .collect();
+        }
+        choices
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                let roots: Vec<_> = crate::per_computation_candidates::compose_logical_candidate(
+                    &inventory, choice,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect();
+                let mut candidate = stage2_physical("L", &roots).unwrap();
+                candidate.id = format!("P{}", index + 1);
+                candidate
+            })
+            .collect()
+    }
+
+    fn has_summary_estimate(candidate: &PhysicalCandidate) -> bool {
+        candidate
+            .dag
+            .nodes
+            .iter()
+            .any(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryEstimate { .. })))
+    }
+
+    /// A deployment whose empirical accuracy shows every output exact.
+    struct EveryOutputMeasuredExact;
+
+    impl AccuracyModel for EveryOutputMeasuredExact {
+        fn local_guarantee(
+            &self,
+            family: &FieldDataType,
+            query: &SketchStatistic,
+        ) -> Option<ResultGuarantee> {
+            DefaultAccuracyModel.local_guarantee(family, query)
+        }
+        fn propagate(
+            &self,
+            op: &CompositionOperator,
+            inputs: &[ResultGuarantee],
+            local: Option<&ResultGuarantee>,
+            stats: &PropagationStats,
+        ) -> Result<ResultGuarantee, AccuracyError> {
+            DefaultAccuracyModel.propagate(op, inputs, local, stats)
+        }
+        fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
+            DefaultAccuracyModel.satisfies(guarantee, target)
+        }
+        fn output_guarantee(&self, _output: &QueryRoot) -> Option<ResultGuarantee> {
+            Some(ResultGuarantee::exact("measured"))
+        }
+    }
+
+    /// A difference of two quantile estimates has no output guarantee, though
+    /// each estimate is certified: its summary candidates stay listed as
+    /// invalid with a reason. The deployment's empirical accuracy for the
+    /// output admits them.
+    #[test]
+    fn combined_estimates_need_evidence_about_the_output() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let candidates = all_candidates(
+            "quantile_over_time(0.99, m[1m]) - quantile_over_time(0.5, m[1m])",
+            &target,
+        );
+        let summaries: Vec<_> = candidates
+            .iter()
+            .filter(|c| has_summary_estimate(c))
+            .map(|c| c.id.as_str())
+            .collect();
+        assert!(!summaries.is_empty());
+
+        let builtin = stage3_select(
+            &candidates,
+            &[Some(target.clone())],
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        for id in &summaries {
+            let rejection = builtin.rejected.iter().find(|r| r.id == *id).unwrap();
+            assert!(!rejection.valid);
+            assert!(
+                rejection.reason.contains("no guarantee"),
+                "{}",
+                rejection.reason
+            );
+        }
+        assert!(!summaries.contains(&builtin.selected.as_str()));
+
+        let measured = stage3_select(
+            &candidates,
+            &[Some(target)],
+            &data(),
+            PlanningModels::builtin().with_accuracy(&EveryOutputMeasuredExact),
+        )
+        .unwrap();
+        for id in &summaries {
+            assert!(measured.costs.contains_key(*id), "{id} is valid");
+        }
     }
 }

@@ -12,7 +12,7 @@
 //     (default 64). A candidate that cannot be composed carries `error`
 //     instead of `dag`;
 //   - stage2_physical_asap: one physical candidate per composed logical
-//     candidate (operator implementation only, everything at query time), no cost;
+//     candidate (operator implementation; every sub-DAG NotMaterialized), no cost;
 //   - stage3_selection: per-candidate costs, the selected candidate, and
 //     every other candidate as rejected (`valid: false`) or costlier.
 //
@@ -130,17 +130,8 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
             Ok(roots) => {
                 let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
                 candidate["dag"] = json!(export(&roots)?);
-                let operators = roots
-                    .into_iter()
-                    .map(|root| match root {
-                        QueryRoot::Operator(node) => Ok(node),
-                        QueryRoot::Scalar(_) => {
-                            Err("Stage 2: scalar query roots are not physical yet")
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
                 let mut physical_candidate =
-                    stage2_physical(&id, &operators).map_err(|e| format!("Stage 2 {id}: {e}"))?;
+                    stage2_physical(&id, &roots).map_err(|e| format!("Stage 2 {id}: {e}"))?;
                 physical_candidate.id = format!("P{}", index + 1);
                 physical_candidate.label = label;
                 physical.push(physical_candidate);
