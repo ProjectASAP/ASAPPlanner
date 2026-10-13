@@ -7016,7 +7016,10 @@ fn walk(
 /// inputs plus the operator nodes its scalar expressions read), the same
 /// scope `asap_types::ir::cse::share_common_sub_dags` itself uses and
 /// `tests::count_consumers` mirrors for its own fixtures. `Concat` is
-/// transparent: its branches are walked in place of it.
+/// transparent: its branches are walked in place of it. A `scalar(v)` read
+/// by a Project/Filter expression is planned here as an interior site and
+/// keeps its summary candidates; a combination's guarantee is not composed
+/// in this pass (#669).
 fn walk_children(
     node: &OperatorNode,
     order: &mut Vec<*const OperatorNode>,

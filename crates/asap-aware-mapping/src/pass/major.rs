@@ -53,24 +53,30 @@ impl OptimizationPass for MajorPass {
         // A standalone scalar query is not a node; the operator sub-DAGs it
         // reads are planned like operator roots, against its entry (#511
         // §2.3, operator-sharing §3). They follow the operator roots, each
-        // scalar's distinct references in `operator_refs` order.
+        // scalar's distinct references in `operator_refs` order. References
+        // are distinct by structure, not pointer: front ends build identical
+        // references as separate nodes, and planning merges them into one.
         let scalar_refs: Vec<Vec<Rc<OperatorNode>>> = workload
             .scalar_roots()
             .iter()
             .map(|(_, expr)| {
                 let mut refs: Vec<Rc<OperatorNode>> = Vec::new();
                 for node in expr.operator_refs() {
-                    if !refs.iter().any(|r| Rc::ptr_eq(r, node)) {
+                    if !refs.iter().any(|r| same_reference(r, node)) {
                         refs.push(Rc::clone(node));
                     }
                 }
                 refs
             })
             .collect();
-        // Each reference is planned against the entry's accuracy target. The
-        // guarantee of a combination of approximate values (e.g. a difference
-        // of two quantiles) is not composed here: guarantee composition is
-        // #575's, and Stage 3's accuracy model decides.
+        // Each reference is planned against the entry's accuracy target, so a
+        // combination of approximate values (e.g. a difference of two
+        // quantiles) keeps its summary candidates. The combined guarantee is
+        // not composed in this pass (it is effectively `None`): composition is
+        // designed in #669 and implemented in #575, Stage 3's accuracy model
+        // checks it, and in the MVP a rank-interval guarantee counts as
+        // `None`. The same holds for scalar references inside Project/Filter
+        // expressions, which are planned as interior sites.
         for ((index, _), refs) in workload.scalar_roots().iter().zip(&scalar_refs) {
             for node in refs {
                 roots.push((*index, Rc::clone(node), Some(targets[*index].clone())));
@@ -221,7 +227,7 @@ impl OptimizationPass for MajorPass {
                 let expr = expr.map_operator_refs(&mut |node| {
                     let position = refs
                         .iter()
-                        .position(|r| Rc::ptr_eq(r, node))
+                        .position(|r| same_reference(r, node))
                         .expect("every reference was planned");
                     Rc::clone(&selected[position].plan.root)
                 });
@@ -247,4 +253,9 @@ impl MajorPass {
             detail: format!("entry {entry_index}: root has no candidate group"),
         }
     }
+}
+
+/// Whether two scalar references read the same operator sub-DAG.
+fn same_reference(a: &Rc<OperatorNode>, b: &Rc<OperatorNode>) -> bool {
+    Rc::ptr_eq(a, b) || a.as_ref() == b.as_ref()
 }

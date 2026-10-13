@@ -627,3 +627,30 @@ async fn combined_scalar_references_read_summaries() {
         assert!(sketches > 0, "{:#?}", read.plan.root);
     }
 }
+
+/// Front ends build structurally identical references as separate nodes and
+/// planning merges them: such a scalar plans each distinct reference once and
+/// satisfies the plan contract.
+#[tokio::test]
+async fn identical_scalar_references_plan_once() {
+    for (query, distinct) in [
+        ("scalar(rate(x[5m])) - scalar(rate(x[5m]))", 1),
+        (
+            "scalar(sum(rate(x[5m]))) / scalar(sum(rate(x[5m]))) + scalar(count(x))",
+            2,
+        ),
+    ] {
+        let output = plan_promql(&[(query, 0.01)], &CHEAP_SUMMARY).await;
+        assert_eq!(output.scalar_plans.len(), distinct, "{query}");
+        let (_, expr) = &output.scalar_roots[0];
+        for node in expr.operator_refs() {
+            assert!(
+                output
+                    .scalar_plans
+                    .iter()
+                    .any(|read| Rc::ptr_eq(&read.plan.root, node)),
+                "{query}"
+            );
+        }
+    }
+}
