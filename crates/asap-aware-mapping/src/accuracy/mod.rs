@@ -2,18 +2,32 @@
 //!
 //! Estimator models derive local guarantees, and evidence supplies the
 //! deployment's empirical accuracy for a candidate's output. Unknown evidence
-//! may retain a candidate but does not authorize selection. See
-//! `docs/design_docs/concepts/accuracy-models.md` for the design.
+//! may retain a candidate but does not authorize selection. Composition
+//! ([`AccuracyModel::propagate`]) and budget allocation ([`allocation`]) are
+//! kept as library code but not yet called by the Stage 1 → Stage 3
+//! pipeline (#669). See `docs/design_docs/concepts/accuracy-models.md` for
+//! the design.
 
+pub mod allocation;
+pub mod composition;
 pub mod estimators;
 pub mod evidence;
 
-pub use evidence::{AccuracyEvidenceProvider, NoAccuracyEvidence};
-
-use asap_types::post_asap::{
-    BoundExpr, ErrorMetric, FieldDataType, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchParams, SketchStatistic,
+pub use allocation::{
+    AccuracyAllocation, AccuracyBudgetAllocator, CompositionShape, EqualSplitAllocator,
 };
+pub use estimators::EstimatorAccuracy;
+pub use evidence::{
+    AccuracyEvidenceProvider, EstimatorContract, NoAccuracyEvidence, PropagationStats,
+    QuantileInputDomain, WorkloadAccuracyEvidence,
+};
+
+use asap_types::ir::OperatorNode;
+use asap_types::post_asap::{
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
+    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic,
+};
+use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 
 /// The deployment-extensible accuracy model. `asap-aware-mapping` ships
@@ -21,6 +35,14 @@ use asap_types::types::AccuracyTarget;
 /// family implements this trait and passes it to plan selection through
 /// [`crate::PlanningModels`].
 pub trait AccuracyModel {
+    /// The definition-registered rule for applying the exact aggregate
+    /// `measures` to an approximate input. `None` means the function is exact
+    /// only over exact inputs; callers must fail closed for approximate input.
+    /// Not called by the Stage 1 → Stage 3 pipeline yet (#669).
+    fn exact_operation_rule(&self, _measures: &[AggIntent]) -> Option<CompositionOperator> {
+        None
+    }
+
     /// The guarantee of reading `query` out of a summary of family `family`
     /// built over an **exact** input — derived from the family's committed
     /// parameters by inverting the same sizing formulas
@@ -33,12 +55,24 @@ pub trait AccuracyModel {
         query: &SketchStatistic,
     ) -> Option<ResultGuarantee>;
 
+    /// Compose `inputs`' guarantees (in the parent's child order) with the
+    /// parent's own `local` guarantee under `op`. `Err` is the fail-closed
+    /// answer: no registered rule, or a missing input guarantee. Not called
+    /// by the Stage 1 → Stage 3 pipeline yet (#669).
+    fn propagate(
+        &self,
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        local: Option<&ResultGuarantee>,
+        stats: &PropagationStats,
+    ) -> Result<ResultGuarantee, AccuracyError>;
+
     /// Compare the dimensions requested by `target`. Unknown required
     /// dimensions fail; selection separately excludes missing accuracy evidence.
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool;
 }
 
-/// The built-in estimator models, with conservative target checks.
+/// The built-in estimator and composition models, with conservative target checks.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultAccuracyModel;
 
@@ -59,12 +93,24 @@ impl DefaultAccuracyModel {
 }
 
 impl AccuracyModel for DefaultAccuracyModel {
+    fn exact_operation_rule(&self, measures: &[AggIntent]) -> Option<CompositionOperator> {
+        composition::exact_operation_rule(measures)
+    }
     fn local_guarantee(
         &self,
         family: &FieldDataType,
         query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         estimators::local_guarantee(family, query)
+    }
+    fn propagate(
+        &self,
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        local: Option<&ResultGuarantee>,
+        stats: &PropagationStats,
+    ) -> Result<ResultGuarantee, AccuracyError> {
+        composition::propagate(op, inputs, local, stats)
     }
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
         let within = |value: Option<f64>, limit: f64| {

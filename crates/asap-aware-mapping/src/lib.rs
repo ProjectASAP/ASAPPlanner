@@ -57,6 +57,10 @@
 //!   for a summary's output, and the
 //!   [`AccuracyEvidenceProvider`](accuracy::AccuracyEvidenceProvider) through
 //!   which a deployment supplies empirical accuracy for a candidate's output.
+//!   Its composition and budget-allocation rules, and classic HLL confidence,
+//!   are not called by the stage pipeline yet.
+//! - [`empirical_cost`] and [`empirical_resources`] — offline measured
+//!   evidence; not called by the stage pipeline yet.
 //! - [`analytical_cost`], [`physical_operator_statistics`],
 //!   [`query_physical_lowering`], [`storage_io`] and
 //!   [`physical_handoff_cost`] — the analytical pricing plan selection uses,
@@ -64,6 +68,9 @@
 
 pub mod accuracy;
 pub mod analytical_cost;
+pub mod empirical_cost;
+pub mod empirical_resources;
+pub mod function_rules;
 pub mod pass;
 pub mod physical_handoff_cost;
 pub mod physical_operator_statistics;
@@ -75,7 +82,9 @@ pub mod storage_io;
 mod test_support;
 
 pub use accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
+    AccuracyAllocation, AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel,
+    CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
+    PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use pass::{
     optimize, run_stage1_to_stage3, OptimizationInput, OptimizationInputError, OptimizationPass,
