@@ -7,11 +7,10 @@
 //! could silently consume an approximate child. This module is the
 //! *vocabulary* that fixes that — the typed metric, the symbolic bound and
 //! failure-probability expressions, the provenance trail, and the typed
-//! rejection reasons. The *algebra* that composes these (the `AccuracyModel`
-//! trait, its default conservative rules, and budget allocation) lives one
-//! layer up in `asap_aware_mapping::accuracy`, the same layering
-//! [`crate::dag_export`] keeps for cost decisions: this crate defines the
-//! shapes, the planning crate decides.
+//! rejection reasons. The *model* that derives them (the `AccuracyModel`
+//! trait and its default per-family rules) lives one layer up in
+//! `asap_aware_mapping::accuracy`: this crate defines the shapes, the
+//! planning crate decides.
 //!
 //! ## What a guarantee says
 //!
@@ -261,8 +260,8 @@ impl ProbabilityExpr {
     }
 }
 
-/// How a parent operator consumes its inputs' values — the shape an
-/// `AccuracyModel::propagate` rule is registered against. `#[non_exhaustive]`
+/// How a parent operator consumes its inputs' values — the shape a
+/// composition rule is registered against. `#[non_exhaustive]`
 /// for the same reason [`ErrorMetric`] is.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -353,7 +352,7 @@ pub enum GuaranteeSource {
         rule: String,
     },
     /// The budget split that produced this layer's local target — present
-    /// only when an `AccuracyBudgetAllocator` re-sized a layer.
+    /// only when an accuracy budget allocator re-sized a layer.
     BudgetAllocation {
         allocator: String,
         layer: usize,
@@ -424,7 +423,7 @@ impl ResultGuarantee {
     /// How many approximate sketch evaluations contributed to this value —
     /// `1` for a plain evaluation, `0` for an exact value, and the transitive
     /// count through every [`GuaranteeSource::ChildGuarantee`] for a
-    /// composition. An `AccuracyBudgetAllocator` uses this as the number
+    /// composition. An accuracy budget allocator uses this as the number
     /// of layers a budget must be split across.
     pub fn approximate_layer_count(&self) -> usize {
         self.provenance

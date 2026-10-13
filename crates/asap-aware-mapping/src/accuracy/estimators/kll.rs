@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_rank_sizing() {
-        use crate::replacement::default_size_params;
+        use crate::realization::default_size_params;
         use asap_types::post_asap::{GroupingStrategy, SketchKind};
         use asap_types::pre_asap::agg_intent::default_quantile;
         let q = default_quantile(0.99);

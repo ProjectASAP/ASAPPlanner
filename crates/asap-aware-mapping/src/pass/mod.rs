@@ -2,8 +2,8 @@
 //!
 //! An [`OptimizationPass`] is the whole optimization stage behind one
 //! signature: pre-ASAP IR in, post-ASAP DAG out. The trait deliberately names
-//! none of this crate's two-phase vocabulary — no `CandidateLogicalASAPDAGs`, no
-//! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
+//! none of the planning stages' vocabulary — no per-computation candidates,
+//! physical candidates or plan selection — so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
 //! one implementation, [`Stage1ToStage3Pass`]: the planning stages in order
@@ -30,7 +30,6 @@ use asap_types::workload::WorkloadError;
 use crate::accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
 };
-use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::per_computation_candidates::PerComputationCandidateError;
 use crate::stage3_plan_selection::{Selection, SelectionError};
 
@@ -38,7 +37,6 @@ pub use stage1_to_stage3::{
     run_stage1_to_stage3, LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
-static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 
@@ -48,40 +46,28 @@ static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 /// a built-in default, evidence about a particular deployment cannot.
 ///
 /// Plan selection reads `accuracy` and `evidence`. It prices candidates with
-/// its own analytical model, so [`Stage1ToStage3Pass`] does not read `cost`.
+/// its own analytical model.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
-    pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
 }
 
 impl<'a> PlanningModels<'a> {
     pub fn new(
-        cost: &'a dyn CostModel,
         accuracy: &'a dyn AccuracyModel,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
-        Self {
-            cost,
-            accuracy,
-            evidence,
-        }
+        Self { accuracy, evidence }
     }
 
     /// The built-in models.
     pub fn builtin() -> PlanningModels<'static> {
         PlanningModels {
-            cost: &DEFAULT_COST_MODEL,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
         }
-    }
-
-    pub fn with_cost(mut self, cost: &'a dyn CostModel) -> Self {
-        self.cost = cost;
-        self
     }
 
     pub fn with_accuracy(mut self, accuracy: &'a dyn AccuracyModel) -> Self {

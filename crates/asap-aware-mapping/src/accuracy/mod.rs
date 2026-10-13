@@ -1,51 +1,30 @@
 //! Planner accuracy interfaces and model dispatch.
 //!
-//! Estimator models derive local guarantees, composition propagates them,
-//! allocation proposes local budgets, and evidence supplies scoped contracts.
-//! Unknown evidence may retain a candidate but does not authorize selection.
-//! See `docs/design_docs/concepts/accuracy-models.md` for the design.
+//! Estimator models derive local guarantees, and evidence supplies the
+//! deployment's empirical accuracy for a candidate's output. Unknown evidence
+//! may retain a candidate but does not authorize selection. See
+//! `docs/design_docs/concepts/accuracy-models.md` for the design.
 
-pub mod allocation;
-pub mod composition;
 pub mod estimators;
 pub mod evidence;
-pub mod reconciliation;
 
-pub use allocation::{
-    AccuracyAllocation, AccuracyBudgetAllocator, CompositionShape, EqualSplitAllocator,
-};
-pub(crate) use estimators::EstimatorAccuracy;
-pub use evidence::{
-    AccuracyEvidenceProvider, EstimatorContract, NoAccuracyEvidence, PropagationStats,
-    QuantileInputDomain, WorkloadAccuracyEvidence,
-};
+pub use evidence::{AccuracyEvidenceProvider, NoAccuracyEvidence};
 
-use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
-    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic,
+    BoundExpr, ErrorMetric, FieldDataType, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::types::AccuracyTarget;
 
-use crate::exact_composition::ExactOperation;
-
-/// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
-/// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
-/// default rejects (a registered cross-metric conversion, say) implements
-/// this trait and passes it to
-/// [`crate::replacement::ASAPStrategies::new_with_planning_inputs`].
+/// The deployment-extensible accuracy model. `asap-aware-mapping` ships
+/// [`DefaultAccuracyModel`]; a deployment with its own error model for a
+/// family implements this trait and passes it to plan selection through
+/// [`crate::PlanningModels`].
 pub trait AccuracyModel {
-    /// The definition-registered rule for applying `operation` to an
-    /// approximate input. `None` means the function is exact only over exact
-    /// inputs; callers must fail closed for approximate input.
-    fn exact_operation_rule(&self, _operation: &ExactOperation) -> Option<CompositionOperator> {
-        None
-    }
-
     /// The guarantee of reading `query` out of a summary of family `family`
     /// built over an **exact** input — derived from the family's committed
     /// parameters by inverting the same sizing formulas
-    /// [`crate::replacement::default_size_params`] uses. `None` when this
+    /// [`crate::realization::default_size_params`] uses. `None` when this
     /// model has no error model for the family (the default has none for
     /// `Sample`/`Wavelet`/`StatModel`).
     fn local_guarantee(
@@ -54,23 +33,12 @@ pub trait AccuracyModel {
         query: &SketchStatistic,
     ) -> Option<ResultGuarantee>;
 
-    /// Compose `inputs`' guarantees (in the parent's child order) with the
-    /// parent's own `local` guarantee under `op`. `Err` is the fail-closed
-    /// answer: no registered rule, or a missing input guarantee.
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError>;
-
     /// Compare the dimensions requested by `target`. Unknown required
     /// dimensions fail; selection separately excludes missing accuracy evidence.
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool;
 }
 
-/// The built-in estimator and composition models, with conservative target checks.
+/// The built-in estimator models, with conservative target checks.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultAccuracyModel;
 
@@ -91,24 +59,12 @@ impl DefaultAccuracyModel {
 }
 
 impl AccuracyModel for DefaultAccuracyModel {
-    fn exact_operation_rule(&self, operation: &ExactOperation) -> Option<CompositionOperator> {
-        composition::exact_operation_rule(operation)
-    }
     fn local_guarantee(
         &self,
         family: &FieldDataType,
         query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         estimators::local_guarantee(family, query)
-    }
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError> {
-        composition::propagate(op, inputs, local, stats)
     }
     fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
         let within = |value: Option<f64>, limit: f64| {
@@ -124,8 +80,6 @@ impl AccuracyModel for DefaultAccuracyModel {
         }
     }
 }
-
-pub(crate) use estimators::topk_capacity;
 
 #[cfg(test)]
 mod tests {

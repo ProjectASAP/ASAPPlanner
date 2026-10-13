@@ -12,8 +12,6 @@ const OPTIMIZATION_MODULES: &[&str] = &[
 
 /// The modules that price plans.
 const COST_MODULES: &[&str] = &[
-    "cost_model",
-    "recurrence",
     "analytical_cost",
     "physical_operator_statistics",
     "stage3_plan_selection",
@@ -128,20 +126,20 @@ fn logical_and_physical_asap_optimization_import_no_cost_model() {
 #[test]
 fn the_check_finds_cost_imports_outside_tests() {
     let source = "\
-// use crate::cost_model::CostModel;
+// use crate::analytical_cost::estimate_operator;
 use crate::{
     accuracy::AccuracyModel,
-    DefaultCostModel,
+    ResourceCalibration,
 };
 fn f() -> f64 {
     crate::analytical_cost::price()
 }
 #[cfg(test)]
 mod tests {
-    use crate::cost_model::CostModel;
+    use crate::analytical_cost::estimate_operator;
 }
 ";
-    let lines: Vec<_> = cost_imports(source, &["DefaultCostModel"])
+    let lines: Vec<_> = cost_imports(source, &["ResourceCalibration"])
         .into_iter()
         .map(|(number, _)| number)
         .collect();

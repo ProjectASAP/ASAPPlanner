@@ -291,7 +291,7 @@ pub fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
             } => {
                 // An own-field `ColumnRef` must be seeded like `Dedup.cols`, or
                 // a discriminator column referenced nowhere else in the tree is
-                // absent from the fallback schema and fails `NotFound` later.
+                // absent from the usage-derived schema and fails `NotFound` later.
                 if let Some(key) = discriminator_unique_key {
                     push_ref_name(key.discriminator(), out);
                     key.inner_key().iter().for_each(|c| push_ref_name(c, out));
