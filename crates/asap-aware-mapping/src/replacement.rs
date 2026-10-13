@@ -7050,6 +7050,88 @@ mod tests {
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
 
+    /// A logical rewrite is told apart by provenance, not shape: a summary
+    /// realization with no guarantee and no ASAP operator is still a bound
+    /// summary decision.
+    #[test]
+    fn logical_rewrite_follows_provenance_not_shape() {
+        let node = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
+        assert!(node.guarantee.is_none() && !node.contains_asap());
+        let candidate = |provenance| ReplacementSubDAG {
+            replacement: Replacement::SubDAG(Rc::clone(&node)),
+            strategy: "test",
+            provenance,
+            rationale: String::new(),
+        };
+        let realization = candidate(ReplacementProvenance::SummaryRealization);
+        assert!(!realization.is_logical_rewrite());
+        assert!(realization.has_missing_accuracy_evidence());
+        for provenance in [
+            ReplacementProvenance::LogicalRewrite,
+            ReplacementProvenance::CseShare,
+            ReplacementProvenance::CseRecompute,
+            ReplacementProvenance::AccuracyReconciliation,
+        ] {
+            assert!(candidate(provenance).is_logical_rewrite(), "{provenance:?}");
+        }
+    }
+
+    /// A heap sketch consumes every raw row, so the keyed input rule refuses
+    /// a TopK over a filtered count (#466) even when handed one directly.
+    #[test]
+    fn keyed_heap_input_refuses_a_filtered_count() {
+        use asap_types::ir::{ExprSemantics, Predicate};
+        use asap_types::pre_asap::{CompareOpKind, ScalarValue};
+        let count_by_job = |filter: Option<Predicate>| {
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: ReductionTy::by(vec![2]),
+                measures: vec![AggIntent::Count {
+                    accuracy: AccuracyTarget::Exact,
+                }],
+                output_names: vec![],
+                filters: vec![filter],
+                having: None,
+                child: metric_scan(&["job"]),
+            }))
+            .unwrap()
+        };
+        let intent = AggIntent::TopK {
+            k: 5,
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        let family = FieldDataType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::CmsWithHeap,
+                SketchParams::CmsWithHeap {
+                    width: 64,
+                    depth: 4,
+                    heap_size: 5,
+                },
+            ),
+            GroupingStrategy::default(),
+        );
+        let output = ReductionTy::Reduce(asap_types::ir::operator_properties::GroupKeys::none());
+        assert!(matches!(
+            realize_keyed_additive_summary_input(&intent, &family, &output, &count_by_job(None)),
+            PhysicalSummaryInputRuleResult::Realized(_)
+        ));
+        let value_above_one = Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(1)),
+            op: CompareOpKind::Gt,
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+            semantics: ExprSemantics::Promql,
+        });
+        assert!(matches!(
+            realize_keyed_additive_summary_input(
+                &intent,
+                &family,
+                &output,
+                &count_by_job(Some(value_above_one))
+            ),
+            PhysicalSummaryInputRuleResult::NotApplicable
+        ));
+    }
+
     /// Search takes the front end's pre-ASAP DAG: a root that already holds
     /// an ASAP operator is an error, not a panic.
     #[test]

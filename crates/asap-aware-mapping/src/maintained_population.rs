@@ -471,6 +471,51 @@ mod tests {
         assert_eq!(p.grouping, ["instance"]);
         assert_eq!(p.matchers[0].operation, CurrentSeriesMatch::Regex);
     }
+    /// `root`, a `Limit`, with its partition replaced by `partition_by`.
+    fn with_limit_partition(
+        root: &Rc<OperatorNode>,
+        partition_by: asap_types::pre_asap::GroupKeys,
+    ) -> Rc<OperatorNode> {
+        let Some(NonASAPOp::Limit {
+            n, offset, child, ..
+        }) = root.non_asap()
+        else {
+            panic!("expected a Limit root, got {root:?}");
+        };
+        Rc::new(OperatorNode::with_schema(
+            Operator::NonASAP(NonASAPOp::Limit {
+                n: *n,
+                offset: *offset,
+                partition_by,
+                child: Rc::clone(child),
+            }),
+            root.schema.clone(),
+        ))
+    }
+
+    // A Limit keeps k rows per its own partition: over a Sort partitioned
+    // otherwise it is not the population's top-k.
+    #[test]
+    fn topk_limit_must_partition_like_its_sort() {
+        let per_job = lower("topk by(job)(5,a)");
+        let global = lower("topk(5,a)");
+        assert!(recognize(&per_job).is_some());
+        assert!(recognize(&global).is_some());
+        let Some(NonASAPOp::Limit {
+            partition_by: by_job,
+            ..
+        }) = per_job.non_asap()
+        else {
+            panic!("expected a Limit root, got {per_job:?}");
+        };
+        assert!(!by_job.is_empty());
+        let global_limit_over_per_job_sort =
+            with_limit_partition(&per_job, asap_types::pre_asap::GroupKeys::none());
+        let per_job_limit_over_global_sort = with_limit_partition(&global, by_job.clone());
+        assert!(recognize(&global_limit_over_per_job_sort).is_none());
+        assert!(recognize(&per_job_limit_over_global_sort).is_none());
+    }
+
     // Population timing is a lifecycle choice: a retained or rebuilt
     // population both validate, while its evaluation must stay at query time.
     #[test]

@@ -500,6 +500,94 @@ mod tests {
         ));
     }
 
+    /// A scalar plan read from `root`, keyed by `entry_index`.
+    fn scalar_plan(entry_index: usize, root: &Rc<OperatorNode>) -> QueryLifecyclePlan {
+        QueryLifecyclePlan {
+            entry_index,
+            plan: crate::SummaryMaintenanceLifecyclePlan {
+                root: Rc::clone(root),
+                deployments: vec![],
+                horizon: None,
+                evaluation_rate: None,
+                update_rate: None,
+                expected_reads: None,
+                selected_raw_recompute: true,
+                selected_window_implementation_id: None,
+                summary_total_cost: None,
+                window_accuracy_guarantee: None,
+                raw_recompute_total_cost: None,
+            },
+        }
+    }
+
+    /// `scalar_plans` holds one plan per distinct reference of each scalar
+    /// root, in order and keyed by that root's entry: a plan out of order,
+    /// under another entry, or read by no scalar root is rejected.
+    #[test]
+    fn contract_checks_scalar_plan_order_entry_and_count() {
+        use asap_types::ir::non_asap::NonASAPOp;
+        use asap_types::ir::operator_properties::Source;
+        use asap_types::ir::{ExprSemantics, Operator, ScalarExpr};
+        use asap_types::pre_asap::schema::{DataType, Field, Schema};
+        use asap_types::pre_asap::ArithmeticOpKind;
+        let series = |metric: &str| {
+            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries {
+                    metric: metric.into(),
+                },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![Field::plain("ts", DataType::Timestamp, false)],
+                    0,
+                    vec![],
+                ),
+            }))
+            .unwrap()
+        };
+        let (a, b) = (series("a"), series("b"));
+        let read = |node: &Rc<OperatorNode>| ScalarExpr::PromqlScalarFromVector(Rc::clone(node));
+        let combine = |left, right| ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Sub,
+            left: Box::new(left),
+            right: Box::new(right),
+            semantics: ExprSemantics::Promql,
+        };
+        let with_plans = |plans: Vec<QueryLifecyclePlan>| {
+            let mut output = PlanOutput::new(Vec::new());
+            // `a - b`, then `a - a`: one plan per distinct reference.
+            output.scalar_roots = vec![
+                (0, combine(read(&a), read(&b))),
+                (1, combine(read(&a), read(&a))),
+            ];
+            output.scalar_plans = plans;
+            check_contract(&output, "stub", 2)
+        };
+        with_plans(vec![
+            scalar_plan(0, &a),
+            scalar_plan(0, &b),
+            scalar_plan(1, &a),
+        ])
+        .unwrap();
+        for plans in [
+            // Wrong order.
+            vec![scalar_plan(0, &b), scalar_plan(0, &a), scalar_plan(1, &a)],
+            // Wrong entry key.
+            vec![scalar_plan(0, &a), scalar_plan(1, &b), scalar_plan(1, &a)],
+            // An extra plan.
+            vec![
+                scalar_plan(0, &a),
+                scalar_plan(0, &b),
+                scalar_plan(1, &a),
+                scalar_plan(1, &a),
+            ],
+        ] {
+            assert!(matches!(
+                with_plans(plans),
+                Err(OptimizeError::ContractViolation { pass: "stub", .. })
+            ));
+        }
+    }
+
     /// The matching count passes.
     #[test]
     fn contract_accepts_an_empty_workload() {

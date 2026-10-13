@@ -2774,11 +2774,28 @@ mod tests {
             "rate(a[5m]) / scalar(rate(b[5m]))",
             "rate(a[5m]) > scalar(rate(b[5m]))",
         ] {
-            assert_scalar_reference_is_a_scalar_input(query);
+            assert_scalar_reference_is_a_scalar_input(query, false, 1);
         }
     }
 
-    fn assert_scalar_reference_is_a_scalar_input(query: &str) {
+    /// Each distinct reference is one scalar input of the `Project` or
+    /// `Filter`; one node read twice is one input.
+    #[test]
+    fn scalar_references_are_one_input_per_distinct_reference() {
+        for query in [
+            "rate(a[5m]) / (scalar(rate(b[5m])) + scalar(rate(c[5m])))",
+            "rate(a[5m]) > (scalar(rate(b[5m])) + scalar(rate(c[5m])))",
+        ] {
+            assert_scalar_reference_is_a_scalar_input(query, false, 2);
+            assert_scalar_reference_is_a_scalar_input(query, true, 1);
+        }
+    }
+
+    fn assert_scalar_reference_is_a_scalar_input(
+        query: &str,
+        same_reference: bool,
+        scalar_inputs: usize,
+    ) {
         use crate::physical_operator_statistics::ScalarInputStatistics;
         use asap_types::types::AccuracyTarget;
         use asap_types::workload::{
@@ -2814,6 +2831,22 @@ mod tests {
         let root = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
             .unwrap()
             .remove(0);
+        // Read one node through every reference (as a planner that shares
+        // the identical references would), so the input dedupe is tested.
+        let root = if same_reference {
+            let children = root.children();
+            let (row, first) = (Rc::clone(children[0]), Rc::clone(children[1]));
+            OperatorNode::new_shared(root.operator.map_children(|child| {
+                if Rc::ptr_eq(child, &row) {
+                    Rc::clone(&row)
+                } else {
+                    Rc::clone(&first)
+                }
+            }))
+            .unwrap()
+        } else {
+            root
+        };
 
         let vector = |series| promql_edge(series, 10, PromqlValueKind::Vector);
         let produced: RefCell<HashMap<String, OperatorStatistics>> = RefCell::default();
@@ -2888,16 +2921,15 @@ mod tests {
                 ..evidence(statistics)
             })
         };
-        let query_scope = scope(vec![
-            coverage(
-                asap_types::pre_asap::Source::TimeSeries { metric: "a".into() },
-                vec![],
-            ),
-            coverage(
-                asap_types::pre_asap::Source::TimeSeries { metric: "b".into() },
-                vec![],
-            ),
-        ]);
+        let query_scope = scope(
+            OperatorNode::reachable(&root)
+                .iter()
+                .filter_map(|node| match node.non_asap() {
+                    Some(NonASAPOp::Scan { source, .. }) => Some(coverage(source.clone(), vec![])),
+                    _ => None,
+                })
+                .collect(),
+        );
         let dag = lower_query_physical_dag(&root, &query_scope, &provider).unwrap();
         let root_node = dag.nodes.iter().find(|node| node.id == dag.root).unwrap();
         assert!(
@@ -2908,13 +2940,11 @@ mod tests {
             "{query}: {:?}",
             root_node.operator
         );
-        assert_eq!(root_node.children.len(), 2, "{query}");
-        let scalar = dag
-            .nodes
-            .iter()
-            .find(|node| node.id == root_node.children[1])
-            .unwrap();
-        assert_eq!(scalar.operator, PhysicalOperator::PromqlVectorToScalar);
+        assert_eq!(root_node.children.len(), 1 + scalar_inputs, "{query}");
+        for child in &root_node.children[1..] {
+            let scalar = dag.nodes.iter().find(|node| node.id == *child).unwrap();
+            assert_eq!(scalar.operator, PhysicalOperator::PromqlVectorToScalar);
+        }
         estimate_physical_dag(&dag.nodes, &dag.root, &query_scope, &dag.evidence).unwrap();
     }
 }
