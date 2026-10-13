@@ -357,7 +357,7 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
                 layers,
             },
         ) => *heap_size > 0 && *sketch_rows > 0 && *sketch_cols > 0 && (1..=64).contains(layers),
-        (SketchAlgorithm::Kll, SketchParams::Kll { k })
+        (SketchAlgorithm::Kll, SketchParams::Kll { k, .. })
         | (SketchAlgorithm::Kmv, SketchParams::Kmv { k })
         | (SketchAlgorithm::Theta, SketchParams::Theta { k }) => *k > 0,
         (SketchAlgorithm::Hll, SketchParams::Hll { precision }) => (4..=18).contains(precision),

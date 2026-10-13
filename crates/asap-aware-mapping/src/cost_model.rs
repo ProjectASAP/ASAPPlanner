@@ -1092,7 +1092,10 @@ mod tests {
             match kind {
                 SketchAlgorithm::Kll => {
                     let k = if eps >= 0.01 { 200 } else { 2048 };
-                    SketchParams::Kll { k }
+                    SketchParams::Kll {
+                        k,
+                        failure_probability: None,
+                    }
                 }
                 other => crate::realization::default_size_params(other, intent, eps, delta),
             }
@@ -1106,7 +1109,10 @@ mod tests {
         let intent = default_quantile(0.99);
         assert_eq!(
             DiscreteKllRungs.size_params(SketchAlgorithm::Kll, &intent, 0.001, 0.01),
-            SketchParams::Kll { k: 2048 },
+            SketchParams::Kll {
+                k: 2048,
+                failure_probability: None
+            },
         );
         // Untouched kinds still fall through to the default formula.
         assert_eq!(
