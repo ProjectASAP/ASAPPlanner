@@ -533,7 +533,7 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
         .iter()
         .map(|(index, root)| {
             let dag = selection
-                .assemble_selected_dag(root)
+                .assemble_selected_query(root)
                 .expect("assembles")
                 .expect("root has a group");
             (*index, dag)
@@ -652,5 +652,42 @@ async fn identical_scalar_references_plan_once() {
                 "{query}"
             );
         }
+    }
+}
+
+/// A root whose selected candidate is an exact state is a query result: it
+/// is read through `FinalizeExactAccumulator`, so its output is plain values,
+/// not accumulator state.
+#[tokio::test]
+async fn exact_state_roots_are_finalized() {
+    for query in [
+        "sum_over_time(m[1m])",
+        "sum(rate(x[5m]))",
+        "sum(sum_over_time(m[1m]) + sum_over_time(n[1m]))",
+    ] {
+        let output = plan_promql(&[(query, 0.01)], &CHEAP_SUMMARY).await;
+        let plan = &output.plans[0].plan;
+        assert!(
+            matches!(
+                plan.root.asap(),
+                Some(ASAPOp::FinalizeExactAccumulator { .. })
+            ),
+            "{query}: {:#?}",
+            plan.root
+        );
+        let dag = plan.execution_timed_dag().unwrap();
+        let root = dag
+            .nodes
+            .iter()
+            .find(|node| node.id == dag.roots[0])
+            .unwrap();
+        assert!(
+            root.output_schema
+                .fields
+                .iter()
+                .all(|field| field.is_plain()),
+            "{query}: {:?}",
+            root.output_schema
+        );
     }
 }

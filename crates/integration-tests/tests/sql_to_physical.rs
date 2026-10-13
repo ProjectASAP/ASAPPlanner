@@ -39,7 +39,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
         let space = search_workload(vec![("sql", logical)]).unwrap();
         let selected = space
             .global_selection(&DefaultCostModel)
-            .assemble_selected_dag(&space.roots[0].1)
+            .assemble_selected_query(&space.roots[0].1)
             .unwrap()
             .unwrap();
         let dag = compile_physical_asap_dag(&selected).unwrap();

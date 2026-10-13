@@ -116,6 +116,9 @@ impl OptimizationPass for MajorPass {
         // Assemble every root, then intern structurally identical summary
         // producers across them once, so two queries that selected the same
         // `SummaryAgg` reach one `Rc` (consumers dedupe states by pointer).
+        // `plan_assembled_dag` then reads an exact-state root through its
+        // finalize, scalar references included: `scalar(v)` reads an instant
+        // vector's value, not accumulator state.
         let mut assembled = Vec::with_capacity(space.roots.len());
         for (entry_index, root) in &space.roots {
             let dag = selection

@@ -56,7 +56,7 @@ fn exact_dag(query: &str) -> PhysicalASAPDAG {
     let space = asap_aware_mapping::search_workload(vec![("q", root)]).unwrap();
     let selected = space
         .global_selection(&asap_aware_mapping::DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
     compile_physical_asap_dag(&selected).unwrap()

@@ -55,7 +55,7 @@ async fn plan(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let space = search_workload(vec![("query", pre)]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered")
 }

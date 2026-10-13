@@ -1036,6 +1036,10 @@ pub(crate) fn plan_assembled_dag(
         plan.summary_total_cost = None;
         plan.window_accuracy_guarantee = None;
     }
+    // The plan is a query result: an exact state is read through its
+    // finalize. Costing above saw the bare state, which is what the cost
+    // model's evidence is bound to; the finalize wraps the same `Rc`.
+    plan.root = crate::replacement::finalize_query_candidate(plan.root, target)?;
     Ok(plan)
 }
 
@@ -2850,7 +2854,7 @@ mod tests {
         )
         .unwrap();
         let materialized = selection
-            .assemble_selected_dag(&space.roots[0].1)
+            .assemble_selected_query(&space.roots[0].1)
             .unwrap()
             .unwrap();
 

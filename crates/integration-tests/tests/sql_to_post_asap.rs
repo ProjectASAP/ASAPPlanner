@@ -197,7 +197,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
         let space = search_workload(vec![("nested", Rc::clone(&pre_asap))]).unwrap();
         let selection = space.global_selection(&DefaultCostModel);
         let root = selection
-            .assemble_selected_dag(&space.roots[0].1)
+            .assemble_selected_query(&space.roots[0].1)
             .expect("materialization failed")
             .expect("root must be discovered");
 
@@ -258,7 +258,7 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered");
     let Some(NonASAPOp::Project {
@@ -304,7 +304,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
     let space = search_workload(vec![("ratio", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered");
     let Some(NonASAPOp::Project {
@@ -420,7 +420,7 @@ async fn unsupported_sql_join_shapes_remain_fail_closed() {
         let space = search_workload(vec![("unsupported-join", Rc::clone(&pre_asap))]).unwrap();
         let selection = space.global_selection(&DefaultCostModel);
         let root = selection
-            .assemble_selected_dag(&space.roots[0].1)
+            .assemble_selected_query(&space.roots[0].1)
             .expect("materialization failed")
             .expect("root must be discovered");
         let Some(NonASAPOp::Project { child, .. }) = root.non_asap() else {
@@ -449,7 +449,7 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
     let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered");
 
@@ -540,7 +540,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered");
 
@@ -596,7 +596,7 @@ async fn sql_filter_preserves_local_fallback_boundary_for_unsupported_child() {
     let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     let root = selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered");
 
@@ -831,7 +831,7 @@ async fn map_projection_export_preserves_unsupported_child_boundary() {
     let space = search_workload(vec![("map_query", pre)]).unwrap();
     let root = space
         .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
     let dag = post_asap_dag(&root);

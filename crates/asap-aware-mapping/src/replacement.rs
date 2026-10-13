@@ -55,7 +55,7 @@
 //! A caller may inspect local replacements, but taking the first candidate
 //! does not establish a compatible workload plan or physical deployability.
 //! For Planner-owned logical selection, call [`CandidateLogicalASAPDAGs::global_selection`]
-//! once and [`GlobalSelection::assemble_selected_dag`] for each wanted query
+//! once and [`GlobalSelection::assemble_selected_query`] for each wanted query
 //! root. Alternatively, use the summary-maintenance-lifecycle-aware helpers
 //! when Planner should also compare maintenance against raw recomputation.
 //! Physical binding, deployment, and execution remain downstream.
@@ -5286,7 +5286,9 @@ impl<'a> GlobalSelection<'a> {
     /// as it is (exact); an unmatched site keeps its own operator with each
     /// child assembled independently ([`Self::assemble_residual`]).
     /// Memoized by target identity, so a shared inner summary is one `Rc`
-    /// no matter how many roots reach it.
+    /// no matter how many roots reach it. An exact-state root comes out as
+    /// its bare state; query results go through
+    /// [`Self::assemble_selected_query`].
     pub fn assemble_selected_dag(
         &self,
         target: &Rc<OperatorNode>,
@@ -7052,6 +7054,41 @@ mod tests {
 
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
+
+    /// A query result reads an exact state through its finalize; any other
+    /// selected root is returned as assembled.
+    #[test]
+    fn assemble_selected_query_finalizes_only_an_exact_state_root() {
+        let assemble = |query: &str, accuracy: AccuracyTarget| {
+            let space = search_workload(vec![("q", lower_promql(query, accuracy))]).unwrap();
+            let selection = space.global_selection(&DefaultCostModel);
+            let root = &space.roots[0].1;
+            (
+                selection.assemble_selected_dag(root).unwrap().unwrap(),
+                selection.assemble_selected_query(root).unwrap().unwrap(),
+            )
+        };
+        let (state, query) = assemble("sum_over_time(m[1m])", AccuracyTarget::Exact);
+        assert!(matches!(
+            state.asap(),
+            Some(ASAPOp::SummaryAgg {
+                family: FieldDataType::ExactAggregate(..),
+                ..
+            })
+        ));
+        let Some(ASAPOp::FinalizeExactAccumulator { child }) = query.asap() else {
+            panic!("expected a finalized exact state, got {query:#?}");
+        };
+        assert!(Rc::ptr_eq(child, &state));
+        assert!(query.schema.fields.iter().all(|field| field.is_plain()));
+
+        let (estimate, query) = assemble(
+            "quantile_over_time(0.99, m[1m])",
+            AccuracyTarget::Epsilon(0.01),
+        );
+        assert!(estimate.contains_asap());
+        assert!(Rc::ptr_eq(&estimate, &query));
+    }
 
     /// A logical rewrite is told apart by provenance, not shape: a summary
     /// realization with no guarantee and no ASAP operator is still a bound
@@ -11299,7 +11336,7 @@ mod tests {
             .chosen
             .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
         assert!(selected
-            .assemble_selected_dag(&space.roots[0].1)
+            .assemble_selected_query(&space.roots[0].1)
             .unwrap()
             .is_some());
     }

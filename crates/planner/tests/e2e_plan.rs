@@ -145,7 +145,7 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
     assert_eq!(output.plans.len(), space.roots.len());
     for (plan, (_, root)) in output.plans.iter().zip(&space.roots) {
         let cost_only = selection
-            .assemble_selected_dag(root)
+            .assemble_selected_query(root)
             .expect("assembles")
             .expect("root has a group");
         assert!(

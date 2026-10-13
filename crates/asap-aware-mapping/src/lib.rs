@@ -40,7 +40,7 @@
 //! - Inspect the candidate space, optionally using [`CandidateLogicalASAPDAGs::cost_sorted`]
 //!   to obtain ranked views, and perform selection downstream.
 //! - Call [`CandidateLogicalASAPDAGs::global_selection`] once for the workload, then
-//!   [`GlobalSelection::assemble_selected_dag`] for each query root. This
+//!   [`GlobalSelection::assemble_selected_query`] for each query root. This
 //!   coordinates logical choices and preserves shared nodes, but makes no
 //!   summary-maintenance lifecycle decision.
 //! - When Planner owns maintenance-versus-recomputation decisions, use

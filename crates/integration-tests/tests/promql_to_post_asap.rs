@@ -88,7 +88,7 @@ fn lower_search_and_materialize(query: &str) -> Rc<OperatorNode> {
     let space = search_workload(vec![("query", pre)]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered")
 }
@@ -1060,7 +1060,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     let space = search_workload(vec![("query", pre)]).unwrap();
     let selected = space.global_selection(&DefaultCostModel);
     let plan = selected
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
     // Stored timings are gone: time the plan and read the timed copy.
@@ -1120,7 +1120,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
         let search = search_workload(vec![("q", input)]).unwrap();
         let choice = search.global_selection(&DefaultCostModel);
         let plan = choice
-            .assemble_selected_dag(&search.roots[0].1)
+            .assemble_selected_query(&search.roots[0].1)
             .unwrap()
             .unwrap();
         let dag = post_asap_dag(&plan);
@@ -1188,7 +1188,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
         "Planner must not automatically select an uncertified ratio"
     );
     let materialized = selection
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .expect("materialized root");
     assert!(!materialized.contains_asap());

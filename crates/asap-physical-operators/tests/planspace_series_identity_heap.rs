@@ -223,7 +223,7 @@ fn global_selection_never_commits_a_series_identity_heap() {
     .unwrap();
     let selected = space
         .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
     assert!(!carries_identity(&vec![(0, selected)]));
