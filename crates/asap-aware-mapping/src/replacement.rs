@@ -532,10 +532,9 @@ pub struct ReplacementSubDAG {
 }
 
 impl ReplacementSubDAG {
-    /// Whether this summary still needs accuracy/domain evidence before it can
-    /// be treated as certified. A missing guarantee on any summary candidate
-    /// (a sub-DAG whose root is an ASAP operator) is unknown; a kept
-    /// pre-ASAP sub-DAG carries an explicit exact guarantee.
+    /// Whether this summary still needs accuracy/domain evidence about its
+    /// output before it can be selected automatically; it stays a candidate.
+    /// A kept pre-ASAP sub-DAG carries an explicit exact guarantee.
     pub fn has_missing_accuracy_evidence(&self) -> bool {
         matches!(
             &self.replacement,
@@ -2089,7 +2088,7 @@ fn realize_binary(
         return Ok(None);
     };
     let (op, vector_match) = (&operator.kind, &operator.vector_match);
-    if !matches!(op, BinaryOpKind::Arithmetic(_)) || vector_match.is_some() {
+    if !is_supported_exact_binary(root) {
         return Ok(None);
     }
 
@@ -2379,12 +2378,16 @@ fn finalize_exact_accumulator(
     ))
 }
 
+/// Arithmetic and comparisons over summary operands keep their candidates;
+/// over approximate operands their combined guarantee is not composed (#669).
 fn is_supported_exact_binary(root: &OperatorNode) -> bool {
     matches!(
         root.non_asap(),
         Some(NonASAPOp::BinaryOp {
             operator: BinaryOperator {
-                kind: BinaryOpKind::Arithmetic(_),
+                kind: BinaryOpKind::Arithmetic(_)
+                    | BinaryOpKind::Compare(_)
+                    | BinaryOpKind::CompareBool(_),
                 vector_match: None,
                 ..
             },
@@ -2455,6 +2458,13 @@ fn ddsketch_quantile_alpha(node: &OperatorNode) -> Option<f64> {
     }
 }
 
+/// Whether nothing shows that the candidate's output meets its target. Only
+/// the output's own guarantee (the composed one; realization already checked
+/// it against the target) counts here; certified inputs do not, since a
+/// combination of them (a difference, a ratio) can be unbounded. Such a
+/// candidate is kept, not pruned: composition through operators (#669) or the
+/// deployment's empirical output-level accuracy model (plan selection, #576) may
+/// supply the evidence later.
 fn has_missing_accuracy_evidence(node: &OperatorNode) -> bool {
     node.guarantee
         .as_ref()
