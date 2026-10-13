@@ -1,9 +1,6 @@
 //! A precompute boundary reads raw samples only from a time series scan.
-#[path = "unified_common/mod.rs"]
 mod common;
-use asap_physical_operators::unified_physical_planner::precompute::{
-    boundary_schema, raw_sample_schema,
-};
+use asap_physical_operators::physical_planner::precompute::{boundary_schema, raw_sample_schema};
 use common::compile_physical_asap_dag;
 use planner_types::ir::{NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use planner_types::pre_asap::{DataType, Field, Schema, Source};

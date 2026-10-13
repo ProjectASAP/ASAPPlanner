@@ -1,7 +1,6 @@
 //! Compilation rejects Planner node IDs outside the range its helper IDs avoid.
-#[path = "unified_common/mod.rs"]
 mod common;
-use asap_physical_operators::unified_physical_planner::compile;
+use asap_physical_operators::physical_planner::compile;
 use common::compile_physical_asap_dag;
 use planner_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
 use planner_types::pre_asap::{DataType, Field, ScalarValue, Schema};

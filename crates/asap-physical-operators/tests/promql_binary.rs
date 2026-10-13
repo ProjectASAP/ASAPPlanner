@@ -1,8 +1,8 @@
 //! Binary computation must be fully compiled before deployment binds values.
 use asap_physical_operators::{
     operators::Operator,
+    physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
     values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
@@ -163,7 +163,7 @@ fn duplicate_matching_identity_is_rejected() {
 // Scalar broadcasting and comparison filtering keep the vector operand's value.
 #[test]
 fn scalar_broadcast_and_bool_comparison_are_distinct() {
-    use asap_physical_operators::unified_physical_planner::promql_values;
+    use asap_physical_operators::physical_planner::promql_values;
     use planner_types::pre_asap::CompareOpKind;
     for return_bool in [false, true] {
         let physical_dag = promql_values::compile_binary(
@@ -330,7 +330,7 @@ fn label_map_bool_comparison_drops_the_name() {
 #[test]
 fn stored_series_evaluations_support_filters_and_sets() {
     use asap_physical_operators::{
-        summary_kernels::exact::ExactAccumulator, unified_physical_planner::compile,
+        physical_planner::compile, summary_kernels::exact::ExactAccumulator,
     };
     use planner_types::post_asap::*;
     use planner_types::pre_asap::{

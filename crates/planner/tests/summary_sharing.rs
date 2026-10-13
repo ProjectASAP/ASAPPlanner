@@ -19,8 +19,8 @@ use asap_aware_mapping::{
     CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
 };
-use asap_frontend_promql::unified::lower_promql_workload;
-use asap_frontend_sql::unified::SqlCatalog;
+use asap_frontend_promql::lower_promql_workload;
+use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,

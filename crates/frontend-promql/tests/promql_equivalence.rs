@@ -19,7 +19,6 @@
 
 use std::rc::Rc;
 
-#[path = "unified_support.rs"]
 mod support;
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;

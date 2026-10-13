@@ -16,9 +16,9 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
+    physical_planner::{precompute, Source},
     runtime::{Limits, RunContext, Scope},
     summary_kernels::{exact::ExactAccumulator, weighted_frequency::WeightedFrequency},
-    unified_physical_planner::{precompute, Source},
     values::{Batch, Value},
     AggregateCore, KeyByLabelValues, Statistic,
 };
@@ -141,7 +141,7 @@ fn execute(
         );
     });
     let program = serde_json::from_slice::<
-        asap_physical_operators::unified_physical_planner::CompiledPhysicalDAG,
+        asap_physical_operators::physical_planner::CompiledPhysicalDAG,
     >(&serde_json::to_vec(&program).unwrap())
     .unwrap();
     let schema = precompute::raw_sample_schema();

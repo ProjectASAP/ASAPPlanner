@@ -877,7 +877,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
 // Planner scalar signatures, collection access and null predicates share native execution.
 #[test]
 fn planner_expressions_preserve_collection_and_nullable_types() {
-    use asap_physical_operators::dag::expressions::unified_planner::CompiledExpression;
+    use asap_physical_operators::dag::expressions::CompiledExpression;
     use planner_types::pre_asap::{CompareOpKind, ScalarValue};
 
     let input_schema = schema(&[(
@@ -900,9 +900,7 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
         input_schema.clone(),
         vec![(
             "count".into(),
-            Expression::unified_planner(
-                CompiledExpression::compile(&access, &input_schema).unwrap(),
-            ),
+            Expression::planner(CompiledExpression::compile(&access, &input_schema).unwrap()),
         )],
     )
     .unwrap();
@@ -939,9 +937,7 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
         vec![1],
         Operator::filter(
             projected.clone(),
-            Expression::unified_planner(
-                CompiledExpression::compile(&predicate, &projected).unwrap(),
-            ),
+            Expression::planner(CompiledExpression::compile(&predicate, &projected).unwrap()),
         )
         .unwrap(),
     )
@@ -1162,7 +1158,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
 // The grouped temporal reducer's sample schema must survive physical Sort/Limit binding.
 #[test]
 fn grouped_temporal_schema_compiles_and_executes_topk() {
-    use asap_physical_operators::unified_physical_planner::{
+    use asap_physical_operators::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
@@ -1273,7 +1269,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
 // A certified candidate set must have authoritative values for every key, including after recovery.
 #[test]
 fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
-    use asap_physical_operators::unified_physical_planner::{
+    use asap_physical_operators::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::{
@@ -1385,7 +1381,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
 // Precompute arithmetic must match population/window identities, never zip arrival order.
 #[test]
 fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
-    use asap_physical_operators::unified_physical_planner::{
+    use asap_physical_operators::physical_planner::{
         compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::{

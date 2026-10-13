@@ -7,16 +7,17 @@
 
 use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 mod support;
-use asap_types::pre_asap::{AggIntent, QueryExpr};
+use asap_types::ir::{NonASAPOp, OperatorNode};
+use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, lower_promql_with_histograms};
 
 /// The histogram/quantile intent kind in the lowered DAG: `"HQ"` for the
 /// classic-bucket `HistogramQuantile`, `"Q"` for the sketch-able `Quantile`.
-fn quantile_kind(qe: &QueryExpr) -> &'static str {
-    fn walk(e: &QueryExpr) -> Option<&'static str> {
-        match e {
-            QueryExpr::Aggregate {
+fn quantile_kind(qe: &OperatorNode) -> &'static str {
+    fn walk(e: &OperatorNode) -> Option<&'static str> {
+        match e.expect_non_asap() {
+            NonASAPOp::Aggregate {
                 measures, child, ..
             } => measures
                 .iter()
@@ -26,12 +27,12 @@ fn quantile_kind(qe: &QueryExpr) -> &'static str {
                     _ => None,
                 })
                 .or_else(|| walk(child)),
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::Project { child, .. } => walk(child),
+            NonASAPOp::TimeRange { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. }
+            | NonASAPOp::PromqlSubquery { child, .. }
+            | NonASAPOp::Project { child, .. } => walk(child),
             _ => None,
         }
     }
@@ -48,27 +49,26 @@ fn with_meta(q: &str, catalog: HistogramCatalog) -> &'static str {
 
 #[test]
 fn heuristic_baseline_is_unchanged_without_a_catalog() {
-    // Classic `by (le)`-bucket form → HistogramQuantile; anything else → Quantile.
+    // Classic buckets are represented; undeclared native samples are rejected.
     assert_eq!(
         heuristic(
             "histogram_quantile(0.9, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))"
         ),
         "HQ"
     );
-    assert_eq!(heuristic("histogram_quantile(0.9, native_latency)"), "Q");
+    assert!(lower_promql(
+        "histogram_quantile(0.9, native_latency)",
+        AccuracyTarget::Exact
+    )
+    .is_err());
 }
 
 #[test]
 fn declared_classic_bucket_fixes_the_false_negative() {
     // A classic histogram exposed WITHOUT the `_bucket` suffix and queried with
-    // no `le` grouping/matcher: the heuristic wrongly routes it to the
-    // sketch-able Quantile. Declaring it `ClassicBucket` corrects it.
+    // no `le` grouping/matcher requires an explicit sample-type declaration.
     let q = "histogram_quantile(0.9, latency_seconds)";
-    assert_eq!(
-        heuristic(q),
-        "Q",
-        "heuristic mis-routes the suffix-less classic histogram"
-    );
+    assert!(lower_promql(q, AccuracyTarget::Exact).is_err());
     assert_eq!(
         with_meta(
             q,
@@ -80,7 +80,7 @@ fn declared_classic_bucket_fixes_the_false_negative() {
 }
 
 #[test]
-fn declared_raw_or_native_fixes_the_false_positive() {
+fn declared_raw_extension_and_native_gap_override_the_heuristic() {
     // A metric merely NAMED `…_bucket` that actually holds raw samples / a native
     // histogram: the heuristic wrongly routes it to bucket interpolation.
     let q = "histogram_quantile(0.9, foo_bucket)";
@@ -97,14 +97,9 @@ fn declared_raw_or_native_fixes_the_false_positive() {
         "Q",
         "raw samples are sketch-able"
     );
-    assert_eq!(
-        with_meta(
-            q,
-            HistogramCatalog::new().with("foo_bucket", HistogramKind::Native)
-        ),
-        "Q",
-        "native histograms are sketch-able"
-    );
+    let catalog = HistogramCatalog::new().with("foo_bucket", HistogramKind::Native);
+    assert!(lower_promql_with_histograms(q, AccuracyTarget::Exact, catalog.clone()).is_err());
+    assert!(lower_promql_with_histograms("foo_bucket", AccuracyTarget::Exact, catalog).is_err());
 }
 
 #[test]
@@ -119,10 +114,12 @@ fn undeclared_metric_falls_back_to_the_heuristic() {
         ),
         "HQ"
     );
-    assert_eq!(
-        with_meta("histogram_quantile(0.9, native_thing)", catalog),
-        "Q"
-    );
+    assert!(lower_promql_with_histograms(
+        "histogram_quantile(0.9, native_thing)",
+        AccuracyTarget::Exact,
+        catalog
+    )
+    .is_err());
 }
 
 #[test]

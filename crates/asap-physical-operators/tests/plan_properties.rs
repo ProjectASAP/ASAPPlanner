@@ -3,7 +3,7 @@ use asap_physical_operators::{
     operators::{Operator, SortKey},
     plan::{Boundedness, Emission, PhysicalDAG},
     runtime::{Limits, OutputStream, RunContext, Scope},
-    unified_sources::{DataSources, RawSource},
+    sources::{DataSources, RawSource},
     values::{Batch, SchemaRef},
     Error,
 };

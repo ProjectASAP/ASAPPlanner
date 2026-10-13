@@ -1,14 +1,13 @@
-//! PromQL string → the canonical, unresolved
-//! [`UnresolvedQueryExpr`](asap_types::pre_asap::query_expr::UnresolvedQueryExpr)
-//! (`QueryExpr<ColumnRef>`).
+//! PromQL string → the name-based
+//! [`UnresolvedOp`](asap_frontend_common::UnresolvedOp) tree.
 //!
 //! - **Parsing** is delegated to `promql-parser` 0.8.
 //! - **Lowering** builds *directly in canonical shape* here (issue #179): the
 //!   walk interprets PromQL semantics (range vectors, aggregate operators,
-//!   label matchers) and emits `UnresolvedQueryExpr` nodes with unresolved
-//!   `ColumnRef`s — the same DAG shape
-//!   [`resolve_root`](asap_types::pre_asap::resolve_root) later binds to
-//!   canonical, positional `QueryExpr<ColumnId>`. The structural decisions a
+//!   label matchers) and emits `UnresolvedOp` / `UnresolvedScalar` nodes with
+//!   unresolved `ColumnRef`s — the same tree shape
+//!   [`resolve_root`](asap_frontend_common::resolve_root) later binds to the
+//!   positional [`OperatorNode`](asap_types::ir::OperatorNode) DAG. The structural decisions a
 //!   separate converter stage would otherwise have to make (heavy-hitter
 //!   `topk` recognition, the `PerEntity`/`Reduce` reduction choice,
 //!   `without(...)` grouping) are made right here, since a front end
@@ -25,7 +24,7 @@
 //! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
 //! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
 //! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
-//! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
+//! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | **rejected** — native histogram samples have no IR representation, and `histogram_fraction` over classic `_bucket` series is not lowered (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
 //! | `topk(k, <non-count expr>)` / `bottomk(k, <any expr>)` | `Sort{value} → Limit{k}` over the fully-lowered argument |
@@ -38,9 +37,11 @@
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
-//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `PromqlScalarBridge` leaf |
-//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTimestamp` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
-//! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar` / `PromqlScalarFromVector` — the scalar⇄vector bridges (issue #48) |
+//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | typed scalar `Project` (issue #45); `pi()` → a `ScalarExpr::Literal` root |
+//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `ScalarExpr::EvalTimestamp` root / `Aggregate{[TimeFn(f)]}` (issue #46) |
+//! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar(s)` / `ScalarExpr::PromqlScalarFromVector(v)` — the scalar⇄vector bridges (issue #48) |
+//! | `<scalar> op <scalar>` (`time() - 1`, `1 < bool 2`, `-time()`) | `ScalarExpr::{Arithmetic, Case, Negative}` — a scalar expression, never an operator |
+//! | `v op <scalar>`, `a op bool b`, `v > bool 0` | `Project`/`Filter` with owned scalar expressions; vector/vector uses `BinaryOp{return_bool}` |
 //! | `label_replace(v,…)` / `label_join(v,…)` | `PromqlRelabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
 //! | `info(v, [selector])` | `PromqlInfoEnrich{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
@@ -50,7 +51,7 @@
 //! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
 //! | `topk(k, count_over_time(…))` / `topk(k, sum_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count/Sum]}` |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
-//! | `m{f}` | `Scan{predicates}` |
+//! | `m{f}` / `m{f}[w]` | `TimeRange{ingestion, Instant, Scan{predicates}}` / `TimeRange{w, Range, Scan}` |
 //! | `a OP b` | `BinaryOp{vector_match}` |
 //! | `expr[r:res]` | `PromqlSubquery{r, res}` |
 //! | `<selector> offset <d>` / `<selector> @ <ts>`/`start()`/`end()` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
@@ -59,21 +60,29 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use promql_parser::label::{MatchOp, Matcher};
+use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     self, token, AggregateExpr, AtModifier as ParserAtModifier, BinaryExpr, Call, Expr,
     LabelModifier, Offset, VectorMatchCardinality, VectorSelector,
 };
 
-use asap_types::pre_asap::agg_intent::{topk, AggIntent, MathFunc, TimeFunc};
-use asap_types::pre_asap::query_expr::{
-    AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, PromQLVectorSetOpKind, Reduction,
-    SortKey, Source, TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch,
-    VectorMatchKind,
+use asap_frontend_common::{
+    UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
 };
+use asap_types::ir::operator_properties::{
+    AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
+    TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
+};
+use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
+use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
+
 use asap_types::pre_asap::{
     ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
 };
 use asap_types::types::AccuracyTarget;
+
+/// Every scalar expression this front end builds follows PromQL's numeric rules.
+const PROMQL: ExprSemantics = ExprSemantics::Promql;
 
 use crate::error::PromqlError as LoweringError;
 
@@ -158,7 +167,7 @@ enum InnerFunc {
 
 struct Inner {
     metric: String,
-    matchers: Vec<Unresolved>,
+    matchers: Vec<Scalar>,
     window: Option<Duration>,
     func: Option<InnerFunc>,
     /// `offset` / `@` on the selector, carried to the `Source` (issue #40).
@@ -172,16 +181,35 @@ struct Inner {
 const MAX_DEPTH: usize = 256;
 
 impl PromqlLowerer {
-    pub(crate) fn lower_with_ingestion_interval(
+    pub(crate) fn lower_query_with_ingestion_interval(
         query: &str,
         accuracy: &AccuracyTarget,
         interval: Duration,
-    ) -> Result<Unresolved> {
+    ) -> Result<asap_types::ir::QueryRoot> {
         let _guard = AccuracyGuard::install(accuracy.clone());
         let _interval = IngestionIntervalGuard::install(interval);
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
         check_depth(&ast, MAX_DEPTH)?;
-        walk(&ast)
+        let mut metrics = Vec::new();
+        collect_metric_names(&ast, &mut metrics);
+        if metrics.iter().any(|metric| {
+            crate::histogram::current_kind_of(metric)
+                == Some(crate::histogram::HistogramKind::Native)
+        }) {
+            return Err(LoweringError::UnsupportedFeature(
+                "native histogram samples have no IR representation".into(),
+            ));
+        }
+
+        if ast.value_type() == ValueType::Scalar {
+            Ok(asap_types::ir::QueryRoot::Scalar(
+                asap_frontend_common::resolve_scalar_root(&lower_scalar(&ast)?)?,
+            ))
+        } else {
+            Ok(asap_types::ir::QueryRoot::Operator(
+                asap_frontend_common::resolve_root(&walk(&ast)?)?,
+            ))
+        }
     }
 }
 
@@ -273,6 +301,13 @@ fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
 }
 
 fn walk(expr: &Expr) -> Result<Unresolved> {
+    // A scalar-typed expression (`5`, `time() - 1`, `scalar(v)`, `1 < bool 2`)
+    // is a scalar expression at an operator position, never an operator tree.
+    if expr.value_type() == ValueType::Scalar {
+        return Err(LoweringError::UnsupportedFeature(
+            "scalar root requires query-root lowering".into(),
+        ));
+    }
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
         Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
@@ -282,31 +317,23 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
         Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
         Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
-        // A bare `min_of`/`max_of(consts…)` scalar query folds to a `PromqlScalarBridge`
-        // leaf; a non-constant argument makes `num_expr` fail → rejected (#89).
-        Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => {
-            Ok(Unresolved::promql_scalar(num_expr(expr)?))
-        }
         Expr::Call(call) if call.func.name == "info" => walk_info(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
         // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
-        // identity and `-<literal>` to a negated `NumberLiteral`, so this wraps a
-        // sub-expression whose samples must be sign-flipped. Now that a scalar
-        // operand exists (#35), express it as `x * -1` — a constant-foldable
-        // operand (`-(10*1024)`) collapses to a negated `PromqlScalarBridge` leaf; anything
-        // else is a vector, sign-flipped by a `Mul` against `PromqlScalarBridge(-1)`. `Mul`
-        // is commutative, so operand order carries no hazard (#36).
-        Expr::Unary(u) => match num_expr(&u.expr) {
-            Ok(v) => Ok(Unresolved::promql_scalar(-v)),
-            Err(_) => Ok(Unresolved::BinaryOp {
-                op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-                lhs: Rc::new(walk(&u.expr)?),
-                rhs: Rc::new(Unresolved::promql_scalar(-1.0)),
-                vector_match: None,
-            }),
-        },
+        // identity and `-<literal>` to a negated `NumberLiteral`. A scalar
+        // operand was dispatched to `lower_scalar` above (→ `Negative`), so this
+        // is a vector projection. Like other value-changing operations,
+        // Prometheus drops the metric name on vector negation.
+        Expr::Unary(u) => Ok(Unresolved::PromqlMap {
+            child: Rc::new(walk(&u.expr)?),
+            sample: Scalar::Negative {
+                expr: Box::new(Scalar::Column(ColumnRef::SampleValue)),
+                semantics: ExprSemantics::Promql,
+            },
+            drop_metric_name: true,
+        }),
         Expr::Subquery(sq) => {
             let subquery = Unresolved::PromqlSubquery {
                 range: sq.range,
@@ -332,19 +359,112 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
             let (metric, matchers, shift) = vs_parts(&ms.vs)?;
             Ok(Unresolved::TimeRange {
                 range: ms.range,
+                kind: TimeRangeKind::Range,
                 child: Rc::new(filtered_source(metric, matchers, shift)),
             })
         }
-        // A number literal is a scalar leaf (`v > 5`, or a bare scalar query
-        // `5`). String literals only appear as function args (`label_replace`,
-        // …), which are not supported, so reject them (issue #35).
-        Expr::NumberLiteral(n) => Ok(Unresolved::promql_scalar(n.val)),
+        // Scalar-typed, dispatched above; kept for exhaustiveness. String
+        // literals only appear as function args (`label_replace`, …), so a
+        // bare one is rejected (issue #35).
+        Expr::NumberLiteral(_) => unreachable!("scalar handled above"),
         Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
             "bare string literal".into(),
         )),
         Expr::Extension(_) => Err(LoweringError::UnsupportedFeature(
             "extension expression".into(),
         )),
+    }
+}
+
+/// Lower a scalar-typed PromQL expression to a scalar expression. A constant
+/// sub-expression folds to one `Literal` (as `num_expr` always did); anything
+/// else keeps its structure: `-time()` → `Negative`, `time() - 1` →
+/// `Arithmetic`, `scalar(v)` → `PromqlScalarFromVector`, and a `bool`
+/// comparison → `Case(Compare → 1, else 0)` (PromQL yields `0`/`1`).
+fn lower_scalar(expr: &Expr) -> Result<Scalar> {
+    if let Ok(v) = num_expr(expr) {
+        return Ok(Scalar::Literal(ScalarValue::Float64(v)));
+    }
+    match expr {
+        Expr::Paren(p) => lower_scalar(&p.expr),
+        Expr::Unary(u) => Ok(Scalar::Negative {
+            expr: Box::new(lower_scalar(&u.expr)?),
+            semantics: PROMQL,
+        }),
+        Expr::Binary(bin) => lower_scalar_binary(bin),
+        Expr::Call(call) => match call.func.name {
+            "time" => Ok(Scalar::EvalTimestamp),
+            "pi" => Ok(Scalar::Literal(ScalarValue::Float64(std::f64::consts::PI))),
+            "scalar" => Ok(Scalar::PromqlScalarFromVector(Rc::new(walk(arg(
+                call, 0,
+            )?)?))),
+            // `min_of`/`max_of` fold only over constants (#89); the fold above
+            // failed, so surface its error for the non-constant argument.
+            name if is_scalar_reducer_fn(name) => Err(num_expr(expr).unwrap_err()),
+            other => Err(LoweringError::UnsupportedFunction(other.to_string())),
+        },
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "scalar expression `{other}`"
+        ))),
+    }
+}
+
+/// `<scalar> op <scalar>`: arithmetic is an `Arithmetic` expression; a
+/// comparison needs the `bool` modifier (PromQL has no scalar filter) and
+/// becomes `Case(Compare → 1.0, else 0.0)`. The parser already rejects both a
+/// bool-less scalar comparison and a scalar set op; both are re-checked here.
+fn lower_scalar_binary(bin: &BinaryExpr) -> Result<Scalar> {
+    let left = Box::new(lower_scalar(&bin.lhs)?);
+    let right = Box::new(lower_scalar(&bin.rhs)?);
+    match binop(bin.op.id())? {
+        BinaryOpKind::Arithmetic(op) => Ok(Scalar::Arithmetic {
+            op,
+            left,
+            right,
+            semantics: PROMQL,
+        }),
+        BinaryOpKind::Compare(op) | BinaryOpKind::CompareBool(op) => {
+            if !bin.return_bool() {
+                return Err(LoweringError::InvalidParameter(
+                    "a comparison between two scalars requires the `bool` modifier".into(),
+                ));
+            }
+            let compare = Scalar::Compare {
+                left,
+                op,
+                right,
+                semantics: PROMQL,
+            };
+            Ok(Scalar::Case {
+                operand: None,
+                branches: vec![(compare, Scalar::Literal(ScalarValue::Float64(1.0)))],
+                else_expr: Some(Box::new(Scalar::Literal(ScalarValue::Float64(0.0)))),
+            })
+        }
+        BinaryOpKind::Set(_) => Err(LoweringError::UnsupportedFeature(
+            "set operator between two scalars".into(),
+        )),
+    }
+}
+
+/// A binary operation over two vectors.
+fn vector_binary(
+    kind: BinaryOpKind,
+    vector_match: Option<VectorMatch>,
+    return_bool: bool,
+    lhs: Unresolved,
+    rhs: Unresolved,
+) -> Unresolved {
+    Unresolved::BinaryOp {
+        operator: BinaryOperator {
+            kind,
+            vector_match,
+            checked_relative_division: false,
+            checked_finite_division: false,
+        },
+        return_bool,
+        lhs: Rc::new(lhs),
+        rhs: Rc::new(rhs),
     }
 }
 
@@ -461,6 +581,23 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<Unresolved> {
     let (keys, without) = resolve_group(agg)?;
     let outer = outer_kind(agg)?;
 
+    // `topk`/`bottomk`/`limitk` with k < 1 return an empty vector in
+    // Prometheus: an empty `Limit` over the argument.
+    if matches!(
+        outer,
+        Outer::TopK { k: 0, .. }
+            | Outer::Sample {
+                kind: SampleKind::LimitK(0)
+            }
+    ) {
+        return Ok(Unresolved::Limit {
+            n: Some(0),
+            offset: 0,
+            partition_by: GroupKeys::none(),
+            child: Rc::new(walk(&agg.expr)?),
+        });
+    }
+
     // `without(...)` grouping is modelled only for the reducing aggregations
     // (sum/avg/count/…), whose grouping lives on an `Aggregate` node. `topk`/
     // `bottomk` (→ `Sort.partition_by`) and `limitk`/`limit_ratio` (→ `PromqlSeriesSample`)
@@ -576,7 +713,7 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// build this node) decides `PerEntity` vs `Reduce(by)` *without* knowing
 /// about `without` yet — it only ever sees `by`-mode keys, since `without`'s
 /// excluded-labels list is applied here, after the fact, exactly like the
-/// pre-#179 legacy `relational::QueryExpr` DAG's own `mark_without` did (its
+/// pre-#179 legacy relational tree's own `mark_without` did (its
 /// converter read `without` only after this front-end step had already set
 /// it). Whether
 /// `reduction_for` picked `PerEntity` (only possible when `keys` was empty)
@@ -652,22 +789,37 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
                     child,
                 ));
             }
-            let sorted = Unresolved::Sort {
-                keys: vec![SortKey {
-                    expr: Unresolved::Column(ColumnRef::SampleValue),
-                    ascending: !descending,
-                    nulls_first: false,
-                }],
-                partition_by: keys.into(),
-                child: Rc::new(child),
-            };
-            Unresolved::Limit {
-                n: k as usize,
-                offset: 0,
-                child: Rc::new(sorted),
-            }
+            ranked_by_value(keys, k, descending, child)
         }
     })
+}
+
+/// Generic `topk`/`bottomk`: `Limit{k, partition_by: keys} → Sort{value,
+/// partition_by: keys}` over `child` — an order-by-value ranking, not a
+/// heavy-hitter intent. Both carry the keys: `topk by (job)` keeps `k` series
+/// per `job`.
+fn ranked_by_value(
+    keys: Vec<ColumnRef>,
+    k: u64,
+    descending: bool,
+    child: Unresolved,
+) -> Unresolved {
+    let partition_by: GroupKeys<ColumnRef> = keys.into();
+    let sorted = Unresolved::Sort {
+        keys: vec![UnresolvedSortKey {
+            expr: Scalar::Column(ColumnRef::SampleValue),
+            ascending: !descending,
+            nulls_first: false,
+        }],
+        partition_by: partition_by.clone(),
+        child: Rc::new(child),
+    };
+    Unresolved::Limit {
+        n: Some(k as usize),
+        offset: 0,
+        partition_by,
+        child: Rc::new(sorted),
+    }
 }
 
 /// The `histogram_*` function family (issues #43, histogram_quantile).
@@ -677,10 +829,7 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
 /// becomes [`classic_histogram_quantile`]; a native histogram or raw samples
 /// become a `Quantile` over the whole argument.
 /// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
-/// `stdvar`/`fraction`) each extract one float per series, lowering to a
-/// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
-/// `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and the
-/// vector from arg 2; the rest take the vector at arg 0.
+/// `stdvar`) and `histogram_fraction` (native or classic buckets) are rejected.
 fn walk_histogram(call: &Call) -> Result<Unresolved> {
     if call.func.name == "histogram_quantiles" {
         return walk_histogram_quantiles(call);
@@ -696,7 +845,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         // The true signal is the argument's sample type: a declared
         // `HistogramKind` (issue #79) drives the choice when available, else we
         // fall back to the structural `by (le)`/`_bucket` heuristic (issue #43).
-        if !histogram_arg_is_sketchable(arg_expr) {
+        if !histogram_arg_is_sketchable(arg_expr)? {
             return Ok(classic_histogram_quantile(phi, "", walk(arg_expr)?));
         }
         let func = AggIntent::Quantile {
@@ -706,23 +855,15 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         };
         return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
     }
-    // (histogram_quantile handled above; accessors below)
-    let (func, vec_idx) = match call.func.name {
-        "histogram_count" => (AggIntent::HistogramCount, 0),
-        "histogram_sum" => (AggIntent::HistogramSum, 0),
-        "histogram_avg" => (AggIntent::HistogramAvg, 0),
-        "histogram_stddev" => (AggIntent::HistogramStdDev, 0),
-        "histogram_stdvar" => (AggIntent::HistogramStdVar, 0),
-        "histogram_fraction" => (
-            AggIntent::HistogramFraction {
-                lower: num_arg(call, 0)?,
-                upper: num_arg(call, 1)?,
-            },
-            2,
-        ),
-        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
-    };
-    Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+    if call.func.name == "histogram_fraction" {
+        return Err(LoweringError::UnsupportedFeature(
+            "histogram_fraction is not lowered, over native histograms or classic `_bucket` series"
+                .into(),
+        ));
+    }
+    Err(LoweringError::UnsupportedFeature(
+        "native histogram samples have no IR representation".into(),
+    ))
 }
 
 /// Classic-bucket `histogram_quantile(φ, child)`. One histogram is the set of
@@ -769,10 +910,10 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
         ));
     }
     // The bucket-vs-native choice is a property of the argument, not of φ.
-    let sketchable = histogram_arg_is_sketchable(vec_expr);
+    let sketchable = histogram_arg_is_sketchable(vec_expr)?;
     let branches = (2..call.args.args.len())
         .map(|i| {
-            let phi = bounded_quantile_param(num_arg(call, i)?)?;
+            let phi = quantile_param(num_arg(call, i)?)?;
             let child = walk(vec_expr)?;
             // Each branch aliases its value column to "value" (not the
             // intent-keyed default) so `Concat` — which derives its schema
@@ -796,9 +937,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
             };
             Ok(Unresolved::PromqlRelabel {
                 dst: label.clone(),
-                value: Rc::new(Unresolved::Literal(ScalarValue::Utf8(open_metrics_float(
-                    phi,
-                )))),
+                value: Scalar::Literal(ScalarValue::Utf8(open_metrics_float(phi))),
                 child: Rc::new(quantile),
             })
         })
@@ -852,12 +991,12 @@ fn open_metrics_float(v: f64) -> String {
     }
 }
 
-/// The time / calendar functions (issue #46).
+/// The calendar functions (issue #46); `time()` is scalar-typed and lowers in
+/// `lower_scalar`.
 fn is_time_fn(name: &str) -> bool {
     matches!(
         name,
-        "time"
-            | "timestamp"
+        "timestamp"
             | "minute"
             | "hour"
             | "day_of_week"
@@ -869,33 +1008,46 @@ fn is_time_fn(name: &str) -> bool {
     )
 }
 
-/// `time()` → the `EvalTimestamp` leaf. `timestamp(v)` and the calendar accessors →
-/// `Aggregate{[TimeFn(f)]}` over the argument vector, or over `EvalTimestamp` for the
-/// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
+/// `timestamp(<selector>)` → `Aggregate{[TimeFn(Timestamp)]}`; `timestamp` of
+/// any other expression → `PromqlMap{EvalTimestamp}`. The calendar accessors →
+/// `PromqlMap` over the argument vector, or over
+/// `PromqlVectorFromScalar(EvalTimestamp)` for the no-argument forms (`hour()`,
+/// `day_of_week()`, …). Issue #46.
 fn walk_time(call: &Call) -> Result<Unresolved> {
-    if call.func.name == "time" {
-        return Ok(Unresolved::EvalTimestamp);
+    // timestamp() reads the selected sample's timestamp only for a plain
+    // (parenthesised) vector selector; any other argument yields new samples
+    // stamped at the evaluation time, as in Prometheus.
+    if call.func.name == "timestamp" {
+        let mut v = arg(call, 0)?;
+        while let Expr::Paren(p) = v {
+            v = &p.expr;
+        }
+        if !matches!(v, Expr::VectorSelector(_)) {
+            return Ok(Unresolved::PromqlMap {
+                child: Rc::new(walk(v)?),
+                sample: Scalar::EvalTimestamp,
+                drop_metric_name: true,
+            });
+        }
+        return Ok(outer_aggregate(
+            vec![],
+            AggIntent::TimeFn(TimeFunc::Timestamp),
+            walk(v)?,
+        ));
     }
-    let func = match call.func.name {
-        "timestamp" => TimeFunc::Timestamp,
-        "minute" => TimeFunc::Minute,
-        "hour" => TimeFunc::Hour,
-        "day_of_week" => TimeFunc::DayOfWeek,
-        "day_of_month" => TimeFunc::DayOfMonth,
-        "day_of_year" => TimeFunc::DayOfYear,
-        "month" => TimeFunc::Month,
-        "year" => TimeFunc::Year,
-        "days_in_month" => TimeFunc::DaysInMonth,
-        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
-    };
-    // A calendar function with no argument reads the evaluation time; otherwise
-    // it maps over each sample's timestamp in the argument vector.
-    let inner = if call.args.args.is_empty() {
-        Unresolved::EvalTimestamp
+    let child = if call.args.args.is_empty() {
+        Unresolved::PromqlVectorFromScalar(Scalar::EvalTimestamp)
     } else {
         walk(arg(call, 0)?)?
     };
-    Ok(outer_aggregate(vec![], AggIntent::TimeFn(func), inner))
+    Ok(Unresolved::PromqlMap {
+        child: Rc::new(child),
+        sample: Scalar::FunctionCall {
+            name: format!("promql_{}", call.func.name),
+            args: vec![Scalar::Column(ColumnRef::SampleValue)],
+        },
+        drop_metric_name: true,
+    })
 }
 
 /// The presence functions (issue #47).
@@ -919,24 +1071,19 @@ fn walk_presence(call: &Call) -> Result<Unresolved> {
     Ok(outer_aggregate(vec![], func, walk(arg(call, 0)?)?))
 }
 
-/// The scalar⇄vector type-conversion functions (issue #48). `info` is *not*
-/// here: it is a label-enrichment join against info metrics, not a type
-/// conversion, so it falls through to the `UnsupportedFunction` path (#84).
+/// The scalar→vector conversion (issue #48); `scalar(v)` is scalar-typed and
+/// lowers in `lower_scalar`. `info` is *not* here: it is a label-enrichment
+/// join, not a type conversion (#84).
 fn is_typeconv_fn(name: &str) -> bool {
-    matches!(name, "vector" | "scalar")
+    name == "vector"
 }
 
-/// `vector(s)` — promote a scalar to a label-less instant vector. `scalar(v)`
-/// — collapse a single-element vector to its value. Both are honest bridge
-/// nodes in the IR; the "exactly one element → NaN otherwise" runtime rule of
-/// `scalar` is a post-ASAP/runtime concern (issue #48).
+/// `vector(s)` — promote a scalar to a label-less instant vector carrying the
+/// scalar expression `s` (issue #48).
 fn walk_typeconv(call: &Call) -> Result<Unresolved> {
-    let inner = walk(arg(call, 0)?)?;
-    Ok(match call.func.name {
-        "vector" => Unresolved::PromqlVectorFromScalar(Rc::new(inner)),
-        "scalar" => Unresolved::PromqlScalarFromVector(Rc::new(inner)),
-        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
-    })
+    Ok(Unresolved::PromqlVectorFromScalar(lower_scalar(arg(
+        call, 0,
+    )?)?))
 }
 
 /// The instant-vector reordering functions (issue #51).
@@ -960,13 +1107,13 @@ fn walk_sort(call: &Call) -> Result<Unresolved> {
         "sort_by_label_desc" => (false, false),
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
-    let sort_key = |expr| SortKey {
+    let sort_key = |expr| UnresolvedSortKey {
         expr,
         ascending,
         nulls_first: false,
     };
     let keys = if by_value {
-        vec![sort_key(Unresolved::Column(ColumnRef::SampleValue))]
+        vec![sort_key(Scalar::Column(ColumnRef::SampleValue))]
     } else {
         // `sort_by_label(v, "l1", "l2", …)` — one key per label arg, in order.
         if call.args.args.len() < 2 {
@@ -976,7 +1123,7 @@ fn walk_sort(call: &Call) -> Result<Unresolved> {
         }
         (1..call.args.args.len())
             .map(|i| {
-                Ok(sort_key(Unresolved::Column(ColumnRef::Named(str_arg(
+                Ok(sort_key(Scalar::Column(ColumnRef::Named(str_arg(
                     call, i,
                 )?))))
             })
@@ -1050,42 +1197,30 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
             let replacement = str_arg(call, 2)?;
             let src = str_arg(call, 3)?;
             let regex = str_arg(call, 4)?;
-            let value = Unresolved::FunctionCall {
+            let value = Scalar::FunctionCall {
                 name: "label_replace".into(),
                 args: vec![
-                    Unresolved::Column(ColumnRef::Named(src)),
-                    Unresolved::Literal(ScalarValue::Utf8(regex)),
-                    Unresolved::Literal(ScalarValue::Utf8(replacement)),
+                    Scalar::Column(ColumnRef::Named(src)),
+                    Scalar::Literal(ScalarValue::Utf8(regex)),
+                    Scalar::Literal(ScalarValue::Utf8(replacement)),
                 ],
             };
-            Ok(Unresolved::PromqlRelabel {
-                dst,
-                value: Rc::new(value),
-                child,
-            })
+            Ok(Unresolved::PromqlRelabel { dst, value, child })
         }
         "label_join" => {
-            // label_join(v, dst, sep, src_1, …, src_n) — needs ≥1 source label.
-            if call.args.args.len() < 4 {
-                return Err(LoweringError::MissingArgument(
-                    "label_join(v, dst, sep, src…) needs at least one source label".into(),
-                ));
-            }
+            // label_join(v, dst, sep, src_1, …, src_n). With no source labels
+            // the joined value is empty, which removes `dst` (Prometheus).
             let dst = str_arg(call, 1)?;
             let sep = str_arg(call, 2)?;
-            let mut args = vec![Unresolved::Literal(ScalarValue::Utf8(sep))];
+            let mut args = vec![Scalar::Literal(ScalarValue::Utf8(sep))];
             for i in 3..call.args.args.len() {
-                args.push(Unresolved::Column(ColumnRef::Named(str_arg(call, i)?)));
+                args.push(Scalar::Column(ColumnRef::Named(str_arg(call, i)?)));
             }
-            let value = Unresolved::FunctionCall {
+            let value = Scalar::FunctionCall {
                 name: "label_join".into(),
                 args,
             };
-            Ok(Unresolved::PromqlRelabel {
-                dst,
-                value: Rc::new(value),
-                child,
-            })
+            Ok(Unresolved::PromqlRelabel { dst, value, child })
         }
         other => Err(LoweringError::UnsupportedFunction(other.to_string())),
     }
@@ -1118,7 +1253,6 @@ fn is_math_fn(name: &str) -> bool {
             | "atanh"
             | "deg"
             | "rad"
-            | "pi"
             | "round"
             | "clamp"
             | "clamp_min"
@@ -1127,59 +1261,53 @@ fn is_math_fn(name: &str) -> bool {
 }
 
 /// A math / trig function — a per-series element-wise value transform, lowered
-/// to a per-series `Aggregate{[Math(f)]}` over the (instant) argument vector.
-/// `pi()` is the constant π, lowered to a `PromqlScalarBridge` leaf (issue #45).
+/// to a typed scalar projection over the instant-vector argument.
+/// `pi()` is scalar-typed and lowers in `lower_scalar` (issue #45).
 fn walk_math(call: &Call) -> Result<Unresolved> {
-    if call.func.name == "pi" {
-        return Ok(Unresolved::promql_scalar(std::f64::consts::PI));
+    let mut args = vec![Scalar::Column(ColumnRef::SampleValue)];
+    for index in 1..call.args.args.len() {
+        args.push(lower_scalar(arg(call, index)?)?);
     }
-    let func = match call.func.name {
-        "abs" => MathFunc::Abs,
-        "ceil" => MathFunc::Ceil,
-        "floor" => MathFunc::Floor,
-        "exp" => MathFunc::Exp,
-        "ln" => MathFunc::Ln,
-        "log2" => MathFunc::Log2,
-        "log10" => MathFunc::Log10,
-        "sqrt" => MathFunc::Sqrt,
-        "sgn" => MathFunc::Sgn,
-        "sin" => MathFunc::Sin,
-        "cos" => MathFunc::Cos,
-        "tan" => MathFunc::Tan,
-        "asin" => MathFunc::Asin,
-        "acos" => MathFunc::Acos,
-        "atan" => MathFunc::Atan,
-        "sinh" => MathFunc::Sinh,
-        "cosh" => MathFunc::Cosh,
-        "tanh" => MathFunc::Tanh,
-        "asinh" => MathFunc::Asinh,
-        "acosh" => MathFunc::Acosh,
-        "atanh" => MathFunc::Atanh,
-        "deg" => MathFunc::Deg,
-        "rad" => MathFunc::Rad,
-        // `round(v)` defaults the step to 1; `round(v, to)` reads arg 1.
-        "round" => MathFunc::Round {
-            to_nearest: if call.args.args.len() >= 2 {
-                num_arg(call, 1)?
-            } else {
-                1.0
-            },
+    if call.func.name == "round" && args.len() == 1 {
+        args.push(Scalar::Literal(ScalarValue::Float64(1.0)));
+    }
+    let mut child = walk(arg(call, 0)?)?;
+    if call.func.name == "clamp" {
+        child = clamp_bounds_filter(&args[1], &args[2], child);
+    }
+    Ok(Unresolved::PromqlMap {
+        child: Rc::new(child),
+        sample: Scalar::FunctionCall {
+            name: format!("promql_{}", call.func.name),
+            args,
         },
-        "clamp" => MathFunc::Clamp {
-            min: num_arg(call, 1)?,
-            max: num_arg(call, 2)?,
-        },
-        "clamp_min" => MathFunc::ClampMin {
-            min: num_arg(call, 1)?,
-        },
-        "clamp_max" => MathFunc::ClampMax {
-            max: num_arg(call, 1)?,
-        },
-        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
-    };
-    // The value being transformed is always arg 0 (a vector).
-    let inner = walk(arg(call, 0)?)?;
-    Ok(outer_aggregate(vec![], AggIntent::Math(func), inner))
+        drop_metric_name: true,
+    })
+}
+
+/// `clamp(v, min, max)` returns no series when `max < min` (Prometheus
+/// `funcClamp`), and a projection cannot drop rows, so the series pass a
+/// `Filter { NOT (max < min) }` first. Written as a negation so NaN bounds
+/// still pass. Constant bounds in order need no filter.
+fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresolved {
+    if let (
+        Scalar::Literal(ScalarValue::Float64(min)),
+        Scalar::Literal(ScalarValue::Float64(max)),
+    ) = (min, max)
+    {
+        if max.partial_cmp(min) != Some(std::cmp::Ordering::Less) {
+            return child;
+        }
+    }
+    Unresolved::Filter {
+        pred: UnresolvedPredicate(Scalar::Not(Box::new(Scalar::Compare {
+            left: Box::new(max.clone()),
+            op: CompareOpKind::Lt,
+            right: Box::new(min.clone()),
+            semantics: PROMQL,
+        }))),
+        child: Rc::new(child),
+    }
 }
 
 /// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
@@ -1202,15 +1330,31 @@ fn walk_math(call: &Call) -> Result<Unresolved> {
 /// declared `RawSamples`) and the false-negative (a suffix-less classic
 /// histogram declared `ClassicBucket`) of the structural heuristic. With no
 /// declaration, fall back to the structural `by (le)`/`_bucket` heuristic.
-fn histogram_arg_is_sketchable(arg: &Expr) -> bool {
+fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
     let mut metrics = Vec::new();
     collect_metric_names(arg, &mut metrics);
-    for metric in &metrics {
-        if let Some(kind) = crate::histogram::current_kind_of(metric) {
-            return kind.is_sketchable();
-        }
+    let kinds = metrics
+        .iter()
+        .filter_map(|metric| crate::histogram::current_kind_of(metric))
+        .collect::<Vec<_>>();
+    if kinds.contains(&crate::histogram::HistogramKind::Native) {
+        return Err(LoweringError::UnsupportedFeature(
+            "native histogram samples have no IR representation".into(),
+        ));
     }
-    !is_classic_bucket_arg(arg)
+    if let Some(kind) = kinds.first() {
+        if kinds.iter().any(|other| other != kind) {
+            return Err(LoweringError::UnsupportedFeature(
+                "mixed histogram sample contracts".into(),
+            ));
+        }
+        return Ok(kind.is_sketchable());
+    }
+    if is_classic_bucket_arg(arg) {
+        Ok(false)
+    } else {
+        Err(LoweringError::UnsupportedFeature("histogram_quantile requires classic buckets; use quantile for float samples or explicitly declare the RawSamples extension".into()))
+    }
 }
 
 /// Collect the metric names of every vector/matrix selector reachable in `expr`
@@ -1282,9 +1426,28 @@ fn selector_is_bucket(vs: &VectorSelector) -> bool {
         || vs.matchers.matchers.iter().any(|m| m.name == "le")
 }
 
+/// A binary op with at least one vector operand (a scalar/scalar op is
+/// scalar-typed and never reaches here). A scalar side lowers to a
+/// scalar expression; mixed operations resolve to Project or Filter.
 fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
-    let lhs = scalar_or_vector(&bin.lhs)?;
-    let rhs = scalar_or_vector(&bin.rhs)?;
+    let op = binop(bin.op.id())?;
+    let scalar_left = bin.lhs.value_type() == ValueType::Scalar;
+    if scalar_left || bin.rhs.value_type() == ValueType::Scalar {
+        let (scalar, vector) = if scalar_left {
+            (&bin.lhs, &bin.rhs)
+        } else {
+            (&bin.rhs, &bin.lhs)
+        };
+        return Ok(Unresolved::PromqlScalarOp {
+            child: Rc::new(walk(vector)?),
+            scalar: lower_scalar(scalar)?,
+            op,
+            scalar_left,
+            return_bool: bin.return_bool(),
+        });
+    }
+    let lhs = walk(&bin.lhs)?;
+    let rhs = walk(&bin.rhs)?;
     // `VectorMatch` has no fill field; dropping fill would change which series
     // are emitted and their values, so the query must fall back to exact
     // execution instead.
@@ -1295,10 +1458,6 @@ fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
             )));
         }
     }
-    let op = match (binop(bin.op.id())?, bin.return_bool()) {
-        (BinaryOpKind::Compare(op), true) => BinaryOpKind::CompareBool(op),
-        (op, _) => op,
-    };
     let vector_match = bin.modifier.as_ref().map(|m| {
         let (kind, labels) = match &m.matching {
             Some(LabelModifier::Include(ls)) => (VectorMatchKind::On, ls.labels.clone()),
@@ -1329,12 +1488,7 @@ fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
             grouping,
         }
     });
-    Ok(Unresolved::BinaryOp {
-        op,
-        lhs: Rc::new(lhs),
-        rhs: Rc::new(rhs),
-        vector_match,
-    })
+    Ok(vector_binary(op, vector_match, bin.return_bool(), lhs, rhs))
 }
 
 fn lower_inner(expr: &Expr) -> Result<Inner> {
@@ -1601,20 +1755,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     Some(intent) => windowed_aggregate(inner, vec![], intent),
                     None => instant_source(inner.metric, inner.matchers, inner.shift),
                 };
-                let sorted = Unresolved::Sort {
-                    keys: vec![SortKey {
-                        expr: Unresolved::Column(ColumnRef::SampleValue),
-                        ascending: !descending,
-                        nulls_first: false,
-                    }],
-                    partition_by: keys.into(),
-                    child: Rc::new(base),
-                };
-                Ok(Unresolved::Limit {
-                    n: k as usize,
-                    offset: 0,
-                    child: Rc::new(sorted),
-                })
+                Ok(ranked_by_value(keys, k, descending, base))
             }
         }
     }
@@ -1650,19 +1791,12 @@ fn windowed_aggregate(
     let child = match inner.window {
         Some(w) => Unresolved::TimeRange {
             range: w,
+            kind: TimeRangeKind::Range,
             child: Rc::new(base),
         },
-        None => base,
+        None => ingestion_lookback(base),
     };
     let reduction = reduction_for(&keys, inner.window.is_some() || intent.is_per_series());
-    let child = if inner.window.is_none() {
-        Unresolved::TimeRange {
-            range: current_ingestion_interval(),
-            child: Rc::new(child),
-        }
-    } else {
-        child
-    };
     Unresolved::Aggregate {
         reduction,
         measures: vec![intent],
@@ -1715,13 +1849,10 @@ fn per_series_aggregate(
     }
 }
 
-fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) -> Unresolved {
+fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Unresolved {
     let scan = Unresolved::Scan {
         source: Source::TimeSeries { metric },
-        predicates: matchers
-            .into_iter()
-            .map(|m| Predicate(Rc::new(m)))
-            .collect(),
+        predicates: matchers.into_iter().map(UnresolvedPredicate).collect(),
         // Usage-derived (PromQL is schemaless) — the SchemaResolver fills this in.
         schema: None,
     };
@@ -1735,10 +1866,17 @@ fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) 
     }
 }
 
-fn instant_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) -> Unresolved {
+/// An instant selector: the latest sample per series within the workload's
+/// ingestion interval, so the lookback is an `Instant` `TimeRange`.
+fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Unresolved {
+    ingestion_lookback(filtered_source(metric, matchers, shift))
+}
+
+fn ingestion_lookback(child: Unresolved) -> Unresolved {
     Unresolved::TimeRange {
         range: current_ingestion_interval(),
-        child: Rc::new(filtered_source(metric, matchers, shift)),
+        kind: TimeRangeKind::Instant,
+        child: Rc::new(child),
     }
 }
 
@@ -1881,7 +2019,7 @@ fn resolve_group(agg: &AggregateExpr) -> Result<(Vec<ColumnRef>, bool)> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<Unresolved>, TimeShift)> {
+fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<Scalar>, TimeShift)> {
     // A non-equality `__name__` matcher (`=~` / `!~` / `!=`) selects *across*
     // metric names. `Source::TimeSeries { metric }` carries a single concrete
     // metric name, so there is no representation for a regex/negated name
@@ -1961,21 +2099,22 @@ fn system_time_ms(t: SystemTime) -> Result<i64> {
     })
 }
 
-fn matcher_to_compare(m: &Matcher) -> Unresolved {
+fn matcher_to_compare(m: &Matcher) -> Scalar {
     let op = match &m.op {
         MatchOp::Equal => CompareOpKind::Eq,
         MatchOp::NotEqual => CompareOpKind::Ne,
         MatchOp::Re(_) => CompareOpKind::Regex,
         MatchOp::NotRe(_) => CompareOpKind::NotRegex,
     };
-    Unresolved::Compare {
-        left: Rc::new(Unresolved::Column(ColumnRef::Named(m.name.clone()))),
+    Scalar::Compare {
+        left: Box::new(Scalar::Column(ColumnRef::Named(m.name.clone()))),
         op,
-        right: Rc::new(Unresolved::Literal(ScalarValue::Utf8(m.value.clone()))),
+        right: Box::new(Scalar::Literal(ScalarValue::Utf8(m.value.clone()))),
+        semantics: PROMQL,
     }
 }
 
-fn extract_matrix(expr: &Expr) -> Result<(String, Vec<Unresolved>, Duration, TimeShift)> {
+fn extract_matrix(expr: &Expr) -> Result<(String, Vec<Scalar>, Duration, TimeShift)> {
     match expr {
         Expr::MatrixSelector(ms) => {
             let (metric, matchers, shift) = vs_parts(&ms.vs)?;
@@ -2017,6 +2156,7 @@ fn num_expr(expr: &Expr) -> Result<f64> {
     match expr {
         Expr::NumberLiteral(n) => Ok(n.val),
         Expr::Paren(p) => num_expr(&p.expr),
+        Expr::Unary(u) => Ok(-num_expr(&u.expr)?),
         // Constant-fold a pure scalar arithmetic expression — the parser does
         // not fold `10*1024*1024` / `24 * 3600`. A `modifier` (vector matching)
         // or a non-arithmetic operator means it is not a pure scalar.
@@ -2045,13 +2185,19 @@ fn num_expr(expr: &Expr) -> Result<f64> {
         // when every argument is itself a constant scalar — this is the only
         // form the intent algebra can hold (there is no scalar min/max node). A
         // non-constant argument (`min_of(step(), 1s)`) fails the recursive fold
-        // and propagates the error, so it stays rejected. `f64::min`/`max`
-        // ignore NaN, matching PromQL's `min`/`max` NaN semantics.
+        // and propagates the error, so it stays rejected. Like Go's
+        // `math.Min`/`Max`, any NaN argument makes the result NaN (`f64::min`/
+        // `max` would skip it).
         Expr::Call(c) if is_scalar_reducer_fn(c.func.name) => {
-            let reduce = if c.func.name == "min_of" {
-                f64::min
-            } else {
-                f64::max
+            let is_min = c.func.name == "min_of";
+            let reduce = |a: f64, b: f64| {
+                if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if is_min {
+                    a.min(b)
+                } else {
+                    a.max(b)
+                }
             };
             c.args
                 .args
@@ -2074,26 +2220,21 @@ fn is_scalar_reducer_fn(name: &str) -> bool {
     matches!(name, "min_of" | "max_of")
 }
 
-/// A `BinaryOp` operand: fold a pure-scalar expression (`5`, `10*1024*1024`) to
-/// a `PromqlScalarBridge` leaf, otherwise walk it as a vector (issue #35).
-fn scalar_or_vector(expr: &Expr) -> Result<Unresolved> {
-    match num_expr(expr) {
-        Ok(v) => Ok(Unresolved::promql_scalar(v)),
-        Err(_) => walk(expr),
-    }
-}
-
-/// `topk`/`bottomk` count parameter — a non-negative integer. Rejects
-/// fractional / negative / non-finite values rather than silently truncating
-/// or saturating them via `as u64` (`topk(2.7, …)` ≠ `topk(2, …)`).
+/// `topk`/`bottomk`/`limitk` k parameter, as Prometheus reads it: truncated
+/// toward zero, with any `k < 1` selecting nothing (returned as 0). NaN and a
+/// k that overflows int64 are errors.
 fn count_param(agg: &AggregateExpr) -> Result<u64> {
+    // Prometheus's `maxInt64`: the largest float64 below 2^63.
+    const MAX_K: f64 = 9_223_372_036_854_774_784.0;
     let v = num_param(agg)?;
-    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= u64::MAX as f64 {
-        Ok(v as u64)
-    } else {
+    if v < 1.0 {
+        Ok(0)
+    } else if v.is_nan() || v >= MAX_K {
         Err(LoweringError::InvalidParameter(format!(
-            "topk/bottomk k must be a non-negative integer, got {v}"
+            "topk/bottomk/limitk k must be a number below 2^63, got {v}"
         )))
+    } else {
+        Ok(v as u64)
     }
 }
 
@@ -2115,17 +2256,6 @@ fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
 fn quantile_param(q: f64) -> Result<f64> {
     // Prometheus returns NaN/-Inf/+Inf for these parameters at execution time.
     Ok(q)
-}
-
-// The non-standard histogram_quantiles extension keeps its bounded label contract.
-fn bounded_quantile_param(q: f64) -> Result<f64> {
-    if q.is_finite() && (0.0..=1.0).contains(&q) {
-        Ok(q)
-    } else {
-        Err(LoweringError::InvalidParameter(format!(
-            "quantile φ must be in [0, 1], got {q}"
-        )))
-    }
 }
 
 fn binop(id: token::TokenId) -> Result<BinaryOpKind> {

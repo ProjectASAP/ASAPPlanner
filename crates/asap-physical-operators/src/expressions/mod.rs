@@ -6,7 +6,8 @@ use crate::{
 use planner_types::pre_asap::{ArithmeticOpKind, DataType};
 pub mod arithmetic;
 pub mod binary;
-pub mod unified_planner;
+mod planner;
+pub use planner::CompiledExpression;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Expression {
     Binary {
@@ -14,7 +15,7 @@ pub enum Expression {
         left: Box<Expression>,
         right: Box<Expression>,
     },
-    UnifiedPlanner(Box<unified_planner::CompiledExpression>),
+    Planner(Box<CompiledExpression>),
     Column(usize),
     ExactFloat64(usize),
     FiniteFloat64(Box<Expression>),
@@ -53,8 +54,8 @@ pub enum Expression {
     IsNull(Box<Expression>),
 }
 impl Expression {
-    pub fn unified_planner(expression: unified_planner::CompiledExpression) -> Self {
-        Self::UnifiedPlanner(Box::new(expression))
+    pub fn planner(expression: CompiledExpression) -> Self {
+        Self::Planner(Box::new(expression))
     }
     pub(crate) fn dtype(&self, input: &SchemaRef) -> Result<(DataType, bool), Error> {
         use Expression::*;
@@ -100,7 +101,7 @@ impl Expression {
                 };
                 Ok((dtype, n || m))
             }
-            UnifiedPlanner(expression) => {
+            Planner(expression) => {
                 expression.validate_input(input)?;
                 Ok(expression.dtype())
             }
@@ -286,7 +287,7 @@ impl Expression {
                     arithmetic::evaluate_binary(operator, a, b)?
                 }
             }
-            UnifiedPlanner(expression) => expression.evaluate(row)?,
+            Planner(expression) => expression.evaluate(row)?,
             Label { column, name } => {
                 let Value::Map(entries) = &row[*column] else {
                     return Err(invalid("label read requires a map"));
@@ -319,8 +320,7 @@ impl Expression {
                     }
                 }
                 Value::Utf8(
-                    crate::unified_physical_planner::promql_rows::encode_series_identity(&labels)?
-                        .into(),
+                    crate::physical_planner::promql_rows::encode_series_identity(&labels)?.into(),
                 )
             }
             Column(i) => row[*i].clone(),

@@ -26,8 +26,8 @@
 // `__GAP`-suffixed names intentionally SHOUT the documented divergences.
 #![allow(non_snake_case)]
 
-use asap_frontend_promql::unified::PromqlError as LoweringError;
-#[path = "../unified_support.rs"]
+use asap_frontend_promql::PromqlError as LoweringError;
+#[path = "../support.rs"]
 mod support;
 use std::rc::Rc;
 

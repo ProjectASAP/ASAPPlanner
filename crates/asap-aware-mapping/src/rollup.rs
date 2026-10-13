@@ -51,7 +51,7 @@
 //!   here, so it is deliberately left unhandled (see [`rollup_combinator`]).
 //!   In practice this never matters: `Rate`/`Increase` are constructed with
 //!   `Reduction::PerEntity` (per-series, no `by` at all — see
-//!   `AggIntent::is_per_series` and `asap_frontend_promql::unified::promql::reduction_for`),
+//!   `AggIntent::is_per_series` and `asap_frontend_promql::promql::reduction_for`),
 //!   never `Reduction::Reduce`, so they never carry a `by` set for this
 //!   strategy to compare in the first place; `PerEntity` nodes never match
 //!   ([`bindable_grouped_aggregate`] returns `None` for them). `Increase`'s

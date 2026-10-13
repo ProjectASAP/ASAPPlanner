@@ -1,13 +1,12 @@
 //! Spatial heap weights come from a fresh instant vector, never sample history.
-#[path = "unified_common/mod.rs"]
 mod common;
 use asap_physical_operators::{
     operators::Operator,
-    runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{
+    physical_planner::{
         promql_rows::{decode_series_identity, series_row, SERIES_IDENTITY_COLUMN},
         CompiledPhysicalDAG, InputContract, Source,
     },
+    runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
 use common::compile_physical_asap_dag;
@@ -273,7 +272,7 @@ fn current_series_observes_resource_limits() {
 
 #[test]
 fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
-    use asap_physical_operators::unified_physical_planner::promql_rows::encode_series_identity;
+    use asap_physical_operators::physical_planner::promql_rows::encode_series_identity;
     let labels = BTreeMap::from([
         ("a".into(), "quote\"slash\\".into()),
         ("other".into(), "".into()),
@@ -296,9 +295,7 @@ fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
 // test does not manually assemble the computation or its dependency edges.
 #[test]
 fn planner_current_series_candidate_compiles_with_dynamic_identity() {
-    use asap_physical_operators::unified_physical_planner::{
-        compile, promql_rows::with_series_identity,
-    };
+    use asap_physical_operators::physical_planner::{compile, promql_rows::with_series_identity};
     use planner_types::{types::AccuracyTarget, workload::*};
     use std::rc::Rc;
     let workload = PlanningWorkload {
@@ -325,7 +322,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
             ..Default::default()
         }),
     };
-    let original = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+    let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
     let open_root = Rc::new(original.clone());
@@ -336,7 +333,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .candidate(&open_root)
         .unwrap();
     let snapshot_program =
-        asap_physical_operators::unified_physical_planner::promql_rows::compile_current_series_evaluation(
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
             &open_selected,
         )
         .unwrap();

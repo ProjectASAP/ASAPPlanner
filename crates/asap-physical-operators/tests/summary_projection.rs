@@ -3,8 +3,8 @@ use asap_physical_operators::{
     expressions::Expression,
     factory::create_planner_accumulator,
     operators::Operator,
+    physical_planner::{compile, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{compile, CompiledPhysicalDAG, InputContract, Source},
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};

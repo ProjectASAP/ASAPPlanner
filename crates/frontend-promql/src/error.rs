@@ -1,12 +1,12 @@
 use std::fmt;
 
-use asap_types::pre_asap::ResolveDAGError;
+use asap_frontend_common::ResolveDAGError;
 use asap_types::workload::WorkloadError;
 
-/// Errors from lowering a PromQL query (parse → the canonical, unresolved
-/// DAG, built directly →
-/// [`resolve_root`](asap_types::pre_asap::resolve_root) binds it to the
-/// resolved DAG, issue #179).
+/// Errors from lowering a PromQL query (parse → the name-based unresolved
+/// tree, built directly →
+/// [`resolve_root`](asap_frontend_common::resolve_root) binds it to the
+/// unified operator DAG, issue #179).
 ///
 /// Carries no DataFusion type — the PromQL front end never depends on the SQL
 /// stack. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`

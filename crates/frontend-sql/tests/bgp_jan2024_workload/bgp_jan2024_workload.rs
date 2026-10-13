@@ -13,7 +13,7 @@
 //! per-query), this corpus is 200 queries wide and only pins an **aggregate
 //! tally** by outcome category -- see the module doc on [`Category`] for why.
 
-use asap_frontend_sql::unified::{lower_sql_dialect, SqlCatalog, SqlError};
+use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;

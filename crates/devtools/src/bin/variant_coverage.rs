@@ -7,7 +7,7 @@
 // (`ScalarExpr`) separately. Used to find the minimal IR node set.
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;
-use asap_frontend_sql::unified::{lower_sql_dialect, SqlCatalog};
+use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::ir::{OperatorNode, ScalarExpr};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;

@@ -10,7 +10,7 @@ use asap_aware_mapping::replacement::default_strategies_with_evidence;
 use asap_aware_mapping::{
     search_workload_with_targets, Horizon, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
 };
-use asap_frontend_sql::unified::{lower_sql_dialect, SqlCatalog};
+use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;

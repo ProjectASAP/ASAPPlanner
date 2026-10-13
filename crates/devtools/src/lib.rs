@@ -12,12 +12,10 @@
 //! only) or [`asap_frontend_sql`] (DataFusion only) — so it never compiles the
 //! other's parser.
 
-pub use asap_frontend_promql::unified::{
+pub use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, PromqlError,
 };
-pub use asap_frontend_sql::unified::{
-    lower_sql, lower_sql_batch, SqlCatalog, SqlError, SqlLowerer,
-};
+pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError, SqlLowerer};
 
 /// Lower one developer-supplied PromQL query with an explicit source cadence.
 /// Tools intentionally require the cadence rather than choosing a default.

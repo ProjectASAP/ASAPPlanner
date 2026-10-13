@@ -24,7 +24,7 @@ use asap_aware_mapping::{
     search_workload, ASAPStrategies, DefaultCostModel, Replacement, ReplacementStrategy,
     ReplacementSubDAG, TargetSubDAG,
 };
-use asap_frontend_sql::unified::{lower_sql, lower_sql_dialect, SqlCatalog};
+use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::physical_export::{EdgeRole, PhysicalASAPNodeId, PhysicalASAPOperatorPayload};

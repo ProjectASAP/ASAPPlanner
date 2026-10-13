@@ -2,7 +2,6 @@
 //! Planner's search space: `enumerate_candidate_dags_for_root` lists
 //! current-series TopK heaps without a caller-side series-identity pass, cost
 //! ranking, or workload Cartesian expansion. Placement variants are not listed.
-#[path = "unified_common/mod.rs"]
 mod common;
 use common::compile_physical_asap_dag;
 use planner_types::ir::OperatorNode as QueryExpr;
@@ -13,7 +12,7 @@ use asap_aware_mapping::{
     replacement::{default_strategies_with_evidence, ReplacementProvenance},
     search_workload_with_targets, Proposals, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_physical_operators::unified_physical_planner::promql_rows::{
+use asap_physical_operators::physical_planner::promql_rows::{
     compile_current_series_evaluation, SERIES_IDENTITY_COLUMN,
 };
 use planner_types::{
@@ -93,7 +92,7 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<QueryExpr> {
             ..Default::default()
         }),
     };
-    asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0)
 }

@@ -1,11 +1,10 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
 //! the deployment supplies only raw rows at the ingestion frontier.
-#[path = "unified_common/mod.rs"]
 mod common;
 use asap_physical_operators::{
     operators::Operator,
+    physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
     values::{Batch, Value},
 };
 use common::compile_physical_asap_dag;
@@ -44,7 +43,7 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
             ..Default::default()
         }),
     };
-    asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0)
 }

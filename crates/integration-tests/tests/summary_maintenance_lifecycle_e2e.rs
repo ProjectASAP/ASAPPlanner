@@ -15,7 +15,7 @@ use asap_aware_mapping::{
     SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection, WorkloadDemand,
 };
-use asap_frontend_promql::unified::lower_promql_workload;
+use asap_frontend_promql::lower_promql_workload;
 use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
     EvaluationSchedule, SummaryMaintenanceLifecycle, SummaryMaintenanceMode,
@@ -273,8 +273,8 @@ mod physical_common;
 #[test]
 fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
     use asap_physical_operators::{
+        physical_planner::{compile_candidate, InputContract},
         runtime::Scope,
-        unified_physical_planner::{compile_candidate, InputContract},
         values::{Batch, Value},
     };
     use asap_types::{post_asap::FieldDataType, pre_asap::DataType};
@@ -340,7 +340,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
     )
     .unwrap();
     let mut priced = 0;
-    let feedback = asap_physical_operators::unified_physical_planner::select_candidate(
+    let feedback = asap_physical_operators::physical_planner::select_candidate(
         vec![
             rejected.map(|candidate| {
                 (
@@ -353,7 +353,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         |_| {
             priced += 1;
             Ok(Some(
-                asap_physical_operators::unified_physical_planner::CandidateCost {
+                asap_physical_operators::physical_planner::CandidateCost {
                     workload_scope: "dashboard".into(),
                     horizon_seconds: 100.,
                     total_cost: 1000.,
@@ -458,10 +458,8 @@ fn lifecycle_timed_dag(
     let mut lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
     if query.contains(" by(") {
         lowered =
-            asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity(
-                &lowered,
-            )
-            .unwrap();
+            asap_physical_operators::physical_planner::promql_rows::with_series_identity(&lowered)
+                .unwrap();
     }
     let root =
         selected_plan_for_lowered(&workload, lowered, &FullyCostedRuntime, Horizon(100.)).root;
@@ -496,8 +494,7 @@ fn lifecycle_timed_dag(
 /// Compile inputs for a timed DAG: its raw source, available at either phase.
 fn raw_inputs(
     dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
-) -> std::collections::BTreeMap<u64, asap_physical_operators::unified_physical_planner::InputContract>
-{
+) -> std::collections::BTreeMap<u64, asap_physical_operators::physical_planner::InputContract> {
     let raw = dag
         .nodes
         .iter()
@@ -512,9 +509,9 @@ fn raw_inputs(
         .unwrap();
     std::collections::BTreeMap::from([(
         raw.id as u64,
-        asap_physical_operators::unified_physical_planner::InputContract::bounded(
-            std::sync::Arc::new(raw.output_schema.clone()),
-        ),
+        asap_physical_operators::physical_planner::InputContract::bounded(std::sync::Arc::new(
+            raw.output_schema.clone(),
+        )),
     )])
 }
 
@@ -549,8 +546,8 @@ fn planner_lifecycle_selection_reproduces_strategy_timing() {
 #[test]
 fn chosen_lifecycle_timing_decides_precompute_contents() {
     use asap_physical_operators::{
+        physical_planner::{compile_candidate, frontier_from_timing},
         runtime::Scope,
-        unified_physical_planner::{compile_candidate, frontier_from_timing},
         values::{Batch, Value},
     };
     use asap_types::{post_asap::FieldDataType, pre_asap::DataType};
@@ -643,7 +640,7 @@ fn chosen_lifecycle_timing_decides_precompute_contents() {
 /// Ephemeral. Covers the KLL quantile fixture and grouped Rate→Sum.
 #[test]
 fn lifecycle_timing_cuts_one_compilation() {
-    use asap_physical_operators::unified_physical_planner::{
+    use asap_physical_operators::physical_planner::{
         compile, compile_candidate, cut_candidate, frontier_from_timing,
     };
     for query in ["quantile(0.99, latency)", "sum by(job)(rate(m[1m]))"] {
@@ -702,12 +699,12 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
         maintained_population::MaintainedPopulationStrategy,
     };
     use asap_physical_operators::{
-        runtime::Scope,
-        unified_physical_planner::{
+        physical_planner::{
             compile_candidate,
             promql_rows::{series_row, with_series_identity},
             InputContract,
         },
+        runtime::Scope,
         values::{Batch, Value},
     };
     use asap_types::post_asap::maintained_population::PopulationInput;
@@ -770,7 +767,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
             .unwrap();
         let (raw_id, schema) = (raw.id as u64, Arc::new(raw.output_schema.clone()));
         let frontier =
-            asap_physical_operators::unified_physical_planner::frontier_from_timing(&dag).unwrap();
+            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
         let candidate = compile_candidate(
             &dag,
             BTreeMap::from([(raw_id, InputContract::bounded(schema.clone()))]),
@@ -847,16 +844,15 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
 #[test]
 fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
     use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
-    use asap_physical_operators::unified_physical_planner::{compile_candidate, InputContract};
+    use asap_physical_operators::physical_planner::{compile_candidate, InputContract};
     use asap_types::post_asap::{ExactKind, FieldDataType};
     use std::{collections::BTreeMap, sync::Arc};
 
     let workload = quantile_workload("sum by(job)(rate(m[1m]))");
-    let root =
-        asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity(
-            &lower_promql_workload(&workload, 0).unwrap().remove(0),
-        )
-        .unwrap();
+    let root = asap_physical_operators::physical_planner::promql_rows::with_series_identity(
+        &lower_promql_workload(&workload, 0).unwrap().remove(0),
+    )
+    .unwrap();
     let is_exact = |node: &OperatorNode, kind: ExactKind| {
         matches!(&node.operator, asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::ExactAggregate(k, _), ..
@@ -927,7 +923,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
             })
             .unwrap();
         let frontier =
-            asap_physical_operators::unified_physical_planner::frontier_from_timing(&dag).unwrap();
+            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
         let [boundary] = frontier.as_slice() else {
             panic!("one precompute output, got {frontier:?}");
         };
@@ -1004,10 +1000,8 @@ fn execute_timed(
     samples: &[(&str, &str, i64, f64)],
 ) -> Vec<f64> {
     use asap_physical_operators::{
+        physical_planner::{compile_candidate, frontier_from_timing, promql_rows, InputContract},
         runtime::Scope,
-        unified_physical_planner::{
-            compile_candidate, frontier_from_timing, promql_rows, InputContract,
-        },
         values::{Batch, Value},
     };
     use asap_types::{ir::physical_export::PhysicalASAPOperatorPayload, pre_asap::Source};
@@ -1071,12 +1065,11 @@ fn execute_timed(
         &frontier,
     )
     .unwrap();
-    let raw_sources =
-        |plan: &asap_physical_operators::unified_physical_planner::CompiledPhysicalDAG| {
-            plan.input_contracts()
-                .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
-                .collect::<BTreeMap<_, _>>()
-        };
+    let raw_sources = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDAG| {
+        plan.input_contracts()
+            .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
+            .collect::<BTreeMap<_, _>>()
+    };
     let mut query_sources = raw_sources(&candidate.query);
     if let Some(precompute) = &candidate.precompute {
         let stored = physical_common::execute(

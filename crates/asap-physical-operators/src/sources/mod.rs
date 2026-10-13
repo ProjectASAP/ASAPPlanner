@@ -1,6 +1,6 @@
 //! Raw data access. Connectors provide rows; Scan owns Planner predicate semantics.
 use crate::{
-    expressions::unified_planner::CompiledExpression,
+    expressions::CompiledExpression,
     plan::PhysicalOperator,
     runtime::{Input, OutputStream, RunContext},
     values::{Batch, SchemaRef, Value},

@@ -60,10 +60,8 @@ impl Operator {
         use planner_types::pre_asap::JoinKind;
         let mut joined = left.fields.clone();
         joined.extend(right.fields.clone());
-        let predicate = crate::expressions::unified_planner::CompiledExpression::compile(
-            &predicate.0,
-            &schema(joined.clone()),
-        )?;
+        let predicate =
+            crate::expressions::CompiledExpression::compile(&predicate.0, &schema(joined.clone()))?;
         if predicate.dtype().0 != DataType::Bool {
             return Err(invalid("join predicate must be boolean"));
         }

@@ -14,12 +14,12 @@
 use asap_types::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
 use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
 
-use asap_frontend_metricsql::unified::{lower_metricsql_query_workload, MetricsqlError};
-use asap_frontend_promql::unified::{
+use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
+use asap_frontend_promql::{
     lower_promql_query_workload, lower_promql_query_workload_with_histograms, HistogramCatalog,
     PromqlError,
 };
-use asap_frontend_sql::unified::{lower_sql_dialect, SqlCatalog, SqlError};
+use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 
 // The optimization stage's vocabulary is this facade's vocabulary too: a caller
 // configures the same models and reads the same output whether it goes through

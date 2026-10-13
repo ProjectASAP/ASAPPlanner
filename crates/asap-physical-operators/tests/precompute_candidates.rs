@@ -1,16 +1,15 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
-#[path = "unified_common/mod.rs"]
 mod common;
 use asap_aware_mapping::{cost_model::DefaultCostModel, search_workload};
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
-    runtime::{Limits, RunContext, Scope},
-    unified_physical_planner::{
+    physical_planner::{
         compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
         select_candidate, CandidateCost, CompiledPhysicalDAG, CompiledPhysicalPlan, InputContract,
         Source,
     },
+    runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
 use common::compile_physical_asap_dag;
@@ -45,12 +44,11 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static
             ..Default::default()
         }),
     };
-    let root = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+    let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
-    let root =
-        asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity(&root)
-            .unwrap();
+    let root = asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
+        .unwrap();
     search_workload(vec![("grouped-rate", root)]).unwrap()
 }
 
@@ -172,7 +170,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let root = dag.roots[0] as u64;
     let state_id = state.id as u64;
     let rate_id = evaluation.id as u64;
-    let frontiers = asap_physical_operators::unified_physical_planner::enumerate_frontiers(
+    let frontiers = asap_physical_operators::physical_planner::enumerate_frontiers(
         &dag,
         &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
         &[root],
@@ -184,7 +182,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     assert!(frontiers.contains(&vec![root]));
     assert!(!frontiers.contains(&vec![root, rate_id]));
     assert!(
-        asap_physical_operators::unified_physical_planner::enumerate_frontiers(
+        asap_physical_operators::physical_planner::enumerate_frontiers(
             &dag,
             &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
             &[root],
@@ -257,7 +255,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     )]);
     for frontier in [vec![rate_id, rate_id], vec![root, rate_id], vec![999]] {
         assert!(
-            asap_physical_operators::unified_physical_planner::compile_candidate(
+            asap_physical_operators::physical_planner::compile_candidate(
                 &dag,
                 contracts.clone(),
                 &[root],
@@ -380,7 +378,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
 /// persistence; an explicit Rate-state input retains its original semantics.
 #[test]
 fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
-    use asap_physical_operators::unified_physical_planner::enumerate_frontiers;
+    use asap_physical_operators::physical_planner::enumerate_frontiers;
     let dag = grouped_rate();
     let state = dag
         .nodes
@@ -657,14 +655,12 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
             ..Default::default()
         }),
     };
-    let original = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+    let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
     let root =
-        asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity(
-            &original,
-        )
-        .unwrap();
+        asap_physical_operators::physical_planner::promql_rows::with_series_identity(&original)
+            .unwrap();
     let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
         std::slice::from_ref(&root),
     )

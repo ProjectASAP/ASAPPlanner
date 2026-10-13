@@ -1,70 +1,68 @@
+use std::rc::Rc;
 use std::time::Duration;
 
 use asap_frontend_metricsql::{
     canonical_metricsql, lower_metricsql, parse_metricsql, MetricsqlError,
 };
-use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
+use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
+use asap_types::pre_asap::{AggIntent, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
-fn lower(query: &str) -> QueryExpr {
-    lower_metricsql(query, AccuracyTarget::Epsilon(0.01)).unwrap()
+/// The workload's ingestion interval, the lookback of a bare selector.
+const INTERVAL: Duration = Duration::from_secs(15);
+
+fn lower(query: &str) -> Rc<OperatorNode> {
+    lower_metricsql(query, AccuracyTarget::Epsilon(0.01), INTERVAL).unwrap()
 }
 
 #[test]
 fn selector_range_aggregate_and_call_share_the_canonical_shape() {
     let query = r#"sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))"#;
     let dag = lower(query);
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = dag
+    } = dag.expect_non_asap()
     else {
         panic!("expected outer aggregate");
     };
-    assert_eq!(reduction, Reduction::by(vec![2]));
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected rate aggregate");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { range, child } = child.as_ref() else {
+    let NonASAPOp::TimeRange { range, child, .. } = child.expect_non_asap() else {
         panic!("expected range");
     };
     assert_eq!(*range, Duration::from_secs(300));
     assert!(
-        matches!(child.as_ref(), QueryExpr::Scan { source: Source::TimeSeries { metric }, predicates, .. } if metric == "http_requests_total" && predicates.len() == 1)
+        matches!(child.expect_non_asap(), NonASAPOp::Scan { source: Source::TimeSeries { metric }, predicates, .. } if metric == "http_requests_total" && predicates.len() == 1)
     );
 }
 
 #[test]
 fn default_rollup_with_explicit_range_is_last_over_time() {
     let dag = lower("default_rollup(cpu_usage[5m])");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = dag
+    } = dag.expect_non_asap()
     else {
         panic!("expected aggregate");
     };
-    assert_eq!(reduction, Reduction::PerEntity);
+    assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::LastOverTime]));
     assert!(
-        matches!(child.as_ref(), QueryExpr::TimeRange { range, .. } if *range == Duration::from_secs(300))
-    );
-}
-
-#[test]
-fn implicit_default_rollup_requires_runtime_step() {
-    let error = lower_metricsql("default_rollup(cpu_usage)", AccuracyTarget::Exact).unwrap_err();
-    assert!(
-        matches!(error, MetricsqlError::UnsupportedFeature(message) if message.contains("evaluation step"))
+        matches!(child.expect_non_asap(), NonASAPOp::TimeRange { range, kind, .. }
+        if *range == Duration::from_secs(300) && *kind == TimeRangeKind::Range)
     );
 }
 
@@ -75,6 +73,7 @@ fn keep_metric_names_is_preserved_in_ast_and_rejected_without_lineage() {
     let error = lower_metricsql(
         "rate(requests_total[5m]) keep_metric_names",
         AccuracyTarget::Exact,
+        INTERVAL,
     )
     .unwrap_err();
     assert!(
@@ -98,7 +97,7 @@ fn victoria_metrics_extension_corpus_parses_natively_and_fails_closed() {
         let ast = parse_metricsql(query)
             .unwrap_or_else(|error| panic!("native MetricsQL parser rejected {query:?}: {error}"));
         assert!(!ast.to_string().is_empty());
-        let result = lower_metricsql(query, AccuracyTarget::Exact);
+        let result = lower_metricsql(query, AccuracyTarget::Exact, INTERVAL);
         assert!(
             result.is_err(),
             "extension semantics must be represented or routed to exact fallback: {query}"
@@ -136,7 +135,7 @@ fn canonical_identity_recursively_formats_metricsql_extensions() {
 fn metricsql_multi_argument_aggregates_fail_closed() {
     for query in ["sum(foo, bar)", "avg(foo, bar)", "count(foo, bar)"] {
         parse_metricsql(query).expect("MetricsQL accepts multi-argument aggregates");
-        let error = lower_metricsql(query, AccuracyTarget::Exact).unwrap_err();
+        let error = lower_metricsql(query, AccuracyTarget::Exact, INTERVAL).unwrap_err();
         assert!(
             matches!(error, MetricsqlError::UnsupportedFeature(message) if message.contains("requires exactly 1")),
             "{query} must not silently discard an aggregate input"
@@ -147,7 +146,13 @@ fn metricsql_multi_argument_aggregates_fail_closed() {
 #[test]
 fn supported_parameterized_functions_require_their_exact_arity() {
     let quantile = lower("quantile(0.9, requests_total)");
-    assert!(matches!(quantile, QueryExpr::Aggregate { .. }));
+    assert!(matches!(
+        quantile.expect_non_asap(),
+        NonASAPOp::Aggregate { .. }
+    ));
     let rollup = lower("quantile_over_time(0.9, requests_total[5m])");
-    assert!(matches!(rollup, QueryExpr::Aggregate { .. }));
+    assert!(matches!(
+        rollup.expect_non_asap(),
+        NonASAPOp::Aggregate { .. }
+    ));
 }
