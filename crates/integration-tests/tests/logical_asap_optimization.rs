@@ -1,11 +1,14 @@
 //! Frontends → Pass 1 → composed candidate logical ASAP DAGs: every candidate of
 //! a query is a valid DAG with the query's output column types.
 
+use std::rc::Rc;
+
 use asap_aware_mapping::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates,
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::ir::QueryRoot;
+use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SummaryUpdate};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -131,4 +134,73 @@ fn promql_candidates_compose() {
     ] {
         assert!(compose_all(query, promql(query)) >= 1, "{query}");
     }
+}
+
+/// The summary estimates of `root`'s candidates that vary one target's
+/// choice, every other target taking its first.
+fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
+    let inventory = generate_per_computation_candidates(vec![(0, root)]).unwrap();
+    let targets = inventory.targets.len();
+    let choices: Vec<_> = inventory
+        .targets
+        .iter()
+        .enumerate()
+        .flat_map(|(target, computation)| {
+            (1..computation.choices.candidates.len()).map(move |index| {
+                let mut choice = vec![0; targets];
+                choice[target] = index;
+                choice
+            })
+        })
+        .collect();
+    choices
+        .into_iter()
+        .flat_map(|choice| {
+            let composed = compose_logical_candidate(&inventory, &choice).unwrap();
+            let QueryRoot::Operator(node) = &composed[0].1 else {
+                panic!("operator root expected")
+            };
+            OperatorNode::reachable(node)
+        })
+        .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. })))
+        .collect()
+}
+
+fn update_of(estimate: &OperatorNode) -> (SketchAlgorithm, SummaryUpdate) {
+    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
+        unreachable!()
+    };
+    let Some(ASAPOp::SummaryAgg {
+        family: FieldDataType::Sketch(kind, _),
+        input,
+        ..
+    }) = summary_input.asap()
+    else {
+        panic!("sketch state expected")
+    };
+    (kind.algorithm().clone(), input.clone())
+}
+
+/// A heap sketch's bound is per item frequency, not Top-K membership, and
+/// its weights are not proven non-negative: a Top-K estimate gets no
+/// guarantee. A unit-count CMS estimate keeps its bound.
+#[test]
+fn topk_estimates_carry_no_frequency_bound() {
+    let topk = composed_estimates(promql("topk by (job) (10, sum_over_time(m[1m]))"));
+    let algorithms: Vec<_> = topk.iter().map(|node| update_of(node).0).collect();
+    assert_eq!(
+        algorithms,
+        [
+            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountSketchWithHeap
+        ]
+    );
+    assert!(topk.iter().all(|node| node.guarantee.is_none()));
+
+    let count = composed_estimates(promql("count by (job) (m)"));
+    let cms = count
+        .iter()
+        .find(|node| update_of(node).0 == SketchAlgorithm::Cms)
+        .expect("CMS candidate");
+    assert!(cms.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
 }

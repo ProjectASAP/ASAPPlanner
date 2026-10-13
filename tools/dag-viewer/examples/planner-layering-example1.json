@@ -2048,32 +2048,7 @@
               "timing": null
             },
             {
-              "guarantee": {
-                "bound": {
-                  "op": "constant",
-                  "value": 0.009993683192864136
-                },
-                "failure_probability": {
-                  "op": "constant",
-                  "value": 0.0009118819655545162
-                },
-                "metric": "frequency",
-                "provenance": [
-                  {
-                    "algorithm": "CmsWithHeap",
-                    "contract": "count_min_l1_markov_v1",
-                    "kind": "sketch_evaluation",
-                    "params": {
-                      "CmsWithHeap": {
-                        "depth": 7,
-                        "heap_size": 100,
-                        "width": 272
-                      }
-                    },
-                    "query": "TopK { k: 10 }"
-                  }
-                ]
-              },
+              "guarantee": null,
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
@@ -2908,32 +2883,7 @@
               "timing": null
             },
             {
-              "guarantee": {
-                "bound": {
-                  "op": "constant",
-                  "value": 0.01
-                },
-                "failure_probability": {
-                  "op": "constant",
-                  "value": 0.0009639757257341771
-                },
-                "metric": "l2_frequency",
-                "provenance": [
-                  {
-                    "algorithm": "CountSketchWithHeap",
-                    "contract": "count_sketch_l2_median_hoeffding_v1",
-                    "kind": "sketch_evaluation",
-                    "params": {
-                      "CountSketchWithHeap": {
-                        "depth": 125,
-                        "heap_size": 100,
-                        "width": 30000
-                      }
-                    },
-                    "query": "TopK { k: 10 }"
-                  }
-                ]
-              },
+              "guarantee": null,
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {

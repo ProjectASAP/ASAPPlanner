@@ -55,9 +55,12 @@
 //!
 //! Every node of the candidate gets a theoretical guarantee: exact over
 //! exact inputs; a `SummaryEstimate` over exact input the sized family's
-//! bound; and `None` for anything computed from an approximate value.
-//! Composing guarantees through operators is #669; plan selection's accuracy model
-//! decides a candidate without one.
+//! bound where that bound answers the estimate (not for Top-K, where a heap
+//! sketch bounds item frequencies, not membership; not for a Count-Min
+//! family over weights not proven non-negative); and `None` otherwise and for
+//! anything computed from an approximate value. Composing guarantees through
+//! operators is #669; plan selection's accuracy model decides a candidate without
+//! one.
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -564,10 +567,11 @@ fn with_guarantees(
 
 /// The theoretical guarantee of a composed node, given its children's: exact
 /// over exact inputs; a summary estimate over exact input has its sized
-/// family's bound. Anything computed from an approximate value (arithmetic,
-/// a comparison, a value `HAVING` or any other predicate, at any depth) gets
-/// `None`: composition through operators is not defined yet (#669), and
-/// plan selection's accuracy model decides. A summary state carries none itself.
+/// family's bound when [`estimate_has_bound`]. Anything computed from an
+/// approximate value (arithmetic, a comparison, a value `HAVING` or any other
+/// predicate, at any depth) gets `None`: composition through operators is
+/// not defined yet (#669), and plan selection's accuracy model decides. A summary
+/// state carries none itself.
 fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
     let exact = |node: &OperatorNode| {
         node.guarantee
@@ -592,8 +596,11 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
             Some(ASAPOp::SummaryAgg {
                 child: input,
                 family,
+                input: update,
                 ..
-            }) if exact(input) => DefaultAccuracyModel.local_guarantee(family, query),
+            }) if exact(input) && estimate_has_bound(family, update, query) => {
+                DefaultAccuracyModel.local_guarantee(family, query)
+            }
             _ => None,
         },
         Operator::ASAP(_) => None,
@@ -603,6 +610,23 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
             .all(|child| exact(child))
             .then(|| ResultGuarantee::exact("exact over exact inputs")),
     }
+}
+
+/// Whether the default accuracy model's bound for `family` answers `query`
+/// over `update`. A heap sketch's bound is per item frequency, not Top-K
+/// membership; a Count-Min bound assumes non-negative weights.
+fn estimate_has_bound(
+    family: &FieldDataType,
+    update: &SummaryUpdate,
+    query: &SketchStatistic,
+) -> bool {
+    let count_min = matches!(
+        family,
+        FieldDataType::Sketch(kind, _)
+            if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap)
+    );
+    !matches!(query, SketchStatistic::TopK { .. })
+        && !(count_min && update.weight_domain == WeightDomain::UnknownOrSigned)
 }
 
 /// Replace an aggregate whose measures are `targets`' (or exact, for a
