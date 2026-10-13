@@ -1,5 +1,6 @@
 //! Scoped source contracts and evidence required by accuracy rules.
 use super::*;
+use asap_types::ir::QueryRoot;
 
 /// A trusted source assertion scoped by `AccuracyEvidenceProvider` to one
 /// complete evaluation. Choosing this variant asserts the estimator and hash
@@ -103,6 +104,17 @@ pub trait AccuracyEvidenceProvider {
     /// Proof scoped to this complete quantile expression, including its source,
     /// filters, grouping and window. `None` means unknown, including emptiness.
     fn quantile_input_domain(&self, _operand: &OperatorNode) -> Option<QuantileInputDomain> {
+        None
+    }
+
+    /// The deployment's empirical accuracy for one candidate's whole query
+    /// output, as a guarantee. Plan selection (#509 Stage 3) accepts a
+    /// candidate whose output has no theoretical guarantee that meets the
+    /// target (e.g. a difference of two quantile estimates) only when this
+    /// shows the output meets it. Stage 1 composition never reads it: root
+    /// guarantees there come from the built-in theoretical model. `None`
+    /// means no evidence.
+    fn output_guarantee(&self, _output: &QueryRoot) -> Option<ResultGuarantee> {
         None
     }
 

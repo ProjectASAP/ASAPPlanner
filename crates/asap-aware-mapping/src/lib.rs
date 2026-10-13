@@ -215,3 +215,13 @@ pub mod maintained_population;
 /// Stage 1, Pass 1: per-computation candidate generation. No execution timing is
 /// assigned: that is a Stage 2 materialization decision.
 pub mod per_computation_candidates;
+
+/// #509 Stage 2, physical ASAP-aware optimization (MVP): materialization
+/// (every sub-DAG `NotMaterialized`) and physical operator implementation,
+/// producing the CandidatePhysicalASAPDAGs.
+pub mod physical_asap_optimization;
+
+/// #509 Stage 3, plan selection (MVP): accuracy check, analytical pricing
+/// (a `NotMaterialized` node once per query that reads it, a materialized
+/// one once), cheapest valid plan.
+pub mod plan_selection;

@@ -116,7 +116,11 @@ plans:
 
 ### Stage 3 · plans by cost
 
-Every physical plan, cheapest first, with its total cost per second:
+Every physical plan, cheapest first, with its total cost per second.
+A node that is not materialized is recomputed for each query that reads it,
+so a node shared by two queries is charged twice; a materialized node, at
+ingestion or at query time, is charged once, and the nodes below it once for
+it (plus once for each query that also reads them directly).
 
 - **✓ selected**: the plan ASAPPlanner chooses.
 - **valid · costlier**: meets every requirement, but costs more.
