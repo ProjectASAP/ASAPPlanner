@@ -2,7 +2,7 @@
 //   1. index.html loads this via <script src="viewer.js"> for the normal
 //      drag-and-drop page.
 //   2. render.py inlines this file's text verbatim into a standalone HTML
-//      file it generates from a dag_export JSON — see render.py's docstring
+//      file it generates from a planner JSON document — see render.py's docstring
 //      and the "Render a standalone page from Python" section of README.md.
 // Both consumers share one copy of this logic; render.py never forks it.
 cytoscape.use(window.cytoscapeDagre);
@@ -34,9 +34,9 @@ let zoom = 1;
 // The viewer has one Pre/Post-ASAP mode. One selected query renders its own
 // two DAGs; multiple selected queries union each stage into one workload DAG.
 let participants = new Set();
-// Every query pushed from the *same* loaded JSON document (one `dag_export`
+// Every query pushed from the *same* loaded JSON document (one exporter
 // process invocation) shares one `sourceBatch` id, assigned here. Needed
-// because `DAGDecision.id` is only unique *within* one dag_export run, not
+// because `DAGDecision.id` is only unique *within* one exporter run, not
 // across independently-generated files — computeSelectionWorkloadCost below
 // dedups by `${sourceBatch}:${decision.id}`, never `decision.id` alone, so
 // two files that happen to reuse the same small integer id never collide.
@@ -121,10 +121,10 @@ function loadFiles(fileList) {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const parsed = JSON.parse(reader.result);
+        const parsed = asViewerWorkload(JSON.parse(reader.result));
         const incoming = parsed.queries || [];
         const existingNames = new Set(queries.map((q) => q.name));
-        // One batch id per *file* — every query this one dag_export
+        // One batch id per *file* — every query this one exporter
         // invocation produced shares its decision.id numbering.
         const sourceBatch = nextSourceBatch++;
         incoming.forEach((q) => {
@@ -455,10 +455,7 @@ function renderPrePostAsap() {
   const missing = selected.filter((q) => !q.post_dag);
   if (missing.length > 0) {
     viewTitleEl.textContent = selected.length === 1 ? `Pre/Post-ASAP: ${selected[0].name}` : `Pre/Post-ASAP workload: ${selected.length} queries`;
-    const action = document.getElementById('plannerRun')
-      ? 'Open Query planner and click “Plan selected workload”, or re-export with dag_export --post-asap.'
-      : 'Re-export with dag_export --post-asap.';
-    showModeHint(`No post-ASAP DAG for: ${missing.map((q) => q.name).join(', ')}. ${action}`);
+    showModeHint(`No post-ASAP DAG for: ${missing.map((q) => q.name).join(', ')}. Stage 3 plan selection selected no plan; see the document's stage3_plan_selection.`);
     return;
   }
   hideModeHint();
@@ -646,7 +643,7 @@ function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
 }
 
 // ── Structured cost/benefit annotations ───────────────────────────────────
-// Renders only what a `dag_export` JSON export explicitly carries
+// Renders only what a WorkloadDAG JSON export explicitly carries
 // (`CostAnnotation`/`WorkloadCostSummary`/`EdgeCostAnnotation` from
 // crates/types/src/cost.rs) — no client-side cost estimation. A value with
 // no `source: "Modeled"|"Measured"` (i.e. `Unavailable`, or the field
@@ -728,7 +725,7 @@ function renderCostAnnotation(title, annotation) {
 }
 
 // Baseline/selected/benefit trio for one replacement decision, matching
-// `DAGDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
+// a WorkloadDAG `DAGDecision.baseline_cost/selected_cost/benefit`.
 function renderDecisionCostBlock(entry) {
   if (!entry.baseline_cost && !entry.selected_cost && !entry.benefit) return '';
   return `<div class="costBlock">
@@ -755,12 +752,10 @@ function nodeCostBadgeSuffix(node) {
 }
 
 // Workload-wide baseline/selected/benefit for the currently selected
-// queries, deduplicated by `decision.id` *within one loaded document* — the
-// same collision-free key `crates/devtools/src/bin/dag_export.rs`'s own
-// `decision_cost_entries` dedupes by (a decision spans every node in its
-// replacement region, and a CSE-shared target can appear in more than one
-// selected query from the same dag_export run). `decision.id` is only
-// unique within the one `dag_export` process invocation that produced it,
+// queries, deduplicated by `decision.id` *within one loaded document* (a
+// decision spans every node in its replacement region, and a CSE-shared
+// target can appear in more than one selected query from the same export).
+// `decision.id` is only unique within the one export that produced it,
 // never across independently-generated files — the viewer explicitly
 // supports loading and selecting across several files at once — so the
 // dedup key is `${query.sourceBatch}:${decision.id}`, not `decision.id`
@@ -1106,7 +1101,13 @@ document.getElementById('zoomInBtn').addEventListener('click', () => { zoom = Ma
 document.getElementById('fitBtn').addEventListener('click', () => { if (cy) { cy.fit(undefined, 30); zoom = cy.zoom(); zoomSlider.value = Math.round(zoom * 100); zoomLabel.textContent = Math.round(zoom * 100) + '%'; } });
 document.getElementById('resetBtn').addEventListener('click', () => { zoom = 1; applyZoom(); });
 
-function loadWorkload(parsed) {
+// A stage_pipeline document is read through stage-workload.js.
+function asViewerWorkload(parsed) {
+  return isStagePipelineDocument(parsed) ? stageWorkload(parsed) : parsed;
+}
+
+function loadWorkload(raw) {
+  const parsed = asViewerWorkload(raw);
   const incoming = (parsed && parsed.queries) || [];
   // One batch id for this whole document — see `sourceBatch`'s own doc above.
   const sourceBatch = nextSourceBatch++;

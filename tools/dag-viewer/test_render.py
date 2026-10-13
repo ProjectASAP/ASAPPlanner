@@ -334,6 +334,67 @@ class MainCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
 
+STAGE_DOCUMENT = HERE / "examples" / "planner-layering-example1.json"
+
+
+class StageDocumentRenderTests(unittest.TestCase):
+    """render.py passes a stage_pipeline document through for the viewer's
+    stage-workload.js to read."""
+
+    def test_stage_document_is_embedded_unchanged_with_its_reader(self):
+        document = json.loads(STAGE_DOCUMENT.read_text())
+        self.assertEqual(load_workload([STAGE_DOCUMENT]), document)
+        html = render(document)
+        embedded = re.search(r'<script type="application/json" id="embedded-workload">(.*?)</script>', html, re.S)
+        self.assertEqual(json.loads(embedded.group(1)), document)
+        self.assertIn("function stageWorkload", html)
+
+    def test_two_stage_documents_are_rejected(self):
+        with self.assertRaises(ValueError):
+            load_workload([STAGE_DOCUMENT, STAGE_DOCUMENT])
+
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class StageWorkloadTests(unittest.TestCase):
+    """stage-workload.js turns a stage_pipeline document into the viewer's
+    per-query pre/post DAGs: Stage 0 before, the Stage 3 selected physical
+    plan after, with each node's Stage 3 cost."""
+
+    def setUp(self):
+        self.js = py_mini_racer.MiniRacer()
+        self.js.eval((HERE / "stage-workload.js").read_text())
+        self.document = json.loads(STAGE_DOCUMENT.read_text())
+
+    def test_one_query_per_workload_query_with_reachable_dags(self):
+        workload = self.js.call("stageWorkload", self.document)
+        queries = workload["queries"]
+        self.assertEqual([q["name"] for q in queries], ["q1", "q2"])
+        self.assertEqual(queries[0]["source"], self.document["workload"]["queries"][0]["text"])
+        for query in queries:
+            for key in ("dag", "post_dag"):
+                dag = query[key]
+                ids = {node["id"] for node in dag["nodes"]}
+                self.assertIn(dag["root"], ids)
+                for node in dag["nodes"]:
+                    self.assertTrue(set(node["children"]) <= ids)
+                    self.assertEqual(node["workload_node_id"], node["id"])
+                    self.assertTrue(node["kind"] and node["label"])
+
+    def test_post_nodes_carry_the_selected_plans_costs(self):
+        selection = self.document["stage3_plan_selection"]
+        per_node = selection["costs"][selection["selected"]]["per_node"]
+        post = self.js.call("stageWorkload", self.document)["queries"][0]["post_dag"]
+        node = post["nodes"][0]
+        cost = per_node[str(node["id"])]
+        self.assertIn("\ncost ", node["label"])
+        self.assertEqual(node["detail"]["cost"], cost)
+
+    def test_failed_selection_has_no_post_dag(self):
+        self.document["stage3_plan_selection"] = {"costs": {}, "selected": None, "rejected": []}
+        queries = self.js.call("stageWorkload", self.document)["queries"]
+        self.assertTrue(all("post_dag" not in q for q in queries))
+
+
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
 class ViewerCacheTests(unittest.TestCase):
     def setUp(self):

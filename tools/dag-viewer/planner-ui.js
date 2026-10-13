@@ -66,7 +66,7 @@ function addPlannerRow(query = {}) {
   const row = document.createElement('div');
   row.className = 'plannerRow';
   row.innerHTML = `
-    <input class="plannerInclude" type="checkbox" checked title="Include in workload" />
+    <input class="plannerInclude" type="checkbox" ${query.include === false ? '' : 'checked'} title="Include in workload (one language per plan)" />
     <input class="plannerName" value="${escapeHtml(query.name || `q${plannerRows.children.length + 1}`)}" aria-label="Query name" />
     <select class="plannerLanguage" aria-label="Language"><option value="sql">SQL</option><option value="promql">PromQL</option></select>
     <div class="plannerSchemas" aria-label="Input schemas"></div>
@@ -94,7 +94,7 @@ document.getElementById('plannerRun').addEventListener('click', async () => {
     schemas: Array.from(row.querySelectorAll('.plannerSchemas input:checked')).map((input) => input.value),
     text: row.querySelector('.plannerText').value,
   }));
-  plannerStatus.textContent = 'Running pre-ASAP lowering and ASAP-aware mapping…';
+  plannerStatus.textContent = 'Running stage_pipeline (Stage 0 query language frontends → Stage 3 plan selection)…';
   document.getElementById('plannerRun').disabled = true;
   try {
     const response = await fetch('/api/plan', {
@@ -111,7 +111,11 @@ document.getElementById('plannerRun').addEventListener('click', async () => {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
     window.renderPlannerWorkload(result);
-    plannerStatus.textContent = `Planned ${result.queries.length} queries. Select one or several tabs above.`;
+    const selection = result.stage3_plan_selection;
+    const cost = selection.costs[selection.selected];
+    plannerStatus.textContent = selection.selected
+      ? `Stage 3 selected ${selection.selected} (cost ${cost.total} ${cost.unit}) of ${result.stage1_logical_asap_optimization.combinations} candidates. Select one or several tabs above.`
+      : `Stage 3 selected no plan: ${selection.error || selection.rejected.map((r) => `${r.id}: ${r.reason}`).join('; ')}`;
   } catch (error) {
     plannerStatus.textContent = `Planning failed: ${error.message}. Start this page with server.py.`;
   } finally {
@@ -132,6 +136,7 @@ addPlannerRow({ name: 'count_by_service', schemas: ['metrics'] });
 addPlannerRow({ name: 'avg_latency', schemas: ['metrics'], text: 'SELECT service, AVG(latency) FROM metrics GROUP BY service' });
 addPlannerRow({
   name: 'q3',
+  include: false,
   language: 'promql',
   text: 'topk(5, rate(http_requests_total[5m]))',
 });
@@ -143,6 +148,7 @@ addPlannerRow({
 });
 addPlannerRow({
   name: 'q4',
+  include: false,
   language: 'promql',
   text: 'topk(10, rate(http_requests_total[5m]))',
 });

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bake WorkloadDAG JSON into a single, portable Pre/Post-ASAP HTML page,
+"""Bake a stage_pipeline document (or WorkloadDAG JSON) into a single, portable Pre/Post-ASAP HTML page,
 with the same query selection, workload-union, and node details as index.html,
 but with
 the vendored JS libraries and the query data all inlined into one file.
@@ -27,9 +27,12 @@ doesn't explicitly rewrite — viewer.js reads `decision.baseline_cost` /
 `.selected_cost` / `.benefit`, `NamedDAG.workload_cost`, and
 `ExportDAG.edge_annotations` directly, with no help needed from this file.
 
+A stage_pipeline document is embedded unchanged; stage-workload.js reads
+it in the page.
+
 Usage:
-  cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 \\
-    | python3 tools/dag-viewer/render.py -o rendered.html
+  cargo run -p asap-devtools --bin stage_pipeline -- --promql "..." --out run.json
+  python3 tools/dag-viewer/render.py run.json -o rendered.html
 
   python3 tools/dag-viewer/render.py dag1.json dag2.json -o rendered.html
 
@@ -54,7 +57,15 @@ HERE = Path(__file__).resolve().parent
 # embedded data and mode override must land immediately before it in
 # document order (its startup code reads both synchronously as soon as it
 # runs) — see viewer.js's header comment.
-_INLINE_LIBS = ("dagre.min.js", "cytoscape.min.js", "cytoscape-dagre.js", "node-style.js", "planner-ui.js")
+_INLINE_LIBS = (
+    "dagre.min.js",
+    "cytoscape.min.js",
+    "cytoscape-dagre.js",
+    "node-style.js",
+    "stage-workload.js",
+    "planner-ui.js",
+)
+STAGE_PIPELINE_FORMAT = "asap-stage-pipeline/v1"
 
 
 def _compact(value: object) -> str:
@@ -255,11 +266,17 @@ def prepare_workload(workload: dict) -> dict:
 def load_workload(paths: list[Path]) -> dict:
     """Merge one or more WorkloadDAG JSON files into one, matching
     viewer.js's loadFiles(): a query name colliding with an earlier one is
-    disambiguated by suffixing the source filename."""
+    disambiguated by suffixing the source filename. A stage_pipeline
+    document is returned unchanged; it is rendered on its own."""
+    documents = [json.loads(path.read_text()) for path in paths]
+    stage = [d for d in documents if d.get("format") == STAGE_PIPELINE_FORMAT]
+    if stage:
+        if len(documents) > 1:
+            raise ValueError("a stage_pipeline document is rendered on its own")
+        return stage[0]
     queries = []
     seen_names = set()
-    for path in paths:
-        data = json.loads(path.read_text())
+    for path, data in zip(paths, documents):
         incoming = data.get("queries", [])
         for q in incoming:
             name = q["name"]
@@ -310,7 +327,7 @@ def main() -> None:
         "files",
         nargs="*",
         type=Path,
-        help="dag_export WorkloadDAG JSON file(s); reads stdin if none are given",
+        help="a stage_pipeline document or WorkloadDAG JSON file(s); reads stdin if none are given",
     )
     parser.add_argument("-o", "--output", type=Path, required=True, help="output HTML file path")
     args = parser.parse_args()
@@ -318,17 +335,24 @@ def main() -> None:
     try:
         workload = load_workload(args.files) if args.files else json.loads(sys.stdin.read())
     except FileNotFoundError as err:
-        print(f"render.py: {err.filename} — no such file (run dag_export first?)", file=sys.stderr)
+        print(f"render.py: {err.filename} — no such file (run stage_pipeline first?)", file=sys.stderr)
         sys.exit(1)
     except json.JSONDecodeError as err:
         source = args.files[0] if len(args.files) == 1 else "input"
         print(f"render.py: {source} isn't valid JSON — {err}", file=sys.stderr)
         sys.exit(1)
-    if not workload.get("queries"):
+    except ValueError as err:
+        print(f"render.py: {err}", file=sys.stderr)
+        sys.exit(1)
+    if workload.get("format") == STAGE_PIPELINE_FORMAT:
+        workload_queries = workload.get("workload", {}).get("queries", [])
+    else:
+        workload_queries = workload.get("queries")
+    if not workload_queries:
         print("render.py: no queries in input — nothing to render", file=sys.stderr)
         sys.exit(1)
     args.output.write_text(render(workload))
-    n = len(workload["queries"])
+    n = len(workload_queries)
     print(f"wrote {args.output} ({n} quer{'y' if n == 1 else 'ies'})")
 
 
