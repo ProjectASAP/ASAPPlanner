@@ -153,15 +153,16 @@ whether an exact Q2 misses 100 ms is not tested.
    most deployments. A composed top-*k* estimate has no guarantee, so without
    deployment evidence every heap candidate is invalid and the exact plan is
    selected.
-4. **Stage 2 is materialization in the doc's example.** Example 1 lists only
-   window-form and materialization options. The MVP reads "physical operator
-   implementation" from the Stage 2 section ("TopK as a sort followed by a
-   limit"), which gives one physical candidate per logical candidate.
+4. **Physical ASAP-aware optimization is materialization in the doc's
+   example.** Example 1 lists only window-form and materialization options.
+   The MVP reads "physical operator implementation" from the physical
+   ASAP-aware optimization section ("TopK as a sort followed by a limit"),
+   which gives one physical candidate per logical candidate.
 5. **Where exact top-*k* becomes sort + limit.** The Pass 1 diagram draws
    exact Q2 as "sort + limit 10 per job", but the frontend emits
-   `Aggregate{[TopK]}` and the Stage 2 section calls sort + limit a physical
-   choice. The tests require sort → limit only after physical ASAP-aware
-   optimization.
+   `Aggregate{[TopK]}` and the physical ASAP-aware optimization section calls
+   sort + limit a physical choice. The tests require sort → limit only after
+   physical ASAP-aware optimization.
 6. **Hydra's inner sketch.** The doc says "Hydra over the whole `job`
    column" without naming the inner sketch. The test assumes `HydraCms`.
 7. **"Shared summary charged once"** does not apply literally: the doc says
