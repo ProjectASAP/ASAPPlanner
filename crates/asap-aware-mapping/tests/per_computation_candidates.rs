@@ -937,7 +937,7 @@ fn summary_agg(node: &OperatorNode) -> &ASAPOp {
 /// measure's accuracy requirement.
 #[test]
 fn composed_summary_is_sized_for_its_measure() {
-    use asap_aware_mapping::replacement::default_size_params;
+    use asap_aware_mapping::realization::default_size_params;
     let intent = AggIntent::Count {
         accuracy: approximate(),
     };

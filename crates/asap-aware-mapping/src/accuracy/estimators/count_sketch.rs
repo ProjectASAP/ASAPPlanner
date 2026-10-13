@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn count_sketch_uses_an_l2_guarantee() {
-        use crate::replacement::default_size_params;
+        use crate::realization::default_size_params;
         use asap_types::post_asap::{GroupingStrategy, SketchKind};
         use asap_types::pre_asap::agg_intent::default_cardinality;
         let intent = default_cardinality();

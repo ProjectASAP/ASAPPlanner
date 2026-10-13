@@ -1,10 +1,10 @@
-// cargo run -p asap-devtools --bin show_pre_asap_ir -- queries.txt
-// (or pipe via stdin: cargo run -p asap-devtools --bin show_pre_asap_ir < queries.txt)
+// cargo run -p asap-devtools --bin show_logical_dag -- queries.txt
+// (or pipe via stdin: cargo run -p asap-devtools --bin show_logical_dag < queries.txt)
 //
 // Lowers a batch of ad-hoc SQL/PromQL queries to **pre-ASAP IR** (the
 // sketch-agnostic intent algebra: an `OperatorNode` DAG of `NonASAPOp`
 // operators with `AggIntent` measures) and prints them.
-// See `show_post_asap_ir` for the post-ASAP sketch-bound IR one layer
+// See `stage_pipeline` for the planner stages one layer
 // downstream — this tool never picks a sketch, it only shows what a query
 // means.
 //
@@ -49,7 +49,7 @@ async fn main() {
     assert_eq!(
         args.next().as_deref(),
         Some("--data-ingestion-interval-ms"),
-        "usage: show_pre_asap_ir --data-ingestion-interval-ms <ms> [queries.txt]"
+        "usage: show_logical_dag --data-ingestion-interval-ms <ms> [queries.txt]"
     );
     let interval_ms = args
         .next()

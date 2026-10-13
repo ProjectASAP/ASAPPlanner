@@ -86,7 +86,7 @@ use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
 use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
-use crate::replacement::{
+use crate::realization::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates,
 };
 
@@ -1068,7 +1068,7 @@ fn measure_input(
         AggIntent::Count { .. } if input.result_kind == OperatorResultKind::Relation => {
             SummaryInputExpr::Column(counted_column(schema, filter)?)
         }
-        _ => crate::replacement::summarised_input(intent, schema).map_err(|_| {
+        _ => crate::realization::summarised_input(intent, schema).map_err(|_| {
             PerComputationCandidateError::Unsupported("input column outside child schema")
         })?,
     };
@@ -1109,7 +1109,7 @@ fn counted_column(
                 .then_some(id)
             })
     };
-    let reference = |id: usize| schema.fields.get(id).map(crate::replacement::column_ref);
+    let reference = |id: usize| schema.fields.get(id).map(crate::realization::column_ref);
     filter
         .map_or_else(Vec::new, |filter| not_null(&filter.0))
         .into_iter()
@@ -1173,7 +1173,7 @@ fn summary_update(
                     .enumerate()
                     .filter(|(index, _)| *index != value && !groups.contains(index))
                     .map(|(_, field)| {
-                        SummaryInputExpr::Column(crate::replacement::column_ref(field))
+                        SummaryInputExpr::Column(crate::realization::column_ref(field))
                     })
                     .collect();
                 if items.is_empty() {
@@ -1186,7 +1186,7 @@ fn summary_update(
                 let excluding = groups
                     .iter()
                     .filter_map(|&index| child.fields.get(index))
-                    .map(crate::replacement::column_ref)
+                    .map(crate::realization::column_ref)
                     .collect();
                 SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
             };

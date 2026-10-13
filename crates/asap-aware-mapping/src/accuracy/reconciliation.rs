@@ -34,7 +34,7 @@
 //! 1. Both are the same bindable shape [`crate::replacement::ASAPStrategies`]
 //!    itself targets — a single measure, no `HAVING` (`bindable_intent`'s own
 //!    scope) — **and** that one measure is one of the four accuracy-bearing
-//!    [`AggIntent`] variants ([`crate::replacement::accuracy_target`]'s own
+//!    [`AggIntent`] variants ([`crate::realization::accuracy_target`]'s own
 //!    scope: `Count` / `Quantile` / `Cardinality` / `TopK`). Every other
 //!    intent has no `AccuracyTarget` to reconcile in the first place.
 //! 2. Same `reduction` (grouping), same `output_names`, and the same shared
@@ -61,7 +61,7 @@
 //!
 //! ## Safety of tightening: why reading the tighter build is always sound
 //!
-//! [`crate::replacement::accuracy_budget`] resolves *every* `AccuracyTarget`
+//! [`crate::realization::accuracy_budget`] resolves *every* `AccuracyTarget`
 //! (`Epsilon`/`EpsilonDelta`) to the literal `(eps, delta)` pair
 //! `realizations_for_intent`'s `sketch_realizations` feeds into
 //! `CostModel::size_params` — the same numbers `default_size_params`'
@@ -158,9 +158,9 @@ use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
 
+use crate::realization::{accuracy_budget, accuracy_target};
 use crate::replacement::{
-    accuracy_budget, accuracy_target, Replacement, ReplacementProvenance, ReplacementStrategy,
-    ReplacementSubDAG, TargetSubDAG,
+    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 
 /// `bindable_accuracy_aggregate`'s return shape: `(reduction, intent,
@@ -179,7 +179,7 @@ type BindableAccuracyAggregate<'a> = (
 /// [`crate::replacement::ASAPStrategies`] targets (see that
 /// module's private `bindable_intent`), further narrowed to a measure whose
 /// intent actually carries an [`AccuracyTarget`]
-/// ([`crate::replacement::accuracy_target`]'s own scope: `Count` /
+/// ([`crate::realization::accuracy_target`]'s own scope: `Count` /
 /// `Quantile` / `Cardinality` / `TopK`). `None` for anything else, including
 /// a multi-measure or `HAVING` aggregate, a non-`Aggregate` node, or an
 /// accuracy-free intent (`Sum`, `Avg`, …).
@@ -534,7 +534,7 @@ mod tests {
         let epsilon_only = AccuracyTarget::Epsilon(0.01);
         let equivalent_epsilon_delta = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
-            delta: crate::replacement::DEFAULT_DELTA,
+            delta: crate::realization::DEFAULT_DELTA,
         };
         assert!(dominates(&epsilon_only, &equivalent_epsilon_delta));
         assert!(dominates(&equivalent_epsilon_delta, &epsilon_only));

@@ -84,10 +84,11 @@ use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
+use crate::realization::{accuracy_target, summary_candidates};
 use crate::replacement::{
-    accuracy_target, bindable_intent, construct_summary_with, describe_intent,
-    realizations_for_intent, summary_candidates, CandidatePlanningInputs, Proposals, Realization,
-    RejectedCandidate, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+    bindable_intent, construct_summary_with, describe_intent, realizations_for_intent,
+    CandidatePlanningInputs, Proposals, Realization, RejectedCandidate, Replacement,
+    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 
 /// Whether `reduction` has a genuine subpopulation concept for

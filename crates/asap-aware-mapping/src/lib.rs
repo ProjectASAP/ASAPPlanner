@@ -148,10 +148,8 @@
 pub mod accuracy;
 pub mod analytical_cost;
 pub mod cost_model;
-pub mod empirical_comparison;
 pub mod empirical_cost;
 pub mod empirical_resources;
-pub mod erp;
 pub mod exact_composition;
 pub mod explanation;
 mod function_rules;
@@ -162,6 +160,7 @@ pub mod physical_handoff_cost;
 pub mod physical_operator_statistics;
 pub mod physical_plan_cost_model;
 pub mod query_physical_lowering;
+pub mod realization;
 pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
@@ -192,6 +191,7 @@ pub use pass::{
     OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
     Stage1ToStage3Pass, Stage1ToStage3Run,
 };
+pub use realization::summary_candidates;
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
@@ -199,12 +199,11 @@ pub use recurrence::{
 };
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
-    search_workload_with_targets, summary_candidates, ASAPStrategies, CandidateLogicalASAPDAGs,
-    CompositionDecision, GlobalSelection, Matcher, Proposals, RankedTargetSubDAGCandidates,
-    Realization, RealizationError, RecurrenceProfileMap, RejectedCandidate, Replacement,
-    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SearchError,
-    SharedSubDAGStrategy, TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection,
-    MAX_SEARCH_ITERATIONS,
+    search_workload_with_targets, ASAPStrategies, CandidateLogicalASAPDAGs, CompositionDecision,
+    GlobalSelection, Matcher, Proposals, RankedTargetSubDAGCandidates, Realization,
+    RealizationError, RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
+    ReplacementStrategy, ReplacementSubDAG, SearchError, SharedSubDAGStrategy, TargetSubDAG,
+    TargetSubDAGCandidates, TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use topk_reuse::TopKLimitReuseStrategy;

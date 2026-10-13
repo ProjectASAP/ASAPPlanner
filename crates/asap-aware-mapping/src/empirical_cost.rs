@@ -7,9 +7,8 @@ use asap_types::pre_asap::AggIntent;
 use serde::{Deserialize, Serialize};
 
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::replacement::{
-    accuracy_budget, accuracy_target, default_size_params, ReplacementSubDAG, TargetSubDAG,
-};
+use crate::realization::{accuracy_budget, accuracy_target, default_size_params};
+use crate::replacement::{ReplacementSubDAG, TargetSubDAG};
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const EVIDENCE_MODEL_VERSION: &str = "empirical-update-cpu-v1";
@@ -317,23 +316,6 @@ fn nonnegative(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 
-/// The existing fixed-snapshot CMS/CountSketch contract needs no separate
-/// preparation. Other families must measure that phase, including an explicit
-/// zero when no preparation is necessary; absence is not free work.
-pub(crate) fn snapshot_prepare_cpu(row: &OfflineMeasurement) -> Option<f64> {
-    match &row.metrics.resources.cpu.prepare_cpu_ns {
-        Some(measurement) => nonnegative(measurement.value).then_some(measurement.value),
-        None if matches!(
-            row.algorithm,
-            SketchAlgorithm::Cms | SketchAlgorithm::CountSketch
-        ) =>
-        {
-            Some(0.0)
-        }
-        None => None,
-    }
-}
-
 fn validate_context(
     distribution: &DistributionDescriptor,
     environment: &EnvironmentDescriptor,
@@ -458,25 +440,6 @@ mod tests {
             });
             assert!(artifact.validate().is_err());
         }
-    }
-
-    /// Only the established frequency-sketch contract can omit preparation.
-    #[test]
-    fn unmeasured_preparation_for_other_families_stays_unknown() {
-        let (mut artifact, _, _) = fixture();
-        let row = &mut artifact.records[0];
-        row.algorithm = SketchAlgorithm::CountSketch;
-        assert_eq!(snapshot_prepare_cpu(row), Some(0.0));
-        row.algorithm = SketchAlgorithm::Kll;
-        row.params = SketchParams::Kll { k: 269 };
-        assert_eq!(snapshot_prepare_cpu(row), None);
-        row.metrics.resources.cpu.prepare_cpu_ns = Some(Measurement {
-            value: 17.0,
-            stddev: None,
-            samples: 1,
-            method: None,
-        });
-        assert_eq!(snapshot_prepare_cpu(row), Some(17.0));
     }
 
     fn fixture() -> (EvidenceArtifact, EvidenceContext, AggIntent) {
