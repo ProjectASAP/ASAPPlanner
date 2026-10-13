@@ -11,6 +11,13 @@
 //! matching front-end crate directly — [`asap_frontend_promql`] (PromQL parser
 //! only) or [`asap_frontend_sql`] (DataFusion only) — so it never compiles the
 //! other's parser.
+//!
+//! [`planning_stages`] and [`planner_layering_examples`] hold the one
+//! pipeline and the #509 example workloads that `stage_pipeline` and the
+//! planner-layering acceptance tests share.
+
+pub mod planner_layering_examples;
+pub mod planning_stages;
 
 pub use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, PromqlError,

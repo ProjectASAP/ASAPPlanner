@@ -68,10 +68,10 @@ plan wins.
 
 | Tab | Workload | What to look for |
 | --- | --- | --- |
-| 1 · dashboard panels | Two PromQL panels over 1M counter series every 10 s: an exact per-job rate, and the approximate top-10 series per job | The exact query stays exact, the top-k uses one CMS+heap over the raw samples, and both read one shared scan |
-| 2 · SQL flow statistics | Distinct sources, entropy and L2 of per-source counts over the last minute of flows | Every UnivMon plan is invalid with the reason "no accuracy model for UnivMon", so an exact plan wins |
-| 3a · historical p99 batch | Five p99 reports over 1–5 years, run once | The cheapest plan shares one input scan across the five KLL sketches |
-| 3b · live p99 panel | p99 over the last 5 min every minute, 1M series | Keeping KLL panes from ingestion time costs more memory than building the sketch at each evaluation, and rebuilding all panes at query time is over the 200 ms latency bound |
+| 1 · dashboard panels | Two PromQL panels over 1M counter series every 10 s: an exact per-job rate, and the approximate top-10 series per job | The exact query stays exact; the CMS+heap and CountSketch+heap top-k plans are rejected with their reasons, so the all-exact plan wins; each query reads its own scan until cross-query sharing lands |
+| 2 · SQL flow statistics | Distinct sources, entropy and L2 of per-source counts over the last minute of flows | All 80 plans compose and are priced; none is pruned. The SQL frontend does not yet recognize entropy and L2, so Q2 and Q3 are per-source counts with exact, Count-Min, CountSketch or UnivMon options. 68 plans are invalid: HLL for Q1 because its bound has "failure probability None", and UnivMon for Q1 or Count-Min or CountSketch for Q2 and Q3 because "the output has no guarantee, and the deployment has no evidence that it meets target". 12 are valid: Q1 exact, Theta or KMV with Q2 and Q3 each exact or UnivMon. P1 (all exact) is selected as the first of four plans tied at 52.80111 ms (with UnivMon on Q2, Q3 or both); Theta or KMV on Q1 costs 2·10⁻⁶ ms more |
+| 3a · historical p99 batch | Five p99 reports over 1–5 years, run once | All 243 plans are priced. Nothing is shared yet: each query scans its own interval and builds its own sketch at query time. P122, KLL for all five queries, is selected: it is the first of 32 plans tied at the lowest cost, because KLL and DDSketch cost the same for every query; exact on any query costs more. The all-exact plan costs about 16% more |
+| 3b · live p99 panel | p99 over the last 5 min every minute, 1M series | P2, KLL built from the window's raw samples at each evaluation, is selected; DDSketch costs the same and exact about 14% more. Everything runs at query time and nothing is materialized. KLL panes kept from ingestion time and the 200 ms latency check come with the window-summary PRs |
 | 4a · monthly p99 reports | Example 3a repeated monthly | The same plan, with its cost amortized over a month |
 | 4b · panes that pay off | p99 over the last hour every 10 min, 1k series sampled every second, raw data not kept by the deployment | Maintaining six 10-min KLL panes at ingestion time wins |
 
@@ -208,7 +208,7 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | `--epsilon`, `--delta` | Accuracy for every query; without them the queries are exact |
 | `--interval-ms <ms>` | Sample interval (default 15000) |
 | `--example <name>` | A built-in example instead of `--promql`: `planner-layering-1`, `-2`, `-3a`, `-3b`, `-4a` or `-4b` |
-| `--max-candidates <n>` | How many plans the document carries, cheapest first (default 64). Stage 3 still prices every plan. |
+| `--max-displayed <n>` | How many plans the document shows (default 64), in enumeration order, plus the selected plan. The planner still optimizes and prices every plan, so the selection does not depend on it. |
 | `--out <file>` | Where to write the document |
 
 Open the document with **Open stage document…**, by dropping the file on the

@@ -3,21 +3,30 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
+use asap_devtools::planner_layering_examples::{pattern_a, PatternARecurrence};
+use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
 use asap_types::ir::QueryRoot;
+use asap_types::workload::DataArrival;
 use serde_json::Value;
 
 const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
 
 fn generate(extra: &[&str]) -> Value {
+    generate_example("planner-layering-1", extra)
+}
+
+fn generate_example(example: &str, extra: &[&str]) -> Value {
+    // Tests run as threads of one process, so the name needs a per-call counter.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let out = std::env::temp_dir().join(format!(
-        "stage_pipeline_{}_{}.json",
+        "stage_pipeline_{}_{call}_{example}.json",
         std::process::id(),
-        extra.len()
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .args(["--example", "planner-layering-1", "--out"])
+        .args(["--example", example, "--out"])
         .arg(&out)
         .args(extra)
         .status()
@@ -122,14 +131,20 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
     assert_eq!(accounted, all);
 }
 
-/// The Cartesian product is cut at `--max-candidates` and says so.
+/// `--max-displayed` cuts only what the document shows, says so, and keeps
+/// the selection made over all candidates.
 #[test]
-fn candidate_cap_is_recorded() {
-    let document = generate(&["--max-candidates", "2"]);
+fn display_cap_is_recorded_and_keeps_the_selection() {
+    let full = generate(&[]);
+    let document = generate(&["--max-displayed", "1"]);
     let logical = &document["logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
-    assert_eq!(logical["candidates"].as_array().unwrap().len(), 2);
-    assert!(logical["combinations"].as_u64().unwrap() > 2);
+    assert!(logical["candidates"].as_array().unwrap().len() < 3);
+    assert_eq!(logical["combinations"], 3);
+    assert_eq!(
+        document["plan_selection"]["selected"],
+        full["plan_selection"]["selected"]
+    );
 }
 
 /// A choice composition cannot substitute is listed with its error, and the
@@ -168,4 +183,25 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
     for candidate in composed {
         validated_dag(&candidate["dag"], 1);
     }
+}
+
+/// Example 3a (243 candidates) selects what the planning stages select over
+/// every candidate, which the acceptance tests also run: the document's
+/// display cap does not change the selection, and the selected plan is
+/// displayed with its cost.
+#[test]
+fn example3a_selects_the_cheapest_of_all_candidates() {
+    let workload = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
+    let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap()).unwrap();
+    assert_eq!(run.stage1_logical_asap_optimization.len(), 243);
+    let expected = run.stage3_plan_selection.unwrap().selected;
+
+    let document = generate_example("planner-layering-3a", &[]);
+    let selection = &document["plan_selection"];
+    assert_eq!(selection["selected"], expected.as_str());
+    assert!(selection["costs"].get(&expected).is_some());
+    let physical = document["physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert!(physical.iter().any(|p| p["id"] == expected.as_str()));
 }
