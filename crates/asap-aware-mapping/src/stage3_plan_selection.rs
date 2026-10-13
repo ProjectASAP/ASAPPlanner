@@ -1104,6 +1104,77 @@ mod tests {
         );
     }
 
+    /// Every sketch family's state is sized from its parameters, as
+    /// `asap_sketchlib` allocates it (Theta as an Apache DataSketches update
+    /// table).
+    #[test]
+    fn summary_state_is_sized_from_sketch_params() {
+        let bytes = |algorithm, params| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(algorithm, params),
+                GroupingStrategy::default(),
+            ))
+            .1
+        };
+        assert_eq!(
+            bytes(SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
+            1 << 14
+        );
+        assert_eq!(
+            bytes(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1_000 }),
+            8 * 1_000
+        );
+        assert_eq!(
+            bytes(SketchAlgorithm::Theta, SketchParams::Theta { k: 1_000 }),
+            16 * 1_000
+        );
+        assert_eq!(
+            bytes(
+                SketchAlgorithm::UnivMon,
+                SketchParams::UnivMon {
+                    heap_size: 256,
+                    sketch_rows: 5,
+                    sketch_cols: 1_024,
+                    layers: 16,
+                }
+            ),
+            16 * (8 * 5 * 1_024 + 24 * 256)
+        );
+    }
+
+    /// Exact distinct-count state keeps every item of its group: over 10 000
+    /// groups of 300 rows it is smaller than a distinct-count sketch sized for
+    /// ε = 0.01 and is selected; over one group of 3 000 000 rows a sketch is.
+    #[test]
+    fn exact_distinct_count_beats_a_sketch_over_small_groups() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let one_series = DataWorkload {
+            input_cardinality: Evidence {
+                value: Some(1),
+                ..Default::default()
+            },
+            ..data()
+        };
+        for (data, sketch_wins) in [(data(), false), (one_series, true)] {
+            let candidates = all_candidates("distinct_over_time(x[5m])", &target);
+            let selection = select_plan(
+                &candidates,
+                &[Some(target.clone())],
+                &data,
+                PlanningModels::builtin(),
+            )
+            .unwrap();
+            let selected = candidates
+                .iter()
+                .find(|c| c.id == selection.selected)
+                .unwrap();
+            assert_eq!(has_summary_estimate(selected), sketch_wins, "{selection:?}");
+        }
+    }
+
     /// A candidate that ties the selected one is rejected for losing on
     /// enumeration order, not as costlier.
     #[test]

@@ -494,6 +494,38 @@ fn stage3_plan_selection_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&pipeline());
 }
 
+/// The distinct-count sketches (HLL, Theta, KMV) are priced by their own state sizes, so no two tie.
+#[test]
+fn stage3_plan_selection_prices_each_distinct_count_sketch_by_its_size() {
+    let run = pipeline();
+    let costs: Vec<(&str, f64)> = ["Hll", "Theta", "Kmv"]
+        .into_iter()
+        .map(|family| {
+            let build = format!("build {family} into");
+            let (id, cost) = run
+                .selection
+                .costs
+                .iter()
+                .find(|(_, c)| {
+                    let builds: Vec<_> = c
+                        .per_node
+                        .values()
+                        .filter(|n| n.detail.starts_with("build "))
+                        .collect();
+                    builds.len() == 1 && builds[0].detail.starts_with(&build)
+                })
+                .unwrap_or_else(|| panic!("no candidate builds only {family}"));
+            eprintln!("{family}: {id} {}", cost.total);
+            (family, cost.total)
+        })
+        .collect();
+    for (i, a) in costs.iter().enumerate() {
+        for b in &costs[i + 1..] {
+            assert_ne!(a.1, b.1, "{} and {} tie", a.0, b.0);
+        }
+    }
+}
+
 /// A UnivMon estimate has a guarantee, so plan selection judges it against its target instead of rejecting it for having none.
 #[test]
 #[ignore = "needs a UnivMon accuracy model: L2 in #621; distinct count and entropy have none yet"]
