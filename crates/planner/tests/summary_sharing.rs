@@ -424,9 +424,10 @@ async fn scalar_queries_read_planned_sub_dags() {
 
 /// A combination of approximate values keeps its summary candidates: each
 /// reference of `scalar(q99) - scalar(q50)` is planned against the entry's
-/// target, so a candidate reads a sketch in both. Its output has no composed
-/// guarantee (#669) and the built-in models have no empirical output-level
-/// evidence, so plan selection rejects it with that reason.
+/// target, so a candidate reads a sketch in both. A difference of rank (KLL)
+/// or relative (DDSketch) errors composes to no guarantee in the MVP (#669)
+/// and the built-in models have no empirical output-level evidence, so plan
+/// selection rejects it with that reason.
 #[test]
 fn combined_scalar_references_keep_summary_candidates() {
     let run = promql_stages(&[(
@@ -456,8 +457,9 @@ fn combined_scalar_references_keep_summary_candidates() {
 }
 
 /// The vector form of a combination of approximate values keeps its summary
-/// candidates (nothing prunes them), but its output has no composed guarantee
-/// (#669) and the built-in models have no empirical output-level evidence
+/// candidates (nothing prunes them), but a difference or a comparison of
+/// estimates composes to no guarantee in the MVP (#669; a comparison's band
+/// guarantee is later work) and the built-in models have no empirical output-level evidence
 /// (plan selection, #576), so it is not selected automatically: the exact plan is.
 #[tokio::test]
 async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
