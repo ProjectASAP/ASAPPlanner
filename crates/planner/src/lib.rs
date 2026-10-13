@@ -6,9 +6,9 @@
 //!                   (this crate)                  (asap-aware-mapping)
 //! ```
 //!
-//! The default pass, [`StagePipeline`], runs the planning stages in order:
-//! logical ASAP-aware optimization, physical ASAP-aware optimization and plan
-//! selection ([`plan_stages`]).
+//! The default pass, [`Stage1ToStage3Pass`], runs Stage 1 (logical ASAP-aware
+//! optimization), Stage 2 (physical ASAP-aware optimization) and Stage 3 (plan
+//! selection) in order ([`run_stage1_to_stage3`]).
 //!
 //! [`e2e_plan`] runs both steps. A caller who already holds pre-ASAP IR — a
 //! new frontend, a deserialized plan, a test that does not want to build SQL
@@ -29,8 +29,8 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_aware_mapping::pass::{
-    optimize, plan_stages, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry,
-    PlanOutput, PlanningModels, QueryPlan, StagePipeline, StagePipelineRun,
+    optimize, run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError,
+    PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
 // ── Input ────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ pub struct UserInput<'a> {
     pub workload: &'a PlanningWorkload,
     pub frontend_specific: FrontendInput<'a>,
     pub models: PlanningModels<'a>,
-    /// `None` uses [`StagePipeline`]. A black-box caller never sets this.
+    /// `None` uses [`Stage1ToStage3Pass`]. A black-box caller never sets this.
     pub pass: Option<&'a dyn OptimizationPass>,
 }
 
@@ -166,7 +166,7 @@ pub enum PlanError {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /// Lower every query (the query-language frontends), then run the
-/// optimization pass over the result: by default [`StagePipeline`], the
+/// optimization pass over the result: by default [`Stage1ToStage3Pass`], the
 /// planning stages in order.
 ///
 /// Async because the SQL frontend plans through DataFusion. One failed query
@@ -178,7 +178,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     let exprs = lower(&input).await?;
     let parsed = ParsedWorkload::from_roots(input.workload.clone(), exprs)?;
 
-    let default_pass = StagePipeline;
+    let default_pass = Stage1ToStage3Pass;
     let pass: &dyn OptimizationPass = input.pass.unwrap_or(&default_pass);
 
     let optimization = OptimizationInput::new(&parsed, input.models);

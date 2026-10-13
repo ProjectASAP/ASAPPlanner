@@ -49,7 +49,9 @@ use thiserror::Error;
 pub struct PhysicalCandidate {
     pub id: String,
     pub from_logical: String,
-    pub label: String,
+    /// Human-readable name of the candidate, used only for display (see
+    /// `pass::stage1_to_stage3`).
+    pub display_name: String,
     pub roots: Vec<QueryRoot>,
     pub dag: PhysicalASAPDAG,
 }
@@ -66,7 +68,7 @@ pub enum PhysicalASAPOptimizationError {
 
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
 /// (physical operator implementation) and time it with every
-/// sub-DAG `NotMaterialized`. `id` and `label` are left empty for the caller
+/// sub-DAG `NotMaterialized`. `id` and `display_name` are left empty for the caller
 /// to name. Sharing between `roots` is preserved: one memo serves the whole
 /// workload.
 pub fn optimize_physical_asap(
@@ -88,7 +90,7 @@ pub fn optimize_physical_asap(
     Ok(PhysicalCandidate {
         id: String::new(),
         from_logical: from_logical.to_string(),
-        label: String::new(),
+        display_name: String::new(),
         roots: timed,
         dag,
     })

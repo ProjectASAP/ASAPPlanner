@@ -4,7 +4,7 @@
 //! summaries below set operators.
 //!
 //! Each test drives SQL text through `lower_sql` and the plan the planner
-//! pipeline selects (`plan_stages`).
+//! pipeline selects (`run_stage1_to_stage3`).
 
 use std::rc::Rc;
 

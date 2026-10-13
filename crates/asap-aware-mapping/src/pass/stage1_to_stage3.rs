@@ -1,18 +1,21 @@
-//! The planner pipeline (#509 MVP): the planning stages in order over the
-//! frontends' query roots, and [`StagePipeline`], the
-//! [`OptimizationPass`](super::OptimizationPass) that runs them.
+//! Stage 1 (logical ASAP-aware optimization) → Stage 2 (physical ASAP-aware
+//! optimization) → Stage 3 (plan selection), starting from the query-language
+//! frontends' roots; Stage 0 runs before it in the facade.
 //!
-//! [`plan_stages`] runs, for one workload:
-//! 1. logical ASAP-aware optimization: Pass 1 per-computation candidate
+//! This is the planner pipeline (#509 MVP). [`Stage1ToStage3Pass`] is the
+//! [`OptimizationPass`](super::OptimizationPass) that runs it.
+//!
+//! [`run_stage1_to_stage3`] runs, for one workload:
+//! 1. Stage 1, logical ASAP-aware optimization: Pass 1 per-computation candidate
 //!    generation, then composition of one whole-workload candidate per choice
 //!    of a per-computation candidate for every target (the Cartesian product,
 //!    in mixed-radix order, the last target varying fastest);
-//! 2. physical ASAP-aware optimization of every composed candidate
+//! 2. Stage 2, physical ASAP-aware optimization of every composed candidate
 //!    ([`optimize_physical_asap`]);
-//! 3. plan selection over the physical candidates ([`select_plan`]).
+//! 3. Stage 3, plan selection over the physical candidates ([`select_plan`]).
 //!
-//! The query-language frontends run before it (the `asap-planner` facade
-//! lowers the workload). Pass 2 (ASAP-aware CSE) is not planned yet.
+//! Stage 0, the query-language frontends, runs before it (the `asap-planner`
+//! facade lowers the workload). Pass 2 (ASAP-aware CSE) is not planned yet.
 //!
 //! Every combination is enumerated and plan selection prices every
 //! candidate; nothing is capped. A search that avoids building every
@@ -42,8 +45,9 @@ use crate::PlanningModels;
 pub struct LogicalCandidate {
     /// `L<n>`, numbered in enumeration order.
     pub id: String,
-    /// E.g. "Q1 exact · Q2 CMS+heap"; exact accumulators in parentheses.
-    pub label: String,
+    /// Human-readable name of the candidate, e.g. "Q1 exact · Q2 CMS+heap", used only for
+    /// display.
+    pub display_name: String,
     pub choice: Vec<usize>,
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
@@ -53,32 +57,42 @@ pub struct LogicalCandidate {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrunedCandidate {
     pub from_logical: String,
-    pub label: String,
+    /// Human-readable name of the candidate, e.g. "Q1 exact · Q2 CMS+heap", used only for
+    /// display.
+    pub display_name: String,
     pub reason: String,
 }
 
-/// Every stage's output for one workload ([`plan_stages`]).
+/// The output of Stage 1, Stage 2 and Stage 3 for one workload
+/// ([`run_stage1_to_stage3`]).
 #[derive(Debug)]
-pub struct StagePipelineRun<Id> {
-    /// Pass 1's per-computation candidates, with the roots they read.
-    pub per_computation: PerComputationCandidates<Id>,
-    /// Size of the Cartesian product of the targets' candidates, saturating
-    /// at `usize::MAX`.
+pub struct Stage1ToStage3Run<Id> {
+    /// Stage 1, Pass 1: the per-computation candidates, with the roots they
+    /// read.
+    pub stage1_pass1_per_computation: PerComputationCandidates<Id>,
+    /// Stage 1: the number of whole-workload candidates, the size of the
+    /// Cartesian product of the targets' candidates, saturating at
+    /// `usize::MAX`.
     pub combinations: usize,
-    /// Every logical candidate, in enumeration order.
-    pub logical: Vec<LogicalCandidate>,
-    /// One physical candidate (`P<n>` from `L<n>`) per logical candidate that
-    /// composed and was implemented.
-    pub physical: Vec<PhysicalCandidate>,
-    pub pruned: Vec<PrunedCandidate>,
-    pub selection: Result<Selection, SelectionError>,
+    /// Stage 1: every whole-workload logical candidate, in enumeration order.
+    pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
+    /// Stage 2: one physical candidate (`P<n>` from `L<n>`) per Stage 1
+    /// candidate that composed and was implemented.
+    pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
+    /// Stage 2: the Stage 1 candidates Stage 2 could not implement, with the
+    /// reasons.
+    pub stage2_pruned: Vec<PrunedCandidate>,
+    /// Stage 3: plan selection over the Stage 2 candidates.
+    pub stage3_plan_selection: Result<Selection, SelectionError>,
 }
 
-impl<Id> StagePipelineRun<Id> {
+impl<Id> Stage1ToStage3Run<Id> {
     /// The selected physical candidate, if selection succeeded.
     pub fn selected(&self) -> Option<&PhysicalCandidate> {
-        let selected = &self.selection.as_ref().ok()?.selected;
-        self.physical.iter().find(|p| &p.id == selected)
+        let selected = &self.stage3_plan_selection.as_ref().ok()?.selected;
+        self.stage2_physical_asap_optimization
+            .iter()
+            .find(|p| &p.id == selected)
     }
 
     /// The composed roots of the logical candidate the selected physical
@@ -86,55 +100,58 @@ impl<Id> StagePipelineRun<Id> {
     /// implementation and materialization.
     pub fn selected_logical(&self) -> Option<&[QueryRoot]> {
         let from = &self.selected()?.from_logical;
-        let logical = self.logical.iter().find(|l| &l.id == from)?;
+        let logical = self
+            .stage1_logical_asap_optimization
+            .iter()
+            .find(|l| &l.id == from)?;
         logical.roots.as_deref().ok()
     }
 }
 
-/// Run the planning stages over the frontends' `roots`, enumerating every
+/// Run Stage 1 → Stage 2 → Stage 3 over the frontends' `roots`, enumerating every
 /// whole-workload candidate. `targets[i]` is the accuracy
 /// requirement of `roots[i]` (`None` imposes none). Only a Pass 1 failure is
 /// an error; a candidate that does not compose or cannot be implemented is
 /// listed with its reason, and a failed selection is reported in the run.
-pub fn plan_stages<Id: Clone + std::fmt::Debug>(
+pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-) -> Result<StagePipelineRun<Id>, PerComputationCandidateError> {
+) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
     let per_computation = generate_per_computation_candidates(roots)?;
     let combinations = per_computation
         .targets
         .iter()
         .map(|target| target.choices.candidates.len())
         .fold(1usize, usize::saturating_mul);
-    let owners = target_owners(&per_computation);
+    let query_of_target = query_of_target(&per_computation);
     let mut logical = Vec::new();
     let mut physical = Vec::new();
     let mut pruned = Vec::new();
     let mut choice = vec![0; per_computation.targets.len()];
     for index in 0usize.. {
         let id = format!("L{}", index + 1);
-        let label = label(&per_computation, &owners, &choice);
+        let display_name = display_name(&per_computation, &query_of_target, &choice);
         let roots = compose_logical_candidate(&per_computation, &choice)
             .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
         if let Ok(roots) = &roots {
             match optimize_physical_asap(&id, roots) {
                 Ok(mut candidate) => {
                     candidate.id = format!("P{}", index + 1);
-                    candidate.label = label.clone();
+                    candidate.display_name = display_name.clone();
                     physical.push(candidate);
                 }
                 Err(error) => pruned.push(PrunedCandidate {
                     from_logical: id.clone(),
-                    label: label.clone(),
+                    display_name: display_name.clone(),
                     reason: error.to_string(),
                 }),
             }
         }
         logical.push(LogicalCandidate {
             id,
-            label,
+            display_name,
             choice: choice.clone(),
             roots,
         });
@@ -154,18 +171,20 @@ pub fn plan_stages<Id: Clone + std::fmt::Debug>(
         }
     }
     let selection = select_plan(&physical, targets, data, models);
-    Ok(StagePipelineRun {
-        per_computation,
+    Ok(Stage1ToStage3Run {
+        stage1_pass1_per_computation: per_computation,
         combinations,
-        logical,
-        physical,
-        pruned,
-        selection,
+        stage1_logical_asap_optimization: logical,
+        stage2_physical_asap_optimization: physical,
+        stage2_pruned: pruned,
+        stage3_plan_selection: selection,
     })
 }
 
-/// The first root that reaches each target (enumeration order).
-fn target_owners<Id>(inventory: &PerComputationCandidates<Id>) -> Vec<usize> {
+/// `query_of_target[t]`: the index of the query root that first reads target
+/// `t` (the first root, in input order, from which the target is reachable).
+/// [`display_name`] lists each target's choice under that query.
+fn query_of_target<Id>(inventory: &PerComputationCandidates<Id>) -> Vec<usize> {
     inventory
         .targets
         .iter()
@@ -192,20 +211,24 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     }
 }
 
-/// E.g. "Q1 exact · Q2 CMS+heap"; exact accumulators are listed in parentheses.
-fn label<Id>(
+/// A human-readable name of a candidate, e.g. "Q1 exact · Q2 CMS+heap"
+/// (exact accumulators are listed in parentheses), used only for display in
+/// the `stage_pipeline` devtool and the viewer; planning never reads it.
+fn display_name<Id>(
     inventory: &PerComputationCandidates<Id>,
-    owners: &[usize],
+    query_of_target: &[usize],
     choice: &[usize],
 ) -> String {
     (0..inventory.roots.len())
         .map(|query| {
             let mut sketches = Vec::new();
             let mut accumulators = Vec::new();
-            for (target, (&owner, &index)) in
-                inventory.targets.iter().zip(owners.iter().zip(choice))
+            for (target, (&target_query, &index)) in inventory
+                .targets
+                .iter()
+                .zip(query_of_target.iter().zip(choice))
             {
-                if owner != query {
+                if target_query != query {
                     continue;
                 }
                 match &target.choices.candidates[index] {
@@ -242,14 +265,14 @@ fn label<Id>(
 /// workload's roots in entry order, PromQL roots with each series' full
 /// identity as a column (the row representation per-series state needs at
 /// runtime; a root with no such representation is planned over its labels
-/// alone), through [`plan_stages`] with every entry's accuracy target. The
+/// alone), through [`run_stage1_to_stage3`] with every entry's accuracy target. The
 /// output is the selected physical candidate's roots.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct StagePipeline;
+pub struct Stage1ToStage3Pass;
 
-impl OptimizationPass for StagePipeline {
+impl OptimizationPass for Stage1ToStage3Pass {
     fn name(&self) -> &'static str {
-        "stage-pipeline"
+        "stage1-to-stage3"
     }
 
     fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
@@ -280,10 +303,10 @@ impl OptimizationPass for StagePipeline {
             .map(|entry| Some(entry.requirements.accuracy.target()))
             .collect();
         let data = workload.data_workload().cloned().unwrap_or_default();
-        let run = plan_stages(roots, &targets, &data, input.models)?;
-        let StagePipelineRun {
-            physical,
-            selection,
+        let run = run_stage1_to_stage3(roots, &targets, &data, input.models)?;
+        let Stage1ToStage3Run {
+            stage2_physical_asap_optimization: physical,
+            stage3_plan_selection: selection,
             ..
         } = run;
         let selection = selection?;

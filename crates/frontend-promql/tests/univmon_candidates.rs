@@ -6,7 +6,7 @@ use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
 use asap_types::types::AccuracyTarget;
-use support::{logical_candidates, lower_promql, plan_stages, post_asap_dag};
+use support::{logical_candidates, lower_promql, post_asap_dag, run_stage1_to_stage3};
 
 /// The summary evaluation over a UnivMon state that `root` reads, if any.
 fn univmon_estimate(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
@@ -103,9 +103,9 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             },
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
-            let run = plan_stages(root, target.clone());
+            let run = run_stage1_to_stage3(root, target.clone());
             let unknown: Vec<_> = run
-                .physical
+                .stage2_physical_asap_optimization
                 .iter()
                 .filter(|candidate| {
                     let asap_types::ir::QueryRoot::Operator(node) = &candidate.roots[0] else {
@@ -118,7 +118,7 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
                 assert!(unknown.is_empty(), "{query}");
             } else {
                 assert!(!unknown.is_empty(), "{query}");
-                let selected = &run.selection.as_ref().unwrap().selected;
+                let selected = &run.stage3_plan_selection.as_ref().unwrap().selected;
                 assert!(
                     unknown.iter().all(|candidate| &candidate.id != selected),
                     "{query}"

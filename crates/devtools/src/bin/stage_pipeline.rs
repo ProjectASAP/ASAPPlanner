@@ -140,21 +140,25 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
         .iter()
         .filter(|c| shown.contains(c.id.as_str()))
         .map(|c| match &c.roots {
-            Ok(roots) => json!({ "id": c.id, "label": c.label, "dag": export(roots) }),
-            Err(error) => json!({ "id": c.id, "label": c.label, "error": error.to_string() }),
+            Ok(roots) => {
+                json!({ "id": c.id, "display_name": c.display_name, "dag": export(roots) })
+            }
+            Err(error) => {
+                json!({ "id": c.id, "display_name": c.display_name, "error": error.to_string() })
+            }
         })
         .collect();
     let physical: Vec<_> = run
         .stage2_physical_asap_optimization
         .iter()
         .filter(|p| shown_physical.contains(p.id.as_str()))
-        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
+        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "display_name": p.display_name, "dag": p.dag }))
         .collect();
     let pruned: Vec<_> = run
         .stage2_pruned
         .iter()
         .filter(|p| shown.contains(p.from_logical.as_str()))
-        .map(|p| json!({ "from_logical": p.from_logical, "label": p.label, "reason": p.reason }))
+        .map(|p| json!({ "from_logical": p.from_logical, "display_name": p.display_name, "reason": p.reason }))
         .collect();
     Ok(json!({
         "format": "asap-stage-pipeline/v1",

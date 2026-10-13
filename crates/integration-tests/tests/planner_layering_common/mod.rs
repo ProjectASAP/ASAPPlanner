@@ -78,7 +78,7 @@ pub fn operation(payload: &Payload) -> String {
 pub struct Logical {
     pub id: String,
     /// The choice of a per-computation candidate for every Pass 1 target.
-    pub label: String,
+    pub display_name: String,
     pub dag: FlatDag,
     pub query_roots: Vec<NodeId>,
     pub roots: Vec<QueryRoot>,
@@ -144,7 +144,7 @@ impl Run {
     }
 }
 
-fn logical(id: String, label: String, roots: Vec<QueryRoot>) -> Logical {
+fn logical(id: String, display_name: String, roots: Vec<QueryRoot>) -> Logical {
     let dag = flatten(&roots).0;
     let query_roots = dag
         .roots
@@ -156,7 +156,7 @@ fn logical(id: String, label: String, roots: Vec<QueryRoot>) -> Logical {
         .collect();
     Logical {
         id,
-        label,
+        display_name,
         dag,
         query_roots,
         roots,
@@ -175,8 +175,8 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         .map(|c| {
             let roots = c
                 .roots
-                .unwrap_or_else(|e| panic!("{} ({}) composes: {e}", c.id, c.label));
-            logical(c.id, c.label, roots)
+                .unwrap_or_else(|e| panic!("{} ({}) composes: {e}", c.id, c.display_name));
+            logical(c.id, c.display_name, roots)
         })
         .collect();
     let physical = run
