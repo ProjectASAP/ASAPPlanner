@@ -40,8 +40,8 @@ pub struct PrunedCandidate {
 
 #[derive(Debug)]
 pub struct PlanningStagesRun {
-    /// The language-specific frontends' roots, one per workload entry.
-    pub frontends: Vec<QueryRoot>,
+    /// The query-language frontends' roots, one per workload entry.
+    pub stage0_query_language_frontends: Vec<QueryRoot>,
     pub logical: Vec<LogicalCandidate>,
     /// `P<n>` implements `L<n>`.
     pub physical: Vec<PhysicalCandidate>,
@@ -134,7 +134,7 @@ pub fn run_planning_stages(
     let data = workload.data_workload.clone().unwrap_or_default();
     let selection = select_plan(&physical, &targets, &data, PlanningModels::builtin());
     Ok(PlanningStagesRun {
-        frontends: roots,
+        stage0_query_language_frontends: roots,
         logical,
         physical,
         pruned,

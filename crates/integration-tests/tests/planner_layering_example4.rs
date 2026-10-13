@@ -113,7 +113,7 @@ use MaterializationOption::{MatAtIngestion, MatAtQuery, NotMaterialized};
 
 /// Every node upstream of an ingestion-time node also runs at ingestion time, in every workload variant.
 #[test]
-fn physical_asap_optimization_ingestion_time_upstream_is_ingestion_time() {
+fn stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time() {
     for workload in [once(), monthly(), at_rest(), pattern_b()] {
         assert_ingestion_upstream_is_ingestion(&run_promql(&workload));
     }
@@ -121,7 +121,7 @@ fn physical_asap_optimization_ingestion_time_upstream_is_ingestion_time() {
 
 /// Data at rest has no ingestion, so no candidate runs anything at ingestion time.
 #[test]
-fn physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time() {
+fn stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time() {
     let run = run_promql(&at_rest());
     for p in &run.physical {
         for n in &p.dag().nodes {
@@ -132,7 +132,7 @@ fn physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time() {
 
 /// A materialized output is kept for as long as its consumers read: it covers every reader's lookback and offset.
 #[test]
-fn physical_asap_optimization_materialized_output_covers_its_consumers() {
+fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() {
     let offsets: Vec<u64> = PATTERN_A.iter().map(|(_, _, before_t)| *before_t).collect();
     for (workload, offsets) in [
         (once(), offsets.clone()),
@@ -165,7 +165,7 @@ fn physical_asap_optimization_materialized_output_covers_its_consumers() {
 /// The shared EH candidate yields A1 (query time, kept), A2 (ingestion time) and A3 (not materialized).
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
-fn physical_asap_optimization_a_shared_eh_has_three_materialization_options() {
+fn stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options() {
     let found: BTreeSet<_> = eh_options(&run_promql(&once())).into_keys().collect();
     assert_eq!(
         found,
@@ -176,7 +176,7 @@ fn physical_asap_optimization_a_shared_eh_has_three_materialization_options() {
 /// With data at rest, A2 is not generated; A1 and A3 remain.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
-fn physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option() {
+fn stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option() {
     let found: BTreeSet<_> = eh_options(&run_promql(&at_rest())).into_keys().collect();
     assert_eq!(found, BTreeSet::from([MatAtQuery, NotMaterialized]));
 }
@@ -184,7 +184,7 @@ fn physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option() {
 /// A materialized shared EH is one build node read by all five queries, charged once.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
-fn physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers() {
+fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers() {
     let run = run_promql(&once());
     for (m, (id, build)) in eh_options(&run) {
         if m == NotMaterialized {
@@ -214,7 +214,7 @@ fn physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers(
 /// which builds it once.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
-fn plan_selection_a_rebuilding_per_query_costs_more_than_building_once() {
+fn stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once() {
     let run = run_promql(&once());
     let options = eh_options(&run);
     let (a1, a3) = (&options[&MatAtQuery].0, &options[&NotMaterialized].0);
@@ -229,7 +229,7 @@ fn plan_selection_a_rebuilding_per_query_costs_more_than_building_once() {
 /// As given (run once, ad hoc), A1 is the cheapest of the three: A2 maintains years of history for one batch.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
-fn plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
+fn stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
     let run = run_promql(&once());
     let options = eh_options(&run);
     let a1 = cost(&run, &options[&MatAtQuery].0);
@@ -241,7 +241,7 @@ fn plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
 /// Repeated monthly and predictable, A2's maintenance is shared by many batches, so A2 gains on A1.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
-fn plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
+fn stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
     let ratio = |workload: PlanningWorkload| {
         let run = run_promql(&workload);
         let options = eh_options(&run);
@@ -256,7 +256,7 @@ fn plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
 /// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, kept).
 #[test]
 #[ignore = "needs tumbling windows (#601), materialization enumeration (#604) and MatAtQuery panes (#625)"]
-fn physical_asap_optimization_b_tumbling_kll_has_three_materialization_options() {
+fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options() {
     let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), tumbling(), 1)
         .into_keys()
         .collect();
@@ -269,7 +269,7 @@ fn physical_asap_optimization_b_tumbling_kll_has_three_materialization_options()
 /// B1 builds the tumbling KLLs at ingestion time and merges and estimates at query time.
 #[test]
 #[ignore = "needs tumbling windows (#601) and materialization enumeration (#604)"]
-fn physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time() {
+fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time() {
     let run = run_promql(&pattern_b());
     let (id, build) = options_of(&run, tumbling(), 1)[&MatAtIngestion].clone();
     let p = run.physical(&id);
@@ -294,7 +294,7 @@ fn physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time(
 /// B3 runs nothing at ingestion time; it keeps the tumbling KLLs it builds at query time.
 #[test]
 #[ignore = "needs tumbling windows (#601) and MatAtQuery panes (#625)"]
-fn physical_asap_optimization_b_b3_keeps_query_time_windows() {
+fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
     let run = run_promql(&pattern_b());
     let (id, _) = options_of(&run, tumbling(), 1)[&MatAtQuery].clone();
     let p = run.physical(&id);
@@ -307,7 +307,7 @@ fn physical_asap_optimization_b_b3_keeps_query_time_windows() {
 /// The sliding-window KLL is kept from ingestion time or from query time; not materializing it is the no-window plan.
 #[test]
 #[ignore = "needs sliding windows (no PR yet) and materialization enumeration (#604)"]
-fn physical_asap_optimization_b_sliding_kll_has_two_materialization_options() {
+fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options() {
     let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), sliding(), 1)
         .into_keys()
         .collect();
@@ -317,7 +317,7 @@ fn physical_asap_optimization_b_sliding_kll_has_two_materialization_options() {
 /// B2 rebuilds all five tumbling KLLs at every evaluation, so it costs at least B1 and B3.
 #[test]
 #[ignore = "needs tumbling windows (#601), materialization enumeration (#604) and MatAtQuery panes (#625)"]
-fn plan_selection_b_rebuilding_every_window_costs_most() {
+fn stage3_plan_selection_b_rebuilding_every_window_costs_most() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);
     let b2 = cost(&run, &options[&NotMaterialized].0);
@@ -329,7 +329,7 @@ fn plan_selection_b_rebuilding_every_window_costs_most() {
 /// Repeating over arriving data, the built-in models pick B1 among the tumbling options.
 #[test]
 #[ignore = "needs tumbling windows (#601), materialization enumeration (#604) and MatAtQuery panes (#625)"]
-fn plan_selection_b_prefers_ingestion_time_tumbling_windows() {
+fn stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);
     let b1 = cost(&run, &options[&MatAtIngestion].0);

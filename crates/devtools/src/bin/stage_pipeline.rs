@@ -155,7 +155,7 @@ fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<V
     Ok(json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": workload_queries(workload) },
-        "language_specific_frontends": { "dag": export(&run.frontends) },
+        "language_specific_frontends": { "dag": export(&run.stage0_query_language_frontends) },
         "logical_asap_optimization": {
             "combinations": run.logical.len(),
             "capped": candidates.len() < run.logical.len(),

@@ -43,7 +43,7 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
     }
 }
 
-// ── Language-specific frontends ──────────────────────────────────────────
+// ── Query-language frontends ──────────────────────────────────────────
 
 /// PromQL workload roots, each series' identity as a column.
 pub fn lower_promql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
@@ -110,7 +110,7 @@ impl Physical {
 
 #[derive(Debug, Clone)]
 pub struct Run {
-    pub language_specific_frontends: Logical,
+    pub stage0_query_language_frontends: Logical,
     pub logical: Vec<Logical>,
     pub physical: Vec<Physical>,
     /// Logical candidates physical ASAP-aware optimization cannot implement:
@@ -190,7 +190,11 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         })
         .collect();
     Run {
-        language_specific_frontends: logical("frontends".into(), "frontends".into(), run.frontends),
+        stage0_query_language_frontends: logical(
+            "stage0-query-language-frontends".into(),
+            "query-language frontends".into(),
+            run.stage0_query_language_frontends,
+        ),
         logical: logical_candidates,
         physical,
         pruned: run

@@ -39,7 +39,7 @@ with Q1–Q3's targets and a 15-s ingestion interval (PromQL needs one).
 
 | Stage | Doc | Today (stand-in) |
 |---|---|---|
-| Language-specific frontends | One summary-free DAG: `Distinct`, `Entropy`, `L2` over `flows.src_ip`, last 1 m | Same for the stand-in. SQL: Q1 is `aggregate:cardinality`; Q2 and Q3 are `count` per `src_ip` → window function / projection → `sum` (not recognized). |
+| Query-language frontends | One summary-free DAG: `Distinct`, `Entropy`, `L2` over `flows.src_ip`, last 1 m | Same for the stand-in. SQL: Q1 is `aggregate:cardinality`; Q2 and Q3 are `count` per `src_ip` → window function / projection → `sum` (not recognized). |
 | Logical ASAP-aware optimization, Pass 1 | Each computation: exact, a specialized summary, UnivMon. 3 × 3 × 3 = **27** | Q1: exact, HLL, Theta, KMV, UnivMon. Q2, Q3: exact, UnivMon (no specialized entropy or norm summary). 5 × 2 × 2 = **20** |
 | Logical ASAP-aware optimization, Pass 2 | Summary-capability rule: + 1 (one UnivMon for all three, sized for ε = 0.01) + 9 (3 pairs share a UnivMon × 3 options of the third). Independent kept. **37**. Window composition left out. | Not implemented: **20**, no candidate shares a node. |
 | Physical ASAP-aware optimization | Same options as Example 1: no window form → rebuilt from raw samples each refresh. | One physical candidate per logical candidate, every sub-DAG `NotMaterialized`: **20**. |
@@ -47,38 +47,38 @@ with Q1–Q3's targets and a 15-s ingestion interval (PromQL needs one).
 
 ## Invariants and tests
 
-### Language-specific frontends
+### Query-language frontends
 
 | Invariant | Test | Status |
 |---|---|---|
 | The SQL workload is valid, in entry order | `workload_encodes_example2` | passes |
-| SQL Q1 lowers to a distinct count over `flows` | `language_specific_frontends_sql_q1_lowers_to_a_distinct_count` | passes |
-| SQL Q2 and Q3 lower to `FrequencyEntropy` and `FrequencyL2` | `language_specific_frontends_sql_q2_q3_lower_to_entropy_and_l2` | ignored: #598 |
-| The stand-in lowers to the three statistics over one 1-min range | `language_specific_frontends_standin_lowers_to_three_statistics_of_one_input` | passes |
-| One summary-free DAG; the queries share no node | `language_specific_frontends_one_summary_free_dag_without_sharing` | passes |
+| SQL Q1 lowers to a distinct count over `flows` | `stage0_query_language_frontends_sql_q1_lowers_to_a_distinct_count` | passes |
+| SQL Q2 and Q3 lower to `FrequencyEntropy` and `FrequencyL2` | `stage0_query_language_frontends_sql_q2_q3_lower_to_entropy_and_l2` | ignored: #598 |
+| The stand-in lowers to the three statistics over one 1-min range | `stage0_query_language_frontends_standin_lowers_to_three_statistics_of_one_input` | passes |
+| One summary-free DAG; the queries share no node | `stage0_query_language_frontends_one_summary_free_dag_without_sharing` | passes |
 
 ### Logical ASAP-aware optimization
 
 | Invariant | Test | Status |
 |---|---|---|
-| Once recognized, the SQL workload has the stand-in's Pass 1 options | `logical_asap_optimization_sql_has_the_standin_options` | ignored: #598 (ambiguity 9) |
-| Each statistic has an exact and a UnivMon option | `logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic` | passes |
-| Q1 has a specialized distinct-count summary (HLL, Theta or KMV) | `logical_asap_optimization_pass1_offers_a_distinct_count_summary` | passes |
-| Q2 and Q3 have a specialized entropy and norm summary | `logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | ignored: no PR yet |
-| Every combination of the queries' own options is kept, with no shared summary | `logical_asap_optimization_keeps_every_independent_combination` | passes |
-| A candidate has one UnivMon build read by all three queries, feeding a distinct-count, an entropy and an L2 estimate | `logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three` | ignored: #595, #596 |
-| For each pair, a candidate shares one UnivMon between the two while the third takes each of its own options | `logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons` | ignored: #595, #596 |
-| A shared UnivMon has the parameters Pass 1 gives its strictest consumer alone | `logical_asap_optimization_shared_univmon_is_sized_for_the_strictest_consumer` | ignored: #595, #596 |
-| UnivMon is sized per target: Q3's (ε = 0.01) is larger than Q2's (ε = 0.05) | `logical_asap_optimization_univmon_is_sized_per_accuracy_target` | ignored: #621 |
-| Only a UnivMon is ever shared across statistics | `logical_asap_optimization_only_univmon_is_shared_across_statistics` | passes (vacuously today) |
-| Candidates are valid DAGs with unique ids | `logical_asap_optimization_candidates_are_valid_and_uniquely_named` | passes |
+| Once recognized, the SQL workload has the stand-in's Pass 1 options | `stage1_logical_asap_optimization_sql_has_the_standin_options` | ignored: #598 (ambiguity 9) |
+| Each statistic has an exact and a UnivMon option | `stage1_logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic` | passes |
+| Q1 has a specialized distinct-count summary (HLL, Theta or KMV) | `stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary` | passes |
+| Q2 and Q3 have a specialized entropy and norm summary | `stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | ignored: no PR yet |
+| Every combination of the queries' own options is kept, with no shared summary | `stage1_logical_asap_optimization_keeps_every_independent_combination` | passes |
+| A candidate has one UnivMon build read by all three queries, feeding a distinct-count, an entropy and an L2 estimate | `stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three` | ignored: #595, #596 |
+| For each pair, a candidate shares one UnivMon between the two while the third takes each of its own options | `stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons` | ignored: #595, #596 |
+| A shared UnivMon has the parameters Pass 1 gives its strictest consumer alone | `stage1_logical_asap_optimization_shared_univmon_is_sized_for_the_strictest_consumer` | ignored: #595, #596 |
+| UnivMon is sized per target: Q3's (ε = 0.01) is larger than Q2's (ε = 0.05) | `stage1_logical_asap_optimization_univmon_is_sized_per_accuracy_target` | ignored: #621 |
+| Only a UnivMon is ever shared across statistics | `stage1_logical_asap_optimization_only_univmon_is_shared_across_statistics` | passes (vacuously today) |
+| Candidates are valid DAGs with unique ids | `stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named` | passes |
 
 ### Physical ASAP-aware optimization
 
 | Invariant | Test | Status |
 |---|---|---|
-| One physical candidate per logical candidate, none pruned | `physical_asap_optimization_keeps_every_logical_candidate` | passes |
-| The shared UnivMon stays one build read by all three queries | `physical_asap_optimization_keeps_the_shared_univmon_as_one_build` | ignored: #595, #596 |
+| One physical candidate per logical candidate, none pruned | `stage2_physical_asap_optimization_keeps_every_logical_candidate` | passes |
+| The shared UnivMon stays one build read by all three queries | `stage2_physical_asap_optimization_keeps_the_shared_univmon_as_one_build` | ignored: #595, #596 |
 
 Materialization and window variants are out of scope: the doc leaves out the
 window-composition variants for this example, and a summary with no window
@@ -88,12 +88,12 @@ form is rebuilt at every refresh (Example 1's table).
 
 | Invariant | Test | Status |
 |---|---|---|
-| One selected id; every other candidate rejected once with a reason | `plan_selection_selects_one_and_explains_the_rest` | passes |
-| The selected plan is the cheapest valid one | `plan_selection_selects_cheapest_valid` | passes |
-| Each node of a valid candidate is charged once per consuming query while `NotMaterialized` (all today), once when materialized | `plan_selection_charges_each_node_per_consuming_query` | passes |
-| A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `plan_selection_judges_univmon_with_an_accuracy_model` | ignored: L2 in #621; distinct count and entropy have no PR |
-| One materialized UnivMon for all three costs no more than three separate UnivMons | `plan_selection_shared_univmon_costs_no_more_than_three` | ignored: #595, #596, #621, #604 |
-| Selection direction: the selected plan has at most one UnivMon, because one shared UnivMon dominates several over the same input | `plan_selection_selected_plan_has_at_most_one_univmon` | passes (vacuously today: no UnivMon is valid) |
+| One selected id; every other candidate rejected once with a reason | `stage3_plan_selection_selects_one_and_explains_the_rest` | passes |
+| The selected plan is the cheapest valid one | `stage3_plan_selection_selects_cheapest_valid` | passes |
+| Each node of a valid candidate is charged once per consuming query while `NotMaterialized` (all today), once when materialized | `stage3_plan_selection_charges_each_node_per_consuming_query` | passes |
+| A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `stage3_plan_selection_judges_univmon_with_an_accuracy_model` | ignored: L2 in #621; distinct count and entropy have no PR |
+| One materialized UnivMon for all three costs no more than three separate UnivMons | `stage3_plan_selection_shared_univmon_costs_no_more_than_three` | ignored: #595, #596, #621, #604 |
+| Selection direction: the selected plan has at most one UnivMon, because one shared UnivMon dominates several over the same input | `stage3_plan_selection_selected_plan_has_at_most_one_univmon` | passes (vacuously today: no UnivMon is valid) |
 
 The doc's "the shared candidate usually wins" depends on the cost model, so
 it is tested only as the dominance above: one build sized for the strictest

@@ -112,11 +112,11 @@ fn workload_encodes_example1() {
     assert_eq!(entries[1].query.0, EXAMPLE1_Q2);
 }
 
-// ── Language-specific frontends ──────────────────────────────────────────
+// ── Query-language frontends ──────────────────────────────────────────
 
 /// The PromQL frontend lowers each query to the doc's chain.
 #[test]
-fn language_specific_frontends_lower_each_query_to_doc_chain() {
+fn stage0_query_language_frontends_lower_each_query_to_doc_chain() {
     let roots = lower_promql(&example1());
     let chains: Vec<_> = roots.iter().map(frontend_operations).collect();
     assert_eq!(
@@ -130,24 +130,28 @@ fn language_specific_frontends_lower_each_query_to_doc_chain() {
 
 /// The frontends yield one workload DAG with one root per query and no summaries.
 #[test]
-fn language_specific_frontends_one_summary_free_workload_dag() {
-    let frontends = pipeline().language_specific_frontends;
-    roots(&frontends.query_roots);
-    assert!(frontends.dag.nodes.iter().all(|n| !is_summary(&n.operator)));
+fn stage0_query_language_frontends_one_summary_free_workload_dag() {
+    let stage0_query_language_frontends = pipeline().stage0_query_language_frontends;
+    roots(&stage0_query_language_frontends.query_roots);
+    assert!(stage0_query_language_frontends
+        .dag
+        .nodes
+        .iter()
+        .all(|n| !is_summary(&n.operator)));
 }
 
 /// The frontends keep Q1 and Q2 separate; sharing is a logical ASAP-aware optimization decision.
 #[test]
-fn language_specific_frontends_queries_do_not_share_nodes() {
-    let frontends = pipeline().language_specific_frontends;
-    assert!(!frontends.shared_input());
+fn stage0_query_language_frontends_queries_do_not_share_nodes() {
+    let stage0_query_language_frontends = pipeline().stage0_query_language_frontends;
+    assert!(!stage0_query_language_frontends.shared_input());
 }
 
 // ── Logical ASAP-aware optimization ──────────────────────────────────────
 
 /// Pass 1 gives 1 × 3 = 3 candidates: Q2's top-k is exact, Count-Min + heap or CountSketch + heap.
 #[test]
-fn logical_asap_optimization_has_three_pass1_candidates() {
+fn stage1_logical_asap_optimization_has_three_pass1_candidates() {
     let run = pipeline();
     assert_eq!(run.logical.len(), 3);
     let found: BTreeSet<_> = run
@@ -161,7 +165,7 @@ fn logical_asap_optimization_has_three_pass1_candidates() {
 
 /// Q1 is exact in every candidate: no summary is reachable from its root.
 #[test]
-fn logical_asap_optimization_q1_is_always_exact() {
+fn stage1_logical_asap_optimization_q1_is_always_exact() {
     let run = pipeline();
     for c in &run.logical {
         let (q1, _) = roots(&c.query_roots);
@@ -177,7 +181,7 @@ fn logical_asap_optimization_q1_is_always_exact() {
 
 /// Every Pass 1 target's exact option is its exact accumulator: Q1's rate and sum and Q2's sum_over_time.
 #[test]
-fn logical_asap_optimization_exact_targets_use_accumulators() {
+fn stage1_logical_asap_optimization_exact_targets_use_accumulators() {
     let run = pipeline();
     for c in &run.logical {
         let accumulators = c
@@ -197,7 +201,7 @@ fn logical_asap_optimization_exact_targets_use_accumulators() {
 
 /// Q2's summary families are Count-Min + heap and CountSketch + heap, one per job.
 #[test]
-fn logical_asap_optimization_q2_summary_families() {
+fn stage1_logical_asap_optimization_q2_summary_families() {
     let run = pipeline();
     let families: BTreeSet<_> = run
         .logical
@@ -219,7 +223,7 @@ fn logical_asap_optimization_q2_summary_families() {
 /// Pass 1 also offers Hydra (HydraCms over all (job, series) keys, a heap per job) for Q2's top-k.
 #[test]
 #[ignore = "needs Pass 1 Hydra for grouped approximate counts (#605)"]
-fn logical_asap_optimization_q2_offers_hydra() {
+fn stage1_logical_asap_optimization_q2_offers_hydra() {
     let run = pipeline();
     assert!(run
         .logical
@@ -230,7 +234,7 @@ fn logical_asap_optimization_q2_offers_hydra() {
 /// Pass 2's identical-expression rule adds a shared-input variant of every Q2 option and keeps the independent one.
 #[test]
 #[ignore = "needs the Pass 2 identical-expression rule (#588)"]
-fn logical_asap_optimization_keeps_independent_and_shared_variants() {
+fn stage1_logical_asap_optimization_keeps_independent_and_shared_variants() {
     let run = pipeline();
     let found: Vec<_> = run
         .logical
@@ -245,7 +249,7 @@ fn logical_asap_optimization_keeps_independent_and_shared_variants() {
 
 /// Only the raw input is ever shared between Q1 and Q2; no summary is shared.
 #[test]
-fn logical_asap_optimization_shares_input_but_never_a_summary() {
+fn stage1_logical_asap_optimization_shares_input_but_never_a_summary() {
     let run = pipeline();
     for c in &run.logical {
         for id in cross_query_nodes(&c.dag, &c.query_roots) {
@@ -261,7 +265,7 @@ fn logical_asap_optimization_shares_input_but_never_a_summary() {
 
 /// Logical candidates are valid DAGs with unique ids.
 #[test]
-fn logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
+fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
     assert_valid_and_uniquely_named(&pipeline());
 }
 
@@ -269,7 +273,7 @@ fn logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 
 /// No candidate is discarded before plan selection: the 3 logical candidates map one-to-one.
 #[test]
-fn physical_asap_optimization_keeps_every_logical_candidate() {
+fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let run = pipeline();
     assert_one_physical_candidate_per_logical(&run);
     assert_eq!(run.physical.len(), 3);
@@ -277,7 +281,7 @@ fn physical_asap_optimization_keeps_every_logical_candidate() {
 
 /// Each physical candidate keeps its logical Q2 option and input sharing.
 #[test]
-fn physical_asap_optimization_preserves_logical_choices() {
+fn stage2_physical_asap_optimization_preserves_logical_choices() {
     let run = pipeline();
     for p in &run.physical {
         let source = run.logical.iter().find(|c| c.id == p.from_logical).unwrap();
@@ -293,7 +297,7 @@ fn physical_asap_optimization_preserves_logical_choices() {
 
 /// Exact TopK is implemented as a sort followed by a limit.
 #[test]
-fn physical_asap_optimization_exact_topk_is_sort_then_limit() {
+fn stage2_physical_asap_optimization_exact_topk_is_sort_then_limit() {
     let run = pipeline();
     let p = physical_with(&run, Q2Option::Exact);
     let sort_then_limit = p.dag().edges.iter().any(|e| {
@@ -306,7 +310,7 @@ fn physical_asap_optimization_exact_topk_is_sort_then_limit() {
 /// Exact Q2 sorts each job's series by the ranked value, descending, and a
 /// `Project` over the limit restores the logical `[job, topk_10]` columns.
 #[test]
-fn physical_asap_optimization_exact_topk_returns_job_and_topk_10() {
+fn stage2_physical_asap_optimization_exact_topk_returns_job_and_topk_10() {
     let run = pipeline();
     let p = physical_with(&run, Q2Option::Exact);
     let QueryRoot::Operator(root) = &p.candidate.roots[1] else {
@@ -347,7 +351,7 @@ fn physical_asap_optimization_exact_topk_returns_job_and_topk_10() {
 
 /// A summary Q2 is a build node feeding a top-10 estimation node, with no merge.
 #[test]
-fn physical_asap_optimization_summary_topk_is_build_then_estimate() {
+fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
     let run = pipeline();
     for p in &run.physical {
         if classify(p.dag(), &p.query_roots).0 == Q2Option::Exact {
@@ -376,7 +380,7 @@ fn physical_asap_optimization_summary_topk_is_build_then_estimate() {
 
 /// Every sub-DAG is NotMaterialized, so every node runs at query time.
 #[test]
-fn physical_asap_optimization_nothing_is_materialized() {
+fn stage2_physical_asap_optimization_nothing_is_materialized() {
     let run = pipeline();
     for p in &run.physical {
         for n in &p.dag().nodes {
@@ -425,7 +429,7 @@ fn compile_in_runtime(p: &Physical) -> Result<(), String> {
 #[ignore = "runtime gaps: CMS+heap needs a non-negative weight contract (#593); \
             CountSketch+heap's SummaryEstimate{TopK} output is not the keyed-evaluation \
             shape the physical planner builds (#579)"]
-fn physical_asap_optimization_every_candidate_compiles_in_the_physical_planner() {
+fn stage2_physical_asap_optimization_every_candidate_compiles_in_the_physical_planner() {
     let run = pipeline();
     let failures: Vec<_> = run
         .physical
@@ -439,7 +443,7 @@ fn physical_asap_optimization_every_candidate_compiles_in_the_physical_planner()
 
 /// Plan selection selects one candidate and gives every other one a reason.
 #[test]
-fn plan_selection_selects_one_and_explains_the_rest() {
+fn stage3_plan_selection_selects_one_and_explains_the_rest() {
     assert_selects_one_and_explains_the_rest(&pipeline());
 }
 
@@ -447,7 +451,7 @@ fn plan_selection_selects_one_and_explains_the_rest() {
 /// are not proven non-negative; CountSketch + heap is invalid because its
 /// top-k output has no guarantee and the deployment has no evidence for it.
 #[test]
-fn plan_selection_selects_exact_q2_and_rejects_both_heaps() {
+fn stage3_plan_selection_selects_exact_q2_and_rejects_both_heaps() {
     let run = pipeline();
     assert_eq!(
         run.selection.selected,
@@ -469,20 +473,20 @@ fn plan_selection_selects_exact_q2_and_rejects_both_heaps() {
 
 /// The selected plan is the cheapest valid candidate for the whole workload.
 #[test]
-fn plan_selection_selects_cheapest_valid() {
+fn stage3_plan_selection_selects_cheapest_valid() {
     assert_selects_cheapest_valid(&pipeline());
 }
 
 /// Every node of a valid candidate is charged once per query that reads it: nothing is materialized, so a shared node is recomputed for each.
 #[test]
-fn plan_selection_charges_each_node_per_consuming_query() {
+fn stage3_plan_selection_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&pipeline());
 }
 
 /// The plan selection picks compiles in the physical planner (added by the
 /// implementer, not part of the spec).
 #[test]
-fn plan_selection_selected_plan_compiles_in_the_physical_planner() {
+fn stage3_plan_selection_selected_plan_compiles_in_the_physical_planner() {
     let run = pipeline();
     compile_in_runtime(run.physical(&run.selection.selected)).unwrap();
 }
@@ -490,7 +494,7 @@ fn plan_selection_selected_plan_compiles_in_the_physical_planner() {
 /// Sharing the input never costs more than reading it separately.
 #[test]
 #[ignore = "needs the Pass 2 identical-expression rule (#588): there are no shared-input variants to compare"]
-fn plan_selection_shared_input_is_not_costlier() {
+fn stage3_plan_selection_shared_input_is_not_costlier() {
     let run = pipeline();
     let by_combo: BTreeMap<_, _> = run
         .physical

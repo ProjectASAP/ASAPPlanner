@@ -39,7 +39,7 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 
 | Stage | Doc | Today |
 |---|---|---|
-| Language-specific frontends | A: five scan → range → quantile chains. B: one. | Same; q3–q5 also have a `time_shift`. |
+| Query-language frontends | A: five scan → range → quantile chains. B: one. | Same; q3–q5 also have a `time_shift`. |
 | Logical ASAP-aware optimization, Pass 1 | A: exact or KLL over its own interval per query, 2⁵ = 32. B: exact, KLL. | A: exact, KLL (k = 547), DDSketch per query, 3⁵ = **243**. B: exact, KLL (k = 269), DDSketch, **3**. |
 | Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Not implemented: no shared input, no window summaries. |
 | Physical ASAP-aware optimization | See Example 4. | One physical candidate per logical candidate, every sub-DAG `NotMaterialized`. |
@@ -52,29 +52,29 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 | Invariant | Test | Status |
 |---|---|---|
 | Both workloads are valid; Pattern B repeats every 1 min over 5 min | `workload_encodes_example3` | passes |
-| Each query lowers to scan → (time shift) → range → quantile | `language_specific_frontends_a_lowers_each_query_to_its_interval` | passes |
-| One summary-free frontend DAG; the queries share no node | `language_specific_frontends_a_one_summary_free_dag_without_sharing` | passes |
-| Each query has an exact and a KLL option | `logical_asap_optimization_a_pass1_offers_exact_and_kll_per_query` | passes |
-| Five independent KLLs, each read by one query, all the same size | `logical_asap_optimization_a_keeps_five_independent_klls` | passes |
-| The identical-expression rule shares only raw input (scan, range, shift) and keeps the unshared variant | `logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input` | ignored: #588 |
-| One EH of KLLs over ≥ 5 y is read by all five queries; each has its own merge feeding a p99 estimate | `logical_asap_optimization_a_window_composition_adds_one_eh_for_all_five` | ignored: #628, #634 |
-| The EH candidate coexists with the five independent KLLs | `logical_asap_optimization_a_keeps_independent_and_shared_window_summaries` | ignored: #628, #634 |
-| Every pair of queries shares a window summary in some candidate | `logical_asap_optimization_a_window_composition_groups_every_pair` | ignored: #628, #634 |
-| One selected id, the rest explained; the selected plan is the cheapest valid one | `plan_selection_a_selects_cheapest_valid` | passes |
-| Each node of a valid candidate is charged once per consuming query while `NotMaterialized` (all today), once when materialized | `plan_selection_a_charges_each_node_per_consuming_query` | passes |
-| For the same per-computation choices, sharing the scan costs no more than separate scans | `plan_selection_a_shared_scan_is_not_costlier` | ignored: #588, #632 (see ambiguity 7) |
+| Each query lowers to scan → (time shift) → range → quantile | `stage0_query_language_frontends_a_lowers_each_query_to_its_interval` | passes |
+| One summary-free frontend DAG; the queries share no node | `stage0_query_language_frontends_a_one_summary_free_dag_without_sharing` | passes |
+| Each query has an exact and a KLL option | `stage1_logical_asap_optimization_a_pass1_offers_exact_and_kll_per_query` | passes |
+| Five independent KLLs, each read by one query, all the same size | `stage1_logical_asap_optimization_a_keeps_five_independent_klls` | passes |
+| The identical-expression rule shares only raw input (scan, range, shift) and keeps the unshared variant | `stage1_logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input` | ignored: #588 |
+| One EH of KLLs over ≥ 5 y is read by all five queries; each has its own merge feeding a p99 estimate | `stage1_logical_asap_optimization_a_window_composition_adds_one_eh_for_all_five` | ignored: #628, #634 |
+| The EH candidate coexists with the five independent KLLs | `stage1_logical_asap_optimization_a_keeps_independent_and_shared_window_summaries` | ignored: #628, #634 |
+| Every pair of queries shares a window summary in some candidate | `stage1_logical_asap_optimization_a_window_composition_groups_every_pair` | ignored: #628, #634 |
+| One selected id, the rest explained; the selected plan is the cheapest valid one | `stage3_plan_selection_a_selects_cheapest_valid` | passes |
+| Each node of a valid candidate is charged once per consuming query while `NotMaterialized` (all today), once when materialized | `stage3_plan_selection_a_charges_each_node_per_consuming_query` | passes |
+| For the same per-computation choices, sharing the scan costs no more than separate scans | `stage3_plan_selection_a_shared_scan_is_not_costlier` | ignored: #588, #632 (see ambiguity 7) |
 
 ### Pattern B
 
 | Invariant | Test | Status |
 |---|---|---|
-| The query lowers to scan → range 5m → quantile, no summary | `language_specific_frontends_b_lowers_to_one_range_quantile` | passes |
-| Exact and KLL options | `logical_asap_optimization_b_pass1_offers_exact_and_kll` | passes |
-| Each summary option appears with no window, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows | `logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option` | ignored: tumbling #601, sliding no PR yet |
-| Window parameters are legal: L divides W; s divides L and the evaluation interval; a tumbling length divides W and the interval | `logical_asap_optimization_b_window_parameters_are_legal` | passes (vacuously today) |
-| Sliding with L = W has no merge; tumbling merges before the estimate | `logical_asap_optimization_b_merge_only_where_the_window_form_needs_it` | ignored: tumbling #601, sliding no PR yet |
-| A window form that merges uses a mergeable summary (KLL, DDSketch), in both patterns | `logical_asap_optimization_window_merges_use_mergeable_summaries` | passes (vacuously today) |
-| One selected, cheapest valid, each node charged once | `plan_selection_b_selects_cheapest_valid` | passes |
+| The query lowers to scan → range 5m → quantile, no summary | `stage0_query_language_frontends_b_lowers_to_one_range_quantile` | passes |
+| Exact and KLL options | `stage1_logical_asap_optimization_b_pass1_offers_exact_and_kll` | passes |
+| Each summary option appears with no window, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows | `stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option` | ignored: tumbling #601, sliding no PR yet |
+| Window parameters are legal: L divides W; s divides L and the evaluation interval; a tumbling length divides W and the interval | `stage1_logical_asap_optimization_b_window_parameters_are_legal` | passes (vacuously today) |
+| Sliding with L = W has no merge; tumbling merges before the estimate | `stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it` | ignored: tumbling #601, sliding no PR yet |
+| A window form that merges uses a mergeable summary (KLL, DDSketch), in both patterns | `stage1_logical_asap_optimization_window_merges_use_mergeable_summaries` | passes (vacuously today) |
+| One selected, cheapest valid, each node charged once | `stage3_plan_selection_b_selects_cheapest_valid` | passes |
 
 **Reading window summaries.** The IR has no window summary yet, so tests read
 it through `planner_layering_common::window_form(dag, build)`, which returns

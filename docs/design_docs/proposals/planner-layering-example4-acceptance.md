@@ -66,31 +66,31 @@ the IR records retention.
 
 | Invariant | Test | Status |
 |---|---|---|
-| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `physical_asap_optimization_ingestion_time_upstream_is_ingestion_time` | passes (vacuously today) |
-| With data at rest, no node runs at ingestion time | `physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes (vacuously today) |
-| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `physical_asap_optimization_materialized_output_covers_its_consumers` | passes (vacuously today) |
+| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time` | passes (vacuously today) |
+| With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes (vacuously today) |
+| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers` | passes (vacuously today) |
 
 ### Pattern A
 
 | Invariant | Test | Status |
 |---|---|---|
-| The shared EH yields exactly A1, A2, A3 | `physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: #628, #634, #604, #625 |
-| At rest, A2 is not generated; A1 and A3 remain | `physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: #628, #634, #604, #625 |
-| A materialized EH is one build node read by all five queries, priced once | `physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: #628, #634, #604, #625 |
-| A3 costs strictly more than A1 (five builds instead of one: a `NotMaterialized` node is charged per consuming query) | `plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: #628, #634, #604, #625 |
-| As given, A1 is the cheapest of the three | `plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: #628, #634, #604, #625 |
-| Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: #628, #634, #604, #625 |
+| The shared EH yields exactly A1, A2, A3 | `stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: #628, #634, #604, #625 |
+| At rest, A2 is not generated; A1 and A3 remain | `stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: #628, #634, #604, #625 |
+| A materialized EH is one build node read by all five queries, priced once | `stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: #628, #634, #604, #625 |
+| A3 costs strictly more than A1 (five builds instead of one: a `NotMaterialized` node is charged per consuming query) | `stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: #628, #634, #604, #625 |
+| As given, A1 is the cheapest of the three | `stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: #628, #634, #604, #625 |
+| Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: #628, #634, #604, #625 |
 
 ### Pattern B
 
 | Invariant | Test | Status |
 |---|---|---|
-| The tumbling KLL candidate yields exactly B1, B2, B3 | `physical_asap_optimization_b_tumbling_kll_has_three_materialization_options` | ignored: #601, #604, #625 |
-| B1 builds at ingestion time; its merge and estimate run at query time | `physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | ignored: #601, #604 |
-| B3 runs nothing at ingestion time | `physical_asap_optimization_b_b3_keeps_query_time_windows` | ignored: #601, #625 |
-| The sliding KLL yields exactly ingestion time and query time, kept | `physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (no PR yet), #604 |
-| B2 costs at least B1 and B3 | `plan_selection_b_rebuilding_every_window_costs_most` | ignored: #601, #604, #625 |
-| With the built-in models, B1 is the cheapest of the three | `plan_selection_b_prefers_ingestion_time_tumbling_windows` | ignored: #601, #604, #625 |
+| The tumbling KLL candidate yields exactly B1, B2, B3 | `stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options` | ignored: #601, #604, #625 |
+| B1 builds at ingestion time; its merge and estimate run at query time | `stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | ignored: #601, #604 |
+| B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | ignored: #601, #625 |
+| The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (no PR yet), #604 |
+| B2 costs at least B1 and B3 | `stage3_plan_selection_b_rebuilding_every_window_costs_most` | ignored: #601, #604, #625 |
+| With the built-in models, B1 is the cheapest of the three | `stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows` | ignored: #601, #604, #625 |
 
 ### Selection direction, relative to the cost model
 

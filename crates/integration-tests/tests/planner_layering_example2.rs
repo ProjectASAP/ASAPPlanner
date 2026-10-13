@@ -215,7 +215,7 @@ fn own_univmon(run: &Run, query: usize) -> SketchParams {
         .expect("Pass 1 offers UnivMon")
 }
 
-// ── Workload and language-specific frontends ─────────────────────────────────────────────────
+// ── Workload and query-language frontends ─────────────────────────────────────────────────
 
 /// The encoded SQL workload is valid and normalizes to Q1, Q2, Q3.
 #[test]
@@ -233,7 +233,7 @@ fn workload_encodes_example2() {
 
 /// The SQL frontend lowers Q1 to a distinct count over `flows`.
 #[tokio::test]
-async fn language_specific_frontends_sql_q1_lowers_to_a_distinct_count() {
+async fn stage0_query_language_frontends_sql_q1_lowers_to_a_distinct_count() {
     let roots = lower_sql(&sql_workload()).await;
     let ops = frontend_operations(&roots[0]);
     assert!(ops.contains(&"scan".to_string()), "{ops:?}");
@@ -246,7 +246,7 @@ async fn language_specific_frontends_sql_q1_lowers_to_a_distinct_count() {
 /// The SQL frontend recognizes Q2 as `Entropy(src_ip)` and Q3 as `L2(src_ip)`.
 #[tokio::test]
 #[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598)"]
-async fn language_specific_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
+async fn stage0_query_language_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
     let roots = lower_sql(&sql_workload()).await;
     assert!(frontend_operations(&roots[1]).contains(&"aggregate:frequency_entropy".to_string()));
     assert!(frontend_operations(&roots[2]).contains(&"aggregate:frequency_l2".to_string()));
@@ -255,7 +255,7 @@ async fn language_specific_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
 /// Once the SQL forms are recognized, the SQL workload has the stand-in's Pass 1 options.
 #[tokio::test]
 #[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598)"]
-async fn logical_asap_optimization_sql_has_the_standin_options() {
+async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
     let workload = sql_workload();
     let sql = run_stages(&workload, lower_sql(&workload).await);
     let standin = pipeline();
@@ -266,7 +266,7 @@ async fn logical_asap_optimization_sql_has_the_standin_options() {
 
 /// The stand-in lowers to the three statistics, each over a 1-min range of one input.
 #[test]
-fn language_specific_frontends_standin_lowers_to_three_statistics_of_one_input() {
+fn stage0_query_language_frontends_standin_lowers_to_three_statistics_of_one_input() {
     let roots = lower_promql(&standin_workload());
     let ops: Vec<_> = roots.iter().map(frontend_operations).collect();
     for (ops, statistic) in ops.iter().zip([
@@ -282,19 +282,27 @@ fn language_specific_frontends_standin_lowers_to_three_statistics_of_one_input()
 
 /// The frontends give one summary-free workload DAG whose queries share no node.
 #[test]
-fn language_specific_frontends_one_summary_free_dag_without_sharing() {
+fn stage0_query_language_frontends_one_summary_free_dag_without_sharing() {
     let run = pipeline();
-    let s0 = &run.language_specific_frontends;
-    assert_eq!(s0.query_roots.len(), 3);
-    assert!(s0.dag.nodes.iter().all(|n| !is_summary(&n.operator)));
-    assert!(cross_query_nodes(&s0.dag, &s0.query_roots).is_empty());
+    let stage0_query_language_frontends = &run.stage0_query_language_frontends;
+    assert_eq!(stage0_query_language_frontends.query_roots.len(), 3);
+    assert!(stage0_query_language_frontends
+        .dag
+        .nodes
+        .iter()
+        .all(|n| !is_summary(&n.operator)));
+    assert!(cross_query_nodes(
+        &stage0_query_language_frontends.dag,
+        &stage0_query_language_frontends.query_roots
+    )
+    .is_empty());
 }
 
 // ── Logical ASAP-aware optimization ──────────────────────────────────────
 
 /// Pass 1 offers an exact and a UnivMon option for each of the three statistics.
 #[test]
-fn logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic() {
+fn stage1_logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic() {
     let run = pipeline();
     for q in 0..3 {
         let found = options(&run, q);
@@ -305,7 +313,7 @@ fn logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic()
 
 /// Pass 1 offers a specialized distinct-count summary for Q1.
 #[test]
-fn logical_asap_optimization_pass1_offers_a_distinct_count_summary() {
+fn stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary() {
     let found = options(&pipeline(), 0);
     assert!(
         found
@@ -318,7 +326,7 @@ fn logical_asap_optimization_pass1_offers_a_distinct_count_summary() {
 /// Pass 1 offers a specialized entropy summary for Q2 and a norm summary for Q3.
 #[test]
 #[ignore = "needs Pass 1 specialized entropy and L2 summary families (no PR yet)"]
-fn logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries() {
+fn stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries() {
     let run = pipeline();
     for q in [1, 2] {
         let found = options(&run, q);
@@ -332,7 +340,7 @@ fn logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries()
 
 /// Every combination of the three queries' own options is kept as an independent candidate.
 #[test]
-fn logical_asap_optimization_keeps_every_independent_combination() {
+fn stage1_logical_asap_optimization_keeps_every_independent_combination() {
     let run = pipeline();
     let found: BTreeSet<_> = run
         .logical
@@ -351,7 +359,7 @@ fn logical_asap_optimization_keeps_every_independent_combination() {
 /// The summary-capability rule adds one UnivMon build feeding a distinct-count, an entropy and an L2 estimate.
 #[test]
 #[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
-fn logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three() {
+fn stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three() {
     let run = pipeline();
     let shared = run.logical.iter().find(|c| {
         let ums = univmons(c);
@@ -371,7 +379,7 @@ fn logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three()
 /// For each pair, a candidate shares one UnivMon between the two while the third keeps each of its own options.
 #[test]
 #[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
-fn logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons() {
+fn stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons() {
     let run = pipeline();
     for (pair, third) in [([0, 1], 2), ([0, 2], 1), ([1, 2], 0)] {
         let thirds: BTreeSet<_> = run
@@ -387,7 +395,7 @@ fn logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons() 
 /// A UnivMon shared by several statistics is sized for the strictest consumer.
 #[test]
 #[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
-fn logical_asap_optimization_shared_univmon_is_sized_for_the_strictest_consumer() {
+fn stage1_logical_asap_optimization_shared_univmon_is_sized_for_the_strictest_consumer() {
     let run = pipeline();
     let strictest = |queries: &[usize]| {
         *queries
@@ -410,14 +418,14 @@ fn logical_asap_optimization_shared_univmon_is_sized_for_the_strictest_consumer(
 /// Pass 1 sizes UnivMon for its query's target: ε = 0.01 (Q3) needs a larger state than ε = 0.05 (Q2).
 #[test]
 #[ignore = "needs UnivMon sizing for an accuracy target (#621); its shape is fixed"]
-fn logical_asap_optimization_univmon_is_sized_per_accuracy_target() {
+fn stage1_logical_asap_optimization_univmon_is_sized_per_accuracy_target() {
     let run = pipeline();
     assert!(footprint(&own_univmon(&run, 2)) > footprint(&own_univmon(&run, 1)));
 }
 
 /// Only a UnivMon, never a specialized summary, is shared across the statistics.
 #[test]
-fn logical_asap_optimization_only_univmon_is_shared_across_statistics() {
+fn stage1_logical_asap_optimization_only_univmon_is_shared_across_statistics() {
     let run = pipeline();
     for c in &run.logical {
         for (id, algorithm, _) in sketch_builds(&c.dag) {
@@ -430,7 +438,7 @@ fn logical_asap_optimization_only_univmon_is_shared_across_statistics() {
 
 /// Logical candidates are valid DAGs with unique ids.
 #[test]
-fn logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
+fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
     assert_valid_and_uniquely_named(&pipeline());
 }
 
@@ -438,14 +446,14 @@ fn logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 
 /// No candidate is discarded before plan selection: logical candidates map one-to-one onto physical ones.
 #[test]
-fn physical_asap_optimization_keeps_every_logical_candidate() {
+fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     assert_one_physical_candidate_per_logical(&pipeline());
 }
 
 /// Physical ASAP-aware optimization keeps the shared UnivMon as one build node read by all three queries.
 #[test]
 #[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
-fn physical_asap_optimization_keeps_the_shared_univmon_as_one_build() {
+fn stage2_physical_asap_optimization_keeps_the_shared_univmon_as_one_build() {
     let run = pipeline();
     let mut seen = 0;
     for c in run
@@ -470,26 +478,26 @@ fn physical_asap_optimization_keeps_the_shared_univmon_as_one_build() {
 
 /// Plan selection selects one candidate and gives every other one a reason.
 #[test]
-fn plan_selection_selects_one_and_explains_the_rest() {
+fn stage3_plan_selection_selects_one_and_explains_the_rest() {
     assert_selects_one_and_explains_the_rest(&pipeline());
 }
 
 /// The selected plan is the cheapest valid candidate for the whole workload.
 #[test]
-fn plan_selection_selects_cheapest_valid() {
+fn stage3_plan_selection_selects_cheapest_valid() {
     assert_selects_cheapest_valid(&pipeline());
 }
 
 /// Every node of a valid candidate is charged once per query that reads it: nothing is materialized, so a shared node is recomputed for each.
 #[test]
-fn plan_selection_charges_each_node_per_consuming_query() {
+fn stage3_plan_selection_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&pipeline());
 }
 
 /// A UnivMon estimate has a guarantee, so plan selection judges it against its target instead of rejecting it for having none.
 #[test]
 #[ignore = "needs a UnivMon accuracy model: L2 in #621; distinct count and entropy have none yet"]
-fn plan_selection_judges_univmon_with_an_accuracy_model() {
+fn stage3_plan_selection_judges_univmon_with_an_accuracy_model() {
     let run = pipeline();
     let invalid = run.invalid();
     for c in &run.logical {
@@ -510,7 +518,7 @@ fn plan_selection_judges_univmon_with_an_accuracy_model() {
 /// One materialized UnivMon for all three costs no more than three separate UnivMons.
 #[test]
 #[ignore = "needs one UnivMon for all three (#595, #596), a UnivMon accuracy model (#621) and materializing it (#604): not materialized, it is charged once per consuming query"]
-fn plan_selection_shared_univmon_costs_no_more_than_three() {
+fn stage3_plan_selection_shared_univmon_costs_no_more_than_three() {
     let run = pipeline();
     let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);
     let separate: Vec<_> = run
@@ -543,7 +551,7 @@ fn plan_selection_shared_univmon_costs_no_more_than_three() {
 
 /// The selected plan updates at most one UnivMon per flow record: separate UnivMons are dominated by the shared one.
 #[test]
-fn plan_selection_selected_plan_has_at_most_one_univmon() {
+fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
     let run = pipeline();
     let selected = run.physical(&run.selection.selected);
     let count = sketch_builds(selected.dag())

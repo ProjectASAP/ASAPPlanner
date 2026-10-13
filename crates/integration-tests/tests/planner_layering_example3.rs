@@ -66,11 +66,11 @@ fn workload_encodes_example3() {
     assert_eq!(lookback_ms(&b, 0), PATTERN_B_WINDOW_MS);
 }
 
-// ── Pattern A: language-specific frontends ───────────────────────────────
+// ── Pattern A: query-language frontends ───────────────────────────────
 
 /// Each Pattern A query lowers to scan → (time shift) → range → quantile.
 #[test]
-fn language_specific_frontends_a_lowers_each_query_to_its_interval() {
+fn stage0_query_language_frontends_a_lowers_each_query_to_its_interval() {
     let roots = lower_promql(&pattern_a(
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed,
@@ -97,19 +97,27 @@ fn language_specific_frontends_a_lowers_each_query_to_its_interval() {
 
 /// The frontends give one summary-free DAG whose five queries share no node.
 #[test]
-fn language_specific_frontends_a_one_summary_free_dag_without_sharing() {
+fn stage0_query_language_frontends_a_one_summary_free_dag_without_sharing() {
     let run = run_a();
-    let s0 = &run.language_specific_frontends;
-    assert_eq!(s0.query_roots.len(), 5);
-    assert!(s0.dag.nodes.iter().all(|n| !is_summary(&n.operator)));
-    assert!(cross_query_nodes(&s0.dag, &s0.query_roots).is_empty());
+    let stage0_query_language_frontends = &run.stage0_query_language_frontends;
+    assert_eq!(stage0_query_language_frontends.query_roots.len(), 5);
+    assert!(stage0_query_language_frontends
+        .dag
+        .nodes
+        .iter()
+        .all(|n| !is_summary(&n.operator)));
+    assert!(cross_query_nodes(
+        &stage0_query_language_frontends.dag,
+        &stage0_query_language_frontends.query_roots
+    )
+    .is_empty());
 }
 
 // ── Pattern A: logical ASAP-aware optimization ───────────────────────────
 
 /// Pass 1 offers each query an exact and a KLL candidate over its own interval.
 #[test]
-fn logical_asap_optimization_a_pass1_offers_exact_and_kll_per_query() {
+fn stage1_logical_asap_optimization_a_pass1_offers_exact_and_kll_per_query() {
     let run = run_a();
     for q in 0..5 {
         let found = options(&run, q);
@@ -123,7 +131,7 @@ fn logical_asap_optimization_a_pass1_offers_exact_and_kll_per_query() {
 
 /// The five independent KLLs: one per query, each read by its query only, all sized for ε = 0.005.
 #[test]
-fn logical_asap_optimization_a_keeps_five_independent_klls() {
+fn stage1_logical_asap_optimization_a_keeps_five_independent_klls() {
     let run = run_a();
     let all_kll = run
         .logical
@@ -152,7 +160,7 @@ fn logical_asap_optimization_a_keeps_five_independent_klls() {
 /// The identical-expression rule shares only raw input (scan, range, shift), never a quantile or summary, and keeps the unshared variant.
 #[test]
 #[ignore = "needs the Pass 2 identical-expression rule (#588)"]
-fn logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input() {
+fn stage1_logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input() {
     let run = run_a();
     assert!(run.logical.iter().any(|c| c.shared_input()));
     assert!(run.logical.iter().any(|c| !c.shared_input()));
@@ -171,7 +179,7 @@ fn logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input()
 /// One Exponential Histogram of KLLs over [T − 5y, T] serves all five queries, each through its own merge and p99 estimate.
 #[test]
 #[ignore = "needs Pass 2 window composition across queries: one window summary for all five (#628, #634)"]
-fn logical_asap_optimization_a_window_composition_adds_one_eh_for_all_five() {
+fn stage1_logical_asap_optimization_a_window_composition_adds_one_eh_for_all_five() {
     let run = run_a();
     let found = run.logical.iter().find(|c| {
         windowed_builds(c).iter().any(|(_, a, form, readers)| {
@@ -205,7 +213,7 @@ fn logical_asap_optimization_a_window_composition_adds_one_eh_for_all_five() {
 /// The shared EH candidate is added next to the independent KLL candidates, not instead of them.
 #[test]
 #[ignore = "needs Pass 2 window composition across queries: one window summary for all five (#628, #634)"]
-fn logical_asap_optimization_a_keeps_independent_and_shared_window_summaries() {
+fn stage1_logical_asap_optimization_a_keeps_independent_and_shared_window_summaries() {
     let run = run_a();
     let shared = run.logical.iter().any(|c| {
         windowed_builds(c).iter().any(|(_, _, f, r)| {
@@ -225,7 +233,7 @@ fn logical_asap_optimization_a_keeps_independent_and_shared_window_summaries() {
 /// Pass 2 adds a candidate for each way of grouping two queries onto one shared window summary.
 #[test]
 #[ignore = "needs Pass 2 window composition across queries: partial groupings (#628, #634)"]
-fn logical_asap_optimization_a_window_composition_groups_every_pair() {
+fn stage1_logical_asap_optimization_a_window_composition_groups_every_pair() {
     let run = run_a();
     let groups: BTreeSet<_> = run
         .logical
@@ -250,7 +258,7 @@ fn logical_asap_optimization_a_window_composition_groups_every_pair() {
 
 /// Plan selection selects one Pattern A candidate, explains the rest, and picks the cheapest valid one.
 #[test]
-fn plan_selection_a_selects_cheapest_valid() {
+fn stage3_plan_selection_a_selects_cheapest_valid() {
     let run = run_a();
     assert_selects_one_and_explains_the_rest(&run);
     assert_selects_cheapest_valid(&run);
@@ -258,14 +266,14 @@ fn plan_selection_a_selects_cheapest_valid() {
 
 /// Every node of a valid candidate is charged once per query that reads it: nothing is materialized, so a shared node is recomputed for each.
 #[test]
-fn plan_selection_a_charges_each_node_per_consuming_query() {
+fn stage3_plan_selection_a_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&run_a());
 }
 
 /// Sharing the scan never costs more than scanning separately, for the same per-computation choices.
 #[test]
 #[ignore = "needs the Pass 2 identical-expression rule (#588) and plan selection row estimates for time-shifted scans and narrower time ranges (#632)"]
-fn plan_selection_a_shared_scan_is_not_costlier() {
+fn stage3_plan_selection_a_shared_scan_is_not_costlier() {
     let run = run_a();
     let key = |c: &Logical| {
         (0..5)
@@ -288,11 +296,11 @@ fn plan_selection_a_shared_scan_is_not_costlier() {
     assert!(compared > 0);
 }
 
-// ── Pattern B: language-specific frontends and Pass 1 ────────────────────
+// ── Pattern B: query-language frontends and Pass 1 ────────────────────
 
 /// Pattern B lowers to scan → range 5m → quantile, with no summary.
 #[test]
-fn language_specific_frontends_b_lowers_to_one_range_quantile() {
+fn stage0_query_language_frontends_b_lowers_to_one_range_quantile() {
     let run = run_b();
     let roots = lower_promql(&pattern_b());
     assert_eq!(
@@ -300,7 +308,7 @@ fn language_specific_frontends_b_lowers_to_one_range_quantile() {
         [op("aggregate:quantile"), op("scan"), op("time_range")]
     );
     assert!(run
-        .language_specific_frontends
+        .stage0_query_language_frontends
         .dag
         .nodes
         .iter()
@@ -309,7 +317,7 @@ fn language_specific_frontends_b_lowers_to_one_range_quantile() {
 
 /// Pass 1 offers an exact and a KLL candidate for the 5-min window.
 #[test]
-fn logical_asap_optimization_b_pass1_offers_exact_and_kll() {
+fn stage1_logical_asap_optimization_b_pass1_offers_exact_and_kll() {
     let found = options(&run_b(), 0);
     assert!(
         found.contains("exact") && found.contains("Kll"),
@@ -322,7 +330,7 @@ fn logical_asap_optimization_b_pass1_offers_exact_and_kll() {
 /// Each Pass 1 option gets three window forms: none, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows.
 #[test]
 #[ignore = "needs Pass 2 window composition: tumbling windows (#601) and sliding windows (no PR yet)"]
-fn logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option() {
+fn stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option() {
     let run = run_b();
     let summaries: BTreeSet<_> = options(&run, 0)
         .into_iter()
@@ -353,7 +361,7 @@ fn logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_
 
 /// Window parameters are legal: L divides W, s divides L and the evaluation interval, a tumbling length divides both.
 #[test]
-fn logical_asap_optimization_b_window_parameters_are_legal() {
+fn stage1_logical_asap_optimization_b_window_parameters_are_legal() {
     let (w, every) = (PATTERN_B_WINDOW_MS, PATTERN_B_INTERVAL_MS);
     for c in &run_b().logical {
         for (_, _, form, _) in windowed_builds(c) {
@@ -382,7 +390,7 @@ fn logical_asap_optimization_b_window_parameters_are_legal() {
 /// A sliding window with L = W reads one completed window (no merge); tumbling windows merge W / length of them.
 #[test]
 #[ignore = "needs Pass 2 window composition: tumbling windows (#601) and sliding windows (no PR yet)"]
-fn logical_asap_optimization_b_merge_only_where_the_window_form_needs_it() {
+fn stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it() {
     let run = run_b();
     let mut seen = BTreeSet::new();
     for c in &run.logical {
@@ -413,7 +421,7 @@ fn logical_asap_optimization_b_merge_only_where_the_window_form_needs_it() {
 
 /// A window form that merges is used only with a summary whose states merge (KLL, DDSketch).
 #[test]
-fn logical_asap_optimization_window_merges_use_mergeable_summaries() {
+fn stage1_logical_asap_optimization_window_merges_use_mergeable_summaries() {
     for (run, window) in [(run_a(), 5 * YEAR_MS), (run_b(), PATTERN_B_WINDOW_MS)] {
         for c in &run.logical {
             for (_, algorithm, form, _) in windowed_builds(c) {
@@ -433,7 +441,7 @@ fn logical_asap_optimization_window_merges_use_mergeable_summaries() {
 
 /// Plan selection selects one Pattern B candidate, explains the rest, and picks the cheapest valid one.
 #[test]
-fn plan_selection_b_selects_cheapest_valid() {
+fn stage3_plan_selection_b_selects_cheapest_valid() {
     let run = run_b();
     assert_selects_one_and_explains_the_rest(&run);
     assert_selects_cheapest_valid(&run);

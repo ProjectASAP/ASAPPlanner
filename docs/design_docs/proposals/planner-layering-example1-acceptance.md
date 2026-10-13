@@ -15,7 +15,7 @@ whose expectation needs a feature that is not in the stack yet is
 
 | Stage | Doc (#509) | MVP (this spec) |
 |---|---|---|
-| Language-specific frontends | 1 workload `LogicalDAG` | same |
+| Query-language frontends | 1 workload `LogicalDAG` | same |
 | Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 only = **3**. Pass 2 is not implemented: the identical-expression rule is #588, window composition #601. |
 | Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, every sub-DAG `NotMaterialized` = **3** (the doc's Raw plans). Materialization enumeration is #604. |
 | Plan selection | 1 plan | 1 plan |
@@ -35,7 +35,7 @@ Shared data workload: `continuously_ingesting`, 15 s ingestion interval,
 | Q1 `sum by (job) (rate(http_requests_total[1m]))` | 10 s | 1 m | evaluation time | exact | none |
 | Q2 `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 10 s | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
 
-## Language-specific frontends: 1 candidate
+## Query-language frontends: 1 candidate
 
 | Query | Chain |
 |---|---|
