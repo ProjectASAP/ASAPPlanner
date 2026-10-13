@@ -1356,8 +1356,8 @@ impl<'a> ASAPStrategies<'a> {
         let Some(NonASAPOp::Limit {
             n: Some(n),
             offset: 0,
+            partition_by: limit_partition,
             child,
-            ..
         }) = root.non_asap()
         else {
             return Proposals::default();
@@ -1370,6 +1370,11 @@ impl<'a> ASAPStrategies<'a> {
         else {
             return Proposals::default();
         };
+        // The Limit keeps k rows per its own partition; only when that is the
+        // Sort's partition is the result the top k of each ranked group.
+        if limit_partition != partition_by {
+            return Proposals::default();
+        }
         let [key] = keys.as_slice() else {
             return Proposals::default();
         };

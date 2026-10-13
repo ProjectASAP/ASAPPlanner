@@ -756,6 +756,49 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     }
 }
 
+// A Limit keeps k rows per its own partition, so a heap ranking per the
+// Sort's groups is only the same result when both partition alike.
+#[test]
+fn spatial_topk_requires_the_limit_and_sort_partitions_to_agree() {
+    use asap_physical_operators::unified_physical_planner::promql_rows::with_series_identity;
+    use planner_types::ir::{NonASAPOp, Operator as IrOperator, OperatorNode};
+    use planner_types::pre_asap::GroupKeys;
+    let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
+    let root = Rc::new(with_series_identity(&logical).unwrap());
+    let Some(NonASAPOp::Limit {
+        n,
+        offset,
+        partition_by,
+        child,
+    }) = root.non_asap()
+    else {
+        panic!("expected a Limit root, got {root:?}");
+    };
+    assert!(!partition_by.is_empty());
+    let global_limit = Rc::new(OperatorNode::with_schema(
+        IrOperator::NonASAP(NonASAPOp::Limit {
+            n: *n,
+            offset: *offset,
+            partition_by: GroupKeys::none(),
+            child: Rc::clone(child),
+        }),
+        root.schema.clone(),
+    ));
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &Evidence,
+    );
+    let candidates = |root: &Rc<OperatorNode>| {
+        strategy
+            .current_series_topk_candidates(root, &AccuracyTarget::Epsilon(0.1))
+            .candidates
+    };
+    assert!(!candidates(&root).is_empty());
+    assert!(candidates(&global_limit).is_empty());
+}
+
 /// Deployment-side lifecycle choice: every summary state of `candidate` is
 /// continuously maintained, and the chosen lifecycles set execution timing.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {

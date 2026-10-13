@@ -170,9 +170,10 @@ fn try_promote_additive_top_ranking(
     else {
         return Ok(None);
     };
-    // A per-group `Limit` must agree with its `Sort`'s partition: the
-    // ranking's partition is what the outer `TopK` groups by.
-    if !limit_partition.is_empty() && limit_partition != partition_by {
+    // The `Limit` must keep k rows per the `Sort`'s partition: the ranking's
+    // partition is what the outer `TopK` groups by. A global `Limit` over a
+    // partitioned `Sort` keeps k rows overall, not k per group.
+    if limit_partition != partition_by {
         return Ok(None);
     }
     let [SortKey {
@@ -695,6 +696,36 @@ mod tests {
             child: sort(desc(1), count_by_service()),
         });
         assert!(!is_topk_over_count(&canonicalize(q).unwrap()));
+    }
+
+    #[test]
+    fn does_not_promote_a_global_limit_over_a_partitioned_sort() {
+        // A global Limit keeps k rows overall, not k per Sort partition.
+        let q = limit(
+            5,
+            0,
+            node(NonASAPOp::Sort {
+                keys: desc(1),
+                partition_by: GroupKeys::by(vec![0]),
+                child: count_by_service(),
+            }),
+        );
+        assert!(!is_topk_over_count(&canonicalize(q).unwrap()));
+    }
+
+    #[test]
+    fn promotes_a_limit_partitioned_like_its_sort() {
+        let q = node(NonASAPOp::Limit {
+            n: Some(5),
+            offset: 0,
+            partition_by: GroupKeys::by(vec![0]),
+            child: node(NonASAPOp::Sort {
+                keys: desc(1),
+                partition_by: GroupKeys::by(vec![0]),
+                child: count_by_service(),
+            }),
+        });
+        assert!(is_topk_over_count(&canonicalize(q).unwrap()));
     }
 
     #[test]
