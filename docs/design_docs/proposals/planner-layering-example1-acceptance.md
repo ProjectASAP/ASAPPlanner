@@ -131,9 +131,12 @@ Invariants:
 * One selected id. Every other candidate is listed once as rejected, with a
   reason, and marked invalid or valid but costlier.
 * Only valid candidates are priced. Each valid candidate's cost has one entry
-  per DAG node, and `total` is their sum. A `NotMaterialized` node is charged
-  once per query that reads it (its multiplier), since it is recomputed for
-  each; a materialized node once. Every node is `NotMaterialized` today.
+  per DAG node, and `total` is their sum. A materialized node is charged
+  once. A `NotMaterialized` node is charged once per consumer that reads it
+  (its multiplier), where a consumer is a query or a materialized node and
+  a read stops at materialized nodes. Every node is `NotMaterialized` today;
+  `charging_helper_*` check the helper on a hand-built candidate with a
+  materialized node.
 * The selected plan is no more expensive than any valid candidate.
 * The selected plan compiles in the physical planner.
 

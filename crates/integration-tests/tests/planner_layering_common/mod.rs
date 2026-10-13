@@ -55,19 +55,19 @@ pub fn lower_promql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 /// (node ids are post-order; compare as a set of operations).
 pub fn frontend_operations(root: &QueryRoot) -> Vec<String> {
     let dag = flatten(std::slice::from_ref(root)).0;
-    let mut ops: Vec<String> = dag
-        .nodes
-        .iter()
-        .map(|n| {
-            let json = serde_json::to_value(&n.operator).expect("serializes");
-            match json["NonASAP"]["Aggregate"]["measures"][0]["kind"].as_str() {
-                Some(measure) => format!("aggregate:{measure}"),
-                None => relational(&n.operator).unwrap_or_else(|| "?".into()),
-            }
-        })
-        .collect();
+    let mut ops: Vec<String> = dag.nodes.iter().map(|n| operation(&n.operator)).collect();
     ops.sort();
     ops
+}
+
+/// The aggregate's first measure as `aggregate:<kind>`, else the operator's
+/// kind in snake case.
+pub fn operation(payload: &Payload) -> String {
+    let json = serde_json::to_value(payload).expect("serializes");
+    match json["NonASAP"]["Aggregate"]["measures"][0]["kind"].as_str() {
+        Some(measure) => format!("aggregate:{measure}"),
+        None => snake_case(payload.kind_name()),
+    }
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────
@@ -448,12 +448,9 @@ pub fn assert_selects_cheapest_valid(run: &Run) {
     }
 }
 
-/// Each valid candidate's cost has one entry per DAG node and `total` is
-/// their sum. A materialized node is charged once; a `NotMaterialized` node
-/// once per consuming query, since it is recomputed for each (#509). With no
-/// materialized node in the DAG (every candidate until #604), a node's
-/// multiplier is the number of queries that read it. Invalid candidates are
-/// not priced.
+/// Each valid candidate's cost has one entry per DAG node, `total` is their
+/// sum, and each node's multiplier is [`computations`]. Invalid candidates
+/// are not priced.
 pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
     let invalid = run.invalid();
     for p in &run.physical {
@@ -471,23 +468,53 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
             "{}",
             p.id
         );
-        let none_materialized = nodes
-            .iter()
-            .all(|&n| materialization(p, n) == MaterializationOption::NotMaterialized);
-        for (&id, c) in &cost.per_node {
-            let expected = if materialization(p, id) != MaterializationOption::NotMaterialized {
-                Some(1)
-            } else if none_materialized {
-                Some(readers(p.dag(), &p.query_roots, id).len() as u64)
-            } else {
-                None
-            };
-            match expected {
-                Some(times) => assert_eq!(c.multiplier, times, "{}: {id:?}", p.id),
-                None => assert!(c.multiplier >= 1, "{}: {id:?}", p.id),
-            }
+        let times = computations(p.dag());
+        for (id, c) in &cost.per_node {
+            assert_eq!(c.multiplier, times[id], "{}: multiplier of {id:?}", p.id);
         }
     }
+}
+
+/// How many times each node is computed per workload evaluation (#509; the
+/// rule of plan selection's private `computations`): 1 for a materialized
+/// node; for a `NotMaterialized` one, the number of consumers that reach
+/// it. A consumer is a query (operator or scalar root) or a materialized
+/// node, whose walk starts at its inputs; a walk stops at materialized
+/// nodes and counts each node once.
+pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
+    let materialized: BTreeSet<_> = dag
+        .nodes
+        .iter()
+        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .map(|n| n.id)
+        .collect();
+    let starts = dag
+        .roots
+        .iter()
+        .map(|&root| vec![root])
+        .chain(
+            dag.scalar_roots
+                .iter()
+                .map(|(_, expr)| expr.operator_refs().into_iter().copied().collect()),
+        )
+        .chain(materialized.iter().map(|&id| dag.producers(id)));
+    let mut times: BTreeMap<_, _> = dag
+        .nodes
+        .iter()
+        .map(|n| (n.id, u64::from(materialized.contains(&n.id))))
+        .collect();
+    for start in starts {
+        let mut seen = HashSet::new();
+        let mut stack = start;
+        while let Some(id) = stack.pop() {
+            if materialized.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            *times.get_mut(&id).expect("node") += 1;
+            stack.extend(dag.producers(id));
+        }
+    }
+    times
 }
 
 /// The evaluation interval of entry `query`, for a fixed-interval repeating

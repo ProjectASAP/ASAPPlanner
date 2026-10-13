@@ -14,9 +14,13 @@ mod planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use asap_aware_mapping::plan_selection::select_plan;
+use asap_aware_mapping::PlanningModels;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
 use asap_types::post_asap::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
+use asap_types::post_asap::{Materialization, Medium};
+use asap_types::types::AccuracyTarget;
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
@@ -481,6 +485,92 @@ fn stage3_plan_selection_selects_cheapest_valid() {
 #[test]
 fn stage3_plan_selection_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&pipeline());
+}
+
+/// A hand-built candidate with a materialized node: Q1's plan read by two
+/// queries, its `time_range` kept `MatAtQuery`. Plan selection charges the
+/// two accumulators (rate, sum) and their finalizations twice, once per query; the walks from
+/// both roots stop at the materialized `time_range`, which is computed once
+/// and reads the scan once.
+fn materialized_case() -> Run {
+    let mut workload = example1();
+    let repeating = workload.query_workload.repeating_queries.as_mut().unwrap();
+    repeating.truncate(1);
+    let run = run_promql(&workload);
+    let mut p = run.physical[0].clone();
+    p.candidate.roots = vec![p.candidate.roots[0].clone(); 2];
+    let dag = &mut p.candidate.dag;
+    dag.roots = vec![dag.roots[0]; 2];
+    p.query_roots = dag.roots.clone();
+    let time_range = dag
+        .nodes
+        .iter_mut()
+        .find(|n| relational(&n.payload).as_deref() == Some("time_range"))
+        .unwrap();
+    time_range.materialization = Materialization::MatAtQuery(Medium::Memory);
+    let selection = select_plan(
+        std::slice::from_ref(&p.candidate),
+        &[Some(AccuracyTarget::Exact), Some(AccuracyTarget::Exact)],
+        workload.data_workload.as_ref().unwrap(),
+        PlanningModels::builtin(),
+    )
+    .unwrap();
+    Run {
+        physical: vec![p],
+        selection,
+        ..run
+    }
+}
+
+/// The charging helper agrees with plan selection when a node is
+/// materialized.
+#[test]
+fn charging_helper_follows_plan_selection_with_a_materialized_node() {
+    let run = materialized_case();
+    let p = &run.physical[0];
+    let mut by_kind: Vec<_> = run.selection.costs[&p.id]
+        .per_node
+        .iter()
+        .map(|(id, c)| (operation(p.dag().payload(*id)), c.multiplier))
+        .collect();
+    by_kind.sort();
+    let expected = [
+        ("finalize_exact_accumulator", 2),
+        ("finalize_exact_accumulator", 2),
+        ("scan", 1),
+        ("summary_agg", 2),
+        ("summary_agg", 2),
+        ("time_range", 1),
+    ];
+    assert_eq!(
+        by_kind,
+        expected.map(|(kind, times)| (kind.to_string(), times))
+    );
+    assert_each_node_charged_per_consuming_query(&run);
+}
+
+/// Charging the scan under a materialized node once per query is caught.
+#[test]
+#[should_panic(expected = "multiplier of")]
+fn charging_helper_rejects_recounting_below_a_materialized_node() {
+    let mut run = materialized_case();
+    let p = run.physical[0].clone();
+    let scan = p
+        .dag()
+        .nodes
+        .iter()
+        .find(|n| relational(&n.payload).as_deref() == Some("scan"))
+        .unwrap()
+        .id;
+    run.selection
+        .costs
+        .get_mut(&p.id)
+        .unwrap()
+        .per_node
+        .get_mut(&scan)
+        .unwrap()
+        .multiplier = 2;
+    assert_each_node_charged_per_consuming_query(&run);
 }
 
 /// The plan selection picks compiles in the physical planner (added by the
