@@ -1,17 +1,9 @@
-"""Tests for render.py's data merging and HTML assembly, plus viewer cache
-provenance checks executed with optional py_mini_racer (no browser required).
+"""Tests for the DAG viewer: render.py's standalone page, stage-workload.js
+(which reads the asap-stage-pipeline/v1 document the viewer shows) and the
+viewer's selection logic, the JS run headless with optional py_mini_racer.
 
-Run with (from the repo root): python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
-(or `cd tools/dag-viewer && python3 -m unittest test_render`, or
-`python3 -m pytest tools/dag-viewer/` if pytest is available -- these are
-plain `unittest.TestCase`s, any of those runners work). Plain
-`python3 -m unittest tools/dag-viewer/test_render.py` does NOT work run
-from the repo root: unittest resolves that path to a bare `test_render`
-module without adding tools/dag-viewer/ to sys.path, so this file's own
-`from render import ...` below fails with `ModuleNotFoundError: No module
-named 'render'` -- discover's `-s` (or a plain module name run from inside
-the directory) puts the right directory on sys.path instead. Not wired
-into CI -- this repo doesn't run Python in CI at all today.
+Run from tools/dag-viewer: `python3 test_render.py` (or
+`python3 -m unittest test_render`). Not wired into CI.
 """
 
 from __future__ import annotations
@@ -24,9 +16,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from render import _json_script, _semantic_label, load_workload, prepare_workload, render
+from render import _json_script, load_document, render
 
 HERE = Path(__file__).resolve().parent
+STAGE_DOCUMENT = HERE / "examples" / "planner-layering-example1.json"
 
 try:
     from py_mini_racer import py_mini_racer
@@ -34,177 +27,61 @@ except ImportError:
     py_mini_racer = None
 
 
-def named_dag(name: str, source: str = "SELECT 1") -> dict:
-    """A minimal well-formed NamedDAG: one leaf Scan node, its own root."""
-    return {
-        "name": name,
-        "source": source,
-        "dag": {
-            "nodes": [
-                {
-                    "id": 0,
-                    "kind": "Scan",
-                    "label": "Scan(t)",
-                    "detail": {},
-                    "children": [],
-                    "hash": 1,
-                }
-            ],
-            "root": 0,
-        },
-    }
+def document() -> dict:
+    return json.loads(STAGE_DOCUMENT.read_text())
 
 
-class LoadWorkloadTests(unittest.TestCase):
-    def test_boundary_terms_and_provenance_survive_standalone_export(self):
-        """The standalone viewer retains byte totals, physical terms, and provenance."""
-        dag = named_dag("boundary-example")
-        annotation = {
-            "value": 1080.0,
-            "unit": "CostUnits",
-            "source": "Modeled",
-            "model_version": "physical-boundary-bytes-v1+bytes-v1",
-            "evidence_version": "evidence-v1",
-            "inputs": [
-                {"name": "network_bytes", "value": 480, "unit": "bytes"},
-                {"name": "materialization_bytes", "value": 40, "unit": "bytes"},
-                {"name": "physical_node:scan:network_bytes", "value": 480, "unit": "bytes"},
-                {"name": "boundary:persist:materialization_bytes", "value": 40, "unit": "bytes"},
-            ],
-        }
-        dag["dag"]["nodes"][0]["selected_cost"] = annotation
-        html = render({"queries": [dag]})
-        for term in annotation["inputs"]:
-            self.assertIn(term["name"], html)
-        self.assertIn(annotation["model_version"], html)
-        self.assertIn(annotation["evidence_version"], html)
+def embedded(html: str) -> dict:
+    match = re.search(r'<script type="application/json" id="embedded-workload">(.*?)</script>', html, re.S)
+    return json.loads(match.group(1))
 
-    def test_merges_queries_across_files_in_order(self):
+
+class LoadDocumentTests(unittest.TestCase):
+    def test_reads_a_stage_document(self):
+        self.assertEqual(load_document(STAGE_DOCUMENT), document())
+
+    def test_rejects_any_other_json(self):
         with tempfile.TemporaryDirectory() as d:
-            f1 = Path(d) / "a.json"
-            f2 = Path(d) / "b.json"
-            f1.write_text(json.dumps({"queries": [named_dag("q1")]}))
-            f2.write_text(json.dumps({"queries": [named_dag("q2")]}))
-
-            workload = load_workload([f1, f2])
-
-        self.assertEqual([q["name"] for q in workload["queries"]], ["q1", "q2"])
-
-    def test_colliding_name_is_disambiguated_by_source_filename(self):
-        # Matches viewer.js's loadFiles(): a later file's query named the
-        # same as an earlier one gets " (filename)" appended instead of
-        # silently overwriting or erroring.
-        with tempfile.TemporaryDirectory() as d:
-            f1 = Path(d) / "a.json"
-            f2 = Path(d) / "b.json"
-            f1.write_text(json.dumps({"queries": [named_dag("q1")]}))
-            f2.write_text(json.dumps({"queries": [named_dag("q1")]}))
-
-            workload = load_workload([f1, f2])
-
-        self.assertEqual(workload["queries"][0]["name"], "q1")
-        self.assertEqual(workload["queries"][1]["name"], "q1 (b.json)")
-
-    def test_non_colliding_names_pass_through_unchanged(self):
-        with tempfile.TemporaryDirectory() as d:
-            f1 = Path(d) / "a.json"
-            f1.write_text(json.dumps({"queries": [named_dag("q1"), named_dag("q2")]}))
-
-            workload = load_workload([f1])
-
-        self.assertEqual([q["name"] for q in workload["queries"]], ["q1", "q2"])
+            old = Path(d) / "old.json"
+            old.write_text(json.dumps({"queries": []}))
+            with self.assertRaisesRegex(ValueError, "asap-stage-pipeline/v1"):
+                load_document(old)
 
 
 class RenderTests(unittest.TestCase):
     def test_no_script_src_tags_remain(self):
-        # Substring-only "<script src=" would also match viewer.js's own
-        # header comment (which documents index.html's <script src=...>
-        # usage in prose) once that file is inlined verbatim -- so match the
-        # real tag shape instead of a bare substring.
-        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
-        html = render(workload)
-        self.assertNotRegex(html, r'<script src="[^"]+"></script>')
+        self.assertNotRegex(render(document()), r'<script src="[^"]+"></script>')
 
-    def test_embedded_workload_round_trips(self):
-        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
-        html = render(workload)
-
-        m = re.search(
-            r'<script type="application/json" id="embedded-workload">(.*?)</script>',
-            html,
-            re.S,
-        )
-        self.assertIsNotNone(m, "embedded-workload <script> tag not found")
-        self.assertEqual(json.loads(m.group(1)), prepare_workload(workload))
+    def test_embedded_document_round_trips_with_its_reader(self):
+        html = render(document())
+        self.assertEqual(embedded(html), document())
+        self.assertIn("function stageWorkload", html)
 
     def test_standalone_export_carries_the_bulk_selection_control(self):
-        """A generated page gets Select-all for free: render.py inlines the
-        markup and viewer.js verbatim, so neither fix needs its own step."""
-        html = render({"queries": [named_dag("q1"), named_dag("q2")]})
+        html = render(document())
         self.assertIn('id="selectAllToggle"', html)
         self.assertIn("function bulkSelectionState(", html)
-        # And it must stay a selection control, not a second Clear all: the
-        # embedded workload is parsed once at load, so dropping `queries`
-        # from a generated page is unrecoverable without a reload.
-        self.assertNotRegex(
-            html, r"selectAllToggle\.addEventListener[^}]*queries = \[\]"
-        )
+        self.assertNotRegex(html, r"selectAllToggle\.addEventListener[^}]*queries = \[\]")
 
     def test_standalone_export_lanes_are_pannable(self):
-        """Dragging the lane background pans the viewport in the generated
-        page too -- `grabbable: false` alone made it a dead zone."""
-        html = render({"queries": [named_dag("q1")]})
-        lanes = re.findall(r"classes: 'laneParent'[^}]*}", html)
+        lanes = re.findall(r"classes: 'laneParent'[^}]*}", render(document()))
         self.assertEqual(len(lanes), 2, "expected the union and single-query lanes")
         for lane in lanes:
             self.assertIn("pannable: true", lane)
 
-    def test_render_does_not_mutate_callers_workload(self):
-        workload = {"queries": [named_dag("q1")]}
-        original = json.loads(json.dumps(workload))
-        render(workload)
-        self.assertEqual(workload, original)
-
-    def test_render_adds_no_legacy_mode_config(self):
-        # Bare "__DAG_RENDER__" also matches viewer.js's own header comment
-        # (which documents the window.__DAG_RENDER__ config object in prose)
-        # once that file is inlined verbatim -- match the actual assignment
-        # statement instead.
-        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
-        html = render(workload)
-        self.assertNotRegex(html, r"window\.__DAG_RENDER__ =")
+    def test_render_does_not_mutate_callers_document(self):
+        doc = document()
+        render(doc)
+        self.assertEqual(doc, document())
 
     def test_embedded_data_placed_before_viewer_js_body(self):
-        # viewer.js's top-level startup code reads #embedded-workload and
-        # synchronously as soon as it runs, so it must appear earlier in the
-        # document than viewer.js's own inlined
-        # <script> block.
-        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
-        html = render(workload)
-        embedded_pos = html.index('id="embedded-workload"')
-        viewer_pos = html.index("cytoscape.use(window.cytoscapeDagre)")  # viewer.js's first line
-        self.assertLess(embedded_pos, viewer_pos)
+        html = render(document())
+        self.assertLess(html.index('id="embedded-workload"'), html.index("cytoscape.use(window.cytoscapeDagre)"))
 
-    def test_inlined_edge_cost_key_contains_no_literal_nul(self):
-        html = render({"queries": [named_dag("q1")]})
-        self.assertNotIn("\x00", html)
-        self.assertIn(r"\u0000", html)
-
-    def test_angle_bracket_in_query_source_does_not_break_out_of_script_tag(self):
-        # A pathological (but legal JSON) query source containing a literal
-        # "</script>" substring must not prematurely close the embedded
-        # <script type="application/json"> tag when the browser parses it.
-        workload = {"queries": [named_dag("q1", source="SELECT '</script><script>evil()</script>'")]}
-        html = render(workload)
-
-        m = re.search(
-            r'<script type="application/json" id="embedded-workload">(.*?)</script>',
-            html,
-            re.S,
-        )
-        self.assertIsNotNone(m)
-        parsed = json.loads(m.group(1))
-        self.assertEqual(parsed["queries"][0]["source"], "SELECT '</script><script>evil()</script>'")
+    def test_angle_bracket_in_query_text_does_not_break_out_of_script_tag(self):
+        doc = document()
+        doc["workload"]["queries"][0]["text"] = "m{a='</script><script>evil()</script>'}"
+        self.assertEqual(embedded(render(doc)), doc)
 
 
 class JsonScriptTests(unittest.TestCase):
@@ -214,109 +91,9 @@ class JsonScriptTests(unittest.TestCase):
         self.assertEqual(json.loads(encoded), {"x": "</script>"})
 
 
-class SemanticLabelTests(unittest.TestCase):
-    def test_scan_recovers_source_from_legacy_label(self):
-        node = {"kind": "Scan", "label": "Scan(metrics)", "detail": {}}
-        self.assertEqual(_semantic_label(node), "Scan\nsource: metrics")
-
-    def test_aggregate_names_measure_input_and_grouping(self):
-        node = {
-            "kind": "Aggregate",
-            "detail": {
-                "measures": [{"kind": "quantile", "col": 6, "q": 0.95}],
-                "reduction": {"Reduce": [1]},
-            },
-        }
-        self.assertEqual(
-            _semantic_label(node),
-            "Aggregate\nmeasure: quantile(col[6], q=0.95)\ngroup by col[1]",
-        )
-
-    def test_summary_aggregate_names_reduction_as_group_by(self):
-        node = {
-            "kind": "SummaryAgg",
-            "detail": {
-                "family": "Sketch(Cms)",
-                "col": "SampleValue",
-                "reduction": {"Reduce": [1]},
-                "grouping": "PerSubpopulationInstance",
-            },
-        }
-        self.assertEqual(
-            _semantic_label(node),
-            "SummaryAgg\nfamily: Sketch(Cms)\ninput: SampleValue\n… +2 more",
-        )
-
-    def test_sort_names_expression_direction_and_null_order(self):
-        node = {
-            "kind": "Sort",
-            "detail": {
-                "keys": [{"expr": {"Column": 2}, "ascending": False, "nulls_first": True}]
-            },
-        }
-        self.assertEqual(_semantic_label(node), "Sort\nsort: col[2] descending, nulls first")
-
-    def test_project_names_columns_from_fields_and_legacy_columns(self):
-        """Exports write `fields`; older ones wrote `columns`. Both name columns."""
-        for key, dtype in (("fields", {"Plain": "utf8"}), ("columns", "utf8")):
-            node = {
-                "kind": "Project",
-                "detail": {"cols": [0]},
-                "schema": {key: [{"name": "service", "dtype": dtype, "nullable": False}]},
-            }
-            self.assertEqual(_semantic_label(node), "Project\ncolumns: service", key)
-
-    def test_prepares_before_after_and_whole_post_asap_dags(self):
-        node = {
-            "id": 0,
-            "kind": "Aggregate",
-            "label": "Aggregate(1 measures)",
-            "detail": {"measures": [{"kind": "avg", "col": 3}]},
-            "children": [],
-        }
-        def dag():
-            return {"nodes": [dict(node)], "root": 0}
-        workload = {
-            "queries": [
-                {
-                    "dag": dag(),
-                    "post_dag": dag(),
-                    "replacements": [{"before": dag(), "after": {"dag": dag()}}],
-                }
-            ]
-        }
-        prepared = prepare_workload(workload)
-        query = prepared["queries"][0]
-        labels = [
-            query["dag"]["nodes"][0]["label"],
-            query["post_dag"]["nodes"][0]["label"],
-        ]
-        self.assertEqual(labels, ["Aggregate\nmeasure: avg(col[3])"] * 2)
-        self.assertEqual(
-            query["replacements"][0]["before"]["nodes"][0]["label"],
-            "Aggregate(1 measures)",
-        )
-
-    def test_replacement_sub_dags_are_not_prepared_for_the_current_viewer(self):
-        def dag():
-            return {"nodes": [{"id": 0, "kind": "Scan", "label": "legacy", "detail": {}, "children": []}], "root": 0}
-        workload = {"queries": [{"dag": dag(), "replacements": [{"before": dag(), "after": {"dag": dag()}}]}]}
-        replacement = prepare_workload(workload)["queries"][0]["replacements"][0]
-        self.assertEqual(replacement["before"]["nodes"][0]["label"], "legacy")
-        self.assertEqual(replacement["after"]["dag"]["nodes"][0]["label"], "legacy")
-
-
 class MainCliTests(unittest.TestCase):
-    """Exercises main()'s own error handling via subprocess, rather than
-    calling main() in-process, since what's under test here is exactly the
-    CLI's user-facing stderr message + exit code, not internal state."""
-
     def run_render_py(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(HERE / "render.py"), *args],
-            capture_output=True,
-            text=True,
-        )
+        return subprocess.run([sys.executable, str(HERE / "render.py"), *args], capture_output=True, text=True)
 
     def test_missing_input_file_gives_a_clean_error_not_a_traceback(self):
         result = self.run_render_py("/no/such/path/dag.json", "-o", "/dev/null")
@@ -333,25 +110,14 @@ class MainCliTests(unittest.TestCase):
         self.assertIn("isn't valid JSON", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
-
-STAGE_DOCUMENT = HERE / "examples" / "planner-layering-example1.json"
-
-
-class StageDocumentRenderTests(unittest.TestCase):
-    """render.py passes a stage_pipeline document through for the viewer's
-    stage-workload.js to read."""
-
-    def test_stage_document_is_embedded_unchanged_with_its_reader(self):
-        document = json.loads(STAGE_DOCUMENT.read_text())
-        self.assertEqual(load_workload([STAGE_DOCUMENT]), document)
-        html = render(document)
-        embedded = re.search(r'<script type="application/json" id="embedded-workload">(.*?)</script>', html, re.S)
-        self.assertEqual(json.loads(embedded.group(1)), document)
-        self.assertIn("function stageWorkload", html)
-
-    def test_two_stage_documents_are_rejected(self):
-        with self.assertRaises(ValueError):
-            load_workload([STAGE_DOCUMENT, STAGE_DOCUMENT])
+    def test_other_json_gives_a_clean_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = Path(d) / "old.json"
+            old.write_text(json.dumps({"queries": []}))
+            result = self.run_render_py(str(old), "-o", "/dev/null")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("asap-stage-pipeline/v1", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
@@ -363,7 +129,7 @@ class StageWorkloadTests(unittest.TestCase):
     def setUp(self):
         self.js = py_mini_racer.MiniRacer()
         self.js.eval((HERE / "stage-workload.js").read_text())
-        self.document = json.loads(STAGE_DOCUMENT.read_text())
+        self.document = document()
 
     def test_one_query_per_workload_query_with_reachable_dags(self):
         workload = self.js.call("stageWorkload", self.document)
@@ -389,6 +155,25 @@ class StageWorkloadTests(unittest.TestCase):
         self.assertIn("\ncost ", node["label"])
         self.assertEqual(node["detail"]["cost"], cost)
 
+    def test_candidates_rank_the_selected_plan_first_then_by_cost(self):
+        """The Stage 3 table: the selected candidate, the other costed ones
+        cheapest first, then the rejected ones with their reasons."""
+        selection = self.document["stage3_plan_selection"]
+        rows = self.js.call("stageCandidateRows", self.document)
+        self.assertEqual(rows[0]["id"], selection["selected"])
+        self.assertEqual(rows[0]["status"], "selected")
+        self.assertEqual(rows[0]["total"], selection["costs"][selection["selected"]]["total"])
+        totals = [row["total"] for row in rows[1:] if row["status"] == "costlier"]
+        self.assertEqual(totals, sorted(totals))
+        self.assertTrue(all(row["total"] >= rows[0]["total"] for row in rows[1:] if row["status"] == "costlier"))
+        rejected = {r["id"]: r["reason"] for r in selection["rejected"] if not r["valid"]}
+        for row in rows:
+            if row["status"] == "rejected":
+                self.assertEqual(row["reason"], rejected[row["id"]])
+        physical = self.document["stage2_physical_asap_optimization"]
+        self.assertEqual(len(rows), len(physical["candidates"]) + len(physical["pruned"]))
+        self.assertTrue(all(row["display_name"] for row in rows))
+
     def test_failed_selection_has_no_post_dag(self):
         self.document["stage3_plan_selection"] = {"costs": {}, "selected": None, "rejected": []}
         queries = self.js.call("stageWorkload", self.document)["queries"]
@@ -396,30 +181,14 @@ class StageWorkloadTests(unittest.TestCase):
 
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
-class ViewerCacheTests(unittest.TestCase):
+class ViewerSelectionTests(unittest.TestCase):
     def setUp(self):
         self.js = py_mini_racer.MiniRacer()
         source = (HERE / "viewer.js").read_text()
-        for name in ["escapeHtml", "formatCostUnit", "formatBaselineRef",
-                     "formatCostNumber", "renderCostAnnotation",
-                     "computeSelectionWorkloadCost", "bulkSelectionState"]:
+        for name in ["escapeHtml", "bulkSelectionState"]:
             function = re.search(r"^function " + name + r"\(.*?^}", source, re.M | re.S)
             self.assertIsNotNone(function, name)
             self.js.eval(function.group(0))
-
-    @staticmethod
-    def query(profile, selected_profile=None, batch=0):
-        def annotation(value, cache):
-            result = {"value": value, "unit": "CostUnits", "source": "Modeled"}
-            if cache is not None:
-                result["cache_profile"] = cache
-            return result
-
-        return {"sourceBatch": batch, "post_dag": {"nodes": [{"decision": {
-            "id": 1,
-            "baseline_cost": annotation(10, profile),
-            "selected_cost": annotation(4, selected_profile or profile),
-        }}]}}
 
     def test_bulk_selection_distinguishes_none_some_and_all(self):
         """The checkbox has three states to show, and `indeterminate` is the
@@ -469,43 +238,6 @@ class ViewerCacheTests(unittest.TestCase):
                 self.assertTrue(self.js.eval("selectAllTab.hidden"))
                 self.assertFalse(self.js.eval("selectAllToggle.checked"))
                 self.assertFalse(self.js.eval("selectAllToggle.indeterminate"))
-
-    def test_cache_profile_and_inputs_are_rendered(self):
-        """The sidebar exposes the assumptions behind a cache-adjusted cost."""
-        annotation = self.query("warm-cache-v1")["post_dag"]["nodes"][0]["decision"]["baseline_cost"]
-        annotation["inputs"] = [{"name": "result_cache_hit_ratio", "value": 0.5, "unit": "ratio"}]
-        html = self.js.call("renderCostAnnotation", "Baseline", annotation)
-        self.assertIn("cache warm-cache-v1", html)
-        self.assertIn("result_cache_hit_ratio", html)
-        self.assertIn("0.5 ratio", html)
-
-    def test_same_cache_profile_aggregates_and_preserves_provenance(self):
-        """Comparable decisions total normally and retain their common profile."""
-        result = self.js.call("computeSelectionWorkloadCost", [self.query("warm-v1"), self.query("warm-v1", batch=1)])
-        self.assertEqual(result["baseline_cost"]["value"], 20)
-        self.assertEqual(result["benefit"]["value"], 12)
-        self.assertEqual(result["benefit"]["cache_profile"], "warm-v1")
-
-    def test_legacy_profiles_preserve_existing_totals(self):
-        """Models without cache provenance retain their existing aggregation."""
-        result = self.js.call("computeSelectionWorkloadCost", [self.query(None), self.query(None, batch=1)])
-        self.assertEqual(result["benefit"]["value"], 12)
-        self.assertIsNone(result["benefit"]["cache_profile"])
-
-    def test_different_or_mixed_cache_profiles_make_totals_unavailable(self):
-        """Selection totals cannot claim benefits across incompatible assumptions."""
-        cases = [
-            [self.query("cold-v1"), self.query("warm-v1", batch=1)],
-            [self.query("cold-v1", selected_profile="warm-v1")],
-            [self.query("warm-v1"), self.query(None, batch=1)],
-            [self.query(None), self.query("warm-v1", batch=1)],
-        ]
-        for queries in cases:
-            with self.subTest(queries=queries):
-                result = self.js.call("computeSelectionWorkloadCost", queries)
-                for annotation in result.values():
-                    self.assertIsNone(annotation["value"])
-                    self.assertEqual(annotation["source"], "Unavailable")
 
 
 if __name__ == "__main__":

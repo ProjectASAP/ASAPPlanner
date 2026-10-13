@@ -107,3 +107,31 @@ function stageWorkload(doc) {
     }),
   };
 }
+
+// Stage 3's view of the candidates the document shows: the selected one,
+// the other valid ones cheapest first ("costlier"), then the rejected and
+// the Stage 2 pruned ones with their reasons.
+function stageCandidateRows(doc) {
+  const selection = doc.stage3_plan_selection || {};
+  const costs = selection.costs || {};
+  const rejected = new Map((selection.rejected || []).map((r) => [r.id, r]));
+  const physical = doc.stage2_physical_asap_optimization || {};
+  const rows = (physical.candidates || []).map((candidate) => {
+    const cost = costs[candidate.id];
+    const rejection = rejected.get(candidate.id);
+    const status = candidate.id === selection.selected ? 'selected' : cost ? 'costlier' : 'rejected';
+    return {
+      id: candidate.id,
+      display_name: candidate.display_name,
+      total: cost ? cost.total : null,
+      unit: cost ? cost.unit : null,
+      status,
+      reason: status === 'rejected' && rejection ? rejection.reason : null,
+    };
+  });
+  (physical.pruned || []).forEach((p) => rows.push({
+    id: p.from_logical, display_name: p.display_name, total: null, unit: null, status: 'pruned', reason: p.reason,
+  }));
+  const order = { selected: 0, costlier: 1, rejected: 2, pruned: 3 };
+  return rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
+}
