@@ -21,7 +21,7 @@ pub(super) fn guarantee(
         params,
         query,
         ErrorMetric::Rank,
-        kll_rank_error_99(*k) * delta_scale(delta),
+        kll_rank_error_99(*k) * delta_scale(delta)?,
         ProbabilityExpr::Constant { value: delta },
         "apache_datasketches_kll_empirical_99_a9b42755072b",
     ))
@@ -49,12 +49,14 @@ pub(crate) fn kll_k(eps: f64) -> u32 {
 /// at the calibrated 0.01: Karnin, Lang & Liberty (FOCS 2016) bound the
 /// error at `delta` by `O(sqrt(ln(1/delta)) / k)`, so the factor is
 /// `sqrt(ln(1/delta) / ln(1/0.01))`, with the constant taken from the 99%
-/// calibration. 1 for `delta >= 0.01`.
-fn delta_scale(delta: f64) -> f64 {
-    if delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
-        1.0
+/// calibration. 1 for `delta >= 0.01`; `None` unless `0 < delta < 1`.
+fn delta_scale(delta: f64) -> Option<f64> {
+    if !(delta > 0.0 && delta < 1.0) {
+        None
+    } else if delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
+        Some(1.0)
     } else {
-        (delta.ln() / KLL_CALIBRATED_FAILURE_PROBABILITY.ln()).sqrt()
+        Some((delta.ln() / KLL_CALIBRATED_FAILURE_PROBABILITY.ln()).sqrt())
     }
 }
 
@@ -69,7 +71,7 @@ pub(crate) fn size_params(eps: f64, delta: f64) -> SketchParams {
         };
     }
     SketchParams::Kll {
-        k: kll_k(eps / delta_scale(delta)),
+        k: kll_k(eps / delta_scale(delta).unwrap_or(1.0)),
         failure_probability: Some(delta),
     }
 }
@@ -139,5 +141,26 @@ mod tests {
             }
         ));
         assert_eq!(g.failure_probability.evaluate(), Some(0.001));
+    }
+
+    /// A hand-built failure probability outside (0, 1) gives no guarantee
+    /// rather than an infinite or NaN error bound.
+    #[test]
+    fn an_invalid_failure_probability_gives_no_guarantee() {
+        for delta in [0.0, -0.1, 1.0, 1.5, f64::NAN, f64::INFINITY] {
+            let params = SketchParams::Kll {
+                k: 200,
+                failure_probability: Some(delta),
+            };
+            assert!(
+                guarantee(
+                    &SketchAlgorithm::Kll,
+                    &params,
+                    &SketchStatistic::Quantile { q: 0.99 },
+                )
+                .is_none(),
+                "{delta}"
+            );
+        }
     }
 }
