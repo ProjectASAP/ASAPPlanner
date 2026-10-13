@@ -13,39 +13,11 @@
 //! that is the guarantee. A coverage floor guards against a change silently
 //! tanking how much of the corpus we can lower.
 
-use std::rc::Rc;
-
-use asap_aware_mapping::replacement::{retain_exact, RealizationError};
-use asap_aware_mapping::{
-    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
-};
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
-use support::lower_promql;
-
-/// This crate has no "bind me one dag" public API any more —
-/// `ASAPStrategies::replacements` always returns every candidate, and
-/// a caller decides what to keep. This test-only helper reproduces the
-/// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
-/// gets one representative `Result` per query, matching what a totality
-/// check over the whole corpus wants.
-fn bind(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
-    let target = TargetSubDAG::new(root);
-    match ASAPStrategies::default_cost_model()
-        .replacements(&target)
-        .into_iter()
-        .next()
-    {
-        Some(ReplacementSubDAG {
-            replacement: Replacement::SubDAG(node),
-            ..
-        }) => Ok(node),
-        _ => retain_exact(root),
-    }
-}
+use support::{logical_plan, lower_promql};
 
 const DOCS: &str = include_str!("data/promql_corpus_docs.txt");
 const TESTDATA: &str = include_str!("data/promql_corpus_testdata.txt");
@@ -87,11 +59,10 @@ fn tally(corpus: &str) -> Tally {
     t
 }
 
-/// Every query that lowers, additionally run through the pre-ASAP →
-/// post-ASAP `asap-aware-mapping` binding pass (issue #98), at an
-/// approximate accuracy target so the sketch-selection boundary actually
-/// fires (an `Exact` target would only ever exercise the exact-accumulator
-/// arm).
+/// Every query that lowers, additionally run through logical ASAP-aware
+/// optimization ([`logical_plan`]: Pass 1 and composition), at an
+/// approximate accuracy target so summary candidates actually appear (an
+/// `Exact` target would only ever exercise the exact-accumulator arm).
 #[derive(Default, Debug)]
 struct BindTally {
     /// An ASAP operator was bound somewhere below the root — the pass did
@@ -99,7 +70,8 @@ struct BindTally {
     transformed: usize,
     /// The kept pre-ASAP dag — the pass left the query untouched.
     unchanged: usize,
-    /// [`bind`] returned `Err` (schema derivation failed).
+    /// [`logical_plan`] returned `Err`: Pass 1 rejected the query, or its
+    /// exact candidate did not compose.
     errored: usize,
 }
 
@@ -109,7 +81,7 @@ fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
         let Ok(dag) = lower_promql(q, accuracy.clone()) else {
             continue;
         };
-        match bind(&dag) {
+        match logical_plan(&dag) {
             Ok(bound) if !bound.contains_asap() => t.unchanged += 1,
             Ok(_) => t.transformed += 1,
             Err(_) => t.errored += 1,
@@ -126,7 +98,7 @@ fn binding_is_total_over_the_entire_corpus() {
     eprintln!("docs corpus post-ASAP binding:     {docs:?}");
     eprintln!("testdata corpus post-ASAP binding: {td:?}");
 
-    // Same totality guarantee as lowering: reaching here means `bind`
+    // Same totality guarantee as lowering: reaching here means `logical_plan`
     // never panicked over any lowerable query in the corpus.
     assert_eq!(docs.errored, 0, "post-ASAP binding errored: {docs:?}");
     assert_eq!(td.errored, 0, "post-ASAP binding errored: {td:?}");

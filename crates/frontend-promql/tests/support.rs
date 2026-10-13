@@ -109,3 +109,83 @@ pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
         other => panic!("expected sample expression, got {other:?}"),
     }
 }
+
+/// Every planning stage's output for the single query `root` at `accuracy`,
+/// with the built-in models.
+#[allow(dead_code)]
+pub fn plan_stages(
+    root: Rc<OperatorNode>,
+    accuracy: AccuracyTarget,
+) -> asap_aware_mapping::StagePipelineRun<usize> {
+    asap_aware_mapping::plan_stages(
+        vec![(0, asap_types::ir::QueryRoot::Operator(root))],
+        &[Some(accuracy)],
+        &DataWorkload::default(),
+        asap_aware_mapping::PlanningModels::builtin(),
+        asap_aware_mapping::pass::MAX_ENUMERATED_CANDIDATES,
+    )
+    .expect("Pass 1 accepts the query")
+}
+
+/// The logical DAG the planner pipeline selects for the single query `root`
+/// at `accuracy`.
+#[allow(dead_code)]
+pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+    let run = plan_stages(root, accuracy);
+    match run.selected_logical().expect("a plan is selected") {
+        [asap_types::ir::QueryRoot::Operator(node)] => Rc::clone(node),
+        other => panic!("one operator root: {other:?}"),
+    }
+}
+
+/// Every logical candidate (a composed CandidateLogicalASAPDAG) of the single
+/// query `root` at `accuracy`, in enumeration order; a choice that does not
+/// compose is skipped.
+#[allow(dead_code)]
+pub fn logical_candidates(
+    root: Rc<OperatorNode>,
+    accuracy: AccuracyTarget,
+) -> Vec<Rc<OperatorNode>> {
+    plan_stages(root, accuracy)
+        .logical
+        .into_iter()
+        .filter_map(|candidate| match candidate.roots.ok()?.remove(0) {
+            asap_types::ir::QueryRoot::Operator(node) => Some(node),
+            asap_types::ir::QueryRoot::Scalar(_) => None,
+        })
+        .collect()
+}
+
+/// One logical candidate of the single query `root`: the first composed
+/// candidate (of up to 64, in enumeration order) that reads a summary, else
+/// the exact one (the first). `Err` when Pass 1 rejects the query or the
+/// exact candidate does not compose; another candidate may legitimately not
+/// compose (a candidate its input cannot feed), and selection skips it.
+#[allow(dead_code)]
+pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
+    let run = asap_aware_mapping::plan_stages(
+        vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
+        &[None],
+        &DataWorkload::default(),
+        asap_aware_mapping::PlanningModels::builtin(),
+        64,
+    )
+    .map_err(|e| e.to_string())?;
+    let operator = |roots: &[asap_types::ir::QueryRoot]| match &roots[0] {
+        asap_types::ir::QueryRoot::Operator(node) => Rc::clone(node),
+        asap_types::ir::QueryRoot::Scalar(_) => unreachable!("an operator root stays one"),
+    };
+    let summarized = run
+        .logical
+        .iter()
+        .filter_map(|candidate| candidate.roots.as_deref().ok().map(operator))
+        .find(|node| node.contains_asap());
+    match summarized {
+        Some(node) => Ok(node),
+        None => run.logical[0]
+            .roots
+            .as_deref()
+            .map(operator)
+            .map_err(|e| e.to_string()),
+    }
+}

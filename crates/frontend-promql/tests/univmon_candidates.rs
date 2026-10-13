@@ -1,75 +1,41 @@
 use std::rc::Rc;
 
-use asap_aware_mapping::accuracy::{
-    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-};
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
-use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
+use asap_aware_mapping::accuracy::{AccuracyModel, DefaultAccuracyModel};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, ProbabilityExpr,
-    ResultGuarantee, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
-};
+use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
 use asap_types::types::AccuracyTarget;
-use support::{lower_promql, post_asap_dag};
+use support::{logical_candidates, lower_promql, plan_stages, post_asap_dag};
 
-// Synthetic evidence exercises structural sharing, never runtime accuracy.
-struct TestEvidence;
-impl AccuracyModel for TestEvidence {
-    fn local_guarantee(
-        &self,
-        family: &FieldDataType,
-        query: &SketchStatistic,
-    ) -> Option<ResultGuarantee> {
-        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
-            && !matches!(query, SketchStatistic::PointCount { .. })
-        {
-            let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
-            guarantee.metric = ErrorMetric::RelativeValue;
-            guarantee.bound = BoundExpr::Constant { value: 0.01 };
-            guarantee.failure_probability = ProbabilityExpr::Constant { value: 0.01 };
-            Some(guarantee)
-        } else {
-            DefaultAccuracyModel.local_guarantee(family, query)
-        }
-    }
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError> {
-        DefaultAccuracyModel.propagate(op, inputs, local, stats)
-    }
-    fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
-        DefaultAccuracyModel.satisfies(guarantee, target)
-    }
+/// The summary evaluation over a UnivMon state that `root` reads, if any.
+fn univmon_estimate(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+    OperatorNode::reachable(root).into_iter().find(|node| {
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else {
+            return false;
+        };
+        matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+            if kind.algorithm() == &SketchAlgorithm::UnivMon)
+    })
 }
 
+/// The logical candidate of `query` that evaluates a UnivMon state.
 fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let root = lower_promql(query, accuracy).unwrap();
-    ASAPStrategies::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
-        .replacements(&TargetSubDAG::new(&root))
+    let root = lower_promql(query, accuracy.clone()).unwrap();
+    logical_candidates(root, accuracy)
         .into_iter()
-        .find_map(|candidate| {
-            let Replacement::SubDAG(node) = candidate.replacement else { return None };
-            let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else { return None };
-            matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::UnivMon).then_some(node)
-        }).expect("UnivMon candidate")
+        .find_map(|node| univmon_estimate(&node))
+        .expect("UnivMon candidate")
 }
 
 #[test]
 fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees() {
-    // Equal data, grouping and window produce one state independently of evaluation.
+    // Equal data, grouping and window produce one state independently of
+    // evaluation. Pass 1 offers UnivMon for an approximate count only.
     let accuracy = AccuracyTarget::Epsilon(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
-        ("count_over_time(m[5m])", AccuracyTarget::Exact),
+        ("count_over_time(m[5m])", accuracy.clone()),
         ("l2_over_time(m[5m])", accuracy.clone()),
         ("entropy_over_time(m[5m])", accuracy),
     ]
@@ -107,7 +73,8 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
             ));
             assert!(root.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         } else {
-            assert!(!root.guarantee.as_ref().unwrap().is_exact());
+            // No calibrated bound, so composition certifies nothing.
+            assert!(root.guarantee.is_none());
             let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
                 panic!()
             };
@@ -136,42 +103,26 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             },
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
-            let candidates =
-                ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
-            let unknown = candidates
+            let run = plan_stages(root, target.clone());
+            let unknown: Vec<_> = run
+                .physical
                 .iter()
                 .filter(|candidate| {
-                    matches!(
-                        &candidate.replacement,
-                        Replacement::SubDAG(node)
-                            if matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. }))
-                                && node.guarantee.is_none()
-                                && candidate.has_missing_accuracy_evidence()
-                    )
+                    let asap_types::ir::QueryRoot::Operator(node) = &candidate.roots[0] else {
+                        return false;
+                    };
+                    univmon_estimate(node).is_some() && node.guarantee.is_none()
                 })
-                .count();
+                .collect();
             if target == AccuracyTarget::Exact {
-                assert_eq!(unknown, 0);
+                assert!(unknown.is_empty(), "{query}");
             } else {
-                assert!(unknown > 0);
-                let space = search_workload_with_targets(
-                    vec![("q", Rc::clone(&root), Some(target))],
-                    &default_strategies(),
-                    &DefaultAccuracyModel,
-                )
-                .unwrap();
-                assert!(space
-                    .candidates_for_target(&space.roots[0].1)
-                    .unwrap()
-                    .candidates
-                    .iter()
-                    .any(|candidate| candidate.has_missing_accuracy_evidence()));
-                assert!(!space
-                    .global_selection(&DefaultCostModel)
-                    .for_target(&space.roots[0].1)
-                    .unwrap()
-                    .chosen
-                    .is_some_and(|candidate| candidate.has_missing_accuracy_evidence()));
+                assert!(!unknown.is_empty(), "{query}");
+                let selected = &run.selection.as_ref().unwrap().selected;
+                assert!(
+                    unknown.iter().all(|candidate| &candidate.id != selected),
+                    "{query}"
+                );
             }
         }
     }
