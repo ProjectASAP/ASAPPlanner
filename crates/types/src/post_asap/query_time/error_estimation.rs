@@ -63,9 +63,8 @@
 //! issue #239.
 //!
 //! Integration point (2) — tighter *plan-time* sizing under an expected-case
-//! (non-adversarial) assumption — is wired for real, since it touches code
-//! that already exists: see
-//! `crates/asap-aware-mapping/src/implementation.rs::posterior_aware_size_params`.
+//! (non-adversarial) assumption — is not wired: the planner sizes summaries
+//! for the worst case (`asap-aware-mapping`'s `accuracy::estimators`).
 
 // ── Posterior (query-time) estimators ───────────────────────────────────────
 

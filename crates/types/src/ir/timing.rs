@@ -24,9 +24,8 @@
 //!   everything that feeds an ingestion-time node runs at ingestion time,
 //!   everything above an evaluation at query time.
 //!
-//! A node whose timing a candidate builder fixed (e.g. the query-time
-//! `FinalizeExactAccumulator` of `finalize_query_candidate`) keeps that
-//! timing. An explicit assignment on it that agrees is kept; one that needs
+//! A node whose timing a candidate builder fixed (e.g. a query-time
+//! `FinalizeExactAccumulator`) keeps that timing. An explicit assignment on it that agrees is kept; one that needs
 //! the other timing is an error
 //! ([`ExecutionDataStateError::MaterializationConflictsWithFixedTiming`]).
 //! A root may be `MatAtIngestion`: the query reads its stored output. A root
@@ -1221,8 +1220,8 @@ mod tests {
             .materialization
     }
 
-    /// A node whose timing its candidate fixed (the query-time read boundary
-    /// of `finalize_query_candidate`) keeps an explicit assignment that agrees
+    /// A node whose timing its candidate fixed (a query-time read boundary)
+    /// keeps an explicit assignment that agrees
     /// with that timing and rejects one that needs the other timing.
     #[test]
     fn fixed_timing_keeps_an_agreeing_assignment_and_rejects_a_conflict() {

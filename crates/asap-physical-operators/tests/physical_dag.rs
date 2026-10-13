@@ -564,7 +564,7 @@ fn bind_post_asap_before_execution() {
     };
     let native = bind(&dag, sources(), &[1]).unwrap();
     assert_eq!(floats(&run(&native, 1, query()), 0), vec![3.]);
-    // A literal Fallback needs no deployment input.
+    // A literal root needs no deployment input.
     let literal = bind(&dag, BTreeMap::new(), &[1]).unwrap();
     assert_eq!(floats(&run(&literal, 1, query()), 0), vec![3.]);
     dag.nodes[1].payload = PhysicalASAPOperatorPayload::ASAP(ASAPOp::Extension {
