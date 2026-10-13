@@ -15,7 +15,7 @@ mod planner_layering_common;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_types::ir::flat::NodeId;
-use asap_types::ir::{ASAPOp, Operator};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
 use asap_types::post_asap::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -356,6 +356,48 @@ fn physical_asap_optimization_exact_topk_is_sort_then_limit() {
     assert!(sort_then_limit, "{}: no sort → limit", p.id);
 }
 
+/// Exact Q2 sorts each job's series by the ranked value, descending, and a
+/// `Project` over the limit restores the logical `[job, topk_10]` columns.
+#[test]
+fn physical_asap_optimization_exact_topk_returns_job_and_topk_10() {
+    let run = pipeline();
+    let p = physical_with(&run, Q2Option::Exact);
+    let QueryRoot::Operator(root) = &p.candidate.roots[1] else {
+        panic!("{}: Q2 is an operator root", p.id)
+    };
+    let names: Vec<_> = root.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["job", "topk_10"], "{}", p.id);
+    let NonASAPOp::Project { child: limit, .. } = root.expect_non_asap() else {
+        panic!("{}: Q2's root is a Project", p.id)
+    };
+    let NonASAPOp::Limit {
+        n: Some(10),
+        child: sort,
+        ..
+    } = limit.expect_non_asap()
+    else {
+        panic!("{}: a limit 10 under the Project", p.id)
+    };
+    let NonASAPOp::Sort {
+        keys,
+        partition_by,
+        child,
+    } = sort.expect_non_asap()
+    else {
+        panic!("{}: a sort under the limit", p.id)
+    };
+    let [SortKey {
+        expr: ScalarExpr::Column(ranked),
+        ascending: false,
+        ..
+    }] = keys.as_slice()
+    else {
+        panic!("{}: one descending column key: {keys:?}", p.id)
+    };
+    assert_eq!(child.schema.fields[*ranked].name, "value", "{}", p.id);
+    assert_eq!(partition_by.len(), 1, "{}: partitioned by job", p.id);
+}
+
 /// A summary Q2 is a build node feeding a top-10 estimation node, with no merge.
 #[test]
 fn physical_asap_optimization_summary_topk_is_build_then_estimate() {
@@ -484,10 +526,10 @@ fn plan_selection_selects_cheapest_valid() {
     assert_selects_cheapest_valid(&pipeline());
 }
 
-/// Every node of a valid candidate is charged exactly once, so a shared input is costed once for both queries.
+/// Every node of a valid candidate is charged once per query that reads it: nothing is materialized, so a shared node is recomputed for each.
 #[test]
-fn plan_selection_charges_each_node_once() {
-    assert_each_node_charged_once(&pipeline());
+fn plan_selection_charges_each_node_per_consuming_query() {
+    assert_each_node_charged_per_consuming_query(&pipeline());
 }
 
 /// The plan selection picks compiles in the physical planner (added by the

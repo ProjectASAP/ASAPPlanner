@@ -256,10 +256,10 @@ fn plan_selection_a_selects_cheapest_valid() {
     assert_selects_cheapest_valid(&run);
 }
 
-/// Every node is charged once, so a node read by several queries is costed once.
+/// Every node of a valid candidate is charged once per query that reads it: nothing is materialized, so a shared node is recomputed for each.
 #[test]
-fn plan_selection_a_charges_each_node_once() {
-    assert_each_node_charged_once(&run_a());
+fn plan_selection_a_charges_each_node_per_consuming_query() {
+    assert_each_node_charged_per_consuming_query(&run_a());
 }
 
 /// Sharing the scan never costs more than scanning separately, for the same per-computation choices.
@@ -437,5 +437,5 @@ fn plan_selection_b_selects_cheapest_valid() {
     let run = run_b();
     assert_selects_one_and_explains_the_rest(&run);
     assert_selects_cheapest_valid(&run);
-    assert_each_node_charged_once(&run);
+    assert_each_node_charged_per_consuming_query(&run);
 }

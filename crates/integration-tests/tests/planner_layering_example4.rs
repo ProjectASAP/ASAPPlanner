@@ -209,7 +209,9 @@ fn physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers(
     }
 }
 
-/// A3 rebuilds the EH for each of the five queries, so it costs more than A1, which builds it once.
+/// A3 rebuilds the EH for each of the five queries (plan selection charges a
+/// `NotMaterialized` node once per consuming query), so it costs more than A1,
+/// which builds it once.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
 fn plan_selection_a_rebuilding_per_query_costs_more_than_building_once() {

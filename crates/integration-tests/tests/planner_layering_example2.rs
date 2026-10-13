@@ -480,10 +480,10 @@ fn plan_selection_selects_cheapest_valid() {
     assert_selects_cheapest_valid(&pipeline());
 }
 
-/// Every node of a valid candidate is charged once, so a summary read by several queries is costed once.
+/// Every node of a valid candidate is charged once per query that reads it: nothing is materialized, so a shared node is recomputed for each.
 #[test]
-fn plan_selection_charges_each_node_once() {
-    assert_each_node_charged_once(&pipeline());
+fn plan_selection_charges_each_node_per_consuming_query() {
+    assert_each_node_charged_per_consuming_query(&pipeline());
 }
 
 /// A UnivMon estimate has a guarantee, so plan selection judges it against its target instead of rejecting it for having none.
@@ -507,9 +507,9 @@ fn plan_selection_judges_univmon_with_an_accuracy_model() {
     }
 }
 
-/// One UnivMon for all three costs no more than three separate UnivMons.
+/// One materialized UnivMon for all three costs no more than three separate UnivMons.
 #[test]
-#[ignore = "needs one UnivMon for all three (#595, #596) and a UnivMon accuracy model (#621)"]
+#[ignore = "needs one UnivMon for all three (#595, #596), a UnivMon accuracy model (#621) and materializing it (#604): not materialized, it is charged once per consuming query"]
 fn plan_selection_shared_univmon_costs_no_more_than_three() {
     let run = pipeline();
     let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);

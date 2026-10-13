@@ -106,7 +106,9 @@ Invariants:
   `from_logical` is a bijection onto the logical ids, so no candidate is
   dropped before plan selection.
 * Each physical candidate keeps its logical Q2 option and input sharing.
-* Exact top-*k* is implemented as a sort followed by a limit.
+* Exact top-*k* is implemented as a sort followed by a limit: each job's
+  series sorted by the ranked value, descending, then a `Project` that
+  restores the logical root columns `[job, topk_10]`.
 * A summary Q2 is a sketch build node feeding an estimation node. There is no
   merge node, because there are no window summaries.
 * Every node is `NotMaterialized` and runs at query time.
@@ -129,7 +131,9 @@ Invariants:
 * One selected id. Every other candidate is listed once as rejected, with a
   reason, and marked invalid or valid but costlier.
 * Only valid candidates are priced. Each valid candidate's cost has one entry
-  per DAG node, and `total` is their sum, so a shared node is charged once.
+  per DAG node, and `total` is their sum. A `NotMaterialized` node is charged
+  once per query that reads it (its multiplier), since it is recomputed for
+  each; a materialized node once. Every node is `NotMaterialized` today.
 * The selected plan is no more expensive than any valid candidate.
 * The selected plan compiles in the physical planner.
 
@@ -166,8 +170,10 @@ whether an exact Q2 misses 100 ms is not tested.
 6. **Hydra's inner sketch.** The doc says "Hydra over the whole `job`
    column" without naming the inner sketch. The test assumes `HydraCms`.
 7. **"Shared summary charged once"** does not apply literally: the doc says
-   no summary is shared in Example 1. The tests check the general form (each
-   node charged once).
+   no summary is shared in Example 1. Plan selection charges a
+   `NotMaterialized` node once per consuming query and a materialized one
+   once; the tests check that rule. A shared input therefore saves nothing
+   until it is materialized (#604).
 8. **Latency.** The doc says an exact top 10 rebuilt at every refresh "may
    miss" 100 ms. Plan selection does not check latency yet.
 9. **Accuracy of Count-Min heap merges** matters only with tumbling windows,

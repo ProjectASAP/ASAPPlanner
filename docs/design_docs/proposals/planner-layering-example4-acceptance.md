@@ -76,7 +76,7 @@ the IR records retention.
 | The shared EH yields exactly A1, A2, A3 | `physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: #628, #634, #604, #625 |
 | At rest, A2 is not generated; A1 and A3 remain | `physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: #628, #634, #604, #625 |
 | A materialized EH is one build node read by all five queries, priced once | `physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: #628, #634, #604, #625 |
-| A3 costs strictly more than A1 (five builds instead of one) | `plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: #628, #634, #604, #625 |
+| A3 costs strictly more than A1 (five builds instead of one: a `NotMaterialized` node is charged per consuming query) | `plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: #628, #634, #604, #625 |
 | As given, A1 is the cheapest of the three | `plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: #628, #634, #604, #625 |
 | Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: #628, #634, #604, #625 |
 
@@ -106,13 +106,13 @@ the IR records retention.
 
 ## Ambiguities and conflicts with the planner
 
-1. **Charging A3.** Plan selection charges each node once, which is right for a
-   shared, materialized summary. A3 is one logical EH node that is not
-   materialized, so it is rebuilt by each of its five consumers. The tests
-   require A3 to cost more than A1. Either plan selection charges a
-   non-materialized node once per consuming query, or physical ASAP-aware
-   optimization duplicates it per consumer (which makes A3 look like five
-   independent EHs). Decision needed.
+1. **Charging A3 (decided).** A3 is one logical EH node that is not
+   materialized, so it is rebuilt by each of its five consumers. Plan
+   selection charges a `NotMaterialized` node once per consuming query
+   (`NodeCost::multiplier`) and a materialized node once; physical ASAP-aware
+   optimization does not duplicate the node. So A3 costs five EH builds and
+   A1 one, as the tests require. The A3 tests stay ignored only because the
+   shared EH and its materialization options do not exist yet.
 2. **Recurrence input.** Materialization depends on `recurrence`,
    `predictability` and `arrival`, but `optimize_physical_asap` takes only
    the logical candidate and `select_plan` only the accuracy targets and

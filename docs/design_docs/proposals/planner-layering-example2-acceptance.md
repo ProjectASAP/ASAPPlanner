@@ -90,15 +90,18 @@ form is rebuilt at every refresh (Example 1's table).
 |---|---|---|
 | One selected id; every other candidate rejected once with a reason | `plan_selection_selects_one_and_explains_the_rest` | passes |
 | The selected plan is the cheapest valid one | `plan_selection_selects_cheapest_valid` | passes |
-| Each node of a valid candidate is charged once (a shared summary is costed once) | `plan_selection_charges_each_node_once` | passes |
+| Each node of a valid candidate is charged once per consuming query while `NotMaterialized` (all today), once when materialized | `plan_selection_charges_each_node_per_consuming_query` | passes |
 | A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `plan_selection_judges_univmon_with_an_accuracy_model` | ignored: L2 in #621; distinct count and entropy have no PR |
-| One UnivMon for all three costs no more than three separate UnivMons | `plan_selection_shared_univmon_costs_no_more_than_three` | ignored: #595, #596, #621 |
+| One materialized UnivMon for all three costs no more than three separate UnivMons | `plan_selection_shared_univmon_costs_no_more_than_three` | ignored: #595, #596, #621, #604 |
 | Selection direction: the selected plan has at most one UnivMon, because one shared UnivMon dominates several over the same input | `plan_selection_selected_plan_has_at_most_one_univmon` | passes (vacuously today: no UnivMon is valid) |
 
 The doc's "the shared candidate usually wins" depends on the cost model, so
 it is tested only as the dominance above: one build sized for the strictest
 consumer costs no more than three builds that include one of that size. Whether
-it also beats the exact plans is the model's call.
+it also beats the exact plans is the model's call. The dominance needs the
+shared UnivMon materialized (#604): plan selection charges a `NotMaterialized`
+node once per consuming query, so unmaterialized it costs three builds of the
+strictest size.
 
 ## Ambiguities and conflicts with the planner
 

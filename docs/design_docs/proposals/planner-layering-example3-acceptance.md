@@ -56,7 +56,7 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 | The EH candidate coexists with the five independent KLLs | `logical_asap_optimization_a_keeps_independent_and_shared_window_summaries` | ignored: #628, #634 |
 | Every pair of queries shares a window summary in some candidate | `logical_asap_optimization_a_window_composition_groups_every_pair` | ignored: #628, #634 |
 | One selected id, the rest explained; the selected plan is the cheapest valid one | `plan_selection_a_selects_cheapest_valid` | passes |
-| Each node of a valid candidate is charged once | `plan_selection_a_charges_each_node_once` | passes |
+| Each node of a valid candidate is charged once per consuming query while `NotMaterialized` (all today), once when materialized | `plan_selection_a_charges_each_node_per_consuming_query` | passes |
 | For the same per-computation choices, sharing the scan costs no more than separate scans | `plan_selection_a_shared_scan_is_not_costlier` | ignored: #588, #632 (see ambiguity 7) |
 
 ### Pattern B

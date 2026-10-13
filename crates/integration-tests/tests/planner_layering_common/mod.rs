@@ -669,9 +669,12 @@ pub fn assert_selects_cheapest_valid(run: &Run) {
 }
 
 /// Each valid candidate's cost has one entry per DAG node and `total` is
-/// their sum, so a node read by several queries is charged once. Invalid
-/// candidates are not priced.
-pub fn assert_each_node_charged_once(run: &Run) {
+/// their sum. A materialized node is charged once; a `NotMaterialized` node
+/// once per consuming query, since it is recomputed for each (#509). With no
+/// materialized node in the DAG (every candidate until #604), a node's
+/// multiplier is the number of queries that read it. Invalid candidates are
+/// not priced.
+pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
     let invalid = run.invalid();
     for p in &run.physical {
         if invalid.contains_key(p.id.as_str()) {
@@ -688,6 +691,22 @@ pub fn assert_each_node_charged_once(run: &Run) {
             "{}",
             p.id
         );
+        let none_materialized = nodes
+            .iter()
+            .all(|&n| materialization(p, n) == MaterializationOption::NotMaterialized);
+        for (&id, c) in &cost.per_node {
+            let expected = if materialization(p, id) != MaterializationOption::NotMaterialized {
+                Some(1)
+            } else if none_materialized {
+                Some(readers(p.dag(), &p.query_roots, id).len() as u64)
+            } else {
+                None
+            };
+            match expected {
+                Some(times) => assert_eq!(c.multiplier, times, "{}: {id:?}", p.id),
+                None => assert!(c.multiplier >= 1, "{}: {id:?}", p.id),
+            }
+        }
     }
 }
 
