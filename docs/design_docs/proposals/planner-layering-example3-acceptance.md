@@ -74,7 +74,7 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 | Window parameters are legal: L divides W; s divides L and the evaluation interval; a tumbling length divides W and the interval | `stage1_logical_asap_optimization_b_window_parameters_are_legal` | passes (vacuously today) |
 | Sliding with L = W has no merge; tumbling merges before the estimate | `stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it` | ignored: tumbling #601, sliding no PR yet |
 | A window form that merges uses a mergeable summary (KLL, DDSketch), in both patterns | `stage1_logical_asap_optimization_window_merges_use_mergeable_summaries` | passes (vacuously today) |
-| One selected, cheapest valid, each node charged once | `stage3_plan_selection_b_selects_cheapest_valid` | passes |
+| One selected, cheapest valid, each node charged once per consuming query | `stage3_plan_selection_b_selects_cheapest_valid` | passes |
 
 **Reading window summaries.** The IR has no window summary yet, so tests read
 it through `planner_layering_common::window_form(dag, build)`, which returns
