@@ -1,6 +1,6 @@
 # ASAPPlanner End-to-End Use Case: Inputs, Outputs, Missing Components, Adding a Summary Family
 
-Status: proposal. Tracking issue: see the PR that adds this file.
+Status: proposal. Tracking issue: #685.
 
 This document builds on [planner-layering.md](planner-layering.md) (#509: stages,
 stage inputs table, Assumptions 1–8, pruning vs selection, Examples, Scenarios),
