@@ -919,32 +919,54 @@ fn summary_update(
     })?;
     Ok(match (intent, algorithm) {
         (AggIntent::TopK { .. }, Some(_)) => {
-            // SQL rows carry no implicit series identity to rank; closed
-            // PromQL rows carry it as a column.
-            if child.closed && !child.has_promql_series_identity() {
-                return Err(PerComputationCandidateError::Unsupported(
-                    "Top-K item identity for closed schemas",
-                ));
-            }
             if reduction.group_keys().is_some_and(|keys| keys.is_without()) {
                 return Err(PerComputationCandidateError::Unsupported(
                     "Top-K partitions given by `without`",
                 ));
             }
-            let excluding = reduction
+            let groups: Vec<usize> = reduction
                 .group_keys()
                 .into_iter()
-                .flat_map(|keys| keys.iter())
-                .filter_map(|&index| child.fields.get(index))
-                .map(crate::replacement::column_ref)
+                .flat_map(|keys| keys.iter().copied())
                 .collect();
-            // Rows that carry the full series identity rank it as a column,
-            // the item form the runtime builds keyed summaries from.
             let item = if child.has_promql_series_identity() {
+                // Rows that carry the full series identity rank it as a
+                // column, the item form the runtime builds keyed summaries
+                // from.
                 SummaryInputExpr::Column(ColumnRef::Named(
                     asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
                 ))
+            } else if child.closed {
+                // A closed PromQL child (an aggregate's output, say) lists
+                // every label: the item is its labels outside the partition,
+                // as the legacy current-series and counter rules rank them.
+                // SQL rows carry no sample value to rank by.
+                let value = resolve_column_ref(&ColumnRef::SampleValue, child).map_err(|_| {
+                    PerComputationCandidateError::Unsupported(
+                        "Top-K item identity for closed schemas without a sample value",
+                    )
+                })?;
+                let items: Vec<_> = child
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != value && !groups.contains(index))
+                    .map(|(_, field)| {
+                        SummaryInputExpr::Column(crate::replacement::column_ref(field))
+                    })
+                    .collect();
+                if items.is_empty() {
+                    return Err(PerComputationCandidateError::Unsupported(
+                        "Top-K item has no label outside its partition",
+                    ));
+                }
+                SummaryInputExpr::Tuple(items)
             } else {
+                let excluding = groups
+                    .iter()
+                    .filter_map(|&index| child.fields.get(index))
+                    .map(crate::replacement::column_ref)
+                    .collect();
                 SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
             };
             SummaryUpdate {

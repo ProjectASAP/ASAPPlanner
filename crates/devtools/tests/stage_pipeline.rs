@@ -87,3 +87,41 @@ fn candidate_cap_is_recorded() {
     assert_eq!(logical["candidates"].as_array().unwrap().len(), 2);
     assert!(logical["combinations"].as_u64().unwrap() > 2);
 }
+
+/// A choice composition cannot substitute is listed with its error, and the
+/// other candidates are still written.
+#[test]
+fn uncomposable_candidate_is_recorded_with_its_error() {
+    let out =
+        std::env::temp_dir().join(format!("stage_pipeline_{}_error.json", std::process::id()));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--promql",
+            // Top-K partitioned by every label of its input has no item.
+            "topk by (job) (3, sum by (job) (rate(m[5m])))",
+            "--epsilon",
+            "0.01",
+            "--delta",
+            "0.001",
+            "--out",
+        ])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    let candidates = document["logical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    let (composed, failed): (Vec<_>, Vec<_>) = candidates
+        .iter()
+        .partition(|candidate| candidate.get("dag").is_some());
+    assert!(!composed.is_empty() && !failed.is_empty());
+    for candidate in failed {
+        assert!(candidate["error"].as_str().unwrap().contains("Top-K"));
+    }
+    for candidate in composed {
+        validated_dag(&candidate["dag"], 1);
+    }
+}

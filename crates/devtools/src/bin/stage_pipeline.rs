@@ -8,8 +8,9 @@
 //   - language_specific_frontends: the frontends' workload DAG, one root per query;
 //   - logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
-//     product), in
-//     enumeration order and capped by `--max-candidates` (default 64).
+//     product), in enumeration order and capped by `--max-candidates`
+//     (default 64). A candidate that cannot be composed carries `error`
+//     instead of `dag`.
 // Physical ASAP-aware optimization and plan selection, and therefore cost,
 // are absent.
 //
@@ -101,14 +102,20 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     let mut candidates = Vec::new();
     let mut choice = vec![0; inventory.targets.len()];
     for index in 0..combinations.min(max_candidates) {
-        let roots = compose_logical_candidate(&inventory, &choice)
-            .map_err(|e| format!("candidate {choice:?}: {e}"))?;
-        let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
-        candidates.push(json!({
+        let mut candidate = json!({
             "id": format!("L{}", index + 1),
             "label": label(&inventory, &owners, &choice),
-            "dag": export(&roots)?,
-        }));
+        });
+        // A choice that composition cannot substitute yet is listed with its
+        // error rather than ending the run.
+        match compose_logical_candidate(&inventory, &choice) {
+            Ok(roots) => {
+                let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
+                candidate["dag"] = json!(export(&roots)?);
+            }
+            Err(error) => candidate["error"] = json!(error.to_string()),
+        }
+        candidates.push(candidate);
         // Mixed-radix increment: the last target varies fastest.
         for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
             *digit += 1;

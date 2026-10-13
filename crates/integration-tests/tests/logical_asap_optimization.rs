@@ -8,8 +8,9 @@ use asap_aware_mapping::per_computation_candidates::{
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SummaryUpdate};
+use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
+use asap_types::pre_asap::ColumnRef;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query,
@@ -130,6 +131,7 @@ fn promql_candidates_compose() {
         "quantile(0.99, m) - quantile(0.5, m)",
         "scalar(quantile(0.99, m)) - scalar(quantile(0.5, m))",
         "topk by (job) (10, sum_over_time(m[1m]))",
+        "topk(3, sum by (job) (rate(m[5m])))",
         "count by (job) (m)",
     ] {
         assert!(compose_all(query, promql(query)) >= 1, "{query}");
@@ -203,4 +205,20 @@ fn topk_estimates_carry_no_frequency_bound() {
         .find(|node| update_of(node).0 == SketchAlgorithm::Cms)
         .expect("CMS candidate");
     assert!(cms.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
+}
+
+/// Top-K over a closed PromQL child without series identity ranks the
+/// child's labels outside the partition.
+#[test]
+fn topk_over_an_aggregate_ranks_its_labels() {
+    let estimates = composed_estimates(promql("topk(3, sum by (job) (rate(m[5m])))"));
+    assert_eq!(estimates.len(), 2);
+    for estimate in &estimates {
+        assert_eq!(
+            update_of(estimate).1.item,
+            Some(SummaryInputExpr::Tuple(vec![SummaryInputExpr::Column(
+                ColumnRef::Named("job".into())
+            )]))
+        );
+    }
 }
