@@ -1,0 +1,414 @@
+//! Stage 1 (logical ASAP-aware optimization), Pass 1: per-computation
+//! candidate generation, as defined in
+//! `docs/design_docs/proposals/planner-layering.md`.
+//!
+//! [`generate_per_computation_candidates`] takes the frontends' logical DAGs
+//! (`QueryRoot`s) and returns, for every eligible computation, its unranked
+//! candidates. A computation ([`ComputationTarget`]) is one measure of an
+//! `Aggregate` whose intent has a realization besides plain exact execution;
+//! nested aggregates and operators read by scalar roots are found too.
+//! Pass 1 does not consider sharing across computations; that is Pass 2.
+//!
+//! - Each target has exactly one exact option: the exact accumulator
+//!   (`ExactAccumulator`, or `AvgAsSumCount` for `avg`) when it can be built,
+//!   otherwise plain `Exact`. Whether it is materialized is decided in Stage 2.
+//! - Summary candidates are unsized; they are sized after Pass 2 sharing.
+//! - Candidates are pruned only when provably unable to meet the accuracy
+//!   requirement, and each pruned candidate keeps its [`PruneReason`].
+//! - A measure filter or `HAVING` prunes nothing. The target records the
+//!   measure filter (applied as `SummaryAgg.filter`) and one [`HavingEntry`]
+//!   per consumer `Filter` directly above the aggregate: a key-only predicate
+//!   applied by every consumer may go below the aggregate, anything else stays
+//!   above the output (approximate outputs then get guarantee `None`).
+//!
+//! The input must be a logical DAG: ASAP operators, execution timing or a
+//! materialization are rejected. No cost or accuracy model is used; ranking
+//! and discarding valid candidates belong to Stage 3.
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, QueryRoot, SchemaDerivationError};
+use asap_types::post_asap::{ExactKind, ExactParams, Materialization, SketchAlgorithm};
+use asap_types::pre_asap::{resolve_column_ref, AggIntent, ColumnRef};
+use asap_types::types::AccuracyTarget;
+use thiserror::Error;
+
+use crate::replacement::{accuracy_budget, accuracy_target, summary_candidates};
+
+/// One Pass 1 candidate for a computation (one measure of an aggregate).
+///
+/// Each target has exactly one exact option: `ExactAccumulator` or
+/// `AvgAsSumCount` when the intent has one and it can be built, otherwise
+/// `Exact`. The plain form would duplicate "accumulator, not materialized";
+/// Stage 2/3 decide materialization and sharing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComputationCandidate {
+    /// Plain exact execution of the original sub-DAG; the exact option only
+    /// when the intent has no exact accumulator form or that form is pruned.
+    Exact,
+    /// An exact mergeable accumulator state.
+    ExactAccumulator {
+        kind: ExactKind,
+        params: ExactParams,
+    },
+    /// An unsized summary family, sized later for the measure's accuracy.
+    Summary(SketchAlgorithm),
+    /// `avg` rewritten as exact `sum` and `count` accumulator states.
+    AvgAsSumCount,
+}
+
+/// Why Pass 1 proved a candidate unable to realize its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneReason {
+    /// The measure requires an exact answer and the summary is approximate.
+    RequiresExact,
+    /// `count` counts rows, so a possibly-null `avg` input changes the result.
+    NullableAvgInput,
+}
+
+/// Unranked candidates of one measure and the candidates pruned for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputationChoices {
+    pub candidates: Vec<ComputationCandidate>,
+    pub pruned: Vec<(ComputationCandidate, PruneReason)>,
+}
+
+impl ComputationChoices {
+    /// Prune matching candidates; a pruned exact accumulator form is replaced by
+    /// plain `Exact`, so the target keeps one exact option.
+    fn prune(&mut self, reason: PruneReason, applies: impl Fn(&ComputationCandidate) -> bool) {
+        let (pruned, kept): (Vec<_>, _) = std::mem::take(&mut self.candidates)
+            .into_iter()
+            .partition(|choice| *choice != ComputationCandidate::Exact && applies(choice));
+        self.candidates = kept;
+        if pruned.iter().any(|choice| {
+            matches!(
+                choice,
+                ComputationCandidate::ExactAccumulator { .. } | ComputationCandidate::AvgAsSumCount
+            )
+        }) {
+            self.candidates.insert(0, ComputationCandidate::Exact);
+        }
+        self.pruned.extend(
+            pruned
+                .into_iter()
+                .map(|choice: ComputationCandidate| (choice, reason)),
+        );
+    }
+}
+
+/// Where a target's `HAVING` is applied. Composition (#575) applies it.
+///
+/// Only the adjacent form is recorded for push-down: the aggregate's own
+/// `having`, or a `Filter` directly above the aggregate (the form the SQL
+/// frontend lowers `HAVING` to). A value predicate anywhere above an
+/// approximate output gets `guarantee = None` through guarantee propagation
+/// (#575); multi-level push-down is tracked in #664.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HavingPlacement {
+    /// The predicate reads only group keys and every consumer of the
+    /// aggregate applies it, so it is pushed below the aggregate as a row
+    /// predicate, like a measure filter.
+    BelowAggregate,
+    /// The predicate reads aggregate values, so it stays a `Filter` above the
+    /// finalize/estimate output; approximate candidates of this target carry
+    /// `guarantee = None`, since membership near the threshold may change.
+    AboveOutput,
+}
+
+/// One `HAVING` over a target's aggregate output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HavingEntry {
+    /// The consumer `Filter` that applies it; `None` for the aggregate's own
+    /// `having`, which every consumer reads.
+    pub filter: Option<Rc<OperatorNode>>,
+    pub predicate: Predicate,
+    pub placement: HavingPlacement,
+}
+
+/// One measure of an aggregate with at least one realization besides exact
+/// execution. The target retains source, grouping, filters, input expressions
+/// and evaluation context.
+#[derive(Debug, Clone)]
+pub struct ComputationTarget {
+    pub target: Rc<OperatorNode>,
+    /// Index into the aggregate's measures.
+    pub measure: usize,
+    pub choices: ComputationChoices,
+    /// The measure's own filter; only rows that pass it update the state
+    /// (`SummaryAgg.filter`).
+    pub filter: Option<Predicate>,
+    /// The aggregate's own `having`, then one entry per consumer `Filter`
+    /// directly above the aggregate.
+    pub having: Vec<HavingEntry>,
+}
+
+/// Compact Pass 1 inventory; roots and nested producer dependencies are retained.
+#[derive(Debug, Clone)]
+pub struct PerComputationCandidates<Id> {
+    pub roots: Vec<(Id, QueryRoot)>,
+    pub targets: Vec<ComputationTarget>,
+}
+
+#[derive(Debug, Error)]
+pub enum PerComputationCandidateError {
+    #[error(transparent)]
+    Structure(#[from] SchemaDerivationError),
+    #[error("logical candidate input already has assigned execution timing or materialization")]
+    AssignedPhysicalAnnotation,
+    #[error("logical candidate input already contains ASAP operators")]
+    ContainsAsap,
+    /// `root` (the root id's `Debug` form) and `measure` locate the target;
+    /// [`computation_candidates_for_intent`] alone leaves them `None`.
+    #[error(
+        "approximate accuracy of root {}, measure {} requires epsilon and delta in (0, 1)",
+        root.as_deref().unwrap_or("?"),
+        measure.map_or_else(|| "?".to_string(), |measure| measure.to_string())
+    )]
+    InvalidAccuracy {
+        root: Option<String>,
+        measure: Option<usize>,
+    },
+}
+
+/// Enumerate exact, rewrite and summary choices of one measure in stable catalog
+/// order, without ranking or empirical assessment. A summary is not a claim that
+/// a deployment meets the measure's accuracy requirement. The one exact option
+/// comes first: the exact accumulator form if the intent has one, else `Exact`.
+pub fn computation_candidates_for_intent(
+    intent: &AggIntent,
+) -> Result<ComputationChoices, PerComputationCandidateError> {
+    let exact = match intent {
+        AggIntent::Count { .. } => Some((ExactKind::Count, ExactParams::Count)),
+        AggIntent::Sum { .. } => Some((ExactKind::Sum, ExactParams::Sum)),
+        AggIntent::Min { .. } => Some((ExactKind::Min, ExactParams::Min)),
+        AggIntent::Max { .. } => Some((ExactKind::Max, ExactParams::Max)),
+        AggIntent::Rate => Some((ExactKind::Rate, ExactParams::Rate)),
+        AggIntent::IRate => Some((ExactKind::IRate, ExactParams::IRate)),
+        AggIntent::Increase => Some((ExactKind::Increase, ExactParams::Increase)),
+        _ => None,
+    };
+    let exact = match exact {
+        Some((kind, params)) => ComputationCandidate::ExactAccumulator { kind, params },
+        None if matches!(intent, AggIntent::Avg { .. }) => ComputationCandidate::AvgAsSumCount,
+        None => ComputationCandidate::Exact,
+    };
+    let mut choices = ComputationChoices {
+        candidates: vec![exact],
+        pruned: vec![],
+    };
+    if let Some(target) = accuracy_target(intent) {
+        if *target != AccuracyTarget::Exact {
+            let (epsilon, delta) = accuracy_budget(target);
+            let unit = |value: f64| value > 0.0 && value < 1.0;
+            if !unit(epsilon) || !unit(delta) {
+                return Err(PerComputationCandidateError::InvalidAccuracy {
+                    root: None,
+                    measure: None,
+                });
+            }
+        }
+        let summaries = summary_candidates(intent).iter().cloned();
+        if *target == AccuracyTarget::Exact {
+            choices.pruned.extend(summaries.map(|algorithm| {
+                (
+                    ComputationCandidate::Summary(algorithm),
+                    PruneReason::RequiresExact,
+                )
+            }));
+        } else {
+            choices
+                .candidates
+                .extend(summaries.map(ComputationCandidate::Summary));
+        }
+    }
+    Ok(choices)
+}
+
+/// Whether an `avg` measure's input may be null, so `count` rows differ from
+/// counted values. An unresolvable input is treated as possibly null.
+fn nullable_avg_input(node: &OperatorNode, intent: &AggIntent) -> bool {
+    let Some(NonASAPOp::Aggregate { child, .. }) = node.non_asap() else {
+        return true;
+    };
+    let column = match intent.input_cols().first() {
+        Some(column) => Some(*column),
+        None => resolve_column_ref(&ColumnRef::SampleValue, &child.schema).ok(),
+    };
+    column
+        .and_then(|column| child.schema.fields.get(column))
+        .is_none_or(|field| field.nullable)
+}
+
+/// Whether `having` over `aggregate`'s output reads only `by(...)` group keys.
+/// A global aggregate (no group keys) never qualifies: its one output row
+/// exists even when no input row does, so no row predicate can stand in.
+fn key_only_having(aggregate: &OperatorNode, having: &Predicate) -> bool {
+    let keys = match aggregate.non_asap() {
+        Some(NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(by),
+            ..
+        }) if !by.is_without() => by.len(),
+        _ => 0,
+    };
+    keys > 0
+        && having.0.operator_refs().is_empty()
+        && having.0.columns_referenced().iter().all(|id| *id < keys)
+}
+
+fn placement(below: bool) -> HavingPlacement {
+    if below {
+        HavingPlacement::BelowAggregate
+    } else {
+        HavingPlacement::AboveOutput
+    }
+}
+
+/// Discover one target per measure of each eligible aggregate, including
+/// operator plans read by scalar roots. An aggregate measure is eligible when it
+/// has a realization besides exact execution, even if every such realization
+/// is pruned; the prune reasons are reported on the target. Measure filters
+/// and `HAVING` keep every candidate; the target records how they are applied.
+/// A consumer `Filter`'s key-only `HAVING` is pushed below only when every
+/// consumer of the aggregate applies the same predicate.
+pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
+    roots: Vec<(Id, QueryRoot)>,
+) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
+    let mut seen = HashSet::new();
+    // Each aggregate with the first root that reaches it.
+    let mut aggregates = Vec::new();
+    // Every consumer of each node: `Some(parent)`, or `None` for a root or
+    // scalar reference.
+    let mut consumers: HashMap<*const OperatorNode, Vec<Option<Rc<OperatorNode>>>> = HashMap::new();
+    for (id, root) in &roots {
+        root.validate_structure()?;
+        let operators = match root {
+            QueryRoot::Operator(node) => vec![node],
+            QueryRoot::Scalar(expr) => expr.operator_refs(),
+        };
+        for root in operators {
+            if root.contains_asap() {
+                return Err(PerComputationCandidateError::ContainsAsap);
+            }
+            consumers.entry(Rc::as_ptr(root)).or_default().push(None);
+            for node in OperatorNode::reachable(root) {
+                if !seen.insert(Rc::as_ptr(&node)) {
+                    continue;
+                }
+                if node.timing.is_some() || node.materialization != Materialization::NotMaterialized
+                {
+                    return Err(PerComputationCandidateError::AssignedPhysicalAnnotation);
+                }
+                for child in node.children() {
+                    consumers
+                        .entry(Rc::as_ptr(child))
+                        .or_default()
+                        .push(Some(Rc::clone(&node)));
+                }
+                if matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. })) {
+                    aggregates.push((format!("{id:?}"), node));
+                }
+            }
+        }
+    }
+    let mut targets = Vec::new();
+    for (root, node) in aggregates {
+        let Some(NonASAPOp::Aggregate {
+            measures,
+            filters,
+            having,
+            ..
+        }) = node.non_asap()
+        else {
+            continue;
+        };
+        let mut entries: Vec<HavingEntry> = having
+            .iter()
+            .map(|having| HavingEntry {
+                filter: None,
+                predicate: having.clone(),
+                placement: placement(key_only_having(&node, having)),
+            })
+            .collect();
+        let parents = &consumers[&Rc::as_ptr(&node)];
+        // Only a `Filter` whose input is this aggregate is its `HAVING`; one
+        // that reads it from a scalar expression stays a plain consumer.
+        let mut filters_above: Vec<(&Rc<OperatorNode>, &Predicate)> = Vec::new();
+        for parent in parents.iter().flatten() {
+            if let Some(NonASAPOp::Filter { child, pred }) = parent.non_asap() {
+                if Rc::ptr_eq(child, &node)
+                    && !filters_above
+                        .iter()
+                        .any(|(filter, _)| Rc::ptr_eq(filter, parent))
+                {
+                    filters_above.push((parent, pred));
+                }
+            }
+        }
+        for (filter, predicate) in &filters_above {
+            let shared_by_all = filters_above.len() == parents.len()
+                && filters_above.iter().all(|(_, other)| other == predicate);
+            entries.push(HavingEntry {
+                filter: Some(Rc::clone(filter)),
+                predicate: (*predicate).clone(),
+                placement: placement(shared_by_all && key_only_having(&node, predicate)),
+            });
+        }
+        for (measure, intent) in measures.iter().enumerate() {
+            let mut choices =
+                computation_candidates_for_intent(intent).map_err(|error| match error {
+                    PerComputationCandidateError::InvalidAccuracy { .. } => {
+                        PerComputationCandidateError::InvalidAccuracy {
+                            root: Some(root.clone()),
+                            measure: Some(measure),
+                        }
+                    }
+                    error => error,
+                })?;
+            if choices.candidates == [ComputationCandidate::Exact] && choices.pruned.is_empty() {
+                continue;
+            }
+            if matches!(intent, AggIntent::Avg { .. }) && nullable_avg_input(&node, intent) {
+                choices.prune(PruneReason::NullableAvgInput, |choice| {
+                    *choice == ComputationCandidate::AvgAsSumCount
+                });
+            }
+            targets.push(ComputationTarget {
+                target: node.clone(),
+                measure,
+                choices,
+                filter: filters.get(measure).cloned().flatten(),
+                having: entries.clone(),
+            });
+        }
+    }
+    Ok(PerComputationCandidates { roots, targets })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Approximate count keeps one exact option, its accumulator, beside the
+    /// universal summary; plain exact execution is not offered.
+    #[test]
+    fn approximate_count_keeps_one_exact_accumulator_and_universal_choices() {
+        let choices = computation_candidates_for_intent(&AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.05,
+                delta: 0.01,
+            },
+        })
+        .unwrap()
+        .candidates;
+        assert!(!choices.contains(&ComputationCandidate::Exact));
+        assert_eq!(
+            choices[0],
+            ComputationCandidate::ExactAccumulator {
+                kind: ExactKind::Count,
+                params: ExactParams::Count
+            }
+        );
+        assert!(choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::UnivMon)));
+    }
+}
