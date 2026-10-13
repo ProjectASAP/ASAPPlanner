@@ -677,7 +677,13 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     assert_eq!(
         family,
         &FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 269,
+                    failure_probability: None
+                }
+            ),
             GroupingStrategy::default()
         )
     );
@@ -697,7 +703,13 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     assert_eq!(
         summary_input.schema.fields[0].dtype,
         FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 269,
+                    failure_probability: None
+                }
+            ),
             GroupingStrategy::default()
         )
     );

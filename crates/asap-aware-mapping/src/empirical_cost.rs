@@ -375,7 +375,7 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
                 layers,
             },
         ) => *heap_size > 0 && *sketch_rows > 0 && *sketch_cols > 0 && (1..=64).contains(layers),
-        (SketchAlgorithm::Kll, SketchParams::Kll { k })
+        (SketchAlgorithm::Kll, SketchParams::Kll { k, .. })
         | (SketchAlgorithm::Kmv, SketchParams::Kmv { k })
         | (SketchAlgorithm::Theta, SketchParams::Theta { k }) => *k > 0,
         (SketchAlgorithm::Hll, SketchParams::Hll { precision }) => (4..=18).contains(precision),
@@ -468,7 +468,10 @@ mod tests {
         row.algorithm = SketchAlgorithm::CountSketch;
         assert_eq!(snapshot_prepare_cpu(row), Some(0.0));
         row.algorithm = SketchAlgorithm::Kll;
-        row.params = SketchParams::Kll { k: 269 };
+        row.params = SketchParams::Kll {
+            k: 269,
+            failure_probability: None,
+        };
         assert_eq!(snapshot_prepare_cpu(row), None);
         row.metrics.resources.cpu.prepare_cpu_ns = Some(Measurement {
             value: 17.0,

@@ -81,7 +81,7 @@ pub(crate) fn size_params(
         // Baseline dimensions are candidates, not an inverted error bound.
         // Empirical models may size these; no theoretical guarantee is claimed.
         SketchAlgorithm::UnivMon => univmon::size_params(),
-        SketchAlgorithm::Kll => SketchParams::Kll { k: kll::kll_k(eps) },
+        SketchAlgorithm::Kll => kll::size_params(eps, delta),
         SketchAlgorithm::Cms => SketchParams::Cms {
             width: cms::cms_width(eps),
             depth: cms::cms_depth(delta),

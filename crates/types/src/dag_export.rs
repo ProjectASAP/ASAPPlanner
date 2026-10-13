@@ -1128,7 +1128,13 @@ mod tests {
         guarantee: Option<ResultGuarantee>,
     ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
         let family = FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 40 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 40,
+                    failure_probability: None,
+                },
+            ),
             GroupingStrategy::default(),
         );
         let agg = std::rc::Rc::new(

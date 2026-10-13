@@ -48,7 +48,7 @@ pub fn validate_summary_kernel(
             use SketchAlgorithm as A;
             use SketchParams as P;
             match (kind.algorithm(), kind.params()) {
-                (A::Kll, P::Kll { k }) if (8..=u16::MAX as u32).contains(k) => false,
+                (A::Kll, P::Kll { k, .. }) if (8..=u16::MAX as u32).contains(k) => false,
                 (A::DDSketch, P::DDSketch { alpha })
                     if alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0 =>
                 {

@@ -34,7 +34,13 @@ fn state(k: u32, region: &str) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: only_region,
         family: FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k,
+                    failure_probability: None,
+                },
+            ),
             Default::default(),
         ),
         input: SummaryUpdate::column(ColumnRef::SampleValue),

@@ -497,6 +497,10 @@ fn nonnegative(value: f64) -> bool {
 
 /// Conservative componentwise dominance for known planner sizing families.
 /// A deployment still checks its own catalog/layout constraints before binding.
+fn kll_failure_probability(sized_for: Option<f64>) -> f64 {
+    sized_for.unwrap_or(crate::accuracy::estimators::kll::KLL_CALIBRATED_FAILURE_PROBABILITY)
+}
+
 pub fn parameters_at_least(candidate: &SketchParams, minimum: &SketchParams) -> bool {
     match (candidate, minimum) {
         (SketchParams::Cms { width: a, depth: b }, SketchParams::Cms { width: c, depth: d })
@@ -504,8 +508,17 @@ pub fn parameters_at_least(candidate: &SketchParams, minimum: &SketchParams) -> 
             SketchParams::CountSketch { width: a, depth: b },
             SketchParams::CountSketch { width: c, depth: d },
         ) => a >= c && b >= d,
-        (SketchParams::Kll { k: a }, SketchParams::Kll { k: b })
-        | (SketchParams::Kmv { k: a }, SketchParams::Kmv { k: b })
+        (
+            SketchParams::Kll {
+                k: a,
+                failure_probability: x,
+            },
+            SketchParams::Kll {
+                k: b,
+                failure_probability: y,
+            },
+        ) => a >= b && kll_failure_probability(*x) <= kll_failure_probability(*y),
+        (SketchParams::Kmv { k: a }, SketchParams::Kmv { k: b })
         | (SketchParams::Theta { k: a }, SketchParams::Theta { k: b }) => a >= b,
         (SketchParams::Hll { precision: a }, SketchParams::Hll { precision: b }) => a >= b,
         (SketchParams::DDSketch { alpha: a }, SketchParams::DDSketch { alpha: b }) => {
@@ -743,7 +756,10 @@ mod tests {
         let mut row = evidence.sketch_evidence.records[1].clone();
         let original_cpu = estimate_sketch(&row, &request).unwrap().cpu_ns;
         row.algorithm = SketchAlgorithm::Kll;
-        row.params = SketchParams::Kll { k: 269 };
+        row.params = SketchParams::Kll {
+            k: 269,
+            failure_probability: None,
+        };
         assert!(estimate_sketch(&row, &request)
             .unwrap_err()
             .contains("preparation CPU"));
