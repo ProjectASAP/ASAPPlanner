@@ -29,23 +29,20 @@
 //!
 //! ## Planning workflows
 //!
-//! Candidate search returns [`CandidateLogicalASAPDAGs`](replacement::CandidateLogicalASAPDAGs), a compact
-//! logical choice space with one [`TargetSubDAGCandidates`] per target sub-DAG.
-//! [`ReplacementStrategy`] implementations propose local alternatives; search
-//! applies the applicable semantic and accuracy checks. Candidate presence does
-//! not certify physical deployability or an unknown accuracy guarantee.
+//! The planner runs the planning stages in order: logical ASAP-aware
+//! optimization ([`per_computation_candidates`]: Pass 1 and composition),
+//! physical ASAP-aware optimization ([`physical_asap_optimization`]) and plan
+//! selection ([`plan_selection`]).
 //!
-//! Integrators choose among these workflows:
+//! - Run them for a parsed workload through [`optimize`] with
+//!   [`StagePipeline`], the default pass.
+//! - Call [`plan_stages`] over the frontends' roots to read every stage's
+//!   candidates as well as the selected plan.
 //!
-//! - Inspect the candidate space, optionally using [`CandidateLogicalASAPDAGs::cost_sorted`]
-//!   to obtain ranked views, and perform selection downstream.
-//! - Call [`CandidateLogicalASAPDAGs::global_selection`] once for the workload, then
-//!   [`GlobalSelection::assemble_selected_query`] for each query root. This
-//!   coordinates logical choices and preserves shared nodes. Whether and when
-//!   a summary state is materialized is not decided here: every summary runs
-//!   at query time until Stage 2 materialization (#509) owns that choice.
-//! - Run the whole pipeline through [`optimize`] with [`MajorPass`], which
-//!   performs the two steps above for every root of a parsed workload.
+//! The planner no longer calls the legacy candidate search
+//! ([`replacement::search_workload`] and
+//! [`CandidateLogicalASAPDAGs::global_selection`]); it remains only until its
+//! removal.
 //!
 //! Models and evidence determine which choices the helpers can justify.
 //! Physical operator binding, placement, storage, deployment, and execution
@@ -190,8 +187,9 @@ pub use explanation::{
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use pass::{
-    optimize, MajorPass, OptimizationInput, OptimizationInputError, OptimizationPass,
+    optimize, plan_stages, OptimizationInput, OptimizationInputError, OptimizationPass,
     OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
+    StagePipeline, StagePipelineRun,
 };
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,

@@ -11,6 +11,9 @@
 //! discards valid candidates.
 //! Every valid candidate is priced node by node over its physical DAG, and
 //! the cheapest is selected. The rest are reported valid but costlier.
+//! Selection prices every candidate it is given; a search that avoids
+//! building every candidate (e.g. a dynamic program over target nesting) is
+//! deferred to #671.
 //!
 //! A node is charged once per computation (#509): a materialized node
 //! (`MatAtIngestion` or `MatAtQuery`) once, since its output is stored and
