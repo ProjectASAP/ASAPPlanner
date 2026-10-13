@@ -852,7 +852,8 @@ fn without_and_per_entity_having_stays_above() {
 }
 
 /// A workload candidate replaces only chosen targets, derives the summary's
-/// coverage from its subtree, and keeps unchosen plans identical.
+/// coverage from its subtree, and keeps unchosen plans as they are, now
+/// with an exact guarantee.
 #[test]
 fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
     use asap_aware_mapping::per_computation_candidates::compose_logical_candidate;
@@ -864,7 +865,12 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(producer.clone()))])
             .unwrap();
     let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
-    assert!(matches!(&exact[0].1, QueryRoot::Operator(node) if Rc::ptr_eq(node, &producer)));
+    let QueryRoot::Operator(kept) = &exact[0].1 else {
+        panic!("operator root expected")
+    };
+    assert_eq!(kept.operator.kind_name(), producer.operator.kind_name());
+    assert_eq!(kept.schema, producer.schema);
+    assert!(kept.guarantee.as_ref().is_some_and(|g| g.is_exact()));
 
     let hll = compose_logical_candidate(&inventory, &[1]).unwrap();
     let QueryRoot::Operator(estimate) = &hll[0].1 else {
@@ -1069,4 +1075,32 @@ fn composed_multi_measure_aggregate_joins_its_measures() {
         };
         assert_eq!(names(&root), names(&node));
     }
+}
+
+/// A summary estimate carries its sized family's bound; an exact accumulator
+/// is exact; anything computed from an approximate value, a value `HAVING`
+/// included, has no guarantee.
+#[test]
+fn composed_guarantees() {
+    let value = equals(1, ScalarValue::Int64(10));
+    let roots = composed(
+        vec![
+            aggregate(AggIntent::Cardinality {
+                cols: vec![0],
+                accuracy: approximate(),
+            }),
+            aggregate(AggIntent::Sum { col: Some(1) }),
+            having_filter(grouped_count(None), value),
+        ],
+        &[1, 0, 1],
+    );
+    let guarantee = |node: &OperatorNode| node.guarantee.clone();
+    let hll = guarantee(&roots[0]).expect("HLL bound");
+    assert!(!hll.is_exact());
+    assert!(guarantee(&roots[1]).is_some_and(|g| g.is_exact()));
+    let Some(NonASAPOp::Filter { child, .. }) = roots[2].non_asap() else {
+        panic!("value HAVING above the estimate expected")
+    };
+    assert!(guarantee(child).is_some());
+    assert!(guarantee(&roots[2]).is_none());
 }

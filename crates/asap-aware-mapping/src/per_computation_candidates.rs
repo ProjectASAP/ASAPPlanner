@@ -32,6 +32,7 @@ use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate,
     ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
 };
+use asap_types::post_asap::guarantee::ResultGuarantee;
 use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Materialization,
     NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchStatistic, SummaryInputExpr,
@@ -44,6 +45,7 @@ use asap_types::pre_asap::{
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
+use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
 use crate::replacement::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates,
 };
@@ -411,8 +413,8 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
 /// aggregate; several measures are joined back on the group keys. A summary
 /// is sized here for its measure's accuracy requirement; Pass 1 leaves it
 /// unsized. A measure filter becomes `SummaryAgg.filter`; `HAVING` is
-/// applied as its target records. Untouched sub-DAGs keep their identity, so
-/// sharing between roots is preserved.
+/// applied as its target records. A sub-DAG shared between roots stays shared.
+/// Every node carries the guarantee [`composed_guarantee`] gives it.
 pub fn compose_logical_candidate<Id: Clone>(
     inventory: &PerComputationCandidates<Id>,
     choice: &[usize],
@@ -441,8 +443,11 @@ pub fn compose_logical_candidate<Id: Clone>(
         .filter(|entry| entry.placement == HavingPlacement::BelowAggregate)
         .filter_map(|entry| entry.filter.as_ref().map(Rc::as_ptr))
         .collect();
-    let mut memo = HashMap::new();
-    let mut rewrite = |node: &Rc<OperatorNode>| rewrite(node, &chosen, &pushed_below, &mut memo);
+    let (mut memo, mut guaranteed) = (HashMap::new(), HashMap::new());
+    let mut rewrite = |node: &Rc<OperatorNode>| {
+        let node = rewrite(node, &chosen, &pushed_below, &mut memo)?;
+        with_guarantees(&node, &mut guaranteed)
+    };
     inventory
         .roots
         .iter()
@@ -503,6 +508,67 @@ fn rewrite(
     };
     memo.insert(Rc::as_ptr(node), rebuilt.clone());
     Ok(rebuilt)
+}
+
+/// `node` and everything below it, each node with its [`composed_guarantee`].
+fn with_guarantees(
+    node: &Rc<OperatorNode>,
+    memo: &mut Memo,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+        return Ok(done.clone());
+    }
+    for child in node.children() {
+        with_guarantees(child, memo)?;
+    }
+    let mut rebuilt = node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?;
+    rebuilt.guarantee = composed_guarantee(&rebuilt);
+    let rebuilt = Rc::new(rebuilt);
+    memo.insert(Rc::as_ptr(node), rebuilt.clone());
+    Ok(rebuilt)
+}
+
+/// The theoretical guarantee of a composed node, given its children's: exact
+/// over exact inputs; a summary estimate over exact input has its sized
+/// family's bound. Anything computed from an approximate value (arithmetic,
+/// a comparison, a value `HAVING` or any other predicate, at any depth) gets
+/// `None`: composition through operators is not defined yet (#669), and
+/// plan selection's accuracy model decides. A summary state carries none itself.
+fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
+    let exact = |node: &OperatorNode| {
+        node.guarantee
+            .as_ref()
+            .is_some_and(ResultGuarantee::is_exact)
+    };
+    match &node.operator {
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap() {
+            Some(ASAPOp::SummaryAgg {
+                child: input,
+                family: FieldDataType::ExactAggregate(..),
+                ..
+            }) if exact(input) => {
+                Some(ResultGuarantee::exact("exact accumulator over exact input"))
+            }
+            _ => None,
+        },
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query,
+        }) => match summary_input.asap() {
+            Some(ASAPOp::SummaryAgg {
+                child: input,
+                family,
+                ..
+            }) if exact(input) => DefaultAccuracyModel.local_guarantee(family, query),
+            _ => None,
+        },
+        Operator::ASAP(_) => None,
+        Operator::NonASAP(_) => node
+            .children()
+            .into_iter()
+            .all(|child| exact(child))
+            .then(|| ResultGuarantee::exact("exact over exact inputs")),
+    }
 }
 
 /// Replace an aggregate whose measures are `targets`' (or exact, for a
