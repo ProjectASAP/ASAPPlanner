@@ -8009,32 +8009,32 @@
       "P1": {
         "per_node": {
           "0": {
-            "cost": 23.2,
+            "cost": 23.2000048,
             "detail": "scan 4000000 samples",
             "multiplier": 1
           },
           "1": {
-            "cost": 4.0,
+            "cost": 4.0000048,
             "detail": "time range 60s: pass 4000000 rows",
             "multiplier": 1
           },
           "10": {
-            "cost": 14.0,
+            "cost": 14.048,
             "detail": "sort 1000000 rows in 100 partitions",
             "multiplier": 1
           },
           "11": {
-            "cost": 0.001,
+            "cost": 0.0010048,
             "detail": "limit to 1000 rows",
             "multiplier": 1
           },
           "12": {
-            "cost": 0.001,
+            "cost": 0.0010048,
             "detail": "operator: pass 1000 rows",
             "multiplier": 1
           },
           "2": {
-            "cost": 4.0,
+            "cost": 4.8,
             "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1",
             "multiplier": 1
           },
@@ -8044,7 +8044,7 @@
             "multiplier": 1
           },
           "4": {
-            "cost": 1.0,
+            "cost": 1.00008,
             "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1",
             "multiplier": 1
           },
@@ -8054,17 +8054,17 @@
             "multiplier": 1
           },
           "6": {
-            "cost": 23.2,
+            "cost": 23.2000048,
             "detail": "scan 4000000 samples",
             "multiplier": 1
           },
           "7": {
-            "cost": 4.0,
+            "cost": 4.0000048,
             "detail": "time range 60s: pass 4000000 rows",
             "multiplier": 1
           },
           "8": {
-            "cost": 4.0,
+            "cost": 4.8,
             "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1",
             "multiplier": 1
           },
@@ -8075,7 +8075,7 @@
           }
         },
         "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 79.40210000000002,
+        "total": 81.05020880000001,
         "unit": "cpu_ms_per_workload_evaluation"
       }
     },
