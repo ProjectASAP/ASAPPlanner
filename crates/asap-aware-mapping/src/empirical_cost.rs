@@ -3,8 +3,8 @@
 //! of an accuracy guarantee. CPU quantities are nanoseconds, never CPU operations.
 //!
 //! Not wired into the Stage 1 → Stage 3 pipeline yet: Stage 3 prices
-//! candidates analytically. A follow-up issue after G4's Stage 3 calibration
-//! (#594) prices them from measured evidence. The `CostModel` adapter
+//! candidates analytically. Issue #679 (after G4's Stage 3 calibration
+//! #594) prices them from measured evidence. The `CostModel` adapter
 //! (`EmpiricalCostModel`) that ranked the removed legacy search's candidates
 //! is gone; [`EmpiricalEvidenceProvider::rank_candidates`] keeps the ranking.
 

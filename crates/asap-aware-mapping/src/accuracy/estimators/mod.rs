@@ -146,7 +146,7 @@ pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 /// Wraps an [`AccuracyModel`] with a deployment's [`EstimatorContract`]:
 /// classic HLL then gets the (ε,δ) certificate of
 /// [`hll::ClassicHllConfidence`] and is sized for δ. Not wired into the
-/// Stage 1 → Stage 3 pipeline yet; a follow-up issue reads the contract when
+/// Stage 1 → Stage 3 pipeline yet; #678 reads the contract when
 /// Stage 1 sizes HLL and Stage 3 checks the target.
 pub struct EstimatorAccuracy<'a> {
     base: &'a dyn AccuracyModel,

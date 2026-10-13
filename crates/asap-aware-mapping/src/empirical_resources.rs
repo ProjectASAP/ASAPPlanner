@@ -4,8 +4,8 @@
 //! exist only to keep archived artifacts readable and preserve their field names.
 //!
 //! Not wired into the Stage 1 → Stage 3 pipeline yet; it feeds
-//! [`crate::empirical_cost`], which a follow-up issue after G4's Stage 3
-//! calibration (#594) wires in.
+//! [`crate::empirical_cost`], which issue #679 (after G4's Stage 3
+//! calibration, #594) wires in.
 
 use asap_types::resources::PhysicalResources;
 use serde::{Deserialize, Serialize};

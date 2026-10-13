@@ -6,7 +6,7 @@
 //!
 //! [`ClassicHllConfidence`] is not wired into the Stage 1 → Stage 3 pipeline
 //! yet: there Pass 1 sizes HLL by RSE only and its failure probability stays
-//! unknown. A follow-up issue wires the deployment's [`EstimatorContract`](crate::accuracy::EstimatorContract)
+//! unknown. Issue #678 wires the deployment's [`EstimatorContract`](crate::accuracy::EstimatorContract)
 //! (through [`super::EstimatorAccuracy`]) into Stage 1 sizing and the Stage 3
 //! check.
 
