@@ -4,12 +4,17 @@ Audience: planner designers and the implementer of Pass 2's
 window-composition rule.
 Source: [planner-layering.md](planner-layering.md), "Example 3: Aggregation over
 windows" and the Pass 2 section. Tests:
-`crates/integration-tests/tests/planner_layering_example3.rs` (helpers and the
-shared Example 3/4 workloads in `tests/planner_layering_common/`). Devtool:
-`stage_pipeline --example planner-layering-3a` and `planner-layering-3b`.
+`crates/integration-tests/tests/planner_layering_example3.rs` (helpers in
+`tests/planner_layering_common/`; the Example 3/4 workloads and the stage
+pipeline in `asap_devtools::{planner_layering_examples, planning_stages}`).
+Devtool: `stage_pipeline --example planner-layering-3a` and
+`planner-layering-3b`. Both run every candidate (243 for 3a) through plan
+selection; `--max-displayed` (default 64) limits only how many the document
+shows, so 3a selects P122, KLL for all five queries.
 
 This spec was written by a test designer who does not implement the stages.
-Tests run the stages through `planner_layering_common::run_stages`. A test
+Tests run the stages through `planner_layering_common::run_stages`, which
+calls `run_planning_stages`, the pipeline `stage_pipeline` runs. A test
 that needs a missing feature is `#[ignore]`d with the PR that delivers it.
 
 ## Workload

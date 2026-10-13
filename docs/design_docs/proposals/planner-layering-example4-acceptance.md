@@ -5,7 +5,8 @@ physical ASAP-aware optimization and its pricing in plan selection.
 Source: [planner-layering.md](planner-layering.md), "Example 4: Materialization
 of window summaries in physical planning" and the Materialization section.
 Tests: `crates/integration-tests/tests/planner_layering_example4.rs` (helpers
-and workloads in `tests/planner_layering_common/`).
+in `tests/planner_layering_common/`; workloads in
+`asap_devtools::planner_layering_examples`).
 
 This spec was written by a test designer who does not implement the stages.
 Tests run the stages through `planner_layering_common::run_stages`. A test

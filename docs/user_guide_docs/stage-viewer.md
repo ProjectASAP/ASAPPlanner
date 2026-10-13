@@ -208,7 +208,7 @@ cargo run -p asap-devtools --bin stage_pipeline -- \
 | `--epsilon`, `--delta` | Accuracy for every query; without them the queries are exact |
 | `--interval-ms <ms>` | Sample interval (default 15000) |
 | `--example <name>` | A built-in example instead of `--promql`: `planner-layering-1`, `-2`, `-3a`, `-3b`, `-4a` or `-4b` |
-| `--max-candidates <n>` | How many plans the document carries, cheapest first (default 64). Stage 3 still prices every plan. |
+| `--max-displayed <n>` | How many plans the document shows (default 64), in enumeration order, plus the selected plan. The planner still optimizes and prices every plan, so the selection does not depend on it. |
 | `--out <file>` | Where to write the document |
 
 Open the document with **Open stage document…**, by dropping the file on the

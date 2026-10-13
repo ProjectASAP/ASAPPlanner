@@ -42,20 +42,11 @@ pub struct PrunedCandidate {
 pub struct PlanningStagesRun {
     /// The language-specific frontends' roots, one per workload entry.
     pub frontends: Vec<QueryRoot>,
-    /// Size of the Cartesian product of per-computation candidates;
-    /// `logical` holds its first `max_candidates`.
-    pub combinations: usize,
     pub logical: Vec<LogicalCandidate>,
     /// `P<n>` implements `L<n>`.
     pub physical: Vec<PhysicalCandidate>,
     pub pruned: Vec<PrunedCandidate>,
     pub selection: Result<Selection, SelectionError>,
-}
-
-impl PlanningStagesRun {
-    pub fn capped(&self) -> bool {
-        self.logical.len() < self.combinations
-    }
 }
 
 /// Lower a PromQL workload, each series' identity as a column (the row
@@ -77,12 +68,12 @@ pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>,
 /// physical ASAP-aware optimization and plan selection over `roots`, the
 /// lowered entries of `workload`. Logical candidates are every choice of a
 /// per-computation candidate for every target, the last target varying
-/// fastest, cut at `max_candidates` (`None`: all). Plan selection reads only
-/// the accuracy targets and the data workload.
+/// fastest. Every candidate is enumerated and priced, so the selection is
+/// the cheapest of all; a caller that shows fewer cuts only its display.
+/// Plan selection reads only the accuracy targets and the data workload.
 pub fn run_planning_stages(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-    max_candidates: Option<usize>,
 ) -> Result<PlanningStagesRun, String> {
     validate(&roots)?;
     let inventory =
@@ -98,7 +89,7 @@ pub fn run_planning_stages(
     let mut physical = Vec::new();
     let mut pruned = Vec::new();
     let mut choice = vec![0; inventory.targets.len()];
-    for index in 0..combinations.min(max_candidates.unwrap_or(usize::MAX)) {
+    for index in 0..combinations {
         let (id, label) = (
             format!("L{}", index + 1),
             label(&inventory, &owners, &choice),
@@ -144,7 +135,6 @@ pub fn run_planning_stages(
     let selection = select_plan(&physical, &targets, &data, PlanningModels::builtin());
     Ok(PlanningStagesRun {
         frontends: roots,
-        combinations,
         logical,
         physical,
         pruned,

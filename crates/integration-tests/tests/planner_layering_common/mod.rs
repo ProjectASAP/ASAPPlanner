@@ -4,7 +4,7 @@
 //!
 //! [`run_stages`] runs the real stages through
 //! `asap_devtools::planning_stages::run_planning_stages`, the pipeline
-//! `stage_pipeline` also runs, uncapped; the example workloads come from
+//! `stage_pipeline` also runs; the example workloads come from
 //! `asap_devtools::planner_layering_examples`. The functions under "Pending adapters" read properties the IR
 //! cannot express yet (window summaries, retention). They return today's
 //! only possible answer; the implementer of each feature replaces the body
@@ -164,11 +164,11 @@ fn logical(id: String, label: String, roots: Vec<QueryRoot>) -> Logical {
 }
 
 /// Every stage over `roots`, the lowered entries of `workload`, with every
-/// logical candidate (no cap). Every candidate of the examples composes and
+/// logical candidate. Every candidate of the examples composes and
 /// plan selection selects one. Recurrence and predictability (which
 /// materialization needs, Example 4) are not passed to plan selection.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    let run = run_planning_stages(workload, roots, None).expect("planning stages run");
+    let run = run_planning_stages(workload, roots).expect("planning stages run");
     let logical_candidates = run
         .logical
         .into_iter()

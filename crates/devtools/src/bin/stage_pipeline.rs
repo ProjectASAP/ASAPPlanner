@@ -1,7 +1,7 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --example planner-layering-1 --out planner-layering-example1.json
 // (also planner-layering-3a and planner-layering-3b: #509 Example 3,
-// Patterns A and B)
+// Patterns A and B; 3a has 243 candidates, all priced, 64 shown by default)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 //
@@ -10,25 +10,29 @@
 //   - language_specific_frontends: the frontends' workload DAG, one root per query;
 //   - logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
-//     product), in enumeration order and capped by `--max-candidates`
-//     (default 64). A candidate that cannot be composed carries `error`
-//     instead of `dag`;
+//     product), in enumeration order. Every candidate is optimized and
+//     priced; the document shows the first `--max-displayed` (default 64)
+//     and the selected one, with `combinations` (how many exist) and
+//     `capped` (whether some are not shown). A candidate that cannot be
+//     composed carries `error` instead of `dag`;
 //   - physical_asap_optimization: one physical candidate per composed logical
 //     candidate (operator implementation; every sub-DAG NotMaterialized), no
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
 //     under `pruned` with the reason;
-//   - plan_selection: per-candidate costs, the selected candidate, and
-//     every other candidate as rejected (`valid: false`) or costlier. Each
-//     node's `cost` is one computation's price times `multiplier`, the
-//     times it is computed: once if materialized, else once per query (or
-//     materialized node) that reads it, so a shared NotMaterialized node is
-//     charged once per query. When
-//     selection fails, `selected` is null, with the rejections, or with
-//     `error` for any other failure.
+//   - plan_selection: the selected candidate, chosen among all candidates;
+//     the shown candidates' costs, and every other shown candidate as
+//     rejected (`valid: false`) or costlier. Each node's `cost` is one
+//     computation's price times `multiplier`, the times it is computed:
+//     once if materialized, else once per query (or materialized node)
+//     that reads it, so a shared NotMaterialized node is charged once per
+//     query. When selection fails, `selected` is null, with the rejections,
+//     or with `error` for any other failure.
 //
 // `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
 // query; without them the queries are exact. `--interval-ms` is the source
 // cadence PromQL needs (default 15000).
+
+use std::collections::HashSet;
 
 use asap_aware_mapping::plan_selection::{Rejection, Selection, SelectionError};
 use asap_devtools::planner_layering_examples::{
@@ -47,7 +51,7 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | --promql <query>... \
-[--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) [--max-candidates <n>] --out <file>";
+[--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) [--max-displayed <n>] --out <file>";
 
 fn main() {
     if let Err(message) = run(std::env::args().skip(1).collect()) {
@@ -60,7 +64,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let mut example = None;
     let mut queries = Vec::new();
     let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
-    let mut max_candidates = 64usize;
+    let mut max_displayed = 64usize;
     let mut out = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -72,7 +76,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "--epsilon" => epsilon = Some(number(value()?)?),
             "--delta" => delta = Some(number(value()?)?),
             "--interval-ms" => interval_ms = value()?.parse().map_err(|e| format!("{e}"))?,
-            "--max-candidates" => max_candidates = value()?.parse().map_err(|e| format!("{e}"))?,
+            "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
             "--out" => out = Some(value()?),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -96,19 +100,41 @@ fn run(args: Vec<String>) -> Result<(), String> {
         _ => return Err("give exactly one of --example or --promql".into()),
     };
     let out = out.ok_or("--out is required")?;
-    let document = stage_pipeline(&workload, max_candidates)?;
+    let document = stage_pipeline(&workload, max_displayed)?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))
 }
 
-fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<Value, String> {
+fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<Value, String> {
     let roots = lower_promql_roots(workload)?;
-    let run = run_planning_stages(workload, roots, Some(max_candidates))?;
+    let run = run_planning_stages(workload, roots)?;
+    // The display keeps the first `max_displayed` candidates and the
+    // selected one; plan selection has already ranked all of them.
+    let selected_logical = run.selection.as_ref().ok().and_then(|selection| {
+        run.physical
+            .iter()
+            .find(|p| p.id == selection.selected)
+            .map(|p| p.from_logical.as_str())
+    });
+    let shown: HashSet<&str> = run
+        .logical
+        .iter()
+        .enumerate()
+        .filter(|(index, c)| *index < max_displayed || Some(c.id.as_str()) == selected_logical)
+        .map(|(_, c)| c.id.as_str())
+        .collect();
+    let shown_physical: HashSet<&str> = run
+        .physical
+        .iter()
+        .filter(|p| shown.contains(p.from_logical.as_str()))
+        .map(|p| p.id.as_str())
+        .collect();
     // A choice that composition cannot substitute yet is listed with its
     // error rather than ending the run.
     let candidates: Vec<_> = run
         .logical
         .iter()
+        .filter(|c| shown.contains(c.id.as_str()))
         .map(|c| match &c.roots {
             Ok(roots) => json!({ "id": c.id, "label": c.label, "dag": export(roots) }),
             Err(error) => json!({ "id": c.id, "label": c.label, "error": error }),
@@ -117,11 +143,13 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
     let physical: Vec<_> = run
         .physical
         .iter()
+        .filter(|p| shown_physical.contains(p.id.as_str()))
         .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
         .collect();
     let pruned: Vec<_> = run
         .pruned
         .iter()
+        .filter(|p| shown.contains(p.from_logical.as_str()))
         .map(|p| json!({ "from_logical": p.from_logical, "label": p.label, "reason": p.reason }))
         .collect();
     Ok(json!({
@@ -129,16 +157,24 @@ fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<
         "workload": { "queries": workload_queries(workload) },
         "language_specific_frontends": { "dag": export(&run.frontends) },
         "logical_asap_optimization": {
-            "combinations": run.combinations,
-            "capped": run.capped(),
+            "combinations": run.logical.len(),
+            "capped": candidates.len() < run.logical.len(),
             "candidates": candidates,
         },
         "physical_asap_optimization": { "candidates": physical, "pruned": pruned },
-        "plan_selection": plan_selection_json(&run.selection),
+        "plan_selection": plan_selection_json(&run.selection, |id| shown_physical.contains(id)),
     }))
 }
 
-fn plan_selection_json(selection: &Result<Selection, SelectionError>) -> Value {
+/// Plan selection over every candidate, listing the costs and rejections
+/// of the `shown` ones.
+fn plan_selection_json(
+    selection: &Result<Selection, SelectionError>,
+    shown: impl Fn(&str) -> bool,
+) -> Value {
+    let rejections_json = |rejected: &[Rejection]| -> Vec<Value> {
+        rejections_json(rejected.iter().filter(|r| shown(&r.id)))
+    };
     let selection = match selection {
         Ok(selection) => selection,
         Err(SelectionError::NoValidCandidate(rejected)) => {
@@ -151,6 +187,7 @@ fn plan_selection_json(selection: &Result<Selection, SelectionError>) -> Value {
     let costs: serde_json::Map<_, _> = selection
         .costs
         .iter()
+        .filter(|(id, _)| shown(id))
         .map(|(id, cost)| {
             let per_node: serde_json::Map<_, _> = cost
                 .per_node
@@ -175,9 +212,8 @@ fn plan_selection_json(selection: &Result<Selection, SelectionError>) -> Value {
     })
 }
 
-fn rejections_json(rejected: &[Rejection]) -> Vec<Value> {
+fn rejections_json<'a>(rejected: impl Iterator<Item = &'a Rejection>) -> Vec<Value> {
     rejected
-        .iter()
         .map(|r| json!({ "id": r.id, "valid": r.valid, "reason": r.reason }))
         .collect()
 }
@@ -266,7 +302,8 @@ mod tests {
             valid: false,
             reason: "q1: misses target".into(),
         }];
-        let document = plan_selection_json(&Err(SelectionError::NoValidCandidate(rejected)));
+        let document =
+            plan_selection_json(&Err(SelectionError::NoValidCandidate(rejected)), |_| true);
         assert_eq!(
             document,
             json!({
@@ -277,14 +314,19 @@ mod tests {
         );
     }
 
-    /// A run with no physical candidate (here, none enumerated) still emits
-    /// every stage, with no selection.
+    /// With nothing else displayed, the document still shows the selected
+    /// candidate and its cost, chosen among all candidates.
     #[test]
-    fn run_without_candidates_emits_plan_selection() {
+    fn display_cap_keeps_the_selected_candidate() {
         let workload = promql_batch(&["sum(m)".into()], AccuracyTarget::Exact, 15_000);
         let document = stage_pipeline(&workload, 0).unwrap();
-        assert_eq!(document["physical_asap_optimization"]["pruned"], json!([]));
-        assert_eq!(document["plan_selection"]["selected"], Value::Null);
+        let selected = document["plan_selection"]["selected"].as_str().unwrap();
+        let physical = document["physical_asap_optimization"]["candidates"]
+            .as_array()
+            .unwrap();
+        assert_eq!(physical.len(), 1);
+        assert_eq!(physical[0]["id"], selected);
+        assert!(document["plan_selection"]["costs"].get(selected).is_some());
         assert_eq!(document["plan_selection"]["rejected"], json!([]));
     }
 }
