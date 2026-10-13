@@ -596,3 +596,34 @@ async fn scalar_queries_read_planned_summaries() {
     assert_eq!(refs.len(), 1);
     assert!(Rc::ptr_eq(refs[0], &read.plan.root));
 }
+
+/// A combination of approximate values may read summaries: each reference of
+/// `scalar(q99) - scalar(q50)` is planned against the entry's target, so
+/// under a cost model that prefers summaries both read a sketch.
+#[tokio::test]
+async fn combined_scalar_references_read_summaries() {
+    let output = plan_promql(
+        &[(
+            "scalar(quantile(0.99, rate(x[5m]))) - scalar(quantile(0.5, rate(x[5m])))",
+            0.01,
+        )],
+        &CHEAP_SUMMARY,
+    )
+    .await;
+    assert_eq!(output.scalar_plans.len(), 2);
+    for read in &output.scalar_plans {
+        let sketches = OperatorNode::reachable(&read.plan.root)
+            .into_iter()
+            .filter(|node| {
+                matches!(
+                    node.asap(),
+                    Some(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(..),
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert!(sketches > 0, "{:#?}", read.plan.root);
+    }
+}
