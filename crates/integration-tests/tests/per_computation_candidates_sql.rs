@@ -1,14 +1,14 @@
-//! SQL `HAVING` → Pass 1 local candidates: where each `HAVING` is applied.
+//! SQL `HAVING` → Pass 1 per-computation candidates: where each `HAVING` is applied.
 
-use asap_aware_mapping::logical_candidates::{
-    enumerate_local_logical_candidates, HavingPlacement, LocalLogicalTarget,
+use asap_aware_mapping::per_computation_candidates::{
+    generate_per_computation_candidates, ComputationTarget, HavingPlacement,
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
-async fn targets(sql: &str) -> Vec<LocalLogicalTarget> {
+async fn targets(sql: &str) -> Vec<ComputationTarget> {
     let catalog = SqlCatalog::new().with_table(
         "flows",
         Schema::new(vec![
@@ -23,12 +23,12 @@ async fn targets(sql: &str) -> Vec<LocalLogicalTarget> {
     let root = lower_sql(sql, &catalog, accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
-    enumerate_local_logical_candidates(vec![(0, QueryRoot::Operator(root))])
+    generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
         .unwrap()
         .targets
 }
 
-fn placements(targets: &[LocalLogicalTarget]) -> Vec<HavingPlacement> {
+fn placements(targets: &[ComputationTarget]) -> Vec<HavingPlacement> {
     targets
         .iter()
         .flat_map(|target| target.having.iter().map(|entry| entry.placement))

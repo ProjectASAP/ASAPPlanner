@@ -1,11 +1,29 @@
-//! Pass 1 local alternatives over the unified logical IR.
+//! Stage 1 (logical ASAP-aware optimization), Pass 1: per-computation
+//! candidate generation, as defined in
+//! `docs/design_docs/proposals/planner-layering.md`.
 //!
-//! Alternatives are nominal realization descriptors attached to their original
-//! target, not ranked plans or accuracy certificates. Summary alternatives are
-//! unsized: Pass 2 may share a summary and tighten it to the strictest consumer,
-//! so sizing happens later. Workload composition and physical planning consume
-//! this inventory later; empirical models belong to selection. The legacy search
-//! API remains until planner cutover.
+//! [`generate_per_computation_candidates`] takes the frontends' logical DAGs
+//! (`QueryRoot`s) and returns, for every eligible computation, its unranked
+//! candidates. A computation ([`ComputationTarget`]) is one measure of an
+//! `Aggregate` whose intent has a realization besides plain exact execution;
+//! nested aggregates and operators read by scalar roots are found too.
+//! Pass 1 does not consider sharing across computations; that is Pass 2.
+//!
+//! - Each target has exactly one exact option: the exact accumulator
+//!   (`ExactAccumulator`, or `AvgAsSumCount` for `avg`) when it can be built,
+//!   otherwise plain `Exact`. Whether it is materialized is decided in Stage 2.
+//! - Summary candidates are unsized; they are sized after Pass 2 sharing.
+//! - Candidates are pruned only when provably unable to meet the accuracy
+//!   requirement, and each pruned candidate keeps its [`PruneReason`].
+//! - A measure filter or `HAVING` prunes nothing. The target records the
+//!   measure filter (applied as `SummaryAgg.filter`) and one [`HavingEntry`]
+//!   per consumer `Filter` directly above the aggregate: a key-only predicate
+//!   applied by every consumer may go below the aggregate, anything else stays
+//!   above the output (approximate outputs then get guarantee `None`).
+//!
+//! The input must be a logical DAG: ASAP operators, execution timing or a
+//! materialization are rejected. No cost or accuracy model is used; ranking
+//! and discarding valid candidates belong to Stage 3.
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -18,14 +36,14 @@ use thiserror::Error;
 
 use crate::replacement::{accuracy_budget, accuracy_target, summary_candidates};
 
-/// One local realization of a target measure.
+/// One Pass 1 candidate for a computation (one measure of an aggregate).
 ///
 /// Each target has exactly one exact option: `ExactAccumulator` or
 /// `AvgAsSumCount` when the intent has one and it can be built, otherwise
 /// `Exact`. The plain form would duplicate "accumulator, not materialized";
 /// Stage 2/3 decide materialization and sharing.
 #[derive(Debug, Clone, PartialEq)]
-pub enum LocalCandidate {
+pub enum ComputationCandidate {
     /// Plain exact execution of the original sub-DAG; the exact option only
     /// when the intent has no exact accumulator form or that form is pruned.
     Exact,
@@ -51,31 +69,31 @@ pub enum PruneReason {
 
 /// Unranked candidates of one measure and the candidates pruned for it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LocalChoices {
-    pub alternatives: Vec<LocalCandidate>,
-    pub pruned: Vec<(LocalCandidate, PruneReason)>,
+pub struct ComputationChoices {
+    pub candidates: Vec<ComputationCandidate>,
+    pub pruned: Vec<(ComputationCandidate, PruneReason)>,
 }
 
-impl LocalChoices {
-    /// Prune matching candidates; a pruned exact accumulator form falls back to
+impl ComputationChoices {
+    /// Prune matching candidates; a pruned exact accumulator form is replaced by
     /// plain `Exact`, so the target keeps one exact option.
-    fn prune(&mut self, reason: PruneReason, applies: impl Fn(&LocalCandidate) -> bool) {
-        let (pruned, kept): (Vec<_>, _) = std::mem::take(&mut self.alternatives)
+    fn prune(&mut self, reason: PruneReason, applies: impl Fn(&ComputationCandidate) -> bool) {
+        let (pruned, kept): (Vec<_>, _) = std::mem::take(&mut self.candidates)
             .into_iter()
-            .partition(|choice| *choice != LocalCandidate::Exact && applies(choice));
-        self.alternatives = kept;
+            .partition(|choice| *choice != ComputationCandidate::Exact && applies(choice));
+        self.candidates = kept;
         if pruned.iter().any(|choice| {
             matches!(
                 choice,
-                LocalCandidate::ExactAccumulator { .. } | LocalCandidate::AvgAsSumCount
+                ComputationCandidate::ExactAccumulator { .. } | ComputationCandidate::AvgAsSumCount
             )
         }) {
-            self.alternatives.insert(0, LocalCandidate::Exact);
+            self.candidates.insert(0, ComputationCandidate::Exact);
         }
         self.pruned.extend(
             pruned
                 .into_iter()
-                .map(|choice: LocalCandidate| (choice, reason)),
+                .map(|choice: ComputationCandidate| (choice, reason)),
         );
     }
 }
@@ -113,11 +131,11 @@ pub struct HavingEntry {
 /// execution. The target retains source, grouping, filters, input expressions
 /// and evaluation context.
 #[derive(Debug, Clone)]
-pub struct LocalLogicalTarget {
+pub struct ComputationTarget {
     pub target: Rc<OperatorNode>,
     /// Index into the aggregate's measures.
     pub measure: usize,
-    pub choices: LocalChoices,
+    pub choices: ComputationChoices,
     /// The measure's own filter; only rows that pass it update the state
     /// (`SummaryAgg.filter`).
     pub filter: Option<Predicate>,
@@ -128,13 +146,13 @@ pub struct LocalLogicalTarget {
 
 /// Compact Pass 1 inventory; roots and nested producer dependencies are retained.
 #[derive(Debug, Clone)]
-pub struct LocalLogicalCandidates<Id> {
+pub struct PerComputationCandidates<Id> {
     pub roots: Vec<(Id, QueryRoot)>,
-    pub targets: Vec<LocalLogicalTarget>,
+    pub targets: Vec<ComputationTarget>,
 }
 
 #[derive(Debug, Error)]
-pub enum LogicalCandidateError {
+pub enum PerComputationCandidateError {
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
     #[error("logical candidate input already has assigned execution timing or materialization")]
@@ -142,7 +160,7 @@ pub enum LogicalCandidateError {
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
     /// `root` (the root id's `Debug` form) and `measure` locate the target;
-    /// [`local_candidates_for_intent`] alone leaves them `None`.
+    /// [`computation_candidates_for_intent`] alone leaves them `None`.
     #[error(
         "approximate accuracy of root {}, measure {} requires epsilon and delta in (0, 1)",
         root.as_deref().unwrap_or("?"),
@@ -158,9 +176,9 @@ pub enum LogicalCandidateError {
 /// order, without ranking or empirical assessment. A summary is not a claim that
 /// a deployment meets the measure's accuracy requirement. The one exact option
 /// comes first: the exact accumulator form if the intent has one, else `Exact`.
-pub fn local_candidates_for_intent(
+pub fn computation_candidates_for_intent(
     intent: &AggIntent,
-) -> Result<LocalChoices, LogicalCandidateError> {
+) -> Result<ComputationChoices, PerComputationCandidateError> {
     let exact = match intent {
         AggIntent::Count { .. } => Some((ExactKind::Count, ExactParams::Count)),
         AggIntent::Sum { .. } => Some((ExactKind::Sum, ExactParams::Sum)),
@@ -172,12 +190,12 @@ pub fn local_candidates_for_intent(
         _ => None,
     };
     let exact = match exact {
-        Some((kind, params)) => LocalCandidate::ExactAccumulator { kind, params },
-        None if matches!(intent, AggIntent::Avg { .. }) => LocalCandidate::AvgAsSumCount,
-        None => LocalCandidate::Exact,
+        Some((kind, params)) => ComputationCandidate::ExactAccumulator { kind, params },
+        None if matches!(intent, AggIntent::Avg { .. }) => ComputationCandidate::AvgAsSumCount,
+        None => ComputationCandidate::Exact,
     };
-    let mut choices = LocalChoices {
-        alternatives: vec![exact],
+    let mut choices = ComputationChoices {
+        candidates: vec![exact],
         pruned: vec![],
     };
     if let Some(target) = accuracy_target(intent) {
@@ -185,7 +203,7 @@ pub fn local_candidates_for_intent(
             let (epsilon, delta) = accuracy_budget(target);
             let unit = |value: f64| value > 0.0 && value < 1.0;
             if !unit(epsilon) || !unit(delta) {
-                return Err(LogicalCandidateError::InvalidAccuracy {
+                return Err(PerComputationCandidateError::InvalidAccuracy {
                     root: None,
                     measure: None,
                 });
@@ -195,14 +213,14 @@ pub fn local_candidates_for_intent(
         if *target == AccuracyTarget::Exact {
             choices.pruned.extend(summaries.map(|algorithm| {
                 (
-                    LocalCandidate::Summary(algorithm),
+                    ComputationCandidate::Summary(algorithm),
                     PruneReason::RequiresExact,
                 )
             }));
         } else {
             choices
-                .alternatives
-                .extend(summaries.map(LocalCandidate::Summary));
+                .candidates
+                .extend(summaries.map(ComputationCandidate::Summary));
         }
     }
     Ok(choices)
@@ -254,9 +272,9 @@ fn placement(below: bool) -> HavingPlacement {
 /// and `HAVING` keep every candidate; the target records how they are applied.
 /// A consumer `Filter`'s key-only `HAVING` is pushed below only when every
 /// consumer of the aggregate applies the same predicate.
-pub fn enumerate_local_logical_candidates<Id: std::fmt::Debug>(
+pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
-) -> Result<LocalLogicalCandidates<Id>, LogicalCandidateError> {
+) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     let mut seen = HashSet::new();
     // Each aggregate with the first root that reaches it.
     let mut aggregates = Vec::new();
@@ -271,7 +289,7 @@ pub fn enumerate_local_logical_candidates<Id: std::fmt::Debug>(
         };
         for root in operators {
             if root.contains_asap() {
-                return Err(LogicalCandidateError::ContainsAsap);
+                return Err(PerComputationCandidateError::ContainsAsap);
             }
             consumers.entry(Rc::as_ptr(root)).or_default().push(None);
             for node in OperatorNode::reachable(root) {
@@ -280,7 +298,7 @@ pub fn enumerate_local_logical_candidates<Id: std::fmt::Debug>(
                 }
                 if node.timing.is_some() || node.materialization != Materialization::NotMaterialized
                 {
-                    return Err(LogicalCandidateError::AssignedPhysicalAnnotation);
+                    return Err(PerComputationCandidateError::AssignedPhysicalAnnotation);
                 }
                 for child in node.children() {
                     consumers
@@ -338,24 +356,25 @@ pub fn enumerate_local_logical_candidates<Id: std::fmt::Debug>(
             });
         }
         for (measure, intent) in measures.iter().enumerate() {
-            let mut choices = local_candidates_for_intent(intent).map_err(|error| match error {
-                LogicalCandidateError::InvalidAccuracy { .. } => {
-                    LogicalCandidateError::InvalidAccuracy {
-                        root: Some(root.clone()),
-                        measure: Some(measure),
+            let mut choices =
+                computation_candidates_for_intent(intent).map_err(|error| match error {
+                    PerComputationCandidateError::InvalidAccuracy { .. } => {
+                        PerComputationCandidateError::InvalidAccuracy {
+                            root: Some(root.clone()),
+                            measure: Some(measure),
+                        }
                     }
-                }
-                error => error,
-            })?;
-            if choices.alternatives == [LocalCandidate::Exact] && choices.pruned.is_empty() {
+                    error => error,
+                })?;
+            if choices.candidates == [ComputationCandidate::Exact] && choices.pruned.is_empty() {
                 continue;
             }
             if matches!(intent, AggIntent::Avg { .. }) && nullable_avg_input(&node, intent) {
                 choices.prune(PruneReason::NullableAvgInput, |choice| {
-                    *choice == LocalCandidate::AvgAsSumCount
+                    *choice == ComputationCandidate::AvgAsSumCount
                 });
             }
-            targets.push(LocalLogicalTarget {
+            targets.push(ComputationTarget {
                 target: node.clone(),
                 measure,
                 choices,
@@ -364,7 +383,7 @@ pub fn enumerate_local_logical_candidates<Id: std::fmt::Debug>(
             });
         }
     }
-    Ok(LocalLogicalCandidates { roots, targets })
+    Ok(PerComputationCandidates { roots, targets })
 }
 
 #[cfg(test)]
@@ -374,22 +393,22 @@ mod tests {
     /// universal summary; plain exact execution is not offered.
     #[test]
     fn approximate_count_keeps_one_exact_accumulator_and_universal_choices() {
-        let choices = local_candidates_for_intent(&AggIntent::Count {
+        let choices = computation_candidates_for_intent(&AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.05,
                 delta: 0.01,
             },
         })
         .unwrap()
-        .alternatives;
-        assert!(!choices.contains(&LocalCandidate::Exact));
+        .candidates;
+        assert!(!choices.contains(&ComputationCandidate::Exact));
         assert_eq!(
             choices[0],
-            LocalCandidate::ExactAccumulator {
+            ComputationCandidate::ExactAccumulator {
                 kind: ExactKind::Count,
                 params: ExactParams::Count
             }
         );
-        assert!(choices.contains(&LocalCandidate::Summary(SketchAlgorithm::UnivMon)));
+        assert!(choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::UnivMon)));
     }
 }

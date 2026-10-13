@@ -212,6 +212,6 @@ pub use topk_reuse::TopKLimitReuseStrategy;
 
 pub mod maintained_population;
 
-/// Local candidate generation over the unified IR. No execution timing is
+/// Stage 1, Pass 1: per-computation candidate generation. No execution timing is
 /// assigned: that is a Stage 2 materialization decision.
-pub mod logical_candidates;
+pub mod per_computation_candidates;
