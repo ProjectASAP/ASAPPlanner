@@ -1018,8 +1018,16 @@ fn composed_avg_divides_sum_and_count_states() {
         None,
     );
     let [root] = <[_; 1]>::try_from(composed(vec![avg.clone()], &[0])).unwrap();
-    let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = root.non_asap() else {
-        panic!("sum / count expected, got {root:#?}")
+    // The quotient is renamed to the aggregate's column.
+    assert_eq!(columns(&root), columns(&avg));
+    let Some(NonASAPOp::Project {
+        child: quotient, ..
+    }) = root.non_asap()
+    else {
+        panic!("renaming projection expected, got {root:#?}")
+    };
+    let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = quotient.non_asap() else {
+        panic!("sum / count expected, got {quotient:#?}")
     };
     for (side, kind) in [(lhs, ExactKind::Sum), (rhs, ExactKind::Count)] {
         assert!(matches!(
@@ -1027,13 +1035,9 @@ fn composed_avg_divides_sum_and_count_states() {
             ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(found, _), .. } if *found == kind
         ));
     }
-    assert_eq!(
-        columns(&root).last().map(|(_, dtype, _)| dtype.clone()),
-        columns(&avg).last().map(|(_, dtype, _)| dtype.clone())
-    );
 }
 
-/// Each measure of a multi-measure aggregate is realized on its own and the
+/// Each measure of a multi-measure aggregate is substituted on its own and the
 /// measures are joined back on the group keys, with the aggregate's columns.
 #[test]
 fn composed_multi_measure_aggregate_joins_its_measures() {

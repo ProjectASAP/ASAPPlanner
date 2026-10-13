@@ -1,5 +1,6 @@
 //! Frontends → Pass 1 → composed candidate logical ASAP DAGs: every candidate of
-//! a query is a valid DAG with the query's output column types.
+//! a query is a valid DAG with the query's output columns (names, types and
+//! nullability).
 
 use std::rc::Rc;
 
@@ -69,13 +70,19 @@ fn promql(query: &str) -> QueryRoot {
         .remove(0)
 }
 
-fn output_types(root: &QueryRoot) -> Vec<(String, bool)> {
+fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {
     match root {
         QueryRoot::Operator(node) => node
             .schema
             .fields
             .iter()
-            .map(|field| (format!("{:?}", field.dtype), field.nullable))
+            .map(|field| {
+                (
+                    field.name.clone(),
+                    format!("{:?}", field.dtype),
+                    field.nullable,
+                )
+            })
             .collect(),
         QueryRoot::Scalar(_) => vec![],
     }
@@ -83,7 +90,7 @@ fn output_types(root: &QueryRoot) -> Vec<(String, bool)> {
 
 /// Compose every candidate of `root`; returns how many there were.
 fn compose_all(label: &str, root: QueryRoot) -> usize {
-    let expected = output_types(&root);
+    let expected = output_columns(&root);
     let inventory = generate_per_computation_candidates(vec![(0, root)]).unwrap();
     let radix: Vec<_> = inventory
         .targets
@@ -98,7 +105,7 @@ fn compose_all(label: &str, root: QueryRoot) -> usize {
         let root = &composed[0].1;
         root.validate_structure()
             .unwrap_or_else(|e| panic!("{label} {choice:?}: {e}"));
-        assert_eq!(output_types(root), expected, "{label} {choice:?}");
+        assert_eq!(output_columns(root), expected, "{label} {choice:?}");
         for (digit, radix) in choice.iter_mut().zip(&radix).rev() {
             *digit += 1;
             if *digit < *radix {
@@ -118,6 +125,7 @@ async fn sql_candidates_compose() {
         "SELECT src, avg(bytes), count(*), approx_distinct(dst) FROM flows GROUP BY src",
         "SELECT count(*) FILTER (WHERE bytes > 10), approx_percentile_cont(bytes, 0.99) FROM flows",
         "SELECT avg(bytes) FROM flows",
+        "SELECT sum(flows.bytes) FROM flows",
     ] {
         assert!(compose_all(query, sql(query).await) >= 1, "{query}");
     }
@@ -133,6 +141,8 @@ fn promql_candidates_compose() {
         "topk by (job) (10, sum_over_time(m[1m]))",
         "topk(3, sum by (job) (rate(m[5m])))",
         "count by (job) (m)",
+        "count_over_time(m[5m])",
+        "quantile_over_time(0.99, m[5m])",
     ] {
         assert!(compose_all(query, promql(query)) >= 1, "{query}");
     }

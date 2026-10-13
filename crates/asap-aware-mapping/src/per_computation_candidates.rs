@@ -40,8 +40,9 @@
 //! - `AvgAsSumCount`: the finalized `sum` and `count` accumulators divided.
 //! - `Exact` (or a measure that is no target): a single-measure `Aggregate`.
 //!
-//! The measures of a multi-measure aggregate are joined back on the group
-//! keys (NULL keys match, as grouping treats them). A measure filter becomes
+//! The substituted output keeps the aggregate's column names. The measures
+//! of a multi-measure aggregate are joined back on the group keys (NULL keys
+//! match, as grouping treats them). A measure filter becomes
 //! `SummaryAgg.filter`, so a group with no matching row stays. A
 //! `BelowAggregate` `HAVING` becomes a `Filter` below the state, with its key
 //! columns renumbered to the input's, and the consumer `Filter` it came from
@@ -570,8 +571,9 @@ fn with_guarantees(
 /// family's bound when [`estimate_has_bound`]. Anything computed from an
 /// approximate value (arithmetic, a comparison, a value `HAVING` or any other
 /// predicate, at any depth) gets `None`: composition through operators is
-/// not defined yet (#669), and plan selection's accuracy model decides. A summary
-/// state carries none itself.
+/// not defined yet (#669), and plan selection's accuracy model decides. A
+/// projection of columns only keeps its child's guarantee. A summary state
+/// carries none itself.
 fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
     let exact = |node: &OperatorNode| {
         node.guarantee
@@ -604,6 +606,14 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
             _ => None,
         },
         Operator::ASAP(_) => None,
+        // Renaming or reordering columns keeps the child's guarantee.
+        Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
+            if cols
+                .iter()
+                .all(|item| matches!(item.expr, ScalarExpr::Column(_))) =>
+        {
+            child.guarantee.clone()
+        }
         Operator::NonASAP(_) => node
             .children()
             .into_iter()
@@ -676,7 +686,7 @@ fn substitute(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut output = match <[_; 1]>::try_from(parts) {
-        Ok([part]) => part,
+        Ok([part]) => with_names_of(target, part)?,
         Err(parts) => join_measures(target, parts)?,
     };
     for entry in having {
@@ -688,6 +698,45 @@ fn substitute(
         }
     }
     Ok(output)
+}
+
+/// `output` with `target`'s column names: an estimate or accumulator names
+/// its value after the operation (`quantile`, `sum`), not the aggregate's
+/// output column.
+fn with_names_of(
+    target: &OperatorNode,
+    output: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let names = |node: &OperatorNode| -> Vec<String> {
+        node.schema
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect()
+    };
+    if names(&output) == names(target) {
+        return Ok(output);
+    }
+    if output.schema.fields.len() != target.schema.fields.len() {
+        return Err(PerComputationCandidateError::Unsupported(
+            "substituted output with other columns than the aggregate",
+        ));
+    }
+    let cols = names(target)
+        .into_iter()
+        .enumerate()
+        .map(|(column, name)| ProjectItem {
+            alias: Some(name),
+            expr: ScalarExpr::Column(column),
+        })
+        .collect();
+    Ok(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: output,
+        },
+    ))?)
 }
 
 /// One measure of `target` over `input`: its group keys, then its value.

@@ -2091,6 +2091,61 @@
                 ]
               },
               "timing": null
+            },
+            {
+              "guarantee": null,
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 11,
+                    "cols": [
+                      {
+                        "alias": "job",
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "topk_10",
+                        "expr": {
+                          "Column": 1
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
             }
           ],
           "roots": [
@@ -2098,7 +2153,7 @@
               "Operator": 5
             },
             {
-              "Operator": 11
+              "Operator": 12
             }
           ]
         },
@@ -2926,6 +2981,61 @@
                 ]
               },
               "timing": null
+            },
+            {
+              "guarantee": null,
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Project": {
+                    "child": 11,
+                    "cols": [
+                      {
+                        "alias": "job",
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "topk_10",
+                        "expr": {
+                          "Column": 1
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "topk_10",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
             }
           ],
           "roots": [
@@ -2933,7 +3043,7 @@
               "Operator": 5
             },
             {
-              "Operator": 11
+              "Operator": 12
             }
           ]
         },
