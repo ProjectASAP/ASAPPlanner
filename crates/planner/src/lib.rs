@@ -11,17 +11,15 @@
 //! and a catalog — skips this crate and calls
 //! [`asap_aware_mapping::optimize`] directly.
 
-use std::rc::Rc;
-
 use asap_types::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
-use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
 
-use asap_frontend_metricsql::{lower_metricsql, MetricsqlError};
-use asap_frontend_promql::{
-    lower_promql_workload, lower_promql_workload_with_histograms, HistogramCatalog, PromqlError,
+use asap_frontend_metricsql::unified::{lower_metricsql_query_workload, MetricsqlError};
+use asap_frontend_promql::unified::{
+    lower_promql_query_workload, lower_promql_query_workload_with_histograms, HistogramCatalog,
+    PromqlError,
 };
-use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
+use asap_frontend_sql::unified::{lower_sql_dialect, SqlCatalog, SqlError};
 
 // The optimization stage's vocabulary is this facade's vocabulary too: a caller
 // configures the same models and reads the same output whether it goes through
@@ -47,7 +45,11 @@ pub enum FrontendInput<'a> {
         now_ms: u64,
         histograms: Option<HistogramCatalog>,
     },
-    Metricsql,
+    Metricsql {
+        /// Planning clock, as for PromQL: the ingestion-interval evidence
+        /// must be valid at it.
+        now_ms: u64,
+    },
 }
 
 #[non_exhaustive]
@@ -95,6 +97,7 @@ impl<'a> UserInput<'a> {
                 QueryLanguage::SQL(_) | QueryLanguage::DataFusion,
                 FrontendInput::Sql { .. }
             ) | (QueryLanguage::PromQL, FrontendInput::Promql { .. })
+                | (QueryLanguage::MetricsQL, FrontendInput::Metricsql { .. })
         );
         if !matches_frontend {
             return Err(UserInputError::FrontendMismatch {
@@ -127,7 +130,7 @@ impl FrontendInput<'_> {
         match self {
             Self::Sql { .. } => "Sql",
             Self::Promql { .. } => "Promql",
-            Self::Metricsql => "Metricsql",
+            Self::Metricsql { .. } => "Metricsql",
         }
     }
 }
@@ -191,7 +194,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     input.validate()?;
 
     let exprs = lower(&input).await?;
-    let parsed = ParsedWorkload::new(input.workload.clone(), exprs)?;
+    let parsed = ParsedWorkload::from_roots(input.workload.clone(), exprs)?;
 
     let fallback = MajorPass;
     let pass: &dyn OptimizationPass = input.pass.unwrap_or(&fallback);
@@ -202,11 +205,11 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
 
 /// One expression per normalized entry, in `QueryWorkload::entries()` order.
 ///
-/// The SQL and MetricsQL frontends are driven one entry at a time rather than
+/// The SQL frontend is driven one entry at a time rather than
 /// through `lower_sql_batch`, which walks `query_batch` alone and would drop
 /// every repeating query — exactly the entries whose recurrence the lifecycle
 /// stage needs.
-async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
+async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, PlanError> {
     let entries = || input.workload.query_workload.entries();
 
     match &input.frontend_specific {
@@ -229,7 +232,7 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
                     entry_index: Some(index),
                     source: LoweringError::Sql(source),
                 })?;
-                lowered.push(Rc::new(expr));
+                lowered.push(expr.into());
             }
             Ok(lowered)
         }
@@ -237,30 +240,26 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
             now_ms, histograms, ..
         } => {
             let lowered = match histograms {
-                Some(histograms) => lower_promql_workload_with_histograms(
+                Some(histograms) => lower_promql_query_workload_with_histograms(
                     input.workload,
                     histograms.clone(),
                     *now_ms,
                 ),
-                None => lower_promql_workload(input.workload, *now_ms),
+                None => lower_promql_query_workload(input.workload, *now_ms),
             }
             .map_err(|source| PlanError::Lowering {
                 entry_index: None,
                 source: LoweringError::Promql(source),
             })?;
-            Ok(lowered.into_iter().map(Rc::new).collect())
-        }
-        FrontendInput::Metricsql => {
-            let mut lowered = Vec::new();
-            for (index, entry) in entries().enumerate() {
-                let expr = lower_metricsql(&entry.query.0, entry.requirements.accuracy.target())
-                    .map_err(|source| PlanError::Lowering {
-                        entry_index: Some(index),
-                        source: LoweringError::Metricsql(source),
-                    })?;
-                lowered.push(Rc::new(expr));
-            }
             Ok(lowered)
+        }
+        FrontendInput::Metricsql { now_ms } => {
+            lower_metricsql_query_workload(input.workload, *now_ms).map_err(|source| {
+                PlanError::Lowering {
+                    entry_index: None,
+                    source: LoweringError::Metricsql(source),
+                }
+            })
         }
     }
 }

@@ -12,7 +12,7 @@ use crate::functions::{BuiltinFunction, TransformFunction};
 use crate::parser::{parse_number, ParseError, ParseResult};
 
 #[allow(rustdoc::private_intra_doc_links)]
-/// Partially evaluate `Expr`s so constant subtrees are evaluated at plan time.
+/// Partially evaluate `Expr`s so constant sub-DAGs are evaluated at plan time.
 ///
 /// Note it does not handle algebraic rewrites such as `(a or false)`
 /// --> `a`, which is handled by [`Simplifier`]

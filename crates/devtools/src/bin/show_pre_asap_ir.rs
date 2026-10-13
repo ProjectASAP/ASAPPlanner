@@ -2,7 +2,8 @@
 // (or pipe via stdin: cargo run -p asap-devtools --bin show_pre_asap_ir < queries.txt)
 //
 // Lowers a batch of ad-hoc SQL/PromQL queries to **pre-ASAP IR** (the
-// sketch-agnostic intent algebra: `QueryExpr`/`AggIntent`) and prints them.
+// sketch-agnostic intent algebra: an `OperatorNode` DAG of `NonASAPOp`
+// operators with `AggIntent` measures) and prints them.
 // See `show_post_asap_ir` for the post-ASAP sketch-bound IR one layer
 // downstream — this tool never picks a sketch, it only shows what a query
 // means.

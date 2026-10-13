@@ -17,6 +17,7 @@ use super::node::{Operator, OperatorNode};
 use super::non_asap::NonASAPOp;
 use super::operator_properties::Reduction;
 use super::query::QueryRoot;
+use super::scalar::ScalarExpr;
 use super::timing::data_state;
 use crate::post_asap::execution_data_state::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
@@ -24,7 +25,7 @@ use crate::post_asap::execution_data_state::{
 use crate::post_asap::guarantee::ResultGuarantee;
 use crate::pre_asap::schema::{FieldDataType, Schema};
 
-pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 8;
+pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 9;
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -86,11 +87,16 @@ pub struct PhysicalASAPDAGEdge {
 pub struct PhysicalASAPDAG {
     pub nodes: Vec<PhysicalASAPDAGNode>,
     pub edges: Vec<PhysicalASAPDAGEdge>,
-    /// Semantic workload root. Physical query/precompute sinks are selected
+    /// Semantic workload roots. Physical query/precompute sinks are selected
     /// downstream by the control plane.
-    /// One root per query of the batch, in workload order. Scalar query roots
-    /// are not physical nodes yet.
+    /// One root per operator query of the batch, in workload order.
     pub roots: Vec<PhysicalASAPNodeId>,
+    /// One expression per standalone scalar query, keyed by the query's
+    /// position in the batch, in increasing order. Its operator references
+    /// name nodes of this DAG. A standalone scalar query is not a node (#511
+    /// §2.3), so query `i` of the batch is the scalar root keyed `i` when
+    /// there is one, and otherwise the next entry of `roots`.
+    pub scalar_roots: Vec<(usize, ScalarExpr<PhysicalASAPNodeId>)>,
 }
 
 /// Versioned transport envelope for a physical ASAP DAG.
@@ -134,6 +140,8 @@ pub enum PhysicalASAPDAGValidationError {
     EdgeRoleMismatch { consumer: PhysicalASAPNodeId },
     #[error("physical ASAP DAG has no query roots")]
     NoRoots,
+    #[error("scalar root keyed {0} is out of order or outside the batch")]
+    ScalarRootPosition(usize),
     #[error("physical ASAP DAG contains a cycle")]
     Cycle,
     #[error("physical ASAP node {0:?} is not reachable from the root")]
@@ -222,10 +230,31 @@ impl PhysicalASAPDAG {
                 }
             }
         }
-        if self.roots.is_empty() {
+        if self.roots.is_empty() && self.scalar_roots.is_empty() {
             return Err(PhysicalASAPDAGValidationError::NoRoots);
         }
-        for root in &self.roots {
+        let queries = self.roots.len() + self.scalar_roots.len();
+        let mut next = 0;
+        for (position, _) in &self.scalar_roots {
+            if *position < next || *position >= queries {
+                return Err(PhysicalASAPDAGValidationError::ScalarRootPosition(
+                    *position,
+                ));
+            }
+            next = position + 1;
+        }
+        // Operator roots and the nodes scalar roots read.
+        let root_ids: Vec<PhysicalASAPNodeId> = self
+            .roots
+            .iter()
+            .copied()
+            .chain(
+                self.scalar_roots
+                    .iter()
+                    .flat_map(|(_, expr)| expr.operator_refs().into_iter().copied()),
+            )
+            .collect();
+        for root in &root_ids {
             if !nodes.contains_key(root) {
                 return Err(PhysicalASAPDAGValidationError::MissingRoot(*root));
             }
@@ -315,7 +344,7 @@ impl PhysicalASAPDAG {
             true
         }
         let mut visited = HashSet::new();
-        for root in &self.roots {
+        for root in &root_ids {
             if !visit(*root, &children, &mut HashSet::new(), &mut visited) {
                 return Err(PhysicalASAPDAGValidationError::Cycle);
             }
@@ -333,7 +362,7 @@ impl PhysicalASAPDAG {
             }
         }
         let mut reachable = HashSet::new();
-        for root in &self.roots {
+        for root in &root_ids {
             mark(*root, &children, &mut reachable);
         }
         if let Some(id) = nodes.keys().find(|id| !reachable.contains(id)) {
@@ -383,27 +412,33 @@ pub fn compile_physical_asap_dag(
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    compile_physical_asap_workload_with_node_ids(std::slice::from_ref(root))
+    compile_physical_asap_workload_with_node_ids(&[QueryRoot::Operator(Rc::clone(root))])
 }
 
-/// Export a timed batch as one DAG with one root per query.
+/// Export a timed batch as one DAG: operator queries become `roots` and
+/// standalone scalar queries `scalar_roots`, keyed by their position in the
+/// batch.
 pub fn compile_physical_asap_workload(
-    roots: &[Rc<OperatorNode>],
+    roots: &[QueryRoot],
 ) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
     Ok(compile_physical_asap_workload_with_node_ids(roots)?.dag)
 }
 
 pub fn compile_physical_asap_workload_with_node_ids(
-    roots: &[Rc<OperatorNode>],
+    roots: &[QueryRoot],
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    let roots: Vec<QueryRoot> = roots.iter().cloned().map(QueryRoot::Operator).collect();
-    let (flat, nodes_by_id) = flatten(&roots);
+    let (flat, nodes_by_id) = flatten(roots);
+    let mut scalar_roots = Vec::new();
     let roots = flat
         .roots
-        .iter()
-        .map(|root| match root {
-            QueryRoot::Operator(id) => *id,
-            QueryRoot::Scalar(_) => unreachable!("only operator roots are flattened"),
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, root)| match root {
+            QueryRoot::Operator(id) => Some(id),
+            QueryRoot::Scalar(expr) => {
+                scalar_roots.push((position, expr));
+                None
+            }
         })
         .collect();
     let mut nodes: Vec<PhysicalASAPDAGNode> = Vec::with_capacity(flat.nodes.len());
@@ -444,6 +479,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
         nodes,
         edges,
         roots,
+        scalar_roots,
     };
     dag.validate()?;
     Ok(PhysicalASAPDAGCompilation {
@@ -452,9 +488,12 @@ pub fn compile_physical_asap_workload_with_node_ids(
     })
 }
 
-/// Each child of `operator` with its edge role: the operator inputs, then the
+/// Each input of `operator` with its edge role: the operator inputs, then the
 /// nodes read by its scalar expressions (the order of [`Operator::children`]).
-fn edge_roles<C: Copy>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
+/// A node referenced several times from the scalar expressions is one
+/// `ScalarRef` input, as cost lowering reads it once; ids are per node
+/// pointer, so this dedupes by pointer.
+fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
     use EdgeRole::*;
     let inputs: Vec<EdgeRole> = match operator {
         Operator::NonASAP(op) => match op {
@@ -474,16 +513,14 @@ fn edge_roles<C: Copy>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
         },
     };
     let children = operator.children();
-    let scalar_refs = children.len() - inputs.len();
-    children
-        .into_iter()
-        .copied()
-        .zip(
-            inputs
-                .into_iter()
-                .chain(std::iter::repeat_n(ScalarRef, scalar_refs)),
-        )
-        .collect()
+    let (direct, scalar_refs) = children.split_at(inputs.len());
+    let mut edges: Vec<(C, EdgeRole)> = direct.iter().map(|c| **c).zip(inputs).collect();
+    for producer in scalar_refs {
+        if !edges.contains(&(**producer, ScalarRef)) {
+            edges.push((**producer, ScalarRef));
+        }
+    }
+    edges
 }
 
 fn grouping_compatibility<C>(

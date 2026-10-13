@@ -1,6 +1,8 @@
-//! Recursive lowering from the canonical query IR to evidenced physical DAGs.
+//! Recursive lowering from the operator IR to evidenced physical DAGs.
 
 use std::rc::Rc;
+
+use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 
 use crate::analytical_cost::{
     validate_operator_semantics, AnalyticalCostError, EvidenceBackedPhysicalDAG,
@@ -13,7 +15,7 @@ use crate::physical_operator_statistics::{
 };
 
 pub struct PhysicalNodeRequest<'a> {
-    pub logical_node: &'a asap_types::pre_asap::QueryExpr,
+    pub logical_node: &'a OperatorNode,
     pub operator: PhysicalOperator,
     pub occurrence: usize,
     pub synthetic: bool,
@@ -40,19 +42,19 @@ where
     }
 }
 
-/// Lower a resolved query operator DAG to the physical operators understood by
+/// Lower a non-ASAP operator DAG to the physical operators understood by
 /// this cost model. The authoritative provider supplies statistics by the
 /// stable physical IDs owned by that provider; missing evidence makes the
 /// complete query unavailable. Scalar expressions remain part of their
-/// containing operator's local cost.
+/// containing operator's local cost. An ASAP node is unsupported here.
 pub fn lower_query_physical_dag(
-    root: &Rc<asap_types::pre_asap::QueryExpr>,
+    root: &Rc<OperatorNode>,
     scope: &ComparisonScope,
     evidence: &dyn PhysicalNodeEvidenceProvider,
 ) -> Result<EvidenceBackedPhysicalDAG, AnalyticalCostError> {
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{GroupKeys, QueryExpr, RelationalSetOpKind};
+    use asap_types::pre_asap::{GroupKeys, RelationalSetOpKind};
 
     scope.validate()?;
 
@@ -65,7 +67,7 @@ pub fn lower_query_physical_dag(
     }
 
     impl Lowerer<'_> {
-        fn lower(&mut self, query: &QueryExpr) -> Result<String, AnalyticalCostError> {
+        fn lower(&mut self, query: &OperatorNode) -> Result<String, AnalyticalCostError> {
             let occurrence = self.next_id;
             self.next_id += 1;
             self.lower_new(query, occurrence)
@@ -73,7 +75,7 @@ pub fn lower_query_physical_dag(
 
         fn resolve(
             &self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             operator: PhysicalOperator,
             occurrence: usize,
             synthetic: bool,
@@ -128,12 +130,23 @@ pub fn lower_query_physical_dag(
 
         fn lower_unary(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
             operator: PhysicalOperator,
-            child: &QueryExpr,
+            child: &OperatorNode,
         ) -> Result<String, AnalyticalCostError> {
             let child_id = self.lower(child)?;
+            self.push_unary(query, occurrence, operator, child_id)
+        }
+
+        /// `operator` over an already-lowered child.
+        fn push_unary(
+            &mut self,
+            query: &OperatorNode,
+            occurrence: usize,
+            operator: PhysicalOperator,
+            child_id: String,
+        ) -> Result<String, AnalyticalCostError> {
             let children = vec![child_id.clone()];
             let evidence = self.resolve(query, operator, occurrence, false, &children, None)?;
             let statistics = &evidence.statistics;
@@ -149,19 +162,65 @@ pub fn lower_query_physical_dag(
             self.push(evidence, operator, children, None)
         }
 
-        fn lower_promql_unary(
+        /// `operator` over its row input `child`, plus one
+        /// `PromqlVectorToScalar` input per distinct operator reference
+        /// (`scalar(v)`) its expressions read, in reference order.
+        fn lower_with_scalar_inputs<'e>(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
             operator: PhysicalOperator,
-            child: &QueryExpr,
+            child: &OperatorNode,
+            exprs: impl IntoIterator<Item = &'e ScalarExpr>,
+        ) -> Result<String, AnalyticalCostError> {
+            let mut refs: Vec<&Rc<OperatorNode>> = Vec::new();
+            for expr in exprs {
+                for node in expr.operator_refs() {
+                    if !refs.iter().any(|r| Rc::ptr_eq(r, node)) {
+                        refs.push(node);
+                    }
+                }
+            }
+            if refs.is_empty() {
+                return self.lower_unary(query, occurrence, operator, child);
+            }
+            let mut children = vec![self.lower(child)?];
+            for node in refs {
+                let scalar = ScalarExpr::PromqlScalarFromVector(Rc::clone(node));
+                let scalar_occurrence = self.next_id;
+                self.next_id += 1;
+                children.push(self.lower_scalar_operand(query, scalar_occurrence, &scalar)?);
+            }
+            let evidence = self.resolve(query, operator, occurrence, false, &children, None)?;
+            require_statistics_shape(&evidence.physical_id, &evidence.statistics, children.len())?;
+            for (index, child_id) in children.iter().enumerate() {
+                let child_statistics = self.node_statistics(child_id)?;
+                if evidence.statistics.input(index) != Some(child_statistics.output()) {
+                    return Err(AnalyticalCostError::ConflictingEdgeStatistics {
+                        parent: evidence.physical_id.clone(),
+                        child: child_id.clone(),
+                        input_index: index,
+                    });
+                }
+                require_promql_edge(&evidence.statistics, index, child_statistics)?;
+            }
+            require_operator_statistics(operator, &evidence.statistics)?;
+            self.push(evidence, operator, children, None)
+        }
+
+        fn lower_promql_unary(
+            &mut self,
+            query: &OperatorNode,
+            occurrence: usize,
+            operator: PhysicalOperator,
+            child: &OperatorNode,
         ) -> Result<String, AnalyticalCostError> {
             self.lower_unary(query, occurrence, operator, child)
         }
 
         fn lower_promql_scalar_leaf(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
         ) -> Result<String, AnalyticalCostError> {
             let operator = PhysicalOperator::PromqlScalarLeaf;
@@ -169,6 +228,28 @@ pub fn lower_query_physical_dag(
             require_statistics_shape(&evidence.physical_id, &evidence.statistics, 0)?;
             require_operator_statistics(operator, &evidence.statistics)?;
             self.push(evidence, operator, vec![], None)
+        }
+
+        /// Lower the owned scalar operand of `vector(s)`. A literal or
+        /// `time()` is a physical scalar leaf; `scalar(v)` reads its vector
+        /// through `PromqlVectorToScalar`.
+        fn lower_scalar_operand(
+            &mut self,
+            query: &OperatorNode,
+            occurrence: usize,
+            expr: &ScalarExpr,
+        ) -> Result<String, AnalyticalCostError> {
+            match expr {
+                ScalarExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
+                | ScalarExpr::EvalTimestamp => self.lower_promql_scalar_leaf(query, occurrence),
+                ScalarExpr::PromqlScalarFromVector(vector) => self.lower_promql_unary(
+                    query,
+                    occurrence,
+                    PhysicalOperator::PromqlVectorToScalar,
+                    vector,
+                ),
+                _ => Err(AnalyticalCostError::UnsupportedQueryOperator),
+            }
         }
 
         fn node_statistics(&self, id: &str) -> Result<&OperatorStatistics, AnalyticalCostError> {
@@ -182,11 +263,14 @@ pub fn lower_query_physical_dag(
 
         fn lower_new(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
         ) -> Result<String, AnalyticalCostError> {
-            match query {
-                QueryExpr::Scan {
+            let Some(op) = query.non_asap() else {
+                return Err(AnalyticalCostError::UnsupportedQueryOperator);
+            };
+            match op {
+                NonASAPOp::Scan {
                     source, predicates, ..
                 } => {
                     let coverage = bind_scan_coverage(
@@ -252,13 +336,13 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(filter_operator, &filter_evidence.statistics)?;
                     self.push(filter_evidence, filter_operator, children, None)
                 }
-                QueryExpr::Filter { pred, child } => {
+                NonASAPOp::Filter { pred, child } => {
                     let operator = PhysicalOperator::Filter {
                         predicate_operations_per_row: scalar_operation_count(&pred.0)?.max(1),
                     };
-                    self.lower_unary(query, occurrence, operator, child)
+                    self.lower_with_scalar_inputs(query, occurrence, operator, child, [&pred.0])
                 }
-                QueryExpr::Project { cols, child, .. } => {
+                NonASAPOp::Project { cols, child, .. } => {
                     let expression_operations_per_row = cols
                         .iter()
                         .try_fold(0_u64, |total, item| {
@@ -271,16 +355,17 @@ pub fn lower_query_physical_dag(
                                 .ok_or(AnalyticalCostError::Overflow)
                         })?
                         .max(1);
-                    self.lower_unary(
+                    self.lower_with_scalar_inputs(
                         query,
                         occurrence,
                         PhysicalOperator::Project {
                             expression_operations_per_row,
                         },
                         child,
+                        cols.iter().map(|item| &item.expr),
                     )
                 }
-                QueryExpr::Aggregate {
+                NonASAPOp::Aggregate {
                     reduction,
                     measures,
                     filters,
@@ -289,7 +374,7 @@ pub fn lower_query_physical_dag(
                     ..
                 } => {
                     if having.is_some()
-                        || asap_types::pre_asap::any_measure_filtered(filters)
+                        || asap_types::ir::non_asap::any_measure_filtered(filters)
                         || measures.is_empty()
                     {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
@@ -338,13 +423,9 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Dedup { cols, child } => {
+                NonASAPOp::Dedup { cols, child } => {
                     let key_count = if cols.is_empty() {
-                        child
-                            .output_schema()
-                            .map_err(|_| AnalyticalCostError::UnsupportedQueryOperator)?
-                            .fields
-                            .len()
+                        child.schema.fields.len()
                     } else {
                         cols.len()
                     };
@@ -361,7 +442,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Sort {
+                NonASAPOp::Sort {
                     keys,
                     partition_by,
                     child,
@@ -381,13 +462,26 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Limit { n, offset, child } => {
-                    if let QueryExpr::Sort {
+                NonASAPOp::Limit {
+                    n,
+                    offset,
+                    partition_by: limit_partition_by,
+                    child,
+                } => {
+                    // Offset-only and per-group limits have no physical
+                    // operator here.
+                    let Some(n) = n else {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    };
+                    if limit_partition_by != &GroupKeys::none() {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    }
+                    if let Some(NonASAPOp::Sort {
                         keys,
                         partition_by,
                         child: sorted_child,
                         ..
-                    } = child.as_ref()
+                    }) = child.non_asap()
                     {
                         if !keys.is_empty() && partition_by == &GroupKeys::none() {
                             let child_id = self.lower(sorted_child)?;
@@ -442,7 +536,7 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::SQLWindowFunc {
+                NonASAPOp::SQLWindowFunc {
                     func,
                     partition_by,
                     order_by,
@@ -472,7 +566,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::TimeRange { range, child } => {
+                NonASAPOp::TimeRange { range, child, .. } => {
                     let range_millis = duration_millis(*range, "range")?;
                     self.lower_promql_unary(
                         query,
@@ -481,7 +575,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::PromqlSubquery {
+                NonASAPOp::PromqlSubquery {
                     range,
                     resolution,
                     child,
@@ -513,7 +607,7 @@ pub fn lower_query_physical_dag(
                     }
                     Ok(id)
                 }
-                QueryExpr::PromqlRelabel { value, child, .. } => self.lower_promql_unary(
+                NonASAPOp::PromqlRelabel { value, child, .. } => self.lower_promql_unary(
                     query,
                     occurrence,
                     PhysicalOperator::PromqlRelabel {
@@ -521,7 +615,7 @@ pub fn lower_query_physical_dag(
                     },
                     child,
                 ),
-                QueryExpr::PromqlSeriesSample {
+                NonASAPOp::PromqlSeriesSample {
                     by, kind, child, ..
                 } => {
                     if by.is_without() {
@@ -557,7 +651,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::PromqlInfoEnrich { selector, child } => {
+                NonASAPOp::PromqlInfoEnrich { selector, child } => {
                     let left_id = self.lower(child)?;
                     let coverage = bind_info_coverage(
                         &format!("occurrence-{occurrence}-info"),
@@ -609,34 +703,13 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, &evidence.statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::BinaryOp {
-                    op,
-                    lhs,
-                    rhs,
-                    vector_match,
+                NonASAPOp::BinaryOp {
+                    operator, lhs, rhs, ..
                 } => {
-                    let left_scalar = is_promql_scalar(lhs);
-                    let right_scalar = is_promql_scalar(rhs);
-                    if left_scalar && right_scalar {
-                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
+                    let op = &operator.kind;
+                    let vector_match = &operator.vector_match;
                     let operation = promql_binary_operation(op);
-                    if (left_scalar || right_scalar)
-                        && !matches!(operation, PromqlBinaryOperation::ArithmeticOrComparison)
-                    {
-                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
-                    let operand_mode = match (left_scalar, right_scalar) {
-                        (false, false) => PromqlBinaryOperandMode::VectorVector,
-                        (false, true) => PromqlBinaryOperandMode::VectorScalar,
-                        (true, false) => PromqlBinaryOperandMode::ScalarVector,
-                        (true, true) => unreachable!("scalar/scalar returned above"),
-                    };
-                    if operand_mode != PromqlBinaryOperandMode::VectorVector
-                        && vector_match.is_some()
-                    {
-                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
+                    let operand_mode = PromqlBinaryOperandMode::VectorVector;
                     let cardinality = promql_vector_cardinality(vector_match.as_ref());
                     let left_id = self.lower(lhs)?;
                     let right_id = self.lower(rhs)?;
@@ -670,41 +743,31 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, &evidence.statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::PromqlVectorFromScalar(child) => self.lower_promql_unary(
-                    query,
-                    occurrence,
-                    PhysicalOperator::PromqlScalarToVector,
-                    child,
-                ),
-                QueryExpr::PromqlScalarFromVector(child) => self.lower_promql_unary(
-                    query,
-                    occurrence,
-                    PhysicalOperator::PromqlVectorToScalar,
-                    child,
-                ),
-                QueryExpr::PromqlScalarBridge(inner)
-                    if matches!(
-                        inner.as_ref(),
-                        QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
-                    ) =>
-                {
-                    self.lower_promql_scalar_leaf(query, occurrence)
+                NonASAPOp::PromqlVectorFromScalar(scalar) => {
+                    let scalar_occurrence = self.next_id;
+                    self.next_id += 1;
+                    let child_id = self.lower_scalar_operand(query, scalar_occurrence, scalar)?;
+                    self.push_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::PromqlScalarToVector,
+                        child_id,
+                    )
                 }
-                QueryExpr::EvalTimestamp => self.lower_promql_scalar_leaf(query, occurrence),
-                QueryExpr::TimeShift { shift, child } => {
+                NonASAPOp::TimeShift { shift, child } => {
                     if !shift.is_identity() {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
                     self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
                 }
-                QueryExpr::Concat { children, .. } => {
+                NonASAPOp::Concat { children, .. } => {
                     let child_ids = children
                         .iter()
                         .map(|child| self.lower(child))
                         .collect::<Result<Vec<_>, _>>()?;
                     self.lower_concat(query, occurrence, child_ids)
                 }
-                QueryExpr::SetOp {
+                NonASAPOp::SetOp {
                     kind: RelationalSetOpKind::Union,
                     all: true,
                     left,
@@ -714,7 +777,7 @@ pub fn lower_query_physical_dag(
                     let right_id = self.lower(right)?;
                     self.lower_concat(query, occurrence, vec![left_id, right_id])
                 }
-                QueryExpr::Join {
+                NonASAPOp::Join {
                     kind,
                     pred,
                     left,
@@ -764,7 +827,7 @@ pub fn lower_query_physical_dag(
 
         fn lower_concat(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
             child_ids: Vec<String>,
         ) -> Result<String, AnalyticalCostError> {
@@ -957,7 +1020,7 @@ fn require_operator_statistics(
 fn bind_scan_coverage(
     node_id: &str,
     source: &asap_types::pre_asap::Source,
-    predicates: &[asap_types::pre_asap::Predicate],
+    predicates: &[asap_types::ir::Predicate],
     scope: &ComparisonScope,
 ) -> Result<ScanSelection, AnalyticalCostError> {
     let mut matches = scope.sources.iter().filter(|coverage| {
@@ -1051,17 +1114,14 @@ fn promql_vector_cardinality(
 }
 
 fn hash_join_key_count(
-    expr: &asap_types::pre_asap::QueryExpr,
-    left: &asap_types::pre_asap::QueryExpr,
-    right: &asap_types::pre_asap::QueryExpr,
+    expr: &ScalarExpr,
+    left: &OperatorNode,
+    right: &OperatorNode,
 ) -> Option<u64> {
-    use asap_types::pre_asap::{CompareOpKind, QueryExpr};
+    use asap_types::pre_asap::CompareOpKind;
 
-    let (Ok(left_schema), Ok(right_schema)) = (left.output_schema(), right.output_schema()) else {
-        return None;
-    };
-    let left_width = left_schema.fields.len();
-    let total_width = left_width.saturating_add(right_schema.fields.len());
+    let left_width = left.schema.fields.len();
+    let total_width = left_width.saturating_add(right.schema.fields.len());
 
     fn column_side(column: usize, left_width: usize, total_width: usize) -> Option<bool> {
         if column < left_width {
@@ -1073,14 +1133,15 @@ fn hash_join_key_count(
         }
     }
 
-    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> Option<u64> {
+    fn predicate(expr: &ScalarExpr, left_width: usize, total_width: usize) -> Option<u64> {
         match expr {
-            QueryExpr::Compare {
+            ScalarExpr::Compare {
                 left,
                 op: CompareOpKind::Eq,
                 right,
+                ..
             } => match (left.as_ref(), right.as_ref()) {
-                (QueryExpr::Column(left), QueryExpr::Column(right)) => match (
+                (ScalarExpr::Column(left), ScalarExpr::Column(right)) => match (
                     column_side(*left, left_width, total_width),
                     column_side(*right, left_width, total_width),
                 ) {
@@ -1089,7 +1150,7 @@ fn hash_join_key_count(
                 },
                 _ => None,
             },
-            QueryExpr::BoolAnd(parts) if !parts.is_empty() => {
+            ScalarExpr::BoolAnd(parts) if !parts.is_empty() => {
                 parts.iter().try_fold(0_u64, |count, part| {
                     count.checked_add(predicate(part, left_width, total_width)?)
                 })
@@ -1101,12 +1162,8 @@ fn hash_join_key_count(
     predicate(expr, left_width, total_width)
 }
 
-fn scalar_operation_count(
-    expr: &asap_types::pre_asap::QueryExpr,
-) -> Result<u64, AnalyticalCostError> {
-    use asap_types::pre_asap::QueryExpr;
-
-    let add = |parts: &[&QueryExpr]| {
+fn scalar_operation_count(expr: &ScalarExpr) -> Result<u64, AnalyticalCostError> {
+    let add = |parts: &[&ScalarExpr]| {
         parts.iter().try_fold(0_u64, |total, part| {
             total
                 .checked_add(scalar_operation_count(part)?)
@@ -1119,14 +1176,16 @@ fn scalar_operation_count(
             .ok_or(AnalyticalCostError::Overflow)
     };
     match expr {
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::EvalTimestamp
-        | QueryExpr::CurrentTimestamp => Ok(0),
-        QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
+        ScalarExpr::Column(_)
+        | ScalarExpr::Literal(_)
+        | ScalarExpr::EvalTimestamp
+        | ScalarExpr::CurrentTimestamp => Ok(0),
+        // Read from a scalar input of the containing operator.
+        ScalarExpr::PromqlScalarFromVector(_) => Ok(0),
+        ScalarExpr::Compare { left, right, .. } | ScalarExpr::Arithmetic { left, right, .. } => {
             with_local(&[left, right])
         }
-        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+        ScalarExpr::BoolAnd(parts) | ScalarExpr::BoolOr(parts) => {
             let children = parts.iter().collect::<Vec<_>>();
             add(&children)?
                 .checked_add(
@@ -1135,12 +1194,11 @@ fn scalar_operation_count(
                 )
                 .ok_or(AnalyticalCostError::Overflow)
         }
-        QueryExpr::Not(child)
-        | QueryExpr::IsNull(child)
-        | QueryExpr::IsNotNull(child)
-        | QueryExpr::PromqlScalarBridge(child) => with_local(&[child]),
-        QueryExpr::Cast { expr, .. } => with_local(&[expr]),
-        QueryExpr::InList { expr, list, .. } => {
+        ScalarExpr::Not(child) | ScalarExpr::IsNull(child) | ScalarExpr::IsNotNull(child) => {
+            with_local(&[child])
+        }
+        ScalarExpr::Cast { expr, .. } => with_local(&[expr]),
+        ScalarExpr::InList { expr, list, .. } => {
             let mut children = Vec::with_capacity(list.len() + 1);
             children.push(expr.as_ref());
             children.extend(list.iter());
@@ -1148,11 +1206,11 @@ fn scalar_operation_count(
                 .checked_add(u64::try_from(list.len()).map_err(|_| AnalyticalCostError::Overflow)?)
                 .ok_or(AnalyticalCostError::Overflow)
         }
-        QueryExpr::FunctionCall { args, .. } => {
+        ScalarExpr::FunctionCall { args, .. } => {
             let children = args.iter().collect::<Vec<_>>();
             with_local(&children)
         }
-        QueryExpr::Case {
+        ScalarExpr::Case {
             operand,
             branches,
             else_expr,
@@ -1246,16 +1304,6 @@ fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bo
     )
 }
 
-fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
-    use asap_types::pre_asap::QueryExpr;
-    matches!(
-        query,
-        QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::PromqlScalarFromVector(_)
-            | QueryExpr::EvalTimestamp
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,6 +1314,7 @@ mod tests {
         validate_comparison_scopes, BinaryEdgeStatistics, PartitionStatistics,
         PromqlEdgeStatistics, PromqlUnaryEdgeStatistics, PromqlValueKind, UnaryEdgeStatistics,
     };
+    use asap_types::ir::{BinaryOperator, ExprSemantics, Predicate, SortKey, TimeRangeKind};
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
@@ -1325,8 +1374,14 @@ mod tests {
     ) -> OperatorStatistics {
         let edges = unary_edges(input, output);
         match operator {
-            PhysicalOperator::Filter { .. } => OperatorStatistics::Filter { edges },
-            PhysicalOperator::Project { .. } => OperatorStatistics::Project { edges },
+            PhysicalOperator::Filter { .. } => OperatorStatistics::Filter {
+                edges,
+                scalar_inputs: vec![],
+            },
+            PhysicalOperator::Project { .. } => OperatorStatistics::Project {
+                edges,
+                scalar_inputs: vec![],
+            },
             PhysicalOperator::InMemoryComparisonSort { .. } => {
                 OperatorStatistics::InMemoryComparisonSort {
                     edges,
@@ -1401,10 +1456,7 @@ mod tests {
         }
     }
 
-    fn coverage(
-        source: asap_types::pre_asap::Source,
-        predicates: Vec<asap_types::pre_asap::Predicate>,
-    ) -> ScanSelection {
+    fn coverage(source: asap_types::pre_asap::Source, predicates: Vec<Predicate>) -> ScanSelection {
         ScanSelection {
             source,
             source_snapshot_id: "snapshot-1".into(),
@@ -1451,27 +1503,30 @@ mod tests {
     // Correlation can be costed as an exact hash aggregate using provider-supplied state size.
     #[test]
     fn correlation_lowers_to_physical_hash_aggregate() {
-        use asap_types::pre_asap::{
-            AggIntent, DataType, Field, QueryExpr, Reduction, Schema, Source,
-        };
+        use asap_types::pre_asap::{AggIntent, DataType, Field, Reduction, Schema, Source};
         let source = Source::Table {
             table_ref: "pairs".into(),
         };
-        let root = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::by(vec![]),
-            measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
-            output_names: vec!["r".into()],
-            filters: vec![],
-            having: None,
-            child: Rc::new(QueryExpr::Scan {
-                source: source.clone(),
-                predicates: vec![],
-                schema: Schema::new(vec![
-                    Field::plain("x", DataType::Float64, true),
-                    Field::plain("y", DataType::Float64, true),
-                ]),
-            }),
-        });
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![]),
+                measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
+                output_names: vec!["r".into()],
+                filters: vec![],
+                having: None,
+                child: OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+                    NonASAPOp::Scan {
+                        source: source.clone(),
+                        predicates: vec![],
+                        schema: Schema::new(vec![
+                            Field::plain("x", DataType::Float64, true),
+                            Field::plain("y", DataType::Float64, true),
+                        ]),
+                    },
+                ))
+                .unwrap(),
+            }))
+            .unwrap();
         let scope = scope(vec![coverage(source, vec![])]);
         let provided = HashMap::from([
             (
@@ -1501,51 +1556,57 @@ mod tests {
 
     #[test]
     fn query_lowering_recurses_and_fuses_global_sort_limit() {
-        use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr, Reduction, SortKey, Source};
+        use asap_types::pre_asap::{AggIntent, GroupKeys, Reduction, Source};
         use asap_types::pre_asap::{DataType, Field, Schema};
         use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
-            predicates: vec![asap_types::pre_asap::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
+            predicates: vec![Predicate(ScalarExpr::Literal(
+                asap_types::pre_asap::ScalarValue::Boolean(true),
             ))],
             schema: Schema::new(vec![
                 Field::plain("service", DataType::Utf8, false),
                 Field::plain("value", DataType::Float64, false),
             ]),
-        });
-        let aggregate = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::by(vec![0]),
-            measures: vec![AggIntent::Sum { col: Some(1) }],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: Rc::clone(&scan),
-        });
-        let sort = Rc::new(QueryExpr::Sort {
+        }))
+        .unwrap();
+        let aggregate =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![0]),
+                measures: vec![AggIntent::Sum { col: Some(1) }],
+                output_names: vec![],
+                filters: vec![],
+                having: None,
+                child: Rc::clone(&scan),
+            }))
+            .unwrap();
+        let sort = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Sort {
             keys: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: ScalarExpr::Column(0),
                 ascending: false,
                 nulls_first: false,
             }],
             partition_by: GroupKeys::none(),
             child: aggregate,
-        });
-        let root = Rc::new(QueryExpr::Limit {
-            n: 10,
+        }))
+        .unwrap();
+        let root = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Limit {
+            n: Some(10),
             offset: 5,
+            partition_by: GroupKeys::none(),
             child: sort,
-        });
+        }))
+        .unwrap();
 
         let scan_coverage = coverage(
             Source::Table {
                 table_ref: "events".into(),
             },
-            vec![asap_types::pre_asap::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
+            vec![Predicate(ScalarExpr::Literal(
+                asap_types::pre_asap::ScalarValue::Boolean(true),
             ))],
         );
         let scope = scope(vec![scan_coverage]);
@@ -1638,26 +1699,29 @@ mod tests {
     #[test]
     fn query_lowering_shares_only_provider_identified_physical_nodes() {
         use asap_types::pre_asap::{CompareOpKind, DataType, Field, Schema};
-        use asap_types::pre_asap::{JoinKind, Predicate, QueryExpr, Source};
+        use asap_types::pre_asap::{JoinKind, Source};
         use std::rc::Rc;
 
-        let shared = Rc::new(QueryExpr::Scan {
+        let shared = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "dimensions".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let root = Rc::new(QueryExpr::Join {
+        }))
+        .unwrap();
+        let root = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Join {
             kind: JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)),
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
                 op: CompareOpKind::Eq,
-                right: Rc::new(QueryExpr::Column(1)),
-            })),
+                right: Box::new(ScalarExpr::Column(1)),
+                semantics: ExprSemantics::Sql,
+            }),
             left: Rc::clone(&shared),
             right: Rc::clone(&shared),
-        });
+        }))
+        .unwrap();
         let scan_selection = coverage(
             Source::Table {
                 table_ref: "dimensions".into(),
@@ -1781,16 +1845,19 @@ mod tests {
             ))
         );
 
-        let invalid = Rc::new(QueryExpr::Join {
-            kind: JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)),
-                op: CompareOpKind::Eq,
-                right: Rc::new(QueryExpr::Column(0)),
-            })),
-            left: Rc::clone(&shared),
-            right: Rc::clone(&shared),
-        });
+        let invalid =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Join {
+                kind: JoinKind::Inner,
+                pred: Predicate(ScalarExpr::Compare {
+                    left: Box::new(ScalarExpr::Column(0)),
+                    op: CompareOpKind::Eq,
+                    right: Box::new(ScalarExpr::Column(0)),
+                    semantics: ExprSemantics::Sql,
+                }),
+                left: Rc::clone(&shared),
+                right: Rc::clone(&shared),
+            }))
+            .unwrap();
         assert_eq!(
             lower_query_physical_dag(&invalid, &shared_scope, &shared_provider),
             Err(AnalyticalCostError::UnsupportedQueryOperator)
@@ -1800,62 +1867,73 @@ mod tests {
     #[test]
     fn query_lowering_covers_relational_unary_operators() {
         use asap_types::pre_asap::{DataType, Field, ScalarValue, Schema};
-        use asap_types::pre_asap::{
-            GroupKeys, Predicate, QueryExpr, SortKey, Source, TimeShift, WindowFuncKind,
-        };
-        use std::rc::Rc;
+        use asap_types::pre_asap::{GroupKeys, Source, TimeShift, WindowFuncKind};
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let filter = Rc::new(QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            child: scan,
-        });
-        let project = Rc::new(QueryExpr::Project {
-            cols: vec![],
-            qualifier: None,
-            child: filter,
-        });
-        let dedup = Rc::new(QueryExpr::Dedup {
+        }))
+        .unwrap();
+        let filter =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
+                pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+                child: scan,
+            }))
+            .unwrap();
+        let project =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
+                cols: vec![],
+                qualifier: None,
+                child: filter,
+            }))
+            .unwrap();
+        let dedup = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Dedup {
             cols: vec![0],
             child: project,
-        });
-        let window = Rc::new(QueryExpr::SQLWindowFunc {
-            func: WindowFuncKind::RowNumber,
-            args: vec![],
-            partition_by: GroupKeys::none(),
-            order_by: vec![SortKey {
-                expr: QueryExpr::Column(0),
-                ascending: true,
-                nulls_first: false,
-            }],
-            frame: None,
-            output_name: "rn".into(),
-            child: dedup,
-        });
-        let sort = Rc::new(QueryExpr::Sort {
+        }))
+        .unwrap();
+        let window = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+            NonASAPOp::SQLWindowFunc {
+                func: WindowFuncKind::RowNumber,
+                args: vec![],
+                partition_by: GroupKeys::none(),
+                order_by: vec![SortKey {
+                    expr: ScalarExpr::Column(0),
+                    ascending: true,
+                    nulls_first: false,
+                }],
+                frame: None,
+                output_name: "rn".into(),
+                child: dedup,
+            },
+        ))
+        .unwrap();
+        let sort = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Sort {
             keys: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: ScalarExpr::Column(0),
                 ascending: true,
                 nulls_first: false,
             }],
             partition_by: GroupKeys::by(vec![0]),
             child: window,
-        });
-        let limit = Rc::new(QueryExpr::Limit {
-            n: 20,
+        }))
+        .unwrap();
+        let limit = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Limit {
+            n: Some(20),
             offset: 0,
+            partition_by: GroupKeys::none(),
             child: sort,
-        });
-        let root = Rc::new(QueryExpr::TimeShift {
-            shift: TimeShift::default(),
-            child: limit,
-        });
+        }))
+        .unwrap();
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
+                shift: TimeShift::default(),
+                child: limit,
+            }))
+            .unwrap();
 
         let scan_selection = coverage(
             Source::Table {
@@ -1974,22 +2052,25 @@ mod tests {
     #[test]
     fn query_lowering_maps_concat_and_union_all_but_rejects_distinct_set_ops() {
         use asap_types::pre_asap::{DataType, Field, Schema};
-        use asap_types::pre_asap::{QueryExpr, RelationalSetOpKind, Source};
-        use std::rc::Rc;
+        use asap_types::pre_asap::{RelationalSetOpKind, Source};
 
-        let scan = |name: &str| QueryExpr::Scan {
-            source: Source::Table {
-                table_ref: name.into(),
-            },
-            predicates: vec![],
-            schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
+        let scan = |name: &str| {
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::Table {
+                    table_ref: name.into(),
+                },
+                predicates: vec![],
+                schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
+            }))
+            .unwrap()
         };
-        let union = Rc::new(QueryExpr::SetOp {
+        let union = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::SetOp {
             kind: RelationalSetOpKind::Union,
             all: true,
-            left: Rc::new(scan("a")),
-            right: Rc::new(scan("b")),
-        });
+            left: scan("a"),
+            right: scan("b"),
+        }))
+        .unwrap();
         let scope = scope(vec![
             coverage(
                 Source::Table {
@@ -2033,19 +2114,23 @@ mod tests {
             ))
         );
 
-        let concat = Rc::new(QueryExpr::Concat {
-            children: vec![scan("a"), scan("b")],
-            discriminator_unique_key: None,
-        });
+        let concat =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
+                children: vec![scan("a"), scan("b")],
+                discriminator_unique_key: None,
+            }))
+            .unwrap();
         let dag = lower_query_physical_dag(&concat, &scope, &scripted(&provided)).unwrap();
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);
 
-        let distinct_union = Rc::new(QueryExpr::SetOp {
-            kind: RelationalSetOpKind::Union,
-            all: false,
-            left: Rc::new(scan("a")),
-            right: Rc::new(scan("b")),
-        });
+        let distinct_union =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::SetOp {
+                kind: RelationalSetOpKind::Union,
+                all: false,
+                left: scan("a"),
+                right: scan("b"),
+            }))
+            .unwrap();
         assert_eq!(
             lower_query_physical_dag(&distinct_union, &scope, &scripted(&provided)),
             Err(AnalyticalCostError::UnsupportedQueryOperator)
@@ -2054,22 +2139,24 @@ mod tests {
 
     #[test]
     fn query_lowering_fails_closed_for_missing_or_inconsistent_statistics() {
+        use asap_types::pre_asap::Source;
         use asap_types::pre_asap::{DataType, Field, Schema};
-        use asap_types::pre_asap::{QueryExpr, Source};
-        use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let root = Rc::new(QueryExpr::Project {
-            cols: vec![],
-            qualifier: None,
-            child: scan,
-        });
+        }))
+        .unwrap();
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
+                cols: vec![],
+                qualifier: None,
+                child: scan,
+            }))
+            .unwrap();
 
         let comparison_scope = scope(vec![coverage(
             Source::Table {
@@ -2171,25 +2258,29 @@ mod tests {
     #[test]
     fn query_lowering_accepts_a_consistently_empty_edge() {
         use asap_types::pre_asap::{DataType, Field, ScalarValue, Schema};
-        use asap_types::pre_asap::{Predicate, QueryExpr, Source};
-        use std::rc::Rc;
+        use asap_types::pre_asap::{GroupKeys, Source};
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let filter = Rc::new(QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(false)))),
-            child: scan,
-        });
-        let root = Rc::new(QueryExpr::Limit {
-            n: 10,
+        }))
+        .unwrap();
+        let filter =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
+                pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(false))),
+                child: scan,
+            }))
+            .unwrap();
+        let root = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Limit {
+            n: Some(10),
             offset: 0,
+            partition_by: GroupKeys::none(),
             child: filter,
-        });
+        }))
+        .unwrap();
 
         let scope = scope(vec![coverage(
             Source::Table {
@@ -2230,59 +2321,70 @@ mod tests {
 
     #[test]
     fn query_lowering_rejects_aggregates_without_a_hash_implementation() {
-        use asap_types::pre_asap::{
-            AggIntent, GroupKeys, QueryExpr, Reduction, Source, WindowFuncKind,
-        };
+        use asap_types::pre_asap::{AggIntent, GroupKeys, Reduction, Source, WindowFuncKind};
         use asap_types::pre_asap::{DataType, Field, Schema};
         use asap_types::types::AccuracyTarget;
-        use std::rc::Rc;
 
         let scan = || {
-            Rc::new(QueryExpr::Scan {
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
                 predicates: vec![],
                 schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-            })
+            }))
+            .unwrap()
         };
-        let exact_quantile = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::by(vec![]),
-            measures: vec![AggIntent::Quantile {
-                col: Some(0),
-                q: 0.99,
-                accuracy: AccuracyTarget::Exact,
-            }],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: scan(),
-        });
-        let empty_sort_limit = Rc::new(QueryExpr::Limit {
-            n: 10,
-            offset: 0,
-            child: Rc::new(QueryExpr::Sort {
-                keys: vec![],
-                partition_by: GroupKeys::none(),
+        let exact_quantile =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![]),
+                measures: vec![AggIntent::Quantile {
+                    col: Some(0),
+                    q: 0.99,
+                    accuracy: AccuracyTarget::Exact,
+                }],
+                output_names: vec![],
+                filters: vec![],
+                having: None,
                 child: scan(),
-            }),
-        });
-        let unsupported_window = Rc::new(QueryExpr::SQLWindowFunc {
-            func: WindowFuncKind::Lag,
-            args: vec![QueryExpr::Column(0)],
-            partition_by: GroupKeys::none(),
-            order_by: vec![],
-            frame: None,
-            output_name: "lag".into(),
-            child: scan(),
-        });
-        let shifted = Rc::new(QueryExpr::TimeShift {
-            shift: asap_types::pre_asap::TimeShift {
-                offset_ms: 60_000,
-                at: None,
+            }))
+            .unwrap();
+        let empty_sort_limit =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Limit {
+                n: Some(10),
+                offset: 0,
+                partition_by: GroupKeys::none(),
+                child: OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+                    NonASAPOp::Sort {
+                        keys: vec![],
+                        partition_by: GroupKeys::none(),
+                        child: scan(),
+                    },
+                ))
+                .unwrap(),
+            }))
+            .unwrap();
+        let unsupported_window = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+            NonASAPOp::SQLWindowFunc {
+                func: WindowFuncKind::Lag,
+                args: vec![ScalarExpr::Column(0)],
+                partition_by: GroupKeys::none(),
+                order_by: vec![],
+                frame: None,
+                output_name: "lag".into(),
+                child: scan(),
             },
-            child: scan(),
-        });
+        ))
+        .unwrap();
+        let shifted =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
+                shift: asap_types::pre_asap::TimeShift {
+                    offset_ms: 60_000,
+                    at: None,
+                },
+                child: scan(),
+            }))
+            .unwrap();
         let scope = scope(vec![coverage(
             Source::Table {
                 table_ref: "events".into(),
@@ -2305,40 +2407,42 @@ mod tests {
 
     #[test]
     fn scalar_work_counts_every_local_predicate_operation() {
-        use asap_types::pre_asap::{CompareOpKind, QueryExpr, ScalarValue};
+        use asap_types::pre_asap::{CompareOpKind, ScalarValue};
 
-        let comparison = || QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(0)),
+        let comparison = || ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(0)),
             op: CompareOpKind::Eq,
-            right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(1))),
+            semantics: ExprSemantics::Sql,
         };
-        let predicate = QueryExpr::BoolAnd(vec![comparison(), comparison()]);
+        let predicate = ScalarExpr::BoolAnd(vec![comparison(), comparison()]);
 
         assert_eq!(scalar_operation_count(&predicate), Ok(3));
     }
 
     #[test]
     fn promql_presence_is_lowered_with_a_per_step_output_bound() {
-        use asap_types::pre_asap::{
-            AggIntent, DataType, Field, QueryExpr, Reduction, Schema, Source,
-        };
+        use asap_types::pre_asap::{AggIntent, DataType, Field, Reduction, Schema, Source};
 
         let source = Source::TimeSeries {
             metric: "missing".into(),
         };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-        });
-        let root = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![AggIntent::Absent],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: scan,
-        });
+        }))
+        .unwrap();
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures: vec![AggIntent::Absent],
+                output_names: vec![],
+                filters: vec![],
+                having: None,
+                child: scan,
+            }))
+            .unwrap();
         let vector = promql_edge(0, 2, PromqlValueKind::Vector);
         let scan_statistics = OperatorStatistics::Scan {
             edges: promql_unary_edges(edge(0, 0), edge(0, 0), vector, vector),
@@ -2387,24 +2491,31 @@ mod tests {
 
     #[test]
     fn promql_range_and_subquery_preserve_internal_steps() {
-        use asap_types::pre_asap::{DataType, Field, QueryExpr, Schema, Source};
+        use asap_types::pre_asap::{DataType, Field, Schema, Source};
         use std::time::Duration;
 
         let source = Source::TimeSeries { metric: "m".into() };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-        });
-        let range = Rc::new(QueryExpr::TimeRange {
-            range: Duration::from_secs(300),
-            child: scan,
-        });
-        let root = Rc::new(QueryExpr::PromqlSubquery {
-            range: Duration::from_secs(300),
-            resolution: Some(Duration::from_secs(60)),
-            child: range,
-        });
+        }))
+        .unwrap();
+        let range =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
+                range: Duration::from_secs(300),
+                kind: TimeRangeKind::Range,
+                child: scan,
+            }))
+            .unwrap();
+        let root = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+            NonASAPOp::PromqlSubquery {
+                range: Duration::from_secs(300),
+                resolution: Some(Duration::from_secs(60)),
+                child: range,
+            },
+        ))
+        .unwrap();
         let vector = promql_edge(10, 6, PromqlValueKind::Vector);
         let range_vector = promql_edge(10, 6, PromqlValueKind::RangeVector);
         let outer_range = promql_edge(10, 1, PromqlValueKind::RangeVector);
@@ -2462,32 +2573,40 @@ mod tests {
     #[test]
     fn promql_binary_lowering_keeps_operation_and_matching_cardinality() {
         use asap_types::pre_asap::{
-            ArithmeticOpKind, BinaryOpKind, DataType, Field, GroupSide, QueryExpr, Schema, Source,
+            ArithmeticOpKind, BinaryOpKind, DataType, Field, GroupSide, Schema, Source,
             VectorGrouping, VectorMatch, VectorMatchKind,
         };
 
         let left_source = Source::TimeSeries { metric: "a".into() };
         let right_source = Source::TimeSeries { metric: "b".into() };
         let scan = |source| {
-            Rc::new(QueryExpr::Scan {
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
                 source,
                 predicates: vec![],
                 schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-            })
+            }))
+            .unwrap()
         };
-        let root = Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-            lhs: scan(left_source.clone()),
-            rhs: scan(right_source.clone()),
-            vector_match: Some(VectorMatch {
-                kind: VectorMatchKind::On,
-                labels: vec!["service".into()],
-                grouping: Some(VectorGrouping {
-                    side: GroupSide::Left,
-                    labels: vec!["region".into()],
-                }),
-            }),
-        });
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                    vector_match: Some(VectorMatch {
+                        kind: VectorMatchKind::On,
+                        labels: vec!["service".into()],
+                        grouping: Some(VectorGrouping {
+                            side: GroupSide::Left,
+                            labels: vec!["region".into()],
+                        }),
+                    }),
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                },
+                return_bool: false,
+                lhs: scan(left_source.clone()),
+                rhs: scan(right_source.clone()),
+            }))
+            .unwrap();
         let left_promql = promql_edge(10, 10, PromqlValueKind::Vector);
         let right_promql = promql_edge(5, 10, PromqlValueKind::Vector);
         let output_promql = promql_edge(8, 10, PromqlValueKind::Vector);
@@ -2545,36 +2664,45 @@ mod tests {
     #[test]
     fn promql_relabel_sample_and_per_series_lower_as_a_complete_chain() {
         use asap_types::pre_asap::{
-            AggIntent, DataType, Field, GroupKeys, QueryExpr, Reduction, SampleKind, ScalarValue,
-            Schema, Source,
+            AggIntent, DataType, Field, GroupKeys, Reduction, SampleKind, ScalarValue, Schema,
+            Source,
         };
 
         let source = Source::TimeSeries {
             metric: "requests".into(),
         };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-        });
-        let relabel = Rc::new(QueryExpr::PromqlRelabel {
-            dst: "service".into(),
-            value: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("api".into()))),
-            child: scan,
-        });
-        let sample = Rc::new(QueryExpr::PromqlSeriesSample {
-            by: GroupKeys::none(),
-            kind: SampleKind::LimitK(5),
-            child: relabel,
-        });
-        let root = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: sample,
-        });
+        }))
+        .unwrap();
+        let relabel = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+            NonASAPOp::PromqlRelabel {
+                dst: "service".into(),
+                value: ScalarExpr::Literal(ScalarValue::Utf8("api".into())),
+                child: scan,
+            },
+        ))
+        .unwrap();
+        let sample = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+            NonASAPOp::PromqlSeriesSample {
+                by: GroupKeys::none(),
+                kind: SampleKind::LimitK(5),
+                child: relabel,
+            },
+        ))
+        .unwrap();
+        let root =
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures: vec![AggIntent::Sum { col: None }],
+                output_names: vec![],
+                filters: vec![],
+                having: None,
+                child: sample,
+            }))
+            .unwrap();
 
         let input = edge(100, 1_600);
         let sampled = edge(50, 800);
@@ -2635,5 +2763,188 @@ mod tests {
             ]
         ));
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &query_scope, &dag.evidence).is_ok());
+    }
+
+    /// `a / scalar(b)` and `a > scalar(b)` read `b` through a
+    /// `PromqlVectorToScalar` input of the `Project` or `Filter`, after its
+    /// row input, so the queries lower and cost.
+    #[test]
+    fn scalar_reference_in_an_expression_is_a_scalar_input() {
+        for query in [
+            "rate(a[5m]) / scalar(rate(b[5m]))",
+            "rate(a[5m]) > scalar(rate(b[5m]))",
+        ] {
+            assert_scalar_reference_is_a_scalar_input(query, false, 1);
+        }
+    }
+
+    /// Each distinct reference is one scalar input of the `Project` or
+    /// `Filter`; one node read twice is one input.
+    #[test]
+    fn scalar_references_are_one_input_per_distinct_reference() {
+        for query in [
+            "rate(a[5m]) / (scalar(rate(b[5m])) + scalar(rate(c[5m])))",
+            "rate(a[5m]) > (scalar(rate(b[5m])) + scalar(rate(c[5m])))",
+        ] {
+            assert_scalar_reference_is_a_scalar_input(query, false, 2);
+            assert_scalar_reference_is_a_scalar_input(query, true, 1);
+        }
+    }
+
+    fn assert_scalar_reference_is_a_scalar_input(
+        query: &str,
+        same_reference: bool,
+        scalar_inputs: usize,
+    ) {
+        use crate::physical_operator_statistics::ScalarInputStatistics;
+        use asap_types::types::AccuracyTarget;
+        use asap_types::workload::{
+            AccuracyRequirement, BatchEntry, DataWorkload, Evidence, PlanningWorkload,
+            Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
+        };
+        use std::cell::RefCell;
+
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: Some(vec![BatchEntry {
+                    query: Query(query.into()),
+                    requirements: QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                        ..Default::default()
+                    },
+                    predictability: Predictability::Unknown,
+                    invocations: 1,
+                    execute_at: None,
+                    time_selection: TimeSelection::default(),
+                }]),
+                repeating_queries: None,
+            },
+            data_workload: Some(DataWorkload {
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1_000)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        let root = asap_frontend_promql::unified::lower_promql_workload(&workload, 0)
+            .unwrap()
+            .remove(0);
+        // Read one node through every reference (as a planner that shares
+        // the identical references would), so the input dedupe is tested.
+        let root = if same_reference {
+            let children = root.children();
+            let (row, first) = (Rc::clone(children[0]), Rc::clone(children[1]));
+            OperatorNode::new_shared(root.operator.map_children(|child| {
+                if Rc::ptr_eq(child, &row) {
+                    Rc::clone(&row)
+                } else {
+                    Rc::clone(&first)
+                }
+            }))
+            .unwrap()
+        } else {
+            root
+        };
+
+        let vector = |series| promql_edge(series, 10, PromqlValueKind::Vector);
+        let produced: RefCell<HashMap<String, OperatorStatistics>> = RefCell::default();
+        let provider = |request: PhysicalNodeRequest<'_>| {
+            let produced_now = produced.borrow();
+            let inputs: Vec<&OperatorStatistics> = request
+                .children
+                .iter()
+                .map(|id| &produced_now[id])
+                .collect();
+            let input = || inputs[0].output();
+            let promql_input = || inputs[0].promql_output().unwrap();
+            let scalar_inputs = || {
+                inputs[1..]
+                    .iter()
+                    .map(|scalar| ScalarInputStatistics {
+                        edge: scalar.output(),
+                        promql: scalar.promql_output(),
+                    })
+                    .collect()
+            };
+            let statistics = match request.operator {
+                PhysicalOperator::Scan => OperatorStatistics::Scan {
+                    edges: promql_unary_edges(
+                        edge(100, 1_600),
+                        edge(100, 1_600),
+                        vector(10),
+                        vector(10),
+                    ),
+                    source_read_bytes: 1_600,
+                },
+                PhysicalOperator::PromqlRange { .. } => OperatorStatistics::PromqlRange {
+                    edges: promql_unary_edges(
+                        input(),
+                        input(),
+                        promql_input(),
+                        promql_edge(10, 10, PromqlValueKind::RangeVector),
+                    ),
+                    max_window_samples_per_series: 10,
+                },
+                PhysicalOperator::PromqlPerSeries { .. } => OperatorStatistics::PromqlPerSeries {
+                    edges: promql_unary_edges(input(), edge(10, 160), promql_input(), vector(10)),
+                    accumulator_bytes_per_series: 8,
+                },
+                PhysicalOperator::PromqlVectorToScalar => {
+                    OperatorStatistics::PromqlVectorToScalar {
+                        edges: promql_unary_edges(
+                            input(),
+                            edge(10, 160),
+                            promql_input(),
+                            promql_edge(0, 10, PromqlValueKind::Scalar),
+                        ),
+                    }
+                }
+                PhysicalOperator::Project { .. } => OperatorStatistics::Project {
+                    edges: promql_unary_edges(input(), input(), promql_input(), promql_input()),
+                    scalar_inputs: scalar_inputs(),
+                },
+                PhysicalOperator::Filter { .. } => OperatorStatistics::Filter {
+                    edges: promql_unary_edges(input(), input(), promql_input(), promql_input()),
+                    scalar_inputs: scalar_inputs(),
+                },
+                other => panic!("unexpected physical operator {other:?}"),
+            };
+            drop(produced_now);
+            let physical_id = format!("query-{}", request.occurrence);
+            produced
+                .borrow_mut()
+                .insert(physical_id.clone(), statistics.clone());
+            Ok(PhysicalNodeEvidence {
+                physical_id,
+                ..evidence(statistics)
+            })
+        };
+        let query_scope = scope(
+            OperatorNode::reachable(&root)
+                .iter()
+                .filter_map(|node| match node.non_asap() {
+                    Some(NonASAPOp::Scan { source, .. }) => Some(coverage(source.clone(), vec![])),
+                    _ => None,
+                })
+                .collect(),
+        );
+        let dag = lower_query_physical_dag(&root, &query_scope, &provider).unwrap();
+        let root_node = dag.nodes.iter().find(|node| node.id == dag.root).unwrap();
+        assert!(
+            matches!(
+                root_node.operator,
+                PhysicalOperator::Project { .. } | PhysicalOperator::Filter { .. }
+            ),
+            "{query}: {:?}",
+            root_node.operator
+        );
+        assert_eq!(root_node.children.len(), 1 + scalar_inputs, "{query}");
+        for child in &root_node.children[1..] {
+            let scalar = dag.nodes.iter().find(|node| node.id == *child).unwrap();
+            assert_eq!(scalar.operator, PhysicalOperator::PromqlVectorToScalar);
+        }
+        estimate_physical_dag(&dag.nodes, &dag.root, &query_scope, &dag.evidence).unwrap();
     }
 }

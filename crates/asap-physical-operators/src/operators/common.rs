@@ -2,20 +2,20 @@ use super::*;
 pub(super) fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
 }
-pub(super) fn schema(fields: Vec<Field>) -> SchemaRef {
+pub(super) fn schema(fields: Vec<SummaryField>) -> SchemaRef {
     Arc::new(Schema {
-        closed: true,
-        unique_keys: vec![],
         fields,
+        unique_keys: vec![],
+        closed: false,
         time_index: None,
     })
 }
-pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> Field {
-    Field {
-        table: None,
+pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> SummaryField {
+    SummaryField {
         name: name.into(),
-        dtype: FieldDataType::Plain(dtype),
+        dtype: SummaryFamilyType::Plain(dtype),
         nullable,
+        table: None,
     }
 }
 
@@ -76,4 +76,3 @@ pub(super) fn key_bytes(key: &[Vec<u8>]) -> usize {
         .map(|part| std::mem::size_of::<Vec<u8>>() + part.len())
         .sum::<usize>()
 }
-use planner_types::pre_asap::Schema;

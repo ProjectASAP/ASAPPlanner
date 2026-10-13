@@ -2,7 +2,7 @@
 use crate::AggregateCore;
 use crate::Error;
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema},
+    post_asap::{Field as SummaryField, FieldDataType as SummaryFamilyType, Schema},
     pre_asap::DataType,
 };
 use std::{cmp::Ordering, sync::Arc};
@@ -28,7 +28,7 @@ pub enum Value {
     Map(Arc<[(Value, Value)]>),
     #[serde(skip)]
     Summary {
-        family: FieldDataType,
+        family: SummaryFamilyType,
         state: Arc<dyn AggregateCore>,
     },
 }
@@ -214,7 +214,9 @@ impl Batch {
             }
             for (value, field) in row.iter().zip(&schema.fields) {
                 let matches = match (&field.dtype, value) {
-                    (FieldDataType::Plain(dtype), value) => value.matches(dtype, field.nullable),
+                    (SummaryFamilyType::Plain(dtype), value) => {
+                        value.matches(dtype, field.nullable)
+                    }
                     (expected, Value::Summary { family, state }) => {
                         expected == family && validate_state(family, state.as_ref()).is_ok()
                     }
@@ -260,7 +262,7 @@ pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>
 
 pub(crate) use crate::capability::validate_native_family as validate_family;
 
-fn validate_state(family: &FieldDataType, state: &dyn AggregateCore) -> Result<(), Error> {
+fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Result<(), Error> {
     use crate::summary_kernels::{
         count_min_sketch::CountMinSketchAccumulator, datasketches_kll::DatasketchesKLLAccumulator,
         dd_sketch::DDSketchAccumulator, exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
@@ -268,7 +270,7 @@ fn validate_state(family: &FieldDataType, state: &dyn AggregateCore) -> Result<(
     use planner_types::post_asap::SketchParams;
     validate_family(family)?;
     let valid = match family {
-        FieldDataType::Sketch(kind, _)
+        SummaryFamilyType::Sketch(kind, _)
             if matches!(
                 kind.params(),
                 SketchParams::CmsWithHeap { .. } | SketchParams::CountSketchWithHeap { .. }
@@ -284,11 +286,11 @@ fn validate_state(family: &FieldDataType, state: &dyn AggregateCore) -> Result<(
                 })
         }
 
-        FieldDataType::ExactAggregate(..) => state
+        SummaryFamilyType::ExactAggregate(..) => state
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .is_some_and(|s| s.family() == family && !s.is_keyed()),
-        FieldDataType::Sketch(kind, _) => match kind.params() {
+        SummaryFamilyType::Sketch(kind, _) => match kind.params() {
             SketchParams::Kll { k } => state
                 .as_any()
                 .downcast_ref::<DatasketchesKLLAccumulator>()
@@ -325,14 +327,14 @@ pub(crate) fn validate_schema(schema: &SchemaRef) -> Result<(), Error> {
         schema
             .fields
             .get(index)
-            .is_none_or(|field| field.dtype != FieldDataType::Plain(DataType::Timestamp))
+            .is_none_or(|field| field.dtype != SummaryFamilyType::Plain(DataType::Timestamp))
     }) {
         return Err(Error::Invalid(
             "time index must name a Timestamp column".into(),
         ));
     }
     for field in &schema.fields {
-        if !matches!(field.dtype, FieldDataType::Plain(_)) {
+        if !matches!(field.dtype, SummaryFamilyType::Plain(_)) {
             validate_family(&field.dtype)?;
             if field.nullable {
                 return Err(Error::Invalid(
@@ -344,7 +346,7 @@ pub(crate) fn validate_schema(schema: &SchemaRef) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn field(schema: &SchemaRef, column: usize) -> Result<&Field, Error> {
+pub(crate) fn field(schema: &SchemaRef, column: usize) -> Result<&SummaryField, Error> {
     schema
         .fields
         .get(column)
@@ -352,7 +354,7 @@ pub(crate) fn field(schema: &SchemaRef, column: usize) -> Result<&Field, Error> 
 }
 pub(crate) fn plain(schema: &SchemaRef, column: usize) -> Result<(&DataType, bool), Error> {
     let f = field(schema, column)?;
-    let FieldDataType::Plain(dtype) = &f.dtype else {
+    let SummaryFamilyType::Plain(dtype) = &f.dtype else {
         return Err(Error::Invalid("plain value required".into()));
     };
     Ok((dtype, f.nullable))
@@ -367,7 +369,7 @@ mod weighted_state_tests {
     // A state cannot acquire a different family or shape merely by relabeling its batch.
     #[test]
     fn weighted_state_family_and_shape_must_match() {
-        let cms = FieldDataType::Sketch(
+        let cms = SummaryFamilyType::Sketch(
             SketchKind::new(
                 SketchAlgorithm::CmsWithHeap,
                 SketchParams::CmsWithHeap {
@@ -378,7 +380,7 @@ mod weighted_state_tests {
             ),
             Default::default(),
         );
-        let cs = FieldDataType::Sketch(
+        let cs = SummaryFamilyType::Sketch(
             SketchKind::new(
                 SketchAlgorithm::CountSketchWithHeap,
                 SketchParams::CountSketchWithHeap {
@@ -395,7 +397,7 @@ mod weighted_state_tests {
         let wrong_shape =
             WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 64, 5, 8).unwrap();
         assert!(validate_state(&cs, &wrong_shape).is_err());
-        let even_depth = FieldDataType::Sketch(
+        let even_depth = SummaryFamilyType::Sketch(
             SketchKind::new(
                 SketchAlgorithm::CountSketchWithHeap,
                 SketchParams::CountSketchWithHeap {

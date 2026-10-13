@@ -335,8 +335,6 @@ pub enum PhysicalOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromqlBinaryOperandMode {
     VectorVector,
-    VectorScalar,
-    ScalarVector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -923,9 +921,12 @@ fn expected_input_arity(
             statistics_inputs: 1,
             dag_children: 0,
         },
-        PhysicalOperator::Filter { .. }
-        | PhysicalOperator::Project { .. }
-        | PhysicalOperator::HashAggregate { .. }
+        // The row input, then one input per scalar the expressions read.
+        PhysicalOperator::Filter { .. } | PhysicalOperator::Project { .. } => OperatorInputArity {
+            statistics_inputs: variadic_child_count.max(1),
+            dag_children: variadic_child_count.max(1),
+        },
+        PhysicalOperator::HashAggregate { .. }
         | PhysicalOperator::InMemoryComparisonSort { .. }
         | PhysicalOperator::TopK { .. }
         | PhysicalOperator::HashDeduplicate { .. }
@@ -1282,9 +1283,6 @@ pub fn estimate_operator(
             let promql = require_promql_binary(edges)?;
             let right = input(1)?;
             let matching_bytes = match operand_mode {
-                PromqlBinaryOperandMode::VectorScalar | PromqlBinaryOperandMode::ScalarVector => {
-                    per_row_width(output.rows, output.bytes)?
-                }
                 PromqlBinaryOperandMode::VectorVector => {
                     let build_series = match build_side.ok_or(
                         AnalyticalCostError::MissingOrStale("vector_match_build_side"),
@@ -2034,28 +2032,6 @@ fn validate_promql_binary(
         return invalid("PromQL binary evaluation steps or output kind are invalid");
     }
     let (row_bound, series_bound) = match operand_mode {
-        PromqlBinaryOperandMode::VectorScalar => {
-            if promql.inputs[0].value_kind != PromqlValueKind::Vector
-                || promql.inputs[1].value_kind != PromqlValueKind::Scalar
-                || cardinality != PromqlVectorCardinality::OneToOne
-                || build_side.is_some()
-                || matching_key_bytes != 0
-            {
-                return invalid("vector/scalar binary configuration is invalid");
-            }
-            (edges.inputs[0].rows, promql.inputs[0].series)
-        }
-        PromqlBinaryOperandMode::ScalarVector => {
-            if promql.inputs[0].value_kind != PromqlValueKind::Scalar
-                || promql.inputs[1].value_kind != PromqlValueKind::Vector
-                || cardinality != PromqlVectorCardinality::OneToOne
-                || build_side.is_some()
-                || matching_key_bytes != 0
-            {
-                return invalid("scalar/vector binary configuration is invalid");
-            }
-            (edges.inputs[1].rows, promql.inputs[1].series)
-        }
         PromqlBinaryOperandMode::VectorVector => {
             if promql
                 .inputs
@@ -2510,6 +2486,7 @@ mod tests {
                 "filter".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(edge, edge),
+                    scalar_inputs: vec![],
                 },
             ),
         ]);
@@ -2606,6 +2583,7 @@ mod tests {
                 filter_operator(),
                 OperatorStatistics::Filter {
                     edges: unary_row_edges(10, 11),
+                    scalar_inputs: vec![],
                 },
             ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
@@ -2615,6 +2593,7 @@ mod tests {
                 project_operator(),
                 OperatorStatistics::Project {
                     edges: unary_row_edges(10, 9),
+                    scalar_inputs: vec![],
                 },
             ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
@@ -2702,6 +2681,7 @@ mod tests {
             },
             OperatorStatistics::Filter {
                 edges: unary_row_edges(1_000, 100),
+                scalar_inputs: vec![],
             },
         );
         assert_eq!(
@@ -2868,12 +2848,14 @@ mod tests {
                 "left".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(scan_edge, branch_edge),
+                    scalar_inputs: vec![],
                 },
             ),
             (
                 "right".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(scan_edge, branch_edge),
+                    scalar_inputs: vec![],
                 },
             ),
             (
@@ -2970,7 +2952,7 @@ mod tests {
     }
 
     fn comparison_scope() -> ComparisonScope {
-        use asap_types::pre_asap::query_expr::Source;
+        use asap_types::ir::operator_properties::Source;
         use asap_types::workload::{
             DurationMs, QueryRecurrence, QueryTimeScope, RepeatedDemand, RepetitionInterval,
             TimeSelection, TimestampMs,
@@ -3009,9 +2991,7 @@ mod tests {
 
     #[test]
     fn comparison_rejects_different_snapshot_predicate_time_or_horizon() {
-        use std::rc::Rc;
-
-        use asap_types::pre_asap::query_expr::{Predicate, QueryExpr};
+        use asap_types::ir::{Predicate, ScalarExpr};
         use asap_types::workload::{DurationMs, TimestampMs};
 
         let raw = comparison_scope();
@@ -3027,7 +3007,7 @@ mod tests {
         candidate = raw.clone();
         candidate.sources[0]
             .predicates
-            .push(Predicate(Rc::new(QueryExpr::promql_scalar(1.0))));
+            .push(Predicate(ScalarExpr::literal_f64(1.0)));
         assert_eq!(
             validate_comparison_scopes(&raw, &candidate),
             Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
@@ -3113,6 +3093,7 @@ mod tests {
                         bytes: 400,
                     },
                 ),
+                scalar_inputs: vec![],
             },
         );
         assert_eq!(
@@ -3180,6 +3161,7 @@ mod tests {
                             bytes: 400,
                         },
                     ),
+                    scalar_inputs: vec![],
                 },
             ),
         ]);
@@ -3229,6 +3211,7 @@ mod tests {
                 "filter".into(),
                 OperatorStatistics::Filter {
                     edges: unary_edges(input, EdgeStatistics { rows: 0, bytes: 0 }),
+                    scalar_inputs: vec![],
                 },
             ),
         ]);
@@ -3247,7 +3230,7 @@ mod tests {
             operator: PhysicalOperator::Scan,
             children: vec![],
             scan_selection: Some(ScanSelection {
-                source: asap_types::pre_asap::query_expr::Source::Table {
+                source: asap_types::ir::operator_properties::Source::Table {
                     table_ref: "other_metrics".into(),
                 },
                 source_snapshot_id: "catalog-version-42".into(),
@@ -3312,7 +3295,7 @@ mod tests {
         let mut scope = comparison_scope();
         let coverage = scope.sources[0].clone();
         scope.sources.push(ScanSelection {
-            source: asap_types::pre_asap::query_expr::Source::Table {
+            source: asap_types::ir::operator_properties::Source::Table {
                 table_ref: "auxiliary".into(),
             },
             source_snapshot_id: "catalog-version-42".into(),
@@ -3479,6 +3462,7 @@ mod tests {
         };
         let filter = OperatorStatistics::Filter {
             edges: unary_edges(edge, edge),
+            scalar_inputs: vec![],
         };
 
         assert_eq!(
@@ -3552,6 +3536,7 @@ mod tests {
         };
         let filter = OperatorStatistics::Filter {
             edges: unary_edges(edge, edge),
+            scalar_inputs: vec![],
         };
         assert_eq!(
             estimate_operator(

@@ -27,6 +27,7 @@
 //! alongside `reduction` and on sketch-valued edge types
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
+// Legacy summary IR: no longer re-exported; removed by the cleanup PR.
 pub mod cse;
 pub mod execution_data_state;
 pub mod expr;
@@ -40,21 +41,29 @@ pub mod summary_maintenance_lifecycle;
 pub mod summary_window;
 
 pub use crate::pre_asap::schema::{Field, FieldDataType, Schema};
-pub use cse::share_common_summary_sub_dags;
 pub use execution_data_state::{
-    assigned_child_data_state, exact_operation_output_schema, produced_data_state,
-    validate_execution_data_states, validate_execution_data_states_at, DataPrimitive,
-    ExactOperationSchemaError, ExecutionDataState, ExecutionDataStateAssignment,
+    lift_plain, DataPrimitive, ExactOperationSchemaError, ExecutionDataState,
     ExecutionDataStateError, ExecutionTiming,
 };
-pub use expr::{
+// Legacy summary IR names, kept for the legacy modules above only.
+#[allow(unused_imports)]
+pub(crate) use cse::share_common_summary_sub_dags;
+#[allow(unused_imports)]
+pub(crate) use execution_data_state::{
+    assigned_child_data_state, exact_operation_output_schema, produced_data_state,
+    validate_execution_data_states, validate_execution_data_states_at,
+    ExecutionDataStateAssignment,
+};
+#[allow(unused_imports)]
+pub(crate) use expr::{
     BinaryOperator, CandidateCompleteness, ExactOperation, SummaryExpr, SummaryNode, ValueOperation,
 };
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
 };
-pub use post_asap_dag::{
+#[allow(unused_imports)]
+pub(crate) use post_asap_dag::{
     compile_post_asap_dag, compile_post_asap_dag_with_node_ids, EdgeRole,
     GroupingEdgeCompatibility, PostAsapDAG, PostAsapDAGCompilation, PostAsapDAGDocument,
     PostAsapDAGEdge, PostAsapDAGNode, PostAsapDAGValidationError, PostAsapNodeId,

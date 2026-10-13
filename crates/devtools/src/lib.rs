@@ -2,7 +2,7 @@
 //!
 //! Re-exports both language paths so a caller can depend on a single crate for
 //! PromQL *and* SQL. Both front ends end at the canonical intent algebra via
-//! the same shared [`resolve_root`](asap_types::pre_asap::resolve_root).
+//! the same unified operator IR ([`asap_types::ir::OperatorNode`]).
 //!
 //! ## Dependency isolation
 //!
@@ -12,10 +12,12 @@
 //! only) or [`asap_frontend_sql`] (DataFusion only) — so it never compiles the
 //! other's parser.
 
-pub use asap_frontend_promql::{
+pub use asap_frontend_promql::unified::{
     lower_promql_workload, lower_promql_workload_with_histograms, PromqlError,
 };
-pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError, SqlLowerer};
+pub use asap_frontend_sql::unified::{
+    lower_sql, lower_sql_batch, SqlCatalog, SqlError, SqlLowerer,
+};
 
 /// Lower one developer-supplied PromQL query with an explicit source cadence.
 /// Tools intentionally require the cadence rather than choosing a default.
@@ -23,7 +25,7 @@ pub fn lower_promql_with_data_ingestion_interval(
     query: &str,
     accuracy: asap_types::types::AccuracyTarget,
     interval_ms: u64,
-) -> Result<asap_types::pre_asap::QueryExpr, PromqlError> {
+) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, PromqlError> {
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
         QueryRequirements, QueryWorkload, TimeSelection,

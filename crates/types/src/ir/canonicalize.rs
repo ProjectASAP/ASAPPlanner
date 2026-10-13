@@ -170,9 +170,10 @@ fn try_promote_additive_top_ranking(
     else {
         return Ok(None);
     };
-    // A per-group `Limit` must agree with its `Sort`'s partition: the
-    // ranking's partition is what the outer `TopK` groups by.
-    if !limit_partition.is_empty() && limit_partition != partition_by {
+    // The `Limit` must keep k rows per the `Sort`'s partition: the ranking's
+    // partition is what the outer `TopK` groups by. A global `Limit` over a
+    // partitioned `Sort` keeps k rows overall, not k per group.
+    if limit_partition != partition_by {
         return Ok(None);
     }
     let [SortKey {
@@ -207,6 +208,7 @@ fn try_promote_additive_top_ranking(
     let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
+        filters,
         child: aggregate_child,
         ..
     }) = agg_node.non_asap()
@@ -216,6 +218,11 @@ fn try_promote_additive_top_ranking(
     let Reduction::Reduce(by) = reduction else {
         return Ok(None);
     };
+    // A heavy-hitter sketch ranks the raw update stream; a filtered measure
+    // counts only part of it, and no binding rule applies the filter (#466).
+    if crate::ir::non_asap::any_measure_filtered(filters) {
+        return Ok(None);
+    }
     let [ranked_agg] = measures.as_slice() else {
         return Ok(None);
     };
@@ -501,6 +508,37 @@ mod tests {
         assert!(is_topk_over_count(&canonicalize(q).unwrap()));
     }
 
+    // A heavy-hitter sketch ranks every row; a count that only counts some
+    // rows (#466) is not that, so the generic Sort + Limit stays. Covers an
+    // explicit `FILTER (WHERE latency > 1)` and the `IsNotNull` filter of
+    // `COUNT(col)` over a nullable column.
+    #[test]
+    fn does_not_promote_a_filtered_count_ranking() {
+        use crate::ir::Predicate;
+        use crate::pre_asap::{CompareOpKind, ScalarValue};
+        let greater = Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(2)),
+            op: CompareOpKind::Gt,
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+            semantics: crate::ir::ExprSemantics::Sql,
+        });
+        let not_null = Predicate(ScalarExpr::IsNotNull(Box::new(ScalarExpr::Column(2))));
+        for filter in [greater, not_null] {
+            let filtered = node(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![1]),
+                measures: vec![count()],
+                output_names: vec![],
+                filters: vec![Some(filter)],
+                having: None,
+                child: scan(),
+            });
+            let q = limit(5, 0, sort(desc(1), filtered));
+            let canonical = canonicalize(Rc::clone(&q)).unwrap();
+            assert!(!is_topk_over_count(&canonical));
+            assert!(Rc::ptr_eq(&canonical, &q));
+        }
+    }
+
     #[test]
     fn promotes_through_a_passthrough_projection() {
         // …with a `SELECT service, count` projection between the Sort and the Agg.
@@ -658,6 +696,36 @@ mod tests {
             child: sort(desc(1), count_by_service()),
         });
         assert!(!is_topk_over_count(&canonicalize(q).unwrap()));
+    }
+
+    #[test]
+    fn does_not_promote_a_global_limit_over_a_partitioned_sort() {
+        // A global Limit keeps k rows overall, not k per Sort partition.
+        let q = limit(
+            5,
+            0,
+            node(NonASAPOp::Sort {
+                keys: desc(1),
+                partition_by: GroupKeys::by(vec![0]),
+                child: count_by_service(),
+            }),
+        );
+        assert!(!is_topk_over_count(&canonicalize(q).unwrap()));
+    }
+
+    #[test]
+    fn promotes_a_limit_partitioned_like_its_sort() {
+        let q = node(NonASAPOp::Limit {
+            n: Some(5),
+            offset: 0,
+            partition_by: GroupKeys::by(vec![0]),
+            child: node(NonASAPOp::Sort {
+                keys: desc(1),
+                partition_by: GroupKeys::by(vec![0]),
+                child: count_by_service(),
+            }),
+        });
+        assert!(is_topk_over_count(&canonicalize(q).unwrap()));
     }
 
     #[test]

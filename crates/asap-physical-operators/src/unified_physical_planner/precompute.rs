@@ -1,6 +1,8 @@
 //! Compile immutable summary-input computation with explicit population and pane identity.
 use super::promql_rows::SERIES_IDENTITY_COLUMN as SERIES_IDENTITY;
 use super::*;
+use planner_types::ir::ASAPOp;
+use planner_types::ir::NonASAPOp;
 use planner_types::post_asap::FieldDataType as SummaryFamilyType;
 use planner_types::{
     post_asap::{ExecutionTiming, GroupingStrategy, Schema},
@@ -137,6 +139,8 @@ pub fn boundary_schema(
 }
 
 /// Validate the adapter layout during installed-plan recovery without lowering operators.
+/// Borrows shared schema metadata and returns an Arc-owned schema for the
+/// population adapter layout.
 pub fn source_schema(logical: &Schema) -> Result<SchemaRef, Error> {
     let states = logical
         .fields
@@ -241,7 +245,7 @@ pub fn compile(
             continue;
         }
         if node.output_state.timing != ExecutionTiming::IngestionTime {
-            return Err(invalid("precompute dag contains a query-time operation"));
+            return Err(invalid("precompute DAG contains a query-time operation"));
         }
         let inputs = dependencies.get(&id).cloned().unwrap_or_default();
         let schemas = inputs
@@ -253,13 +257,18 @@ pub fn compile(
                     .ok_or_else(|| invalid("missing precompute input"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let dag = fragment(
+        let physical_dag = fragment(
             node,
             &schemas,
             &inputs.iter().map(|id| nodes[id]).collect::<Vec<_>>(),
         )?;
-        outputs.insert(id, dag.output_contract(dag.roots()[0])?.schema);
-        fragments.insert(id, (inputs, dag));
+        outputs.insert(
+            id,
+            physical_dag
+                .output_contract(physical_dag.roots()[0])?
+                .schema,
+        );
+        fragments.insert(id, (inputs, physical_dag));
     }
     CompiledPhysicalDAG::compose(sources, fragments, roots.to_vec())
 }
@@ -370,10 +379,10 @@ fn fragment(
                     ))
                 }
             };
-            let read = Operator::readout(
+            let read = Operator::evaluation(
                 input.clone(),
                 2,
-                ReadoutQuery::Exact(ExactReadout {
+                SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
                     lookback_ms: None,
                 }),

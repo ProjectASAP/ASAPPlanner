@@ -308,7 +308,7 @@ mod tests {
         values::Batch,
     };
     use planner_types::{
-        post_asap::{Field, FieldDataType, Schema},
+        post_asap::{Field as SummaryField, FieldDataType as SummaryFamilyType, Schema},
         pre_asap::DataType,
         types::AccuracyTarget,
     };
@@ -318,23 +318,23 @@ mod tests {
     #[test]
     fn temporal_windows_execute_in_both_phases_and_count_is_integer() {
         let schema = Arc::new(Schema {
-            closed: true,
-            unique_keys: vec![],
             fields: vec![
-                Field {
-                    table: None,
+                SummaryField {
                     name: "time".into(),
-                    dtype: FieldDataType::Plain(DataType::Timestamp),
+                    dtype: SummaryFamilyType::Plain(DataType::Timestamp),
                     nullable: false,
-                },
-                Field {
                     table: None,
+                },
+                SummaryField {
                     name: "value".into(),
-                    dtype: FieldDataType::Plain(DataType::Float64),
+                    dtype: SummaryFamilyType::Plain(DataType::Float64),
                     nullable: false,
+                    table: None,
                 },
             ],
             time_index: Some(0),
+            unique_keys: vec![],
+            closed: false,
         });
         for scope in [
             Scope::Query {

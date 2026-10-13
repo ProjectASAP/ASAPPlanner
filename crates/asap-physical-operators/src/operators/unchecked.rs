@@ -134,11 +134,11 @@ impl TryFrom<UncheckedOperator> for Operator {
                     operator
                 }
             }
-            Kind::Join { kind, predicate } => Operator::bound_relational_join(
+            Kind::Join { kind, predicate } => Operator::relational_join(
                 input(0)?,
                 input(1)?,
                 kind,
-                *predicate,
+                &planner_types::ir::Predicate(predicate.expression().clone()),
                 output.clone(),
             )?,
             Kind::SummaryBuild {
@@ -153,13 +153,13 @@ impl TryFrom<UncheckedOperator> for Operator {
                 items,
                 groups,
             } => Operator::keyed_summary_build(input(0)?, family, value, items, groups)?,
-            Kind::KeyedReadout { state, k } => {
-                Operator::keyed_readout(input(0)?, state, k, output.clone())?
+            Kind::KeyedEvaluation { state, k } => {
+                Operator::keyed_evaluation(input(0)?, state, k, output.clone())?
             }
             Kind::SummaryMerge { state, groups } => {
                 Operator::summary_merge(input(0)?, state, groups)?
             }
-            Kind::Readout { state, query } => Operator::readout(input(0)?, state, query)?,
+            Kind::Evaluation { state, query } => Operator::evaluation(input(0)?, state, query)?,
         }
         .with_output_schema(output)?;
         if serde_json::to_value(&op.kind).map_err(|error| invalid(&error.to_string()))?

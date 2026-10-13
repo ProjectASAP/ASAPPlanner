@@ -6,10 +6,10 @@
 //! it *one* pass rather than *the* algorithm. `ReplacementStrategy` is
 //! therefore a concept of this pass, not of the optimization interface.
 
+use asap_types::ir::cse::share_common_sub_dags;
 use std::rc::Rc;
 
-use asap_types::post_asap::{share_common_summary_sub_dags, SummaryNode};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan};
@@ -39,25 +39,58 @@ impl OptimizationPass for MajorPass {
         // search result carries the workload binding the lifecycle stage and
         // the output both need. CSE may make two identical queries share one
         // `Rc`, but it never drops or reorders a root, so this stays aligned.
-        let roots: Vec<(usize, Rc<QueryExpr>, Option<AccuracyTarget>)> = workload
+        let targets: Vec<AccuracyTarget> = workload
+            .query_workload()
             .entries()
-            .enumerate()
-            .map(|(index, (entry, expr))| {
-                (
-                    index,
-                    Rc::clone(expr),
-                    Some(entry.requirements.accuracy.target()),
-                )
+            .map(|entry| entry.requirements.accuracy.target())
+            .collect();
+        let mut roots: Vec<(usize, Rc<OperatorNode>, Option<AccuracyTarget>)> = workload
+            .exprs()
+            .iter()
+            .zip(workload.operator_indices().iter().copied())
+            .map(|(expr, index)| (index, Rc::clone(expr), Some(targets[index].clone())))
+            .collect();
+        // A standalone scalar query is not a node; the operator sub-DAGs it
+        // reads are planned like operator roots, against its entry (#511
+        // §2.3, operator-sharing §3). They follow the operator roots, each
+        // scalar's distinct references in `operator_refs` order. References
+        // are distinct by structure, not pointer: front ends build identical
+        // references as separate nodes, and planning merges them into one.
+        let scalar_refs: Vec<Vec<Rc<OperatorNode>>> = workload
+            .scalar_roots()
+            .iter()
+            .map(|(_, expr)| {
+                let mut refs: Vec<Rc<OperatorNode>> = Vec::new();
+                for node in expr.operator_refs() {
+                    if !refs.iter().any(|r| same_reference(r, node)) {
+                        refs.push(Rc::clone(node));
+                    }
+                }
+                refs
             })
             .collect();
-
-        let space = search_workload_with_targets(roots, &strategies, models.accuracy);
-
-        let lifecycle = input.lifecycle;
+        // Each reference is planned against the entry's accuracy target, so a
+        // combination of approximate values (e.g. a difference of two
+        // quantiles) keeps its summary candidates. The combined guarantee is
+        // not composed in this pass (it is effectively `None`): composition is
+        // designed in #669 and implemented in #575, Stage 3's accuracy model
+        // checks it, and in the MVP a rank-interval guarantee counts as
+        // `None`. The same holds for scalar references inside Project/Filter
+        // expressions, which are planned as interior sites.
+        for ((index, _), refs) in workload.scalar_roots().iter().zip(&scalar_refs) {
+            for node in refs {
+                roots.push((*index, Rc::clone(node), Some(targets[*index].clone())));
+            }
+        }
 
         // One index per root, in `CandidateLogicalASAPDAGs::roots` order — which is the order
-        // the roots went in, which is `entries()` order.
-        let entry_indices: Vec<usize> = (0..workload.len()).collect();
+        // the roots went in.
+        let entry_indices: Vec<usize> = roots.iter().map(|(index, _, _)| *index).collect();
+
+        let space = search_workload_with_targets(roots, &strategies, models.accuracy)
+            .map_err(OptimizeError::Search)?;
+
+        let lifecycle = input.lifecycle;
         let demand = WorkloadDemand {
             workload: workload.query_workload(),
             data_workload: workload.data_workload(),
@@ -83,6 +116,9 @@ impl OptimizationPass for MajorPass {
         // Assemble every root, then intern structurally identical summary
         // producers across them once, so two queries that selected the same
         // `SummaryAgg` reach one `Rc` (consumers dedupe states by pointer).
+        // `plan_assembled_dag` then reads an exact-state root through its
+        // finalize, scalar references included: `scalar(v)` reads an instant
+        // vector's value, not accumulator state.
         let mut assembled = Vec::with_capacity(space.roots.len());
         for (entry_index, root) in &space.roots {
             let dag = selection
@@ -94,8 +130,7 @@ impl OptimizationPass for MajorPass {
                 .ok_or_else(|| self.missing_group(*entry_index))?;
             assembled.push(dag);
         }
-        let interned =
-            share_common_summary_sub_dags(assembled.iter().cloned().enumerate().collect());
+        let interned = share_common_sub_dags(assembled.iter().cloned().enumerate().collect());
         let states: Vec<_> = interned
             .iter()
             .map(|(_, dag)| summary_states(dag))
@@ -105,7 +140,7 @@ impl OptimizationPass for MajorPass {
         // their entries, in every plan that reaches it, so each plan picks
         // the same lifecycle for it. When that union cannot be costed the
         // roots keep their own, unshared DAG and entries.
-        let mut shared_entries: Vec<(Rc<SummaryNode>, Option<Vec<usize>>)> = Vec::new();
+        let mut shared_entries: Vec<(Rc<OperatorNode>, Option<Vec<usize>>)> = Vec::new();
         for (position, (entry_index, root)) in space.roots.iter().enumerate() {
             for state in &states[position] {
                 if shared_entries.iter().any(|(s, _)| Rc::ptr_eq(s, state)) {
@@ -143,7 +178,7 @@ impl OptimizationPass for MajorPass {
             }
         }
 
-        let mut plans = Vec::with_capacity(space.roots.len());
+        let mut plans: Vec<QueryLifecyclePlan> = Vec::with_capacity(space.roots.len());
         for (position, (entry_index, root)) in space.roots.iter().enumerate() {
             let mut entries = bindings[&Rc::as_ptr(root)].clone();
             let mut dag = Rc::clone(&interned[position].1);
@@ -183,7 +218,29 @@ impl OptimizationPass for MajorPass {
                 plan,
             });
         }
-        Ok(PlanOutput::new(plans))
+        // Rebuild each scalar root over its planned sub-DAGs.
+        let scalar_plans = plans.split_off(workload.exprs().len());
+        let mut planned = scalar_plans.iter();
+        let scalar_roots = workload
+            .scalar_roots()
+            .iter()
+            .zip(&scalar_refs)
+            .map(|((index, expr), refs)| {
+                let selected: Vec<_> = planned.by_ref().take(refs.len()).collect();
+                let expr = expr.map_operator_refs(&mut |node| {
+                    let position = refs
+                        .iter()
+                        .position(|r| same_reference(r, node))
+                        .expect("every reference was planned");
+                    Rc::clone(&selected[position].plan.root)
+                });
+                (*index, expr)
+            })
+            .collect();
+        let mut output = PlanOutput::new(plans);
+        output.scalar_roots = scalar_roots;
+        output.scalar_plans = scalar_plans;
+        Ok(output)
     }
 }
 
@@ -199,4 +256,9 @@ impl MajorPass {
             detail: format!("entry {entry_index}: root has no candidate group"),
         }
     }
+}
+
+/// Whether two scalar references read the same operator sub-DAG.
+fn same_reference(a: &Rc<OperatorNode>, b: &Rc<OperatorNode>) -> bool {
+    Rc::ptr_eq(a, b) || a.as_ref() == b.as_ref()
 }

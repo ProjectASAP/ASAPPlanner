@@ -1,4 +1,4 @@
-//! Analytical resource cost for at-rest and incrementally maintained summary deployments.
+//! Analytical resource cost for at-rest and at-rest and incrementally maintained summary deployments.
 //!
 //! The canonical workload and lifecycle types own deployment semantics. This
 //! module only adds physical evidence absent from those schemas: state size,
@@ -7,14 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
 use asap_types::post_asap::{
     BoundExpr, ErrorMetric, ExactKind, FieldDataType, GuaranteeSource, ProbabilityExpr,
-    ResultGuarantee, SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
+    ResultGuarantee, SketchAlgorithm, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
-use asap_types::pre_asap::{
-    agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
-};
+use asap_types::pre_asap::{agg_intent::AggIntent, CompareOpKind, InfoMatcher, Source};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};

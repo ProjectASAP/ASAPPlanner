@@ -17,8 +17,8 @@ mod major;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use asap_types::ir::OperatorNode;
 use asap_types::parsed_workload::ParsedWorkload;
-use asap_types::post_asap::SummaryNode;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{
@@ -164,8 +164,9 @@ pub enum OptimizationInputError {
 
 // ── Output ───────────────────────────────────────────────────────────────
 
-/// One query's selected post-ASAP DAG plus the maintenance decisions taken
-/// for it. The DAG is `plan.root`.
+/// One query's selected post-ASAP DAG, or one operator sub-DAG a standalone
+/// scalar query reads, plus the maintenance decisions taken for it. The DAG
+/// is `plan.root`.
 #[derive(Debug, Clone)]
 pub struct QueryLifecyclePlan {
     /// Index into `QueryWorkload::entries()`.
@@ -173,7 +174,7 @@ pub struct QueryLifecyclePlan {
     pub plan: SummaryMaintenanceLifecyclePlan,
 }
 
-/// One plan per workload entry, in `QueryWorkload::entries()` order;
+/// One multi-root workload DAG with query/lifecycle bindings in entry order;
 /// [`check_contract`] enforces that.
 ///
 /// Plans are not deduplicated across entries: a summary state that several
@@ -184,25 +185,90 @@ pub struct QueryLifecyclePlan {
 #[non_exhaustive]
 pub struct PlanOutput {
     pub plans: Vec<QueryLifecyclePlan>,
+    /// Standalone scalar queries, keyed by position in the batch, which is
+    /// the entry index because [`check_contract`] requires dense entry
+    /// indices. Each operator reference is the root of one of
+    /// `scalar_plans`.
+    pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
+    /// One plan per distinct operator sub-DAG a scalar root reads, keyed by
+    /// that scalar's entry, in `scalar_roots` order.
+    pub scalar_plans: Vec<QueryLifecyclePlan>,
 }
 
 impl PlanOutput {
     pub fn new(plans: Vec<QueryLifecyclePlan>) -> Self {
-        Self { plans }
+        Self {
+            plans,
+            scalar_roots: Vec::new(),
+            scalar_plans: Vec::new(),
+        }
     }
 
     /// Entry indices in output order.
     pub fn entry_indices(&self) -> Vec<usize> {
-        self.plans.iter().map(|p| p.entry_index).collect()
+        let mut indices: Vec<_> = self
+            .plans
+            .iter()
+            .map(|p| p.entry_index)
+            .chain(self.scalar_roots.iter().map(|(i, _)| *i))
+            .collect();
+        if !self.scalar_roots.is_empty() {
+            indices.sort_unstable();
+        }
+        indices
     }
 
-    /// The selected DAG root per query.
-    pub fn dags(&self) -> Vec<Rc<SummaryNode>> {
+    /// All query roots in workload order, including standalone scalars.
+    pub fn roots(&self) -> Vec<asap_types::ir::QueryRoot> {
+        let mut roots: Vec<_> = self
+            .plans
+            .iter()
+            .map(|p| {
+                (
+                    p.entry_index,
+                    asap_types::ir::QueryRoot::Operator(Rc::clone(&p.plan.root)),
+                )
+            })
+            .chain(
+                self.scalar_roots
+                    .iter()
+                    .map(|(i, expr)| (*i, asap_types::ir::QueryRoot::Scalar(expr.clone()))),
+            )
+            .collect();
+        roots.sort_by_key(|(i, _)| *i);
+        roots.into_iter().map(|(_, root)| root).collect()
+    }
+
+    /// The selected operator roots. Use `roots()` to include scalar queries.
+    pub fn operator_roots(&self) -> Vec<Rc<OperatorNode>> {
         self.plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
     }
 
+    /// Unique operators in the entire workload DAG, including scalar-plan dependencies.
+    /// Several query roots can reach the same operator; it is returned once.
+    pub fn operators(&self) -> Vec<Rc<OperatorNode>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut nodes = Vec::new();
+        for root in self.roots() {
+            let inputs = match root {
+                asap_types::ir::QueryRoot::Operator(node) => vec![node],
+                asap_types::ir::QueryRoot::Scalar(expr) => {
+                    expr.operator_refs().into_iter().cloned().collect()
+                }
+            };
+            for input in inputs {
+                for node in OperatorNode::reachable(&input) {
+                    if seen.insert(Rc::as_ptr(&node)) {
+                        nodes.push(node);
+                    }
+                }
+            }
+        }
+        nodes
+    }
+
     pub fn len(&self) -> usize {
-        self.plans.len()
+        self.plans.len() + self.scalar_roots.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -220,6 +286,8 @@ pub enum OptimizeError {
         entry_index: usize,
         source: RealizationError,
     },
+    #[error("search: {0}")]
+    Search(crate::replacement::SearchError),
     #[error("summary-maintenance-lifecycle selection: {0}")]
     LifecycleSelection(SummaryMaintenanceLifecycleSelectionError),
     #[error("entry {entry_index}: {source}")]
@@ -285,6 +353,33 @@ fn check_contract(
                 "plan at position {position} carries entry_index {entry_index}"
             )));
         }
+    }
+    // `scalar_plans` holds one plan per distinct reference of each scalar
+    // root, in `scalar_roots` order, keyed by that scalar's entry.
+    let mut scalar_plans = output.scalar_plans.iter();
+    for (entry_index, expr) in &output.scalar_roots {
+        let mut refs: Vec<&Rc<OperatorNode>> = Vec::new();
+        for node in expr.operator_refs() {
+            if !refs.iter().any(|r| Rc::ptr_eq(r, node)) {
+                refs.push(node);
+            }
+        }
+        for node in refs {
+            match scalar_plans.next() {
+                Some(plan)
+                    if plan.entry_index == *entry_index && Rc::ptr_eq(&plan.plan.root, node) => {}
+                _ => {
+                    return Err(violation(format!(
+                        "scalar root {entry_index} reads an operator without its scalar plan"
+                    )))
+                }
+            }
+        }
+    }
+    if scalar_plans.next().is_some() {
+        return Err(violation(
+            "a scalar plan is read by no scalar root".to_string(),
+        ));
     }
     Ok(())
 }
@@ -374,6 +469,123 @@ mod tests {
             err,
             OptimizeError::ContractViolation { pass: "stub", .. }
         ));
+    }
+
+    /// A scalar root's operator reference must be the root of its scalar
+    /// plan; a scalar root without one is rejected.
+    #[test]
+    fn contract_rejects_a_scalar_reference_without_its_plan() {
+        use asap_types::ir::non_asap::NonASAPOp;
+        use asap_types::ir::operator_properties::Source;
+        use asap_types::ir::{Operator, ScalarExpr};
+        use asap_types::pre_asap::schema::{DataType, Field, Schema};
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![Field::plain("ts", DataType::Timestamp, false)],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
+        let mut output = PlanOutput::new(Vec::new());
+        output
+            .scalar_roots
+            .push((0, ScalarExpr::PromqlScalarFromVector(scan)));
+        let err = check_contract(&output, "stub", 1).unwrap_err();
+        assert!(matches!(
+            err,
+            OptimizeError::ContractViolation { pass: "stub", .. }
+        ));
+    }
+
+    /// A scalar plan read from `root`, keyed by `entry_index`.
+    fn scalar_plan(entry_index: usize, root: &Rc<OperatorNode>) -> QueryLifecyclePlan {
+        QueryLifecyclePlan {
+            entry_index,
+            plan: crate::SummaryMaintenanceLifecyclePlan {
+                root: Rc::clone(root),
+                deployments: vec![],
+                horizon: None,
+                evaluation_rate: None,
+                update_rate: None,
+                expected_reads: None,
+                selected_raw_recompute: true,
+                selected_window_implementation_id: None,
+                summary_total_cost: None,
+                window_accuracy_guarantee: None,
+                raw_recompute_total_cost: None,
+            },
+        }
+    }
+
+    /// `scalar_plans` holds one plan per distinct reference of each scalar
+    /// root, in order and keyed by that root's entry: a plan out of order,
+    /// under another entry, or read by no scalar root is rejected.
+    #[test]
+    fn contract_checks_scalar_plan_order_entry_and_count() {
+        use asap_types::ir::non_asap::NonASAPOp;
+        use asap_types::ir::operator_properties::Source;
+        use asap_types::ir::{ExprSemantics, Operator, ScalarExpr};
+        use asap_types::pre_asap::schema::{DataType, Field, Schema};
+        use asap_types::pre_asap::ArithmeticOpKind;
+        let series = |metric: &str| {
+            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries {
+                    metric: metric.into(),
+                },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![Field::plain("ts", DataType::Timestamp, false)],
+                    0,
+                    vec![],
+                ),
+            }))
+            .unwrap()
+        };
+        let (a, b) = (series("a"), series("b"));
+        let read = |node: &Rc<OperatorNode>| ScalarExpr::PromqlScalarFromVector(Rc::clone(node));
+        let combine = |left, right| ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Sub,
+            left: Box::new(left),
+            right: Box::new(right),
+            semantics: ExprSemantics::Promql,
+        };
+        let with_plans = |plans: Vec<QueryLifecyclePlan>| {
+            let mut output = PlanOutput::new(Vec::new());
+            // `a - b`, then `a - a`: one plan per distinct reference.
+            output.scalar_roots = vec![
+                (0, combine(read(&a), read(&b))),
+                (1, combine(read(&a), read(&a))),
+            ];
+            output.scalar_plans = plans;
+            check_contract(&output, "stub", 2)
+        };
+        with_plans(vec![
+            scalar_plan(0, &a),
+            scalar_plan(0, &b),
+            scalar_plan(1, &a),
+        ])
+        .unwrap();
+        for plans in [
+            // Wrong order.
+            vec![scalar_plan(0, &b), scalar_plan(0, &a), scalar_plan(1, &a)],
+            // Wrong entry key.
+            vec![scalar_plan(0, &a), scalar_plan(1, &b), scalar_plan(1, &a)],
+            // An extra plan.
+            vec![
+                scalar_plan(0, &a),
+                scalar_plan(0, &b),
+                scalar_plan(1, &a),
+                scalar_plan(1, &a),
+            ],
+        ] {
+            assert!(matches!(
+                with_plans(plans),
+                Err(OptimizeError::ContractViolation { pass: "stub", .. })
+            ));
+        }
     }
 
     /// The matching count passes.
