@@ -174,8 +174,8 @@ pub mod planning {
     }
 
     /// Every logical candidate (a composed CandidateLogicalASAPDAG) of the
-    /// single query `root`, in enumeration order; a choice that does not
-    /// compose is skipped.
+    /// single query `root`, in enumeration order; a candidate that does not
+    /// compose panics, so none is silently skipped.
     pub fn logical_candidates(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
@@ -183,9 +183,15 @@ pub mod planning {
         run_stage1_to_stage3(root, accuracy)
             .stage1_logical_asap_optimization
             .into_iter()
-            .filter_map(|candidate| match candidate.roots.ok()?.remove(0) {
-                QueryRoot::Operator(node) => Some(node),
-                QueryRoot::Scalar(_) => None,
+            .filter_map(|candidate| {
+                match candidate
+                    .roots
+                    .unwrap_or_else(|e| panic!("{} does not compose: {e}", candidate.id))
+                    .remove(0)
+                {
+                    QueryRoot::Operator(node) => Some(node),
+                    QueryRoot::Scalar(_) => None,
+                }
             })
             .collect()
     }
