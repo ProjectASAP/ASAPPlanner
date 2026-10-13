@@ -14,7 +14,7 @@ mod planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_aware_mapping::plan_selection::select_plan;
+use asap_aware_mapping::stage3_plan_selection::select_plan;
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};

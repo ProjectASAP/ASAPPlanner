@@ -4,18 +4,11 @@
 //! Prometheus rule YAML. The preprocessing script produces the line-oriented
 //! fixtures consumed here.
 
-use std::rc::Rc;
-
-use asap_aware_mapping::replacement::{retain_exact, RealizationError};
-use asap_aware_mapping::{
-    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
-};
 use asap_frontend_promql::PromqlError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
-use support::lower_promql;
+use support::{logical_plan, lower_promql};
 
 const CORPORA: &[(&str, &str)] = &[
     (
@@ -63,21 +56,6 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }
 
-fn post_asap_candidate(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
-    let target = TargetSubDAG::new(root);
-    match ASAPStrategies::default_cost_model()
-        .replacements(&target)
-        .into_iter()
-        .next()
-    {
-        Some(ReplacementSubDAG {
-            replacement: Replacement::SubDAG(node),
-            ..
-        }) => Ok(node),
-        _ => retain_exact(root),
-    }
-}
-
 #[test]
 fn benchmark_corpora_are_total_and_report_coverage() {
     for (name, corpus) in CORPORA {
@@ -96,7 +74,7 @@ fn benchmark_corpora_are_total_and_report_coverage() {
             match lower_promql(query, AccuracyTarget::Epsilon(0.01)) {
                 Ok(expr) => {
                     lowered += 1;
-                    match post_asap_candidate(&expr) {
+                    match logical_plan(&expr) {
                         // An ASAP operator bound somewhere below the root.
                         Ok(node) if node.contains_asap() => post_asap_candidates += 1,
                         Ok(_) => {
@@ -105,7 +83,12 @@ fn benchmark_corpora_are_total_and_report_coverage() {
                                 eprintln!("POST_ASAP_MISS\t{name}\t{query}");
                             }
                         }
-                        Err(_) => post_asap_errors += 1,
+                        Err(error) => {
+                            post_asap_errors += 1;
+                            if std::env::var_os("METRICS_OBSERVABILITY_REPORT").is_some() {
+                                eprintln!("POST_ASAP_ERROR\t{name}\t{query}\t{error}");
+                            }
+                        }
                     }
                 }
                 Err(PromqlError::Parse(_)) => parse_failures += 1,
@@ -120,5 +103,25 @@ fn benchmark_corpora_are_total_and_report_coverage() {
         // counted above so extraction drift is visible, but are not expected
         // to parse as PromQL.
         assert_eq!(total, lowered + rejected + parse_failures);
+    }
+}
+
+/// The two Kubernetes mixin alerts whose candidates do not compose: each
+/// aggregates over a `topk` output, which the frontend declares as
+/// `[keys.., topk_k]` with a `Utf8` placeholder and no value column, so the
+/// outer `sum`'s accumulator has no value to read (and the plain plan would
+/// sum a string). They compose once the top-k output carries the ranked
+/// value (#672).
+#[test]
+#[ignore = "an aggregate over a top-k output needs the top-k value column (#672)"]
+fn kubernetes_mixin_aggregates_over_topk_compose() {
+    for query in [
+        r#"sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_throttled_periods_total{container!="", job="cadvisor", } [5m]) ) ) / on (cluster, namespace, pod, container, instance) group_left sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_periods_total{job="cadvisor", } [5m]) ) ) > ( 25 / 100 )"#,
+        r#"histogram_quantile(0.99, sum by (cluster, instance, le) ( topk by (cluster, instance, le, operation_type) (1, rate(kubelet_pod_worker_duration_seconds_bucket{job="kubelet"}[5m]) ) ) ) * on(cluster, instance) group_left(node) topk by (cluster, instance, node) (1, kubelet_node_name{job="kubelet"} ) > 60"#,
+    ] {
+        let root = lower_promql(query, AccuracyTarget::Epsilon(0.01)).unwrap();
+        if let Err(error) = logical_plan(&root) {
+            panic!("{query}: {error}");
+        }
     }
 }

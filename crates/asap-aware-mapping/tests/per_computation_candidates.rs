@@ -1138,3 +1138,18 @@ fn own_having_subquery_is_substituted() {
         .iter()
         .all(|node| !matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. }))));
 }
+
+/// A per-series `avg` over PromQL rows that carry the series identity
+/// (`$promql_series_identity` after the sample value) composes from its sum
+/// and count states: the summed value is found by role, not as the last
+/// column.
+#[test]
+fn per_series_avg_with_series_identity_composes_from_sum_and_count() {
+    use asap_types::ir::schema_support::with_promql_series_identity;
+    let [QueryRoot::Operator(root)] = &implicit_exact_promql("avg_over_time(m[5m])")[..] else {
+        panic!("one operator root");
+    };
+    let root = with_promql_series_identity(root).unwrap();
+    let [composed] = <[_; 1]>::try_from(composed(vec![root.clone()], &[0])).unwrap();
+    assert_eq!(columns(&composed), columns(&root));
+}

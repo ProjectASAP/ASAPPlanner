@@ -4,10 +4,9 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::pass::{
-    OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels,
+    plan_stages, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels,
+    StagePipeline,
 };
-use asap_aware_mapping::replacement::default_strategies_with_evidence;
-use asap_aware_mapping::search_workload_with_targets;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
@@ -66,7 +65,8 @@ fn sql_workload(
 }
 
 /// The facade turns a prepared workload into one selected DAG per query, in
-/// `QueryWorkload::entries()` order, without the caller touching `CandidateLogicalASAPDAGs`.
+/// `QueryWorkload::entries()` order, without the caller touching any stage's
+/// candidates.
 #[tokio::test]
 async fn plans_every_query_in_entry_order() {
     let workload = sql_workload(
@@ -88,10 +88,10 @@ async fn plans_every_query_in_entry_order() {
     assert_eq!(output.entry_indices(), vec![0, 1]);
 }
 
-/// The facade selects what workload-wide cost selection selects over the
-/// same search space: here a summary for both approximate queries.
+/// The facade selects what the planning stages select over the frontends'
+/// roots ([`plan_stages`]), and reports that selection.
 #[tokio::test]
-async fn facade_plans_match_cost_only_selection() {
+async fn facade_plans_match_plan_stages() {
     let workload = sql_workload(
         vec![
             batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem"),
@@ -110,9 +110,10 @@ async fn facade_plans_match_cost_only_selection() {
     .await
     .expect("workload plans");
 
-    // The cost-only selection over the same search space, the way a caller
-    // reaches it without the facade.
+    // The same stages over the same roots, the way a caller reaches them
+    // without the facade.
     let mut roots = Vec::new();
+    let mut targets = Vec::new();
     for (index, entry) in workload.query_workload.entries().enumerate() {
         let accuracy = entry.requirements.accuracy.target();
         let expr = lower_sql_dialect(
@@ -123,29 +124,17 @@ async fn facade_plans_match_cost_only_selection() {
         )
         .await
         .expect("lowers");
-        roots.push((index, expr, Some(accuracy)));
+        roots.push((index, expr.into()));
+        targets.push(Some(accuracy));
     }
-    let strategies = default_strategies_with_evidence(models.cost, models.evidence);
-    let space = search_workload_with_targets(roots, &strategies, models.accuracy).unwrap();
-    let selection = space.global_selection(models.cost);
+    let data = workload.data_workload.clone().unwrap();
+    let run = plan_stages(roots, &targets, &data, models).unwrap();
+    let selection = run.selection.as_ref().expect("a candidate is selected");
+    let selected = run.selected().expect("the selected candidate is listed");
 
-    assert_eq!(output.plans.len(), space.roots.len());
-    for (plan, (_, root)) in output.plans.iter().zip(&space.roots) {
-        let cost_only = selection
-            .assemble_selected_query(root)
-            .expect("assembles")
-            .expect("root has a group");
-        assert!(
-            cost_only.contains_asap(),
-            "entry {}: cost-only selection was expected to pick a summary",
-            plan.entry_index
-        );
-        assert_eq!(
-            plan.root, cost_only,
-            "entry {}: the facade selected a different DAG",
-            plan.entry_index
-        );
-    }
+    assert!(run.physical.len() > 1, "the stages chose among candidates");
+    assert_eq!(output.selection.as_ref(), Some(selection));
+    assert_eq!(output.roots(), selected.roots);
 }
 
 /// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks
@@ -233,7 +222,7 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
             "mangling"
         }
         fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
-            let mut output = asap_aware_mapping::MajorPass.optimize(input)?;
+            let mut output = StagePipeline.optimize(input)?;
             for plan in output.plans.iter_mut() {
                 plan.entry_index += 1;
             }

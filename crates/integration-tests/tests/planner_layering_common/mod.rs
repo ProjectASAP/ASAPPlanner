@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_aware_mapping::physical_asap_optimization::PhysicalCandidate;
-use asap_aware_mapping::plan_selection::Selection;
+use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
+use asap_aware_mapping::stage3_plan_selection::Selection;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;

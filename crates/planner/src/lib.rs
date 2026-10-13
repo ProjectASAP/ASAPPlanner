@@ -1,12 +1,16 @@
 //! ASAPPlanner's library facade: one call from a prepared workload to the
-//! selected post-ASAP DAG (issue #429).
+//! selected plan (issue #429).
 //!
 //! ```text
-//! PlanningWorkload ──lowering──▶ ParsedWorkload ──optimization pass──▶ PlanOutput
-//!                   (this crate)                 (asap-aware-mapping)
+//! PlanningWorkload ──frontends──▶ ParsedWorkload ──optimization pass──▶ PlanOutput
+//!                   (this crate)                  (asap-aware-mapping)
 //! ```
 //!
-//! [`e2e_plan`] runs both stages. A caller who already holds pre-ASAP IR — a
+//! The default pass, [`StagePipeline`], runs the planning stages in order:
+//! logical ASAP-aware optimization, physical ASAP-aware optimization and plan
+//! selection ([`plan_stages`]).
+//!
+//! [`e2e_plan`] runs both steps. A caller who already holds pre-ASAP IR — a
 //! new frontend, a deserialized plan, a test that does not want to build SQL
 //! and a catalog — skips this crate and calls
 //! [`asap_aware_mapping::optimize`] directly.
@@ -25,8 +29,8 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_aware_mapping::pass::{
-    optimize, MajorPass, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry,
-    PlanOutput, PlanningModels, QueryPlan,
+    optimize, plan_stages, OptimizationInput, OptimizationPass, OptimizeError, PassRegistry,
+    PlanOutput, PlanningModels, QueryPlan, StagePipeline, StagePipelineRun,
 };
 
 // ── Input ────────────────────────────────────────────────────────────────
@@ -57,7 +61,7 @@ pub struct UserInput<'a> {
     pub workload: &'a PlanningWorkload,
     pub frontend_specific: FrontendInput<'a>,
     pub models: PlanningModels<'a>,
-    /// `None` uses [`MajorPass`]. A black-box caller never sets this.
+    /// `None` uses [`StagePipeline`]. A black-box caller never sets this.
     pub pass: Option<&'a dyn OptimizationPass>,
 }
 
@@ -161,7 +165,9 @@ pub enum PlanError {
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
-/// Lower every query, then run the optimization pass over the result.
+/// Lower every query (the query-language frontends), then run the
+/// optimization pass over the result: by default [`StagePipeline`], the
+/// planning stages in order.
 ///
 /// Async because the SQL frontend plans through DataFusion. One failed query
 /// fails the whole call: the output is positionally aligned with
@@ -172,8 +178,8 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     let exprs = lower(&input).await?;
     let parsed = ParsedWorkload::from_roots(input.workload.clone(), exprs)?;
 
-    let fallback = MajorPass;
-    let pass: &dyn OptimizationPass = input.pass.unwrap_or(&fallback);
+    let default_pass = StagePipeline;
+    let pass: &dyn OptimizationPass = input.pass.unwrap_or(&default_pass);
 
     let optimization = OptimizationInput::new(&parsed, input.models);
     optimize(pass, optimization).map_err(PlanError::Optimize)

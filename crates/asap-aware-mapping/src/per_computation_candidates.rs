@@ -832,9 +832,15 @@ fn substitute_measure(
                 return sql_avg(reduction, filter.is_some(), sum, count);
             }
             // `avg` is Float64 whatever the summed type, as `Avg`'s output is.
-            if sum.schema.fields.last().map(|field| &field.dtype)
-                != Some(&FieldDataType::Plain(DataType::Float64))
-            {
+            // A per-series sum keeps the input's labels, so its value is the
+            // sample-value column; a grouped one ends with it.
+            let value = match reduction {
+                Reduction::PerEntity => resolve_column_ref(&ColumnRef::SampleValue, &sum.schema)
+                    .ok()
+                    .and_then(|column| sum.schema.fields.get(column)),
+                Reduction::Reduce(_) => sum.schema.fields.last(),
+            };
+            if value.map(|field| &field.dtype) != Some(&FieldDataType::Plain(DataType::Float64)) {
                 let Reduction::Reduce(by) = reduction else {
                     return Err(PerComputationCandidateError::Unsupported(
                         "non-Float64 per-series avg",

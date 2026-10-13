@@ -43,7 +43,7 @@ flowchart TD
         direction TB
         L["lowering"]
         O["OptimizationInput"]
-        PASS["OptimizationPass: MajorPass, or another implementation"]
+        PASS["OptimizationPass: StagePipeline, or another implementation"]
         L --> O --> PASS
     end
 
@@ -62,8 +62,8 @@ Details of these types are provided below.
 |---|---|
 | `workload` | `&PlanningWorkload` |
 | `frontend_specific` | `Sql { catalog }` / `Promql { now_ms, histograms }` / `Metricsql`; fixed by `query_workload.language` |
-| `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults |
-| `pass` | `None` uses `MajorPass` |
+| `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults. `StagePipeline` reads the accuracy model and the evidence provider, not the cost model |
+| `pass` | `None` uses `StagePipeline` |
 
 ### `OptimizationInput`
 
@@ -80,7 +80,10 @@ pub struct OptimizationInput<'a> {
 
 ```rust
 pub struct PlanOutput {
-    pub plans: Vec<QueryPlan>,   // one per workload entry, in entries() order
+    pub plans: Vec<QueryPlan>,                   // one per operator entry, in entries() order
+    pub scalar_roots: Vec<(usize, ScalarExpr)>,  // standalone scalar entries
+    pub scalar_plans: Vec<QueryPlan>,            // the operator sub-DAGs they read
+    pub selection: Option<Selection>,            // how plan selection chose, if the pass selects
 }
 
 pub struct QueryPlan {
@@ -89,35 +92,42 @@ pub struct QueryPlan {
 }
 ```
 
-Plans carry no materialization decision. `PlanOutput::execution_timed_dag()`
-times every summary at query time until Stage 2 materialization (#509) decides
-per sub-DAG whether to materialize and whether at ingestion or query time.
+`StagePipeline` returns the selected physical candidate's roots, with every
+sub-DAG `NotMaterialized`; `PlanOutput::execution_timed_dag()` exports them
+with that same assignment. Physical ASAP-aware optimization decides per
+sub-DAG whether to materialize, and whether at ingestion or query time, from
+#604 on.
 
 ---
 
 ## 3. The pluggable optimization pass
 
 The optimization pass is fully pluggable, as long as the end-to-end behavior is satisfied.
-The `MajorPass` described below will be used by default, which corresponds to the current optimization behavior of `ASAPPlanner`.
+The `StagePipeline` described below is used by default.
 
-### 3.1 `MajorPass` — the original optimization pass
+### 3.1 `StagePipeline` — the planning stages
 
-`MajorPass` contains the original optimization algorithm the crate has always run, now behind the trait and registered under the name `major`. Its behaviour is unchanged:
+`StagePipeline` runs the planning stages of
+[planner-layering.md](../proposals/planner-layering.md) in order and is
+registered under the name `stage-pipeline`. It replaced `MajorPass`, the
+legacy replacement search; the coverage this gives up until Pass 2 is
+tracked in #580.
 
 | Step | Call |
 |---|---|
-| Build roots | `Id` is the entry's position in `entries()`; the accuracy target comes from its `requirements` |
-| Candidate search | `search_workload_with_targets` with `default_strategies_with_evidence` |
-| Select | `CandidateLogicalASAPDAGs::global_selection` |
-| Assemble, per root | `GlobalSelection::assemble_selected_dag` |
-| Share | `asap_types::ir::cse::share_common_sub_dags` across the assembled roots |
+| Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
+| Logical ASAP-aware optimization | `generate_per_computation_candidates` (Pass 1), then `compose_logical_candidate` for every combination of per-computation candidates |
+| Physical ASAP-aware optimization | `optimize_physical_asap` for every composed candidate |
+| Plan selection | `select_plan`: reject candidates that miss an accuracy target, price the rest, select the cheapest |
 
-Moving it behind the trait changes one thing for existing developers:
-**`ReplacementStrategy` is now a concept of `MajorPass`, not of the optimization
-stage.** Adding a rewrite or sharing rule to the shipped algorithm still means
-implementing `ReplacementStrategy`. Replacing the algorithm means implementing
-`OptimizationPass` instead — the two extension points no longer sit on top of
-each other.
+`plan_stages` runs these steps over the frontends' roots and returns every
+stage's candidates as well as the selection; the `stage_pipeline` devtool
+shows them. Every combination is enumerated and plan selection prices
+every candidate; nothing is capped. A search that avoids building every
+candidate is future work (#671).
+
+`ReplacementStrategy` remains a concept of the legacy candidate search, which
+no pass uses any more.
 
 ### 3.2 Plugging in another pass
 
@@ -147,7 +157,7 @@ let output = e2e_plan(user_input.with_pass(&my_pass)).await?;  // the whole pipe
 Or through an optimization pass registry:
 
 ```rust
-let mut registry = PassRegistry::with_builtin();   // holds "major"
+let mut registry = PassRegistry::with_builtin();   // holds "stage-pipeline"
 registry.register(Box::new(my_pass))?;
 for name in registry.names() {
     optimize(registry.get(name).unwrap(), optimization_input)?;
@@ -209,15 +219,15 @@ let output = e2e_plan(
 ```
 
 Step 1 is where the binding lived: the `Id` carried through the roots tuple had
-to agree with `entries()` order, and nothing checked that it did. `MajorPass` still
-runs all four steps; another pass need not run any of them.
+to agree with `entries()` order, and nothing checked that it did. The default
+pass no longer runs these steps; another pass need not run any of them.
 
 ## 4. Code layout
 
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `MajorPass` |
+| `asap-aware-mapping` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `StagePipeline`, `plan_stages` |
 | `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch |
 
 ```text
@@ -238,6 +248,6 @@ it.
 ## Related
 
 * [ASAPPlanner input, output, and workflows](input-output-workflow.md)
-* [Searching over plans](asap-aware-plan-search.md) — what `MajorPass` does inside
+* [Searching over plans](asap-aware-plan-search.md) — the legacy candidate search
 * [Planner/runtime responsibilities](planner-runtime-contract.md)
 * [Public library reference](../../develop_docs/library-api.md)

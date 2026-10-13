@@ -143,17 +143,28 @@ async fn corr_filter_is_a_measure_filter() {
     );
 }
 
-// Exact fallback retains the complete typed query and compiles to a post-ASAP DAG.
+// The plan the planner pipeline selects retains the complete typed query and
+// compiles to a physical ASAP DAG.
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
-    let plan = asap_aware_mapping::replacement::retain_exact(&query).unwrap();
+    let run = asap_aware_mapping::plan_stages(
+        vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
+        &[Some(asap_types::types::AccuracyTarget::Exact)],
+        &Default::default(),
+        asap_aware_mapping::PlanningModels::builtin(),
+    )
+    .unwrap();
+    let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_logical().unwrap() else {
+        panic!("one operator root");
+    };
     assert!(plan.guarantee.as_ref().unwrap().is_exact());
-    // The exact fallback is the query's own operator DAG, no ASAP node added.
-    assert!(!plan.contains_asap(), "expected exact fallback");
-    assert_eq!(aggregate(&plan).0, aggregate(&query).0);
+    // Pass 1 has no candidate for `corr`: the plan is the query's own
+    // operator DAG, no ASAP node added.
+    assert!(!plan.contains_asap(), "expected the exact plan");
+    assert_eq!(aggregate(plan).0, aggregate(&query).0);
     let timed = apply_materialization_timings(
-        &plan,
+        plan,
         &MaterializationAssignment::default(),
         &mut TimingMemo::new(),
     )

@@ -11,6 +11,9 @@
 //! discards valid candidates.
 //! Every valid candidate is priced node by node over its physical DAG, and
 //! the cheapest is selected. The rest are reported valid but costlier.
+//! Selection prices every candidate it is given; a search that avoids
+//! building every candidate (e.g. a dynamic program over target nesting) is
+//! deferred to #671.
 //!
 //! A node is charged once per computation (#509): a materialized node
 //! (`MatAtIngestion` or `MatAtQuery`) once, since its output is stored and
@@ -50,10 +53,10 @@ use thiserror::Error;
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
-use crate::physical_asap_optimization::PhysicalCandidate;
 use crate::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
+use crate::stage2_physical_asap_optimization::PhysicalCandidate;
 use crate::PlanningModels;
 
 pub const COST_UNIT: &str = "cpu_ms_per_workload_evaluation";
@@ -644,7 +647,7 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
 mod tests {
     use super::*;
     use crate::accuracy::AccuracyEvidenceProvider;
-    use crate::physical_asap_optimization::optimize_physical_asap;
+    use crate::stage2_physical_asap_optimization::optimize_physical_asap;
     use crate::test_support::lower_promql;
     use asap_types::ir::ExprSemantics;
     use asap_types::post_asap::{BoundExpr, ErrorMetric, ProbabilityExpr};

@@ -73,9 +73,9 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
     assert_eq!(document["format"], "asap-stage-pipeline/v1");
     let queries = document["workload"]["queries"].as_array().unwrap().len();
     assert_eq!(queries, 2);
-    validated_dag(&document["language_specific_frontends"]["dag"], queries);
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], queries);
 
-    let logical = &document["logical_asap_optimization"];
+    let logical = &document["stage1_logical_asap_optimization"];
     let candidates = logical["candidates"].as_array().unwrap();
     assert_eq!(logical["capped"], false);
     assert_eq!(logical["combinations"], candidates.len());
@@ -90,10 +90,10 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         }
     }
 
-    let physical = document["physical_asap_optimization"]["candidates"]
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
-    let pruned = document["physical_asap_optimization"]["pruned"]
+    let pruned = document["stage2_physical_asap_optimization"]["pruned"]
         .as_array()
         .unwrap();
     assert!(pruned
@@ -113,7 +113,7 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         PhysicalASAPDAGDocument::new(dag).validate().unwrap();
     }
 
-    let selection = &document["plan_selection"];
+    let selection = &document["stage3_plan_selection"];
     let costs = selection["costs"].as_object().unwrap();
     let selected = selection["selected"].as_str().unwrap();
     let mut accounted = HashSet::from([selected]);
@@ -137,13 +137,13 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
 fn display_cap_is_recorded_and_keeps_the_selection() {
     let full = generate(&[]);
     let document = generate(&["--max-displayed", "1"]);
-    let logical = &document["logical_asap_optimization"];
+    let logical = &document["stage1_logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
     assert!(logical["candidates"].as_array().unwrap().len() < 3);
     assert_eq!(logical["combinations"], 3);
     assert_eq!(
-        document["plan_selection"]["selected"],
-        full["plan_selection"]["selected"]
+        document["stage3_plan_selection"]["selected"],
+        full["stage3_plan_selection"]["selected"]
     );
 }
 
@@ -170,7 +170,7 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
     assert!(status.success());
     let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
     std::fs::remove_file(out).unwrap();
-    let candidates = document["logical_asap_optimization"]["candidates"]
+    let candidates = document["stage1_logical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
     let (composed, failed): (Vec<_>, Vec<_>) = candidates
@@ -197,10 +197,10 @@ fn example3a_selects_the_cheapest_of_all_candidates() {
     let expected = run.stage3_plan_selection.unwrap().selected;
 
     let document = generate_example("planner-layering-3a", &[]);
-    let selection = &document["plan_selection"];
+    let selection = &document["stage3_plan_selection"];
     assert_eq!(selection["selected"], expected.as_str());
     assert!(selection["costs"].get(&expected).is_some());
-    let physical = document["physical_asap_optimization"]["candidates"]
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
     assert!(physical.iter().any(|p| p["id"] == expected.as_str()));

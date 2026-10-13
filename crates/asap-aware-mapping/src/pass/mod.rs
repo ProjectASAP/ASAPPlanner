@@ -6,13 +6,14 @@
 //! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
-//! one implementation, [`MajorPass`].
+//! one implementation, [`StagePipeline`]: the planning stages in order
+//! ([`plan_stages`]).
 //!
 //! Call [`optimize`] rather than [`OptimizationPass::optimize`] directly: it
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
-mod major;
+mod stage_pipeline;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -30,9 +31,12 @@ use crate::accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
 };
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::replacement::RealizationError;
+use crate::per_computation_candidates::PerComputationCandidateError;
+use crate::stage3_plan_selection::{Selection, SelectionError};
 
-pub use major::MajorPass;
+pub use stage_pipeline::{
+    plan_stages, LogicalCandidate, PrunedCandidate, StagePipeline, StagePipelineRun,
+};
 
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
@@ -42,6 +46,9 @@ static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 
 /// Planning logic, as opposed to the scoped facts it consumes: a model can have
 /// a built-in default, evidence about a particular deployment cannot.
+///
+/// Plan selection reads `accuracy` and `evidence`. It prices candidates with
+/// its own analytical model, so [`StagePipeline`] does not read `cost`.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
@@ -63,9 +70,7 @@ impl<'a> PlanningModels<'a> {
         }
     }
 
-    /// The built-in models. `DefaultCostModel` does not override
-    /// `estimate_cost`, so this configuration ranks structurally and is not a
-    /// measured deployment cost.
+    /// The built-in models.
     pub fn builtin() -> PlanningModels<'static> {
         PlanningModels {
             cost: &DEFAULT_COST_MODEL,
@@ -145,6 +150,9 @@ pub struct PlanOutput {
     /// One plan per distinct operator sub-DAG a scalar root reads, keyed by
     /// that scalar's entry, in `scalar_roots` order.
     pub scalar_plans: Vec<QueryPlan>,
+    /// How plan selection chose the plan, when the pass selects among priced
+    /// candidates.
+    pub selection: Option<Selection>,
 }
 
 impl PlanOutput {
@@ -153,6 +161,7 @@ impl PlanOutput {
             plans,
             scalar_roots: Vec::new(),
             scalar_plans: Vec::new(),
+            selection: None,
         }
     }
 
@@ -279,13 +288,10 @@ fn time_query_root(
 pub enum OptimizeError {
     #[error("optimization input: {0}")]
     Input(#[from] OptimizationInputError),
-    #[error("entry {entry_index}: {source}")]
-    Realization {
-        entry_index: usize,
-        source: RealizationError,
-    },
-    #[error("search: {0}")]
-    Search(crate::replacement::SearchError),
+    #[error("logical ASAP-aware optimization: {0}")]
+    PerComputationCandidates(#[from] PerComputationCandidateError),
+    #[error("plan selection: {0}")]
+    Selection(#[from] SelectionError),
     /// The pass returned something the downstream contract forbids. This is a
     /// defect in the pass, not in its input.
     #[error("pass `{pass}` violated the output contract: {detail}")]
@@ -395,11 +401,11 @@ impl PassRegistry {
         Self::default()
     }
 
-    /// Only [`MajorPass`], under the name `major`.
+    /// Only [`StagePipeline`], under the name `stage-pipeline`.
     pub fn with_builtin() -> Self {
         let mut registry = Self::new();
         registry
-            .register(Box::new(MajorPass))
+            .register(Box::new(StagePipeline))
             .expect("empty registry cannot conflict");
         registry
     }
@@ -583,14 +589,17 @@ mod tests {
         assert_eq!(err.0, "greedy");
     }
 
-    /// The builtin registry resolves `major`, and names come back sorted so a
-    /// sweep over every registered pass is reproducible.
+    /// The builtin registry resolves `stage-pipeline`, and names come back
+    /// sorted so a sweep over every registered pass is reproducible.
     #[test]
     fn registry_resolves_builtin_and_lists_names_in_order() {
         let mut registry = PassRegistry::with_builtin();
         registry.register(Box::new(Stub("alpha"))).unwrap();
-        assert!(registry.get("major").is_some());
+        assert!(registry.get("stage-pipeline").is_some());
         assert!(registry.get("absent").is_none());
-        assert_eq!(registry.names().collect::<Vec<_>>(), vec!["alpha", "major"]);
+        assert_eq!(
+            registry.names().collect::<Vec<_>>(),
+            vec!["alpha", "stage-pipeline"]
+        );
     }
 }

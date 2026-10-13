@@ -141,3 +141,52 @@ pub mod post_asap {
         compile_physical_asap_dag(&at_ingestion(root)).expect("post-ASAP DAG export failed")
     }
 }
+
+/// Plans and candidates from the planner pipeline (`plan_stages`) for one
+/// query, with the built-in models.
+pub mod planning {
+    use asap_types::ir::{OperatorNode, QueryRoot};
+    use asap_types::types::AccuracyTarget;
+    use asap_types::workload::DataWorkload;
+    use std::rc::Rc;
+
+    /// Every planning stage's output for the single query `root`.
+    pub fn plan_stages(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+    ) -> asap_aware_mapping::StagePipelineRun<usize> {
+        asap_aware_mapping::plan_stages(
+            vec![(0, QueryRoot::Operator(root))],
+            &[Some(accuracy)],
+            &DataWorkload::default(),
+            asap_aware_mapping::PlanningModels::builtin(),
+        )
+        .expect("Pass 1 accepts the query")
+    }
+
+    /// The logical DAG the planner pipeline selects for the single query
+    /// `root` at `accuracy`.
+    pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+        match plan_stages(root, accuracy).selected_logical() {
+            Some([QueryRoot::Operator(node)]) => Rc::clone(node),
+            other => panic!("one selected operator root: {other:?}"),
+        }
+    }
+
+    /// Every logical candidate (a composed CandidateLogicalASAPDAG) of the
+    /// single query `root`, in enumeration order; a choice that does not
+    /// compose is skipped.
+    pub fn logical_candidates(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+    ) -> Vec<Rc<OperatorNode>> {
+        plan_stages(root, accuracy)
+            .logical
+            .into_iter()
+            .filter_map(|candidate| match candidate.roots.ok()?.remove(0) {
+                QueryRoot::Operator(node) => Some(node),
+                QueryRoot::Scalar(_) => None,
+            })
+            .collect()
+    }
+}

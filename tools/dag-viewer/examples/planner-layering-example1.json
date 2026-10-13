@@ -1,6 +1,6 @@
 {
   "format": "asap-stage-pipeline/v1",
-  "language_specific_frontends": {
+  "stage0_query_language_frontends": {
     "dag": {
       "nodes": [
         {
@@ -563,7 +563,7 @@
       ]
     }
   },
-  "logical_asap_optimization": {
+  "stage1_logical_asap_optimization": {
     "candidates": [
       {
         "dag": {
@@ -3346,7 +3346,7 @@
     "capped": false,
     "combinations": 3
   },
-  "physical_asap_optimization": {
+  "stage2_physical_asap_optimization": {
     "candidates": [
       {
         "dag": {
@@ -8004,7 +8004,7 @@
     ],
     "pruned": []
   },
-  "plan_selection": {
+  "stage3_plan_selection": {
     "costs": {
       "P1": {
         "per_node": {

@@ -1,6 +1,5 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
 mod common;
-use asap_aware_mapping::{cost_model::DefaultCostModel, search_workload};
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
@@ -12,14 +11,15 @@ use asap_physical_operators::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::compile_physical_asap_dag;
+use common::{compile_physical_asap_dag, logical_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::ASAPOp;
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, sync::Arc};
 
-fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
+/// `sum by(job)(rate(m[1m]))` with its rows carrying the series identity.
+fn grouped_rate_root() -> std::rc::Rc<planner_types::ir::OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -47,19 +47,11 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static
     let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
-    let root = asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
-        .unwrap();
-    search_workload(vec![("grouped-rate", root)]).unwrap()
+    asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root).unwrap()
 }
 
 fn grouped_rate() -> PhysicalASAPDAG {
-    let space = grouped_rate_space();
-    let selected = space
-        .global_selection(&DefaultCostModel)
-        .assemble_selected_query(&space.roots[0].1)
-        .unwrap()
-        .unwrap();
-    compile_physical_asap_dag(&selected).unwrap()
+    compile_physical_asap_dag(&selected_dag(grouped_rate_root(), AccuracyTarget::Exact)).unwrap()
 }
 fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs
@@ -416,11 +408,9 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
 
 #[test]
 fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
-    let inventory = grouped_rate_space().enumerate_candidate_dags(4096).unwrap();
     let mut executed = 0;
-    for forest in inventory.candidates {
-        let root = &forest[0].1;
-        let dag = compile_physical_asap_dag(root).unwrap();
+    for root in logical_candidates(grouped_rate_root(), AccuracyTarget::Exact) {
+        let dag = compile_physical_asap_dag(&root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
                 node.payload,
