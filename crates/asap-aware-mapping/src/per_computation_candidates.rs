@@ -24,6 +24,40 @@
 //! The input must be a logical DAG: ASAP operators, execution timing or a
 //! materialization are rejected. No cost or accuracy model is used; ranking
 //! and discarding valid candidates belong to Stage 3.
+//!
+//! # Whole-workload candidates (logical ASAP-aware optimization, end of Pass 1)
+//!
+//! [`compose_logical_candidate`] is Algorithm 1's
+//! `SUBSTITUTE(d, s_1 ↦ c_1, …)`: it picks one per-computation candidate per
+//! target (`choice[i]` indexes `targets[i].choices.candidates`) and builds one
+//! whole-workload candidate DAG. An aggregate whose chosen candidates are all
+//! `Exact` is kept. Otherwise each of its measures is substituted on its own
+//! over the aggregate's input:
+//!
+//! - `ExactAccumulator`: `SummaryAgg` with the exact family →
+//!   `FinalizeExactAccumulator`.
+//! - `Summary`: `SummaryAgg` → `SummaryEstimate`.
+//! - `AvgAsSumCount`: the finalized `sum` and `count` accumulators divided.
+//! - `Exact` (or a measure that is no target): a single-measure `Aggregate`.
+//!
+//! The measures of a multi-measure aggregate are joined back on the group
+//! keys (NULL keys match, as grouping treats them). A measure filter becomes
+//! `SummaryAgg.filter`, so a group with no matching row stays. A
+//! `BelowAggregate` `HAVING` becomes a `Filter` below the state, with its key
+//! columns renumbered to the input's, and the consumer `Filter` it came from
+//! is dropped; it is not a `SummaryAgg.filter`, which would keep the dropped
+//! groups. An `AboveOutput` `HAVING` stays a `Filter` above the output.
+//!
+//! Summaries are sized here, each for its own measure's accuracy requirement.
+//! Sizing belongs after Pass 2, where a shared summary takes the strictest
+//! requirement among its consumers; Pass 2 sharing is not implemented yet, so
+//! this is that post-Pass-2 sizing step with no sharing.
+//!
+//! Every node of the candidate gets a theoretical guarantee: exact over
+//! exact inputs; a `SummaryEstimate` over exact input the sized family's
+//! bound; and `None` for anything computed from an approximate value.
+//! Composing guarantees through operators is #669; plan selection's accuracy model
+//! decides a candidate without one.
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -123,7 +157,7 @@ impl ComputationChoices {
 pub enum HavingPlacement {
     /// The predicate reads only group keys and every consumer of the
     /// aggregate applies it, so it is pushed below the aggregate as a row
-    /// predicate, like a measure filter.
+    /// predicate (a `Filter` on its input, which drops the group).
     BelowAggregate,
     /// The predicate reads aggregate values, so it stays a `Filter` above the
     /// finalize/estimate output; approximate candidates of this target carry
@@ -434,11 +468,11 @@ pub fn compose_logical_candidate<Id: Clone>(
             .or_default()
             .push((target, candidate));
     }
-    // Consumer `Filter`s whose key-only `HAVING` moves below a realized
+    // Consumer `Filter`s whose key-only `HAVING` moves below a substituted
     // aggregate: each is replaced by its input.
     let pushed_below: HashSet<_> = chosen
         .values()
-        .filter(|targets| realized(targets))
+        .filter(|targets| substituted(targets))
         .flat_map(|targets| &targets[0].0.having)
         .filter(|entry| entry.placement == HavingPlacement::BelowAggregate)
         .filter_map(|entry| entry.filter.as_ref().map(Rc::as_ptr))
@@ -474,9 +508,9 @@ type Chosen<'a> =
     HashMap<*const OperatorNode, Vec<(&'a ComputationTarget, &'a ComputationCandidate)>>;
 type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
-/// Whether any measure of the aggregate is realized by something other than
+/// Whether any measure of the aggregate is substituted by something other than
 /// its plain exact computation.
-fn realized(targets: &[(&ComputationTarget, &ComputationCandidate)]) -> bool {
+fn substituted(targets: &[(&ComputationTarget, &ComputationCandidate)]) -> bool {
     targets
         .iter()
         .any(|(_, candidate)| **candidate != ComputationCandidate::Exact)
@@ -499,7 +533,7 @@ fn rewrite(
         .iter()
         .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
     let rebuilt = match (chosen.get(&Rc::as_ptr(node)), node.non_asap()) {
-        (Some(targets), _) if realized(targets) => realize(node, targets, memo)?,
+        (Some(targets), _) if substituted(targets) => substitute(node, targets, memo)?,
         (_, Some(NonASAPOp::Filter { child, .. })) if pushed_below.contains(&Rc::as_ptr(node)) => {
             memo[&Rc::as_ptr(child)].clone()
         }
@@ -572,9 +606,9 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
 }
 
 /// Replace an aggregate whose measures are `targets`' (or exact, for a
-/// measure that is no target) by its realization, with the same output
+/// measure that is no target) by its substitution, with the same output
 /// columns.
-fn realize(
+fn substitute(
     target: &OperatorNode,
     targets: &[(&ComputationTarget, &ComputationCandidate)],
     memo: &Memo,
@@ -614,7 +648,7 @@ fn realize(
                 .find(|(target, _)| target.measure == measure)
                 .map_or(&ComputationCandidate::Exact, |(_, candidate)| *candidate);
             let filter = filters.get(measure).cloned().flatten();
-            realize_measure(target, intent, candidate, filter, &input)
+            substitute_measure(target, intent, candidate, filter, &input)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut output = match <[_; 1]>::try_from(parts) {
@@ -633,7 +667,7 @@ fn realize(
 }
 
 /// One measure of `target` over `input`: its group keys, then its value.
-fn realize_measure(
+fn substitute_measure(
     target: &OperatorNode,
     intent: &AggIntent,
     candidate: &ComputationCandidate,
@@ -641,7 +675,7 @@ fn realize_measure(
     input: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
-        unreachable!("realize checked the aggregate")
+        unreachable!("substitute checked the aggregate")
     };
     let state = |family: FieldDataType, intent: &AggIntent| {
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
