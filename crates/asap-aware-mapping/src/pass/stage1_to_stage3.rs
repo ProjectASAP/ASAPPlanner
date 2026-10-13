@@ -6,16 +6,20 @@
 //! [`OptimizationPass`](super::OptimizationPass) that runs it.
 //!
 //! [`run_stage1_to_stage3`] runs, for one workload:
-//! 1. Stage 1, logical ASAP-aware optimization: Pass 1 per-computation candidate
-//!    generation, then composition of one whole-workload candidate per choice
-//!    of a per-computation candidate for every target (the Cartesian product,
-//!    in mixed-radix order, the last target varying fastest);
-//! 2. Stage 2, physical ASAP-aware optimization of every composed candidate
+//! 1. Stage 1, logical ASAP-aware optimization: Pass 1 per-computation
+//!    candidate generation, then composition of one whole-workload candidate
+//!    per choice of a per-computation candidate for every target (the
+//!    Cartesian product, in mixed-radix order, the last target varying
+//!    fastest), then Pass 2's identical-expression rule
+//!    ([`share_identical_expressions`]), which adds a shared candidate beside
+//!    each composed candidate that has identical sub-DAGs;
+//! 2. Stage 2, physical ASAP-aware optimization of every Stage 1 candidate
 //!    ([`optimize_physical_asap`]);
 //! 3. Stage 3, plan selection over the physical candidates ([`select_plan`]).
 //!
 //! Stage 0, the query-language frontends, runs before it (the `asap-planner`
-//! facade lowers the workload). Pass 2 (ASAP-aware CSE) is not planned yet.
+//! facade lowers the workload). Pass 2's summary-capability and
+//! window-composition rules are not planned yet.
 //!
 //! Every combination is enumerated and plan selection prices every
 //! candidate; nothing is capped. A search that avoids building every
@@ -27,11 +31,12 @@ use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::post_asap::SketchAlgorithm;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataWorkload, QueryLanguage};
+use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
+use crate::asap_aware_cse::share_identical_expressions;
 use crate::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    compose_logical_candidate, generate_per_computation_candidates_with, ComputationCandidate,
     PerComputationCandidateError, PerComputationCandidates,
 };
 use crate::stage2_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
@@ -52,6 +57,15 @@ pub struct LogicalCandidate {
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
 
+/// A candidate Stage 1's Pass 2 added: `id` is `from_logical` with its
+/// identical sub-DAGs shared (the identical-expression rule). It has the
+/// same `choice` as `from_logical`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedCandidate {
+    pub id: String,
+    pub from_logical: String,
+}
+
 /// A composed logical candidate that physical ASAP-aware optimization could
 /// not implement, with the reason.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,11 +84,16 @@ pub struct Stage1ToStage3Run<Id> {
     /// Stage 1, Pass 1: the per-computation candidates, with the roots they
     /// read.
     pub stage1_pass1_per_computation: PerComputationCandidates<Id>,
-    /// Stage 1: the number of whole-workload candidates, the size of the
-    /// Cartesian product of the targets' candidates, saturating at
-    /// `usize::MAX`.
+    /// Stage 1: the number of whole-workload candidates Pass 1 composes: one
+    /// per choice of a candidate for every target, where a target a
+    /// whole-expression candidate absorbs takes only its first candidate.
     pub combinations: usize,
-    /// Stage 1: every whole-workload logical candidate, in enumeration order.
+    /// Stage 1, Pass 2: the candidates the identical-expression rule added,
+    /// each beside the Pass 1 candidate it shares the identical sub-DAGs of.
+    pub stage1_pass2_asap_aware_cse: Vec<SharedCandidate>,
+    /// Stage 1: every whole-workload logical candidate, in enumeration
+    /// order: each Pass 1 candidate, followed by its Pass 2 shared candidate
+    /// when it has one.
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     /// Stage 2: one physical candidate (`P<n>` from `L<n>`) per Stage 1
     /// candidate that composed and was implemented.
@@ -110,35 +129,35 @@ impl<Id> Stage1ToStage3Run<Id> {
 
 /// Run Stage 1 → Stage 2 → Stage 3 over the frontends' `roots`, enumerating every
 /// whole-workload candidate. `targets[i]` is the accuracy
-/// requirement of `roots[i]` (`None` imposes none). Only a Pass 1 failure is
+/// requirement of `roots[i]` (`None` imposes none) and `recurrence[i]` how
+/// often it is evaluated. Only a Pass 1 failure is
 /// an error; a candidate that does not compose or cannot be implemented is
 /// listed with its reason, and a failed selection is reported in the run.
 pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
     targets: &[Option<AccuracyTarget>],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
-    let per_computation = generate_per_computation_candidates(roots)?;
-    let combinations = per_computation
-        .targets
-        .iter()
-        .map(|target| target.choices.candidates.len())
-        .fold(1usize, usize::saturating_mul);
+    let per_computation = generate_per_computation_candidates_with(roots, &data.metric_types)?;
+    let mut combinations = 0usize;
     let query_of_target = query_of_target(&per_computation);
     let mut logical = Vec::new();
     let mut physical = Vec::new();
     let mut pruned = Vec::new();
-    let mut choice = vec![0; per_computation.targets.len()];
-    for index in 0usize.. {
-        let id = format!("L{}", index + 1);
-        let display_name = display_name(&per_computation, &query_of_target, &choice);
-        let roots = compose_logical_candidate(&per_computation, &choice)
-            .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
+    let mut pass2 = Vec::new();
+    // Stage 2 for one Stage 1 candidate, numbered after the ones before it.
+    let mut add = |logical: &mut Vec<LogicalCandidate>,
+                   display_name: String,
+                   choice: &[usize],
+                   roots: Result<Vec<QueryRoot>, PerComputationCandidateError>| {
+        let number = logical.len() + 1;
+        let id = format!("L{number}");
         if let Ok(roots) = &roots {
             match optimize_physical_asap(&id, roots) {
                 Ok(mut candidate) => {
-                    candidate.id = format!("P{}", index + 1);
+                    candidate.id = format!("P{number}");
                     candidate.display_name = display_name.clone();
                     physical.push(candidate);
                 }
@@ -150,34 +169,79 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
             }
         }
         logical.push(LogicalCandidate {
-            id,
+            id: id.clone(),
             display_name,
-            choice: choice.clone(),
+            choice: choice.to_vec(),
             roots,
         });
-        // Mixed-radix increment: the last target varies fastest; a carry
-        // out of the first target ends the enumeration.
-        let mut carry = true;
-        for (digit, target) in choice.iter_mut().zip(&per_computation.targets).rev() {
-            *digit += 1;
-            if *digit < target.choices.candidates.len() {
-                carry = false;
-                break;
+        id
+    };
+    let mut choice = vec![0; per_computation.targets.len()];
+    loop {
+        if absorbed_choice_varies(&per_computation, &choice) {
+            if next_choice(&per_computation, &mut choice) {
+                continue;
             }
-            *digit = 0;
+            break;
         }
-        if carry {
+        combinations += 1;
+        let display_name = display_name(&per_computation, &query_of_target, &choice);
+        let roots = compose_logical_candidate(&per_computation, &choice)
+            .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
+        // Stage 1, Pass 2: the identical-expression rule adds a shared
+        // candidate and keeps the independent one.
+        let shared = roots
+            .as_ref()
+            .ok()
+            .and_then(|roots| share_identical_expressions(roots));
+        let from_logical = add(&mut logical, display_name.clone(), &choice, roots);
+        if let Some(shared) = shared {
+            let id = add(
+                &mut logical,
+                format!("{display_name} · shared"),
+                &choice,
+                Ok(shared),
+            );
+            pass2.push(SharedCandidate { id, from_logical });
+        }
+        if !next_choice(&per_computation, &mut choice) {
             break;
         }
     }
-    let selection = select_plan(&physical, targets, data, models);
+    let selection = select_plan(&physical, targets, recurrence, data, models);
     Ok(Stage1ToStage3Run {
         stage1_pass1_per_computation: per_computation,
         combinations,
+        stage1_pass2_asap_aware_cse: pass2,
         stage1_logical_asap_optimization: logical,
         stage2_physical_asap_optimization: physical,
         stage2_pruned: pruned,
         stage3_plan_selection: selection,
+    })
+}
+
+/// Mixed-radix increment of `choice`: the last target varies fastest. `false`
+/// when a carry out of the first target ends the enumeration.
+fn next_choice<Id>(inventory: &PerComputationCandidates<Id>, choice: &mut [usize]) -> bool {
+    for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
+        *digit += 1;
+        if *digit < target.choices.candidates.len() {
+            return true;
+        }
+        *digit = 0;
+    }
+    false
+}
+
+/// Whether `choice` picks a whole-expression candidate and a candidate other
+/// than the first for the target it absorbs: the same candidate as the one
+/// with the first, since the absorbed target is not computed.
+fn absorbed_choice_varies<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usize]) -> bool {
+    inventory.targets.iter().zip(choice).any(|(target, &index)| {
+        matches!(
+            target.choices.candidates[index],
+            ComputationCandidate::WholeExpression(_)
+        ) && target.absorbs.is_some_and(|inner| choice[inner] != 0)
     })
 }
 
@@ -239,11 +303,10 @@ fn display_name<Id>(
                     ComputationCandidate::AvgAsSumCount => {
                         accumulators.push("Sum/Count acc".into())
                     }
-                    ComputationCandidate::Summary(algorithm) => sketches.push(match algorithm {
-                        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-                        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-                        other => format!("{other:?}"),
-                    }),
+                    ComputationCandidate::Summary(algorithm) => sketches.push(sketch_name(algorithm)),
+                    ComputationCandidate::WholeExpression(algorithm) => {
+                        sketches.push(format!("whole-expression {}", sketch_name(algorithm)))
+                    }
                 }
             }
             let mut text = format!("Q{} ", query + 1);
@@ -259,6 +322,14 @@ fn display_name<Id>(
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+fn sketch_name(algorithm: &SketchAlgorithm) -> String {
+    match algorithm {
+        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
+        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// The planner pipeline behind the optimization-pass interface: the
@@ -302,8 +373,13 @@ impl OptimizationPass for Stage1ToStage3Pass {
             .entries()
             .map(|entry| Some(entry.requirements.accuracy.target()))
             .collect();
+        let recurrence: Vec<_> = workload
+            .query_workload()
+            .entries()
+            .map(|entry| entry.recurrence)
+            .collect();
         let data = workload.data_workload().cloned().unwrap_or_default();
-        let run = run_stage1_to_stage3(roots, &targets, &data, input.models)?;
+        let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, input.models)?;
         let Stage1ToStage3Run {
             stage2_physical_asap_optimization: physical,
             stage3_plan_selection: selection,

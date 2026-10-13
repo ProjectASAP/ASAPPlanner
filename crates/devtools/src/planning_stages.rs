@@ -37,15 +37,16 @@ pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>,
         .collect()
 }
 
-/// Logical ASAP-aware optimization (Pass 1 and composition; no Pass 2),
+/// Logical ASAP-aware optimization (Pass 1, composition and Pass 2's
+/// identical-expression rule),
 /// physical ASAP-aware optimization and plan selection over `roots`, the
 /// lowered entries of `workload`: the library's planner pipeline
 /// ([`run_stage1_to_stage3`]) with the built-in models. Logical candidates are every
 /// choice of a per-computation candidate for every target, the last target
 /// varying fastest. Every candidate is enumerated and priced, so the
 /// selection is the cheapest of all; a caller that shows fewer cuts only its
-/// display. Plan selection reads only the accuracy targets and the data
-/// workload. The frontends' roots and every composed candidate are
+/// display. Plan selection reads only the accuracy targets, the
+/// recurrences and the data workload. The frontends' roots and every composed candidate are
 /// validated.
 pub fn run_planning_stages(
     workload: &PlanningWorkload,
@@ -57,10 +58,16 @@ pub fn run_planning_stages(
         .entries()
         .map(|entry| Some(entry.requirements.accuracy.target()))
         .collect();
+    let recurrence: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.recurrence)
+        .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let run = run_stage1_to_stage3(
         roots.iter().cloned().enumerate().collect(),
         &targets,
+        &recurrence,
         &data,
         PlanningModels::builtin(),
     )

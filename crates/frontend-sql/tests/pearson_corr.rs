@@ -151,6 +151,7 @@ async fn corr_survives_exact_plan_compilation() {
     let run = asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
         &[Some(asap_types::types::AccuracyTarget::Exact)],
+        &[asap_types::workload::QueryRecurrence::Unknown],
         &Default::default(),
         asap_aware_mapping::PlanningModels::builtin(),
     )

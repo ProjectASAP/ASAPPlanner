@@ -158,6 +158,7 @@ pub mod planning {
         asap_aware_mapping::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
             &[Some(accuracy)],
+            &[asap_types::workload::QueryRecurrence::Unknown],
             &DataWorkload::default(),
             asap_aware_mapping::PlanningModels::builtin(),
         )

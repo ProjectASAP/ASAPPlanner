@@ -64,10 +64,10 @@
 //! anything computed from an approximate value. Composing guarantees through
 //! operators is #669; plan selection's accuracy model decides a candidate without
 //! one.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
+use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
     Predicate, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
@@ -83,6 +83,7 @@ use asap_types::pre_asap::{
     resolve_column_ref, AggIntent, ColumnRef, CompareOpKind, DataType, ScalarValue, Schema,
 };
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::MetricType;
 use thiserror::Error;
 
 use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
@@ -110,6 +111,13 @@ pub enum ComputationCandidate {
     Summary(SketchAlgorithm),
     /// `avg` rewritten as exact `sum` and `count` accumulator states.
     AvgAsSumCount,
+    /// A whole-expression top-k: one heap summary (Count-Min or CountSketch
+    /// with a heap) over the input of the per-item `sum` or `count` beneath
+    /// the top-k, keyed by the ranked item and weighted by the summed value,
+    /// instead of a summary over that aggregate's exact result. It absorbs
+    /// the target beneath ([`ComputationTarget::absorbs`]): that aggregate
+    /// is not computed. Unsized, like `Summary`.
+    WholeExpression(SketchAlgorithm),
 }
 
 /// Why Pass 1 proved a candidate unable to realize its target.
@@ -196,6 +204,16 @@ pub struct ComputationTarget {
     /// The aggregate's own `having`, then one entry per consumer `Filter`
     /// directly above the aggregate.
     pub having: Vec<HavingEntry>,
+    /// The target directly beneath this one that its
+    /// [`ComputationCandidate::WholeExpression`] candidates absorb. A
+    /// whole-workload choice of such a candidate takes the absorbed target's
+    /// first candidate: the target is not computed, so its own choice does
+    /// not matter.
+    pub absorbs: Option<usize>,
+    /// Whether every value the aggregate reads is a sample of a metric
+    /// declared a counter, or a sum of such samples ([`counter_samples`]):
+    /// heap-sketch weights read from it are proven non-negative.
+    pub counter_input: bool,
 }
 
 /// Compact Pass 1 inventory; roots and nested producer dependencies are retained.
@@ -333,6 +351,16 @@ fn placement(below: bool) -> HavingPlacement {
 pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
+    generate_per_computation_candidates_with(roots, &BTreeMap::new())
+}
+
+/// [`generate_per_computation_candidates`] with the data workload's declared
+/// metric types, which prove heap-sketch weights over counter samples
+/// non-negative.
+pub fn generate_per_computation_candidates_with<Id: std::fmt::Debug>(
+    roots: Vec<(Id, QueryRoot)>,
+    metric_types: &BTreeMap<String, MetricType>,
+) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     let mut seen = HashSet::new();
     // Each aggregate with the first root that reaches it.
     let mut aggregates = Vec::new();
@@ -438,10 +466,199 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
                 choices,
                 filter: filters.get(measure).cloned().flatten(),
                 having: entries.clone(),
+                absorbs: None,
+                counter_input: node
+                    .children()
+                    .iter()
+                    .all(|child| counter_samples(child, metric_types)),
             });
         }
     }
+    add_whole_expression_candidates(&mut targets, &consumers);
     Ok(PerComputationCandidates { roots, targets })
+}
+
+/// Whole-expression top-k (#509 Example 1's Q2): a top-k over a per-item
+/// `sum` or `count` that is itself a target gets one
+/// [`ComputationCandidate::WholeExpression`] per heap family its own
+/// candidates list, absorbing the inner target. Offered only when the inner
+/// aggregate has no other consumer, so absorbing it removes its work, and
+/// when the keyed-additive rule realizes it ([`whole_expression_input`]).
+fn add_whole_expression_candidates(
+    targets: &mut [ComputationTarget],
+    consumers: &HashMap<*const OperatorNode, Vec<Option<Rc<OperatorNode>>>>,
+) {
+    for t in 0..targets.len() {
+        let target = &targets[t];
+        let Some(NonASAPOp::Aggregate { child, .. }) = target.target.non_asap() else {
+            continue;
+        };
+        let Some(inner) = targets
+            .iter()
+            .position(|other| Rc::ptr_eq(&other.target, child))
+        else {
+            continue;
+        };
+        if consumers.get(&Rc::as_ptr(child)).map(Vec::len) != Some(1)
+            || target.filter.is_some()
+            || !target.having.is_empty()
+            || whole_expression_input(&target.target).is_none()
+        {
+            continue;
+        }
+        let heaps: Vec<_> = target
+            .choices
+            .candidates
+            .iter()
+            .filter_map(|candidate| match candidate {
+                ComputationCandidate::Summary(
+                    algorithm @ (SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap),
+                ) => Some(ComputationCandidate::WholeExpression(algorithm.clone())),
+                _ => None,
+            })
+            .collect();
+        if heaps.is_empty() {
+            continue;
+        }
+        let target = &mut targets[t];
+        target.choices.candidates.extend(heaps);
+        target.absorbs = Some(inner);
+    }
+}
+
+/// The input, update and partitions of a whole-expression top-k over
+/// `target`'s inner aggregate, by the keyed-additive rule, or `None` when it
+/// does not apply. Rows that carry the full series identity rank it as a
+/// column, as [`summary_update`] does. The partitions are `target`'s, moved
+/// onto the input the heap reads ([`partitions_over`]).
+fn whole_expression_input(
+    target: &OperatorNode,
+) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
+    use crate::replacement::{
+        realize_keyed_additive_summary_input, PhysicalSummaryInputRuleResult,
+    };
+    let Some(NonASAPOp::Aggregate {
+        child,
+        reduction,
+        measures,
+        filters,
+        having: None,
+        ..
+    }) = target.non_asap()
+    else {
+        return None;
+    };
+    let [intent @ AggIntent::TopK { .. }] = measures.as_slice() else {
+        return None;
+    };
+    if asap_types::ir::non_asap::any_measure_filtered(filters) {
+        return None;
+    }
+    // The rule reads only the family's algorithm, and rejects Count-Min over
+    // signed weights. Ask with CountSketch so one update serves both heap
+    // families; Stage 3 decides whether Count-Min is admissible, as it does
+    // for every other Count-Min candidate.
+    let family = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CountSketchWithHeap,
+            asap_types::post_asap::SketchParams::CountSketchWithHeap {
+                width: 1,
+                depth: 1,
+                heap_size: 1,
+            },
+        ),
+        GroupingStrategy::default(),
+    );
+    let PhysicalSummaryInputRuleResult::Realized(realized) =
+        realize_keyed_additive_summary_input(intent, &family, reduction, child)
+    else {
+        return None;
+    };
+    let mut input = realized.input;
+    let per_series = matches!(
+        child.non_asap(),
+        Some(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            ..
+        })
+    );
+    if per_series && realized.child.schema.has_promql_series_identity() {
+        input.item = Some(SummaryInputExpr::Column(ColumnRef::Named(
+            asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
+        )));
+    } else if realized.child.schema.closed {
+        // An encoded label set needs an open PromQL schema.
+        return None;
+    }
+    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
+    Some((realized.child, input, partitions))
+}
+
+/// `reduction`'s keys, which index `inner` (the absorbed aggregate's
+/// output), as indices into `input` (the rows the heap reads), matched by
+/// column. `None` when a key is missing or ambiguous in `input`, or the keys
+/// are given by `without`: `input` carries columns `inner` dropped.
+fn partitions_over(reduction: &Reduction, inner: &Schema, input: &Schema) -> Option<Reduction> {
+    let Reduction::Reduce(keys) = reduction else {
+        return Some(Reduction::PerEntity);
+    };
+    if keys.is_without() {
+        return None;
+    }
+    let column = |schema: &Schema, index: usize| {
+        crate::realization::column_ref(&schema.fields[index])
+    };
+    let keys = keys
+        .keys()
+        .iter()
+        .map(|&index| {
+            inner.fields.get(index)?;
+            let key = column(inner, index);
+            let mut matches = (0..input.fields.len()).filter(|&i| column(input, i) == key);
+            match (matches.next(), matches.next()) {
+                (Some(i), None) => Some(i),
+                _ => None,
+            }
+        })
+        .collect::<Option<_>>()?;
+    Some(Reduction::by(keys))
+}
+
+/// Whether every value `node` outputs is a sample of a metric declared a
+/// counter, or a sum of such samples: never negative. Only a time-range
+/// selection and a plain sum preserve that; any other operator (arithmetic
+/// included) ends the proof. Read off the frontend DAG, this also holds for
+/// the composed candidate, whose sums are exact accumulators.
+fn counter_samples(node: &OperatorNode, metric_types: &BTreeMap<String, MetricType>) -> bool {
+    match node.non_asap() {
+        Some(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric },
+            ..
+        }) => metric_types.get(metric) == Some(&MetricType::Counter),
+        Some(NonASAPOp::TimeRange { child, .. }) => counter_samples(child, metric_types),
+        Some(NonASAPOp::Aggregate {
+            measures, child, ..
+        }) => {
+            matches!(measures.as_slice(), [AggIntent::Sum { col: None }])
+                && counter_samples(child, metric_types)
+        }
+        _ => false,
+    }
+}
+
+/// `update` with its weights proven non-negative when they are the sample
+/// values of counter input ([`ComputationTarget::counter_input`]).
+fn with_counter_proof(mut update: SummaryUpdate, counter_input: bool) -> SummaryUpdate {
+    if counter_input
+        && update.item.is_some()
+        && update.weight == SummaryInputExpr::Column(ColumnRef::SampleValue)
+        && update.weight_domain == WeightDomain::UnknownOrSigned
+    {
+        update.weight_domain = WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::CounterSamples,
+        };
+    }
+    update
 }
 
 /// Build one whole-workload candidate (end of Pass 1): `choice[i]` indexes
@@ -690,12 +907,17 @@ fn substitute(
         .iter()
         .enumerate()
         .map(|(measure, intent)| {
-            let candidate = targets
+            let (candidate, counter_input) = targets
                 .iter()
                 .find(|(target, _)| target.measure == measure)
-                .map_or(&ComputationCandidate::Exact, |(_, candidate)| *candidate);
+                .map_or((&ComputationCandidate::Exact, false), |(target, candidate)| {
+                    (*candidate, target.counter_input)
+                });
             let filter = filters.get(measure).and_then(Option::as_ref).map(rewritten);
-            substitute_measure(target, intent, candidate, filter, &input)
+            if let ComputationCandidate::WholeExpression(algorithm) = candidate {
+                return whole_expression(target, intent, algorithm, counter_input, memo);
+            }
+            substitute_measure(target, intent, candidate, filter, &input, counter_input)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut output = match <[_; 1]>::try_from(parts) {
@@ -752,6 +974,35 @@ fn with_names_of(
     ))?)
 }
 
+/// A whole-expression top-k for `target` ([`whole_expression_input`]): one
+/// heap summary of `algorithm` over the absorbed aggregate's rewritten
+/// input, partitioned as `target`.
+fn whole_expression(
+    target: &OperatorNode,
+    intent: &AggIntent,
+    algorithm: &SketchAlgorithm,
+    counter_input: bool,
+    memo: &Memo,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let (input, update, partitions) = whole_expression_input(target).ok_or(
+        PerComputationCandidateError::Unsupported("whole-expression top-k input"),
+    )?;
+    let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: memo[&Rc::as_ptr(&input)].clone(),
+        input: with_counter_proof(update, counter_input),
+        family: FieldDataType::Sketch(sized(algorithm, intent), GroupingStrategy::default()),
+        reduction: partitions,
+        grouping: GroupingStrategy::default(),
+        filter: None,
+    }))?;
+    Ok(OperatorNode::new_shared(Operator::ASAP(
+        ASAPOp::SummaryEstimate {
+            summary_input: state,
+            query: statistic(intent)?,
+        },
+    ))?)
+}
+
 /// One measure of `target` over `input`: its group keys, then its value.
 fn substitute_measure(
     target: &OperatorNode,
@@ -759,6 +1010,7 @@ fn substitute_measure(
     candidate: &ComputationCandidate,
     filter: Option<Predicate>,
     input: &Rc<OperatorNode>,
+    counter_input: bool,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
         unreachable!("substitute checked the aggregate")
@@ -767,7 +1019,10 @@ fn substitute_measure(
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::SummaryAgg {
                 child: input.clone(),
-                input: summary_update(intent, &family, reduction, &input.schema, read)?,
+                input: with_counter_proof(
+                    summary_update(intent, &family, reduction, &input.schema, read)?,
+                    counter_input,
+                ),
                 family,
                 reduction: reduction.clone(),
                 grouping: GroupingStrategy::default(),
@@ -807,6 +1062,11 @@ fn substitute_measure(
                 )?,
                 query: statistic(intent)?,
             }))?
+        }
+        ComputationCandidate::WholeExpression(_) => {
+            return Err(PerComputationCandidateError::Unsupported(
+                "whole-expression top-k is substituted with its aggregate",
+            ))
         }
         ComputationCandidate::AvgAsSumCount => {
             let AggIntent::Avg { col } = intent else {
@@ -1258,5 +1518,226 @@ mod tests {
             }
         );
         assert!(choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::UnivMon)));
+    }
+
+    fn inventory_with(
+        query: &str,
+        metric_types: &BTreeMap<String, MetricType>,
+    ) -> PerComputationCandidates<usize> {
+        let root = crate::test_support::lower_promql(
+            query,
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.001,
+            },
+        );
+        // Per-series state ranks each series' identity, which the rows carry
+        // as a column; a query over aggregated rows is planned over labels.
+        let root = asap_types::ir::schema_support::with_promql_series_identity(&root)
+            .unwrap_or(root);
+        generate_per_computation_candidates_with(vec![(0, QueryRoot::Operator(root))], metric_types)
+            .unwrap()
+    }
+
+    /// Every choice that picks a whole-expression candidate, with the
+    /// absorbed target at its first candidate, composed.
+    fn whole_expression_roots(inventory: &PerComputationCandidates<usize>) -> Vec<Rc<OperatorNode>> {
+        let mut roots = Vec::new();
+        for (t, target) in inventory.targets.iter().enumerate() {
+            for (c, candidate) in target.choices.candidates.iter().enumerate() {
+                if let ComputationCandidate::WholeExpression(_) = candidate {
+                    let mut choice = vec![0; inventory.targets.len()];
+                    choice[t] = c;
+                    let composed = compose_logical_candidate(inventory, &choice).unwrap();
+                    let QueryRoot::Operator(root) = &composed[0].1 else {
+                        panic!("operator root")
+                    };
+                    roots.push(root.clone());
+                }
+            }
+        }
+        roots
+    }
+
+    fn heap_states(root: &Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+        OperatorNode::reachable(root)
+            .into_iter()
+            .filter(|node| {
+                matches!(node.asap(), Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _), ..
+                }) if matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                ))
+            })
+            .collect()
+    }
+
+    /// A top-k over a per-series `sum_over_time` gets a whole-expression
+    /// Count-Min and CountSketch heap that absorb the inner sum: composed,
+    /// the inner aggregate is not computed and the heap reads raw samples.
+    #[test]
+    fn whole_expression_topk_absorbs_the_inner_sum() {
+        let inventory = inventory_with("topk by (job) (10, sum_over_time(m[1m]))", &BTreeMap::new());
+        let (topk, inner) = inventory
+            .targets
+            .iter()
+            .enumerate()
+            .find_map(|(t, target)| Some((t, target.absorbs?)))
+            .expect("a whole-expression target");
+        let whole: Vec<_> = inventory.targets[topk]
+            .choices
+            .candidates
+            .iter()
+            .filter(|c| matches!(c, ComputationCandidate::WholeExpression(_)))
+            .collect();
+        assert_eq!(
+            whole,
+            [
+                &ComputationCandidate::WholeExpression(SketchAlgorithm::CmsWithHeap),
+                &ComputationCandidate::WholeExpression(SketchAlgorithm::CountSketchWithHeap),
+            ]
+        );
+        let roots = whole_expression_roots(&inventory);
+        assert_eq!(roots.len(), 2);
+        for root in &roots {
+            assert!(
+                !OperatorNode::reachable(root)
+                    .iter()
+                    .any(|n| matches!(n.non_asap(), Some(NonASAPOp::Aggregate { .. }))
+                        || Rc::ptr_eq(n, &inventory.targets[inner].target)),
+                "the inner sum is not computed"
+            );
+            let [state] = &heap_states(root)[..] else {
+                panic!("one heap")
+            };
+            let Some(ASAPOp::SummaryAgg { child, .. }) = state.asap() else {
+                unreachable!()
+            };
+            assert!(matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })));
+        }
+    }
+
+    /// The whole-expression heap reads the inner sum's input, so the outer
+    /// top-k's partition keys (indices into the sum's output) are moved onto
+    /// that input by column.
+    #[test]
+    fn whole_expression_topk_partitions_index_the_heap_input() {
+        let root = crate::test_support::lower_promql(
+            "topk by (job) (2, sum by (service, job) (rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.1),
+        );
+        let inventory =
+            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let roots = whole_expression_roots(&inventory);
+        assert!(!roots.is_empty(), "a whole-expression heap");
+        for root in &roots {
+            for state in heap_states(root) {
+                let Some(ASAPOp::SummaryAgg {
+                    child, reduction, ..
+                }) = state.asap()
+                else {
+                    unreachable!()
+                };
+                let names: Vec<_> = reduction
+                    .group_keys()
+                    .expect("partitioned by job")
+                    .keys()
+                    .iter()
+                    .map(|&index| child.schema.fields[index].name.as_str())
+                    .collect();
+                assert_eq!(names, ["job"]);
+            }
+        }
+    }
+
+    /// The weight domain of every heap-sketch update in every candidate of
+    /// `query` that picks a heap for its top-k.
+    fn heap_weight_domains(query: &str, metric_types: &[(&str, MetricType)]) -> Vec<WeightDomain> {
+        let metric_types = metric_types
+            .iter()
+            .map(|(metric, kind)| (metric.to_string(), *kind))
+            .collect();
+        let inventory = inventory_with(query, &metric_types);
+        let mut domains = Vec::new();
+        for (t, target) in inventory.targets.iter().enumerate() {
+            for c in 0..target.choices.candidates.len() {
+                let mut choice = vec![0; inventory.targets.len()];
+                choice[t] = c;
+                let composed = compose_logical_candidate(&inventory, &choice).unwrap();
+                let QueryRoot::Operator(root) = &composed[0].1 else {
+                    panic!("operator root")
+                };
+                for state in heap_states(root) {
+                    let Some(ASAPOp::SummaryAgg { input, .. }) = state.asap() else {
+                        unreachable!()
+                    };
+                    domains.push(input.weight_domain.clone());
+                }
+            }
+        }
+        domains
+    }
+
+    const COUNTER_PROOF: WeightDomain = WeightDomain::NonNegative {
+        proof: NonNegativeWeightProof::CounterSamples,
+    };
+
+    /// Raw samples of a declared counter, and their `sum_over_time`, are
+    /// proven non-negative: the whole-expression heaps read the samples, the
+    /// others read the sums.
+    #[test]
+    fn declared_counter_samples_prove_heap_weights_non_negative() {
+        let domains = heap_weight_domains(
+            "topk by (job) (10, sum_over_time(m[1m]))",
+            &[("m", MetricType::Counter)],
+        );
+        // Count-Min and CountSketch, over the sums and whole-expression.
+        assert_eq!(domains.len(), 4);
+        assert!(domains.iter().all(|d| *d == COUNTER_PROOF), "{domains:?}");
+    }
+
+    /// No proof without a counter declaration: an undeclared metric (whatever
+    /// its name), a gauge, or another metric declared a counter.
+    #[test]
+    fn undeclared_or_gauge_samples_are_not_proven_non_negative() {
+        for (query, metric_types) in [
+            ("topk by (job) (10, sum_over_time(m_total[1m]))", vec![]),
+            (
+                "topk by (job) (10, sum_over_time(m[1m]))",
+                vec![("m", MetricType::Gauge)],
+            ),
+            (
+                "topk by (job) (10, sum_over_time(m[1m]))",
+                vec![("other", MetricType::Counter)],
+            ),
+        ] {
+            let domains = heap_weight_domains(query, &metric_types);
+            assert_eq!(domains.len(), 4, "{query}");
+            assert!(
+                domains.iter().all(|d| *d == WeightDomain::UnknownOrSigned),
+                "{query} {metric_types:?}: {domains:?}"
+            );
+        }
+    }
+
+    /// Counter samples and their sums are proven; arithmetic over them,
+    /// which can go negative, and a gauge are not.
+    #[test]
+    fn counter_samples_end_at_arithmetic() {
+        let metric_types = BTreeMap::from([
+            ("m".to_string(), MetricType::Counter),
+            ("g".to_string(), MetricType::Gauge),
+        ]);
+        for (query, proven) in [
+            ("sum_over_time(m[1m])", true),
+            ("sum by (job) (sum_over_time(m[1m]))", true),
+            ("sum_over_time(m[1m]) - 100", false),
+            ("-sum_over_time(m[1m])", false),
+            ("sum_over_time(g[1m])", false),
+        ] {
+            let root = crate::test_support::lower_promql(query, AccuracyTarget::Exact);
+            assert_eq!(counter_samples(&root, &metric_types), proven, "{query}");
+        }
     }
 }

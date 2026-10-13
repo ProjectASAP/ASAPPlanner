@@ -21,6 +21,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey
 use asap_types::post_asap::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::post_asap::{Materialization, Medium};
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
@@ -103,6 +104,10 @@ fn physical_with(run: &Run, option: Q2Option) -> &Physical {
     let p = found.next().unwrap_or_else(|| panic!("no {option:?}"));
     assert!(found.next().is_none(), "one {option:?} candidate");
     p
+}
+
+fn every_10s() -> QueryRecurrence {
+    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000)))
 }
 
 // ── Workload ─────────────────────────────────────────────────────────────
@@ -243,7 +248,6 @@ fn stage1_logical_asap_optimization_q2_offers_hydra() {
 
 /// Pass 2's identical-expression rule adds a shared-input variant of every Q2 option and keeps the independent one.
 #[test]
-#[ignore = "needs the Pass 2 identical-expression rule (#588)"]
 fn stage1_logical_asap_optimization_keeps_independent_and_shared_variants() {
     let run = pipeline();
     let found: Vec<_> = run
@@ -531,6 +535,7 @@ fn materialized_case() -> Run {
     let selection = select_plan(
         std::slice::from_ref(&p.candidate),
         &[Some(AccuracyTarget::Exact), Some(AccuracyTarget::Exact)],
+        &[every_10s(), every_10s()],
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
     )
@@ -603,7 +608,6 @@ fn stage3_plan_selection_selected_plan_compiles_in_the_physical_planner() {
 
 /// Sharing the input never costs more than reading it separately.
 #[test]
-#[ignore = "needs the Pass 2 identical-expression rule (#588): there are no shared-input variants to compare"]
 fn stage3_plan_selection_shared_input_is_not_costlier() {
     let run = pipeline();
     let by_combo: BTreeMap<_, _> = run

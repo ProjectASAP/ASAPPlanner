@@ -65,6 +65,7 @@ fn run_stage1_to_stage3(
     asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],
         &[Some(accuracy)],
+        &[planner_types::workload::QueryRecurrence::Unknown],
         &data,
         asap_aware_mapping::PlanningModels::builtin(),
     )

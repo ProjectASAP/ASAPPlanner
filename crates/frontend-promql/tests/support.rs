@@ -120,6 +120,7 @@ pub fn run_stage1_to_stage3(
     asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
         &[Some(accuracy)],
+        &[asap_types::workload::QueryRecurrence::Unknown],
         &DataWorkload::default(),
         asap_aware_mapping::PlanningModels::builtin(),
     )
@@ -165,6 +166,7 @@ pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String>
     let run = asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
         &[None],
+        &[asap_types::workload::QueryRecurrence::Unknown],
         &DataWorkload::default(),
         asap_aware_mapping::PlanningModels::builtin(),
     )

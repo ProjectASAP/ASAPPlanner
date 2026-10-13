@@ -15,6 +15,7 @@
 
 mod stage1_to_stage3;
 
+use crate::stage3_plan_selection::Stage3Calibration;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -47,14 +48,17 @@ static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 /// Planning logic, as opposed to the scoped facts it consumes: a model can have
 /// a built-in default, evidence about a particular deployment cannot.
 ///
-/// Plan selection reads `accuracy` and `evidence`. It prices candidates with
-/// its own analytical model, so [`Stage1ToStage3Pass`] does not read `cost`.
+/// Plan selection reads `accuracy`, `evidence` and `calibration`. It prices
+/// candidates with its own analytical model, weighted by `calibration`, so
+/// [`Stage1ToStage3Pass`] does not read `cost`.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
     pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
+    /// Plan selection's price coefficients and amortization horizon.
+    pub calibration: Stage3Calibration,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -67,6 +71,7 @@ impl<'a> PlanningModels<'a> {
             cost,
             accuracy,
             evidence,
+            calibration: Stage3Calibration::ILLUSTRATIVE,
         }
     }
 
@@ -76,6 +81,7 @@ impl<'a> PlanningModels<'a> {
             cost: &DEFAULT_COST_MODEL,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
+            calibration: Stage3Calibration::ILLUSTRATIVE,
         }
     }
 
@@ -91,6 +97,11 @@ impl<'a> PlanningModels<'a> {
 
     pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidenceProvider) -> Self {
         self.evidence = evidence;
+        self
+    }
+
+    pub fn with_calibration(mut self, calibration: Stage3Calibration) -> Self {
+        self.calibration = calibration;
         self
     }
 }
