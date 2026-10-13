@@ -57,8 +57,8 @@ fn resolve_root_with_inherited(
     tree: &UnresolvedOp,
     inherited: &[String],
 ) -> Result<Rc<OperatorNode>, ResolveDAGError> {
-    let fallback = SchemaResolver::new().resolve_schema_with_inherited(tree, inherited);
-    let root = resolve(tree, &fallback)?;
+    let usage_derived_schema = SchemaResolver::new().resolve_schema_with_inherited(tree, inherited);
+    let root = resolve(tree, &usage_derived_schema)?;
     let root = canonicalize(root)?;
     root.validate_structure()?;
     Ok(root)
@@ -84,11 +84,15 @@ fn node(op: NonASAPOp) -> Result<Rc<OperatorNode>, ResolveDAGError> {
     )?)
 }
 
-/// The generic substitution walk. `fallback` is the usage-derived schema a
+/// The generic substitution walk. `usage_derived_schema` is the schema a
 /// schemaless `Scan` in this scope binds to.
-fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, ResolveDAGError> {
+fn resolve(
+    tree: &UnresolvedOp,
+    usage_derived_schema: &Schema,
+) -> Result<Rc<OperatorNode>, ResolveDAGError> {
     use UnresolvedOp as U;
-    let expr = |e: &UnresolvedScalar, schema: &Schema| resolve_expr_in(e, schema, fallback);
+    let expr =
+        |e: &UnresolvedScalar, schema: &Schema| resolve_expr_in(e, schema, usage_derived_schema);
     let pred = |p: &UnresolvedScalar, schema: &Schema| {
         Ok::<_, ResolveDAGError>(Predicate(expr(p, schema)?))
     };
@@ -109,7 +113,9 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             predicates,
             schema,
         } => {
-            let schema = schema.clone().unwrap_or_else(|| fallback.clone());
+            let schema = schema
+                .clone()
+                .unwrap_or_else(|| usage_derived_schema.clone());
             let predicates = predicates
                 .iter()
                 .map(|p| pred(&p.0, &schema))
@@ -139,7 +145,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
         }
 
         // A scalar at an operator position has no child scope; in practice a
-        // literal, so `fallback` is never consulted for a column here.
+        // literal, so `usage_derived_schema` is never consulted for a column here.
         U::PromqlScalarOp {
             child,
             scalar,
@@ -147,7 +153,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             scalar_left,
             return_bool,
         } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let child = if child.schema.closed {
                 child
             } else {
@@ -162,7 +168,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             sample,
             drop_metric_name,
         } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let child = if child.schema.closed {
                 child
             } else {
@@ -172,12 +178,13 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             let sample = resolve_expr(sample, &child.schema)?;
             project_sample(child, sample, *drop_metric_name)
         }
-        U::PromqlVectorFromScalar(inner) => {
-            node(NonASAPOp::PromqlVectorFromScalar(expr(inner, fallback)?))
-        }
+        U::PromqlVectorFromScalar(inner) => node(NonASAPOp::PromqlVectorFromScalar(expr(
+            inner,
+            usage_derived_schema,
+        )?)),
 
         U::PromqlRelabel { dst, value, child } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let value = expr(value, &child.schema)?;
             node(NonASAPOp::PromqlRelabel {
                 dst: dst.clone(),
@@ -188,11 +195,11 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
 
         U::PromqlInfoEnrich { selector, child } => node(NonASAPOp::PromqlInfoEnrich {
             selector: selector.clone(),
-            child: resolve(child, fallback)?,
+            child: resolve(child, usage_derived_schema)?,
         }),
 
         U::PromqlSeriesSample { by, kind, child } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let by = resolve_group_keys(by, &child.schema)?;
             node(NonASAPOp::PromqlSeriesSample {
                 by,
@@ -202,7 +209,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
         }
 
         U::Filter { pred: p, child } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let pred = pred(&p.0, &child.schema)?;
             node(NonASAPOp::Filter { pred, child })
         }
@@ -212,7 +219,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             qualifier,
             child,
         } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let cols = cols
                 .iter()
                 .map(|item| {
@@ -237,7 +244,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             having,
             child,
         } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let reduction = resolve_reduction(reduction, &child.schema)?;
             let measures = measures
                 .iter()
@@ -271,7 +278,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
         }
 
         U::Dedup { cols, child } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let cols = resolve_column_refs(cols, &child.schema)?;
             node(NonASAPOp::Dedup { cols, child })
         }
@@ -282,7 +289,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
         } => {
             let children = children
                 .iter()
-                .map(|c| resolve(c, fallback))
+                .map(|c| resolve(c, usage_derived_schema))
                 .collect::<Result<Vec<_>, _>>()?;
             // Resolved against the first branch's own output schema — the one
             // `output_schema`'s `Concat` arm derives the merged schema from.
@@ -343,7 +350,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             partition_by,
             child,
         } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let keys = sort_keys(keys, &child.schema)?;
             let partition_by = resolve_group_keys(partition_by, &child.schema)?;
             node(NonASAPOp::Sort {
@@ -359,7 +366,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             partition_by,
             child,
         } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let partition_by = resolve_group_keys(partition_by, &child.schema)?;
             node(NonASAPOp::Limit {
                 n: *n,
@@ -376,18 +383,18 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
         } => node(NonASAPOp::PromqlSubquery {
             range: *range,
             resolution: *resolution,
-            child: resolve(child, fallback)?,
+            child: resolve(child, usage_derived_schema)?,
         }),
 
         U::TimeRange { range, kind, child } => node(NonASAPOp::TimeRange {
             range: *range,
             kind: *kind,
-            child: resolve(child, fallback)?,
+            child: resolve(child, usage_derived_schema)?,
         }),
 
         U::TimeShift { shift, child } => node(NonASAPOp::TimeShift {
             shift: *shift,
-            child: resolve(child, fallback)?,
+            child: resolve(child, usage_derived_schema)?,
         }),
 
         U::SQLWindowFunc {
@@ -399,7 +406,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             output_name,
             child,
         } => {
-            let child = resolve(child, fallback)?;
+            let child = resolve(child, usage_derived_schema)?;
             let args = args
                 .iter()
                 .map(|a| expr(a, &child.schema))
@@ -429,7 +436,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             // The inherited set is computed over the whole `BinaryOp`, so one
             // side's own labels are not conjured into the other.
             let own = collect_referenced_columns(tree);
-            let inherited: Vec<String> = inherited_names(fallback)
+            let inherited: Vec<String> = inherited_names(usage_derived_schema)
                 .into_iter()
                 .filter(|n| !own.contains(n))
                 .collect();
@@ -465,7 +472,7 @@ pub fn resolve_expr(
 }
 
 /// [`resolve_expr`] where the operators the expression reads inherit from
-/// `enclosing` (the owning root's fallback schema) rather than from `schema`.
+/// `enclosing` (the owning root's usage-derived schema) rather than from `schema`.
 fn resolve_expr_in(
     expr: &UnresolvedScalar,
     schema: &Schema,

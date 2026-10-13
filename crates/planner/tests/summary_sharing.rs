@@ -10,7 +10,7 @@ use std::rc::Rc;
 use asap_aware_mapping::pass::{
     run_stage1_to_stage3, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Run,
 };
-use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
+use asap_aware_mapping::realization::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::lower_promql_query_workload;
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};

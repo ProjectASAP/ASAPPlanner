@@ -377,7 +377,7 @@ pub fn default_cse_shared_maintenance_cost(family: &FieldDataType) -> Cost {
 /// Ranks the candidate sketch algorithms for one [`AggIntent`], best choice
 /// first.
 ///
-/// [`replacement::summary_candidates`] returns every algorithm that *can* answer an
+/// [`realization::summary_candidates`] returns every algorithm that *can* answer an
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
@@ -416,7 +416,7 @@ pub trait CostModel {
     }
 
     /// Rank `candidates` (as returned by
-    /// [`summary_candidates`](crate::replacement::summary_candidates)) for
+    /// [`summary_candidates`](crate::realization::summary_candidates)) for
     /// `intent`, best choice first.
     ///
     /// Implementations MAY reorder freely, but MUST return exactly the input
@@ -442,7 +442,7 @@ pub trait CostModel {
     /// discrete rungs required by a downstream catalog) without forking
     /// `replacement::realizations_for_intent` — the same "one extension
     /// point" rationale as `rank_candidates`, one level deeper. Default:
-    /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
+    /// [`realization::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
     /// not resize them, can leave this method unimplemented.
     ///
@@ -463,7 +463,7 @@ pub trait CostModel {
         eps: f64,
         delta: f64,
     ) -> SketchParams {
-        crate::replacement::default_size_params(kind, intent, eps, delta)
+        crate::realization::default_size_params(kind, intent, eps, delta)
     }
 
     /// Estimated number of distinct subpopulations produced by `target`'s
@@ -867,9 +867,9 @@ pub(crate) fn validated_candidate_ranking(
 }
 
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
-/// order and [`replacement::default_size_params`]'s built-in sizing unchanged.
+/// order and [`realization::default_size_params`]'s built-in sizing unchanged.
 ///
-/// [`summary_candidates`]: crate::replacement::summary_candidates
+/// [`summary_candidates`]: crate::realization::summary_candidates
 pub struct DefaultCostModel;
 
 impl CostModel for DefaultCostModel {
@@ -978,7 +978,7 @@ impl CostModel for DefaultCostModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replacement::summary_candidates;
+    use crate::realization::summary_candidates;
     use asap_types::pre_asap::agg_intent::default_cardinality;
 
     #[test]
@@ -1063,7 +1063,7 @@ mod tests {
         let intent = default_cardinality();
         assert_eq!(
             AlwaysPreferLast.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
-            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
+            crate::realization::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
         );
     }
 
@@ -1094,7 +1094,7 @@ mod tests {
                     let k = if eps >= 0.01 { 200 } else { 2048 };
                     SketchParams::Kll { k }
                 }
-                other => crate::replacement::default_size_params(other, intent, eps, delta),
+                other => crate::realization::default_size_params(other, intent, eps, delta),
             }
         }
     }
@@ -1111,7 +1111,7 @@ mod tests {
         // Untouched kinds still fall through to the default formula.
         assert_eq!(
             DiscreteKllRungs.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
-            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
+            crate::realization::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
         );
     }
 

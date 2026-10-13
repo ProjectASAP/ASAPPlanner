@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_frequency_sizing() {
-        use crate::replacement::default_size_params;
+        use crate::realization::default_size_params;
         use asap_types::post_asap::{GroupingStrategy, SketchKind};
         let c = asap_types::pre_asap::agg_intent::default_cardinality();
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
