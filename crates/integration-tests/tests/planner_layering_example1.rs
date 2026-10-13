@@ -17,65 +17,12 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
 use asap_types::post_asap::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
-use asap_types::types::AccuracyTarget;
-use asap_types::workload::{
-    AccuracyRequirement, DataArrival, DurationMs, LatencyRequirement, PlanningWorkload,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
-};
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
 
-const Q1: &str = "sum by (job) (rate(http_requests_total[1m]))";
-const Q2: &str = "topk by (job) (10, sum_over_time(http_requests_total[1m]))";
-
-fn dashboard_panel(query: &str, requirements: QueryRequirements) -> RepeatingEntry {
-    RepeatingEntry {
-        query: Query(query.into()),
-        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
-        requirements,
-        predictability: Predictability::Predictable { known_at: None },
-        time_selection: TimeSelection {
-            scope: QueryTimeScope::RealTime,
-            lookback: Some(DurationMs(60_000)),
-            as_of: None,
-        },
-    }
-}
-
-/// Example 1 queries over the shared data workload of #509.
-fn example1_workload() -> PlanningWorkload {
-    PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: None,
-            repeating_queries: Some(vec![
-                dashboard_panel(
-                    Q1,
-                    QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
-                        response_latency: LatencyRequirement::Unspecified,
-                    },
-                ),
-                dashboard_panel(
-                    Q2,
-                    QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                            epsilon: 0.01,
-                            delta: 0.001,
-                        }),
-                        response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
-                    },
-                ),
-            ]),
-        },
-        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
-    }
-}
-
 fn pipeline() -> Run {
-    run_promql(&example1_workload())
+    run_promql(&example1())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -157,12 +104,12 @@ fn physical_with(run: &Run, option: Q2Option) -> &Physical {
 /// The encoded workload is valid and normalizes to Q1 then Q2.
 #[test]
 fn workload_encodes_example1() {
-    let workload = example1_workload();
+    let workload = example1();
     workload.validate().expect("valid workload");
     let entries: Vec<_> = workload.query_workload.entries().collect();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].query.0, Q1);
-    assert_eq!(entries[1].query.0, Q2);
+    assert_eq!(entries[0].query.0, EXAMPLE1_Q1);
+    assert_eq!(entries[1].query.0, EXAMPLE1_Q2);
 }
 
 // ── Language-specific frontends ──────────────────────────────────────────
@@ -170,7 +117,7 @@ fn workload_encodes_example1() {
 /// The PromQL frontend lowers each query to the doc's chain.
 #[test]
 fn language_specific_frontends_lower_each_query_to_doc_chain() {
-    let roots = lower_promql(&example1_workload());
+    let roots = lower_promql(&example1());
     let chains: Vec<_> = roots.iter().map(frontend_operations).collect();
     assert_eq!(
         chains,

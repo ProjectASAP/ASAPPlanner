@@ -2,9 +2,10 @@
 //! (`planner_layering_example{1,2,3,4}.rs`). Specs:
 //! `docs/design_docs/proposals/planner-layering-example{1,2,3,4}-acceptance.md`.
 //!
-//! [`run_stages`] runs the real stages: logical ASAP-aware optimization
-//! (Pass 1 and composition), physical ASAP-aware optimization and plan
-//! selection. The functions under "Pending adapters" read properties the IR
+//! [`run_stages`] runs the real stages through
+//! `asap_devtools::planning_stages::run_planning_stages`, the pipeline
+//! `stage_pipeline` also runs, uncapped; the example workloads come from
+//! `asap_devtools::planner_layering_examples`. The functions under "Pending adapters" read properties the IR
 //! cannot express yet (window summaries, retention). They return today's
 //! only possible answer; the implementer of each feature replaces the body
 //! with a read of the new IR. Tests that depend on them are `#[ignore]`d
@@ -13,191 +14,20 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_aware_mapping::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates,
-};
-use asap_aware_mapping::physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
-use asap_aware_mapping::plan_selection::{select_plan, Selection};
-use asap_aware_mapping::PlanningModels;
+use asap_aware_mapping::physical_asap_optimization::PhysicalCandidate;
+use asap_aware_mapping::plan_selection::Selection;
+use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::{ASAPOp, Operator, QueryRoot};
 use asap_types::post_asap::{
     FieldDataType, Materialization, SketchAlgorithm, SketchParams, SketchStatistic,
 };
-use asap_types::types::AccuracyTarget;
-use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
-    Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection, TimestampMs,
-};
+use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
+
+pub use asap_devtools::planner_layering_examples::*;
 
 pub type Payload = Operator<NodeId>;
-
-pub fn declared<T>(value: T) -> Evidence<T> {
-    Evidence {
-        value: Some(value),
-        source: EvidenceSource::Declared,
-        ..Default::default()
-    }
-}
-
-// ── Workloads shared by Examples 3 and 4 ────────────────────────────────
-
-pub const MINUTE_MS: u64 = 60_000;
-/// PromQL's `y` is 365 days.
-pub const YEAR_MS: u64 = 365 * 24 * 60 * MINUTE_MS;
-/// Pattern A's batch execution time T (2026-01-01T00:00:00Z).
-pub const T_MS: u64 = 1_767_225_600_000;
-
-/// The #509 shared data workload with `arrival`.
-pub fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
-    DataWorkload {
-        data_ingestion_interval: declared(DurationMs(15_000)),
-        ingestion_volume: Evidence::default(),
-        // Data at rest has no ingestion rate (`validate` rejects one).
-        ingestion_rate: match arrival {
-            DataArrival::AtRest => Evidence::default(),
-            _ => declared(Rate(1_000_000.0 / 15.0)),
-        },
-        input_cardinality: declared(1_000_000),
-        distribution: declared(DataDistribution::Zipf),
-        arrival,
-    }
-}
-
-/// Pattern A's five queries: (PromQL, `lookback`, `as_of` − T).
-pub const PATTERN_A: [(&str, u64, u64); 5] = [
-    ("quantile_over_time(0.99, latency_ms[5y])", 5 * YEAR_MS, 0),
-    ("quantile_over_time(0.99, latency_ms[1y])", YEAR_MS, 0),
-    (
-        "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
-        YEAR_MS,
-        YEAR_MS,
-    ),
-    (
-        "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
-        YEAR_MS,
-        2 * YEAR_MS,
-    ),
-    (
-        "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
-        3 * YEAR_MS,
-        2 * YEAR_MS,
-    ),
-];
-
-/// How Pattern A's batch recurs (Example 4 varies it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PatternARecurrence {
-    /// As given: one `ad_hoc` batch run once at T.
-    OnceAdHoc,
-    /// Example 4: repeated monthly and `Predictable { known_at }`; each run
-    /// reads the intervals ending at its own evaluation time.
-    MonthlyPredictable,
-}
-
-fn pattern_a_requirements() -> QueryRequirements {
-    QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-            epsilon: 0.005,
-            delta: 0.01,
-        }),
-        response_latency: LatencyRequirement::Unspecified,
-    }
-}
-
-/// Example 3, Pattern A: p99 over five historical intervals.
-pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> PlanningWorkload {
-    let (batch, repeating) = match recurrence {
-        PatternARecurrence::OnceAdHoc => (
-            Some(
-                PATTERN_A
-                    .iter()
-                    .map(|&(query, lookback, before_t)| BatchEntry {
-                        query: Query(query.into()),
-                        requirements: pattern_a_requirements(),
-                        predictability: Predictability::AdHoc,
-                        invocations: 1,
-                        execute_at: Some(TimestampMs(T_MS)),
-                        time_selection: TimeSelection {
-                            scope: QueryTimeScope::Longitudinal,
-                            lookback: Some(DurationMs(lookback)),
-                            as_of: Some(TimestampMs(T_MS - before_t)),
-                        },
-                    })
-                    .collect(),
-            ),
-            None,
-        ),
-        PatternARecurrence::MonthlyPredictable => (
-            None,
-            Some(
-                PATTERN_A
-                    .iter()
-                    .map(|&(query, lookback, _)| RepeatingEntry {
-                        query: Query(query.into()),
-                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(
-                            (30 * 24 * 60 * MINUTE_MS) as u32,
-                        )),
-                        requirements: pattern_a_requirements(),
-                        predictability: Predictability::Predictable {
-                            known_at: Some(TimestampMs(T_MS)),
-                        },
-                        time_selection: TimeSelection {
-                            scope: QueryTimeScope::Longitudinal,
-                            lookback: Some(DurationMs(lookback)),
-                            as_of: None,
-                        },
-                    })
-                    .collect(),
-            ),
-        ),
-    };
-    PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: batch,
-            repeating_queries: repeating,
-        },
-        data_workload: Some(shared_data_workload(arrival)),
-    }
-}
-
-pub const PATTERN_B: &str = "quantile_over_time(0.99, latency_ms[5m])";
-pub const PATTERN_B_WINDOW_MS: u64 = 5 * MINUTE_MS;
-pub const PATTERN_B_INTERVAL_MS: u64 = MINUTE_MS;
-
-/// Example 3, Pattern B: a p99 panel over the last 5 min, every minute.
-pub fn pattern_b() -> PlanningWorkload {
-    PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: None,
-            repeating_queries: Some(vec![RepeatingEntry {
-                query: Query(PATTERN_B.into()),
-                demand: RepeatedDemand::FixedInterval(RepetitionInterval(
-                    PATTERN_B_INTERVAL_MS as u32,
-                )),
-                requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                        epsilon: 0.01,
-                        delta: 0.01,
-                    }),
-                    response_latency: LatencyRequirement::ExplicitMaxMs(200.0),
-                },
-                predictability: Predictability::Predictable { known_at: None },
-                time_selection: TimeSelection {
-                    scope: QueryTimeScope::RealTime,
-                    lookback: Some(DurationMs(PATTERN_B_WINDOW_MS)),
-                    as_of: None,
-                },
-            }]),
-        },
-        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
-    }
-}
 
 /// Lower and plan a PromQL workload.
 pub fn run_promql(workload: &PlanningWorkload) -> Run {
@@ -215,20 +45,9 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
 
 // ── Language-specific frontends ──────────────────────────────────────────
 
-/// PromQL workload roots, each series' identity as a column (the row
-/// representation per-series state needs at runtime).
+/// PromQL workload roots, each series' identity as a column.
 pub fn lower_promql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
-    asap_frontend_promql::lower_promql_query_workload(workload, 0)
-        .expect("workload lowers")
-        .into_iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => QueryRoot::Operator(
-                asap_types::ir::schema_support::with_promql_series_identity(&node)
-                    .expect("series identity"),
-            ),
-            scalar => scalar,
-        })
-        .collect()
+    lower_promql_roots(workload).expect("workload lowers")
 }
 
 /// The non-ASAP operator's kind or the aggregate's first measure as
@@ -326,9 +145,6 @@ impl Run {
 }
 
 fn logical(id: String, label: String, roots: Vec<QueryRoot>) -> Logical {
-    for root in &roots {
-        root.validate_structure().expect("valid DAG");
-    }
     let dag = flatten(&roots).0;
     let query_roots = dag
         .roots
@@ -347,82 +163,42 @@ fn logical(id: String, label: String, roots: Vec<QueryRoot>) -> Logical {
     }
 }
 
-/// Every choice of a per-computation candidate for every target, the last
-/// target varying fastest.
-fn choices(counts: &[usize]) -> Vec<Vec<usize>> {
-    counts.iter().fold(vec![vec![]], |prefixes, &count| {
-        prefixes
-            .into_iter()
-            .flat_map(|prefix| {
-                (0..count).map(move |i| {
-                    let mut choice = prefix.clone();
-                    choice.push(i);
-                    choice
-                })
-            })
-            .collect()
-    })
-}
-
-/// The frontends' DAG, then logical ASAP-aware optimization (Pass 1 and
-/// composition; Pass 2 is not implemented), physical ASAP-aware
-/// optimization and plan selection over `roots`, the lowered entries of
-/// `workload`. Plan selection reads only the accuracy targets and the data
-/// workload; recurrence and predictability (which materialization needs,
-/// Example 4) are not passed.
+/// Every stage over `roots`, the lowered entries of `workload`, with every
+/// logical candidate (no cap). Every candidate of the examples composes and
+/// plan selection selects one. Recurrence and predictability (which
+/// materialization needs, Example 4) are not passed to plan selection.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    let language_specific_frontends = logical("S0".into(), "frontends".into(), roots.clone());
-    let inventory = generate_per_computation_candidates(roots.into_iter().enumerate().collect())
-        .expect("Pass 1");
-    let counts: Vec<_> = inventory
-        .targets
-        .iter()
-        .map(|target| target.choices.candidates.len())
+    let run = run_planning_stages(workload, roots, None).expect("planning stages run");
+    let logical_candidates = run
+        .logical
+        .into_iter()
+        .map(|c| {
+            let roots = c
+                .roots
+                .unwrap_or_else(|e| panic!("{} ({}) composes: {e}", c.id, c.label));
+            logical(c.id, c.label, roots)
+        })
         .collect();
-    let mut logical_candidates = Vec::new();
-    let mut physical = Vec::new();
-    let mut pruned = Vec::new();
-    for (index, choice) in choices(&counts).into_iter().enumerate() {
-        let id = format!("L{}", index + 1);
-        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
-            .unwrap_or_else(|e| panic!("{id} {choice:?} composes: {e}"))
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
-        match optimize_physical_asap(&id, &roots) {
-            Ok(mut candidate) => {
-                candidate.id = format!("P{}", index + 1);
-                candidate.label = format!("{choice:?}");
-                physical.push(Physical {
-                    id: candidate.id.clone(),
-                    from_logical: id.clone(),
-                    query_roots: candidate.dag.roots.clone(),
-                    candidate,
-                });
-            }
-            Err(e) => pruned.push((id.clone(), e.to_string())),
-        }
-        logical_candidates.push(logical(id, format!("{choice:?}"), roots));
-    }
-    let targets: Vec<_> = workload
-        .query_workload
-        .entries()
-        .map(|entry| Some(entry.requirements.accuracy.target()))
+    let physical = run
+        .physical
+        .into_iter()
+        .map(|candidate| Physical {
+            id: candidate.id.clone(),
+            from_logical: candidate.from_logical.clone(),
+            query_roots: candidate.dag.roots.clone(),
+            candidate,
+        })
         .collect();
-    let candidates: Vec<_> = physical.iter().map(|p| p.candidate.clone()).collect();
-    let selection = select_plan(
-        &candidates,
-        &targets,
-        workload.data_workload.as_ref().expect("data workload"),
-        PlanningModels::builtin(),
-    )
-    .expect("plan selection selects");
     Run {
-        language_specific_frontends,
+        language_specific_frontends: logical("frontends".into(), "frontends".into(), run.frontends),
         logical: logical_candidates,
         physical,
-        pruned,
-        selection,
+        pruned: run
+            .pruned
+            .into_iter()
+            .map(|p| (p.from_logical, p.reason))
+            .collect(),
+        selection: run.selection.expect("plan selection selects"),
     }
 }
 
@@ -721,7 +497,7 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
 
 pub fn lookback_ms(workload: &PlanningWorkload, query: usize) -> u64 {
     let entry = workload.query_workload.entries().nth(query).expect("entry");
-    let DurationMs(ms) = entry.time_selection.lookback.expect("lookback");
+    let asap_types::workload::DurationMs(ms) = entry.time_selection.lookback.expect("lookback");
     ms
 }
 

@@ -30,25 +30,18 @@
 // query; without them the queries are exact. `--interval-ms` is the source
 // cadence PromQL needs (default 15000).
 
-use std::rc::Rc;
-
-use asap_aware_mapping::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
-    PerComputationCandidates,
+use asap_aware_mapping::plan_selection::{Rejection, Selection, SelectionError};
+use asap_devtools::planner_layering_examples::{
+    declared, example1, pattern_a, pattern_b, PatternARecurrence,
 };
-use asap_aware_mapping::physical_asap_optimization::optimize_physical_asap;
-use asap_aware_mapping::plan_selection::{select_plan, Rejection, Selection, SelectionError};
-use asap_aware_mapping::PlanningModels;
+use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
 use asap_types::ir::flat::{flatten, FlatDag};
-use asap_types::ir::schema_support::with_promql_series_identity;
-use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::post_asap::SketchAlgorithm;
+use asap_types::ir::QueryRoot;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
-    Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection, TimestampMs,
+    AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, LatencyRequirement,
+    PlanningWorkload, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload,
+    RepeatedDemand,
 };
 use serde_json::{json, Value};
 
@@ -85,9 +78,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
     }
     let workload = match (example.as_deref(), queries.is_empty()) {
-        (Some("planner-layering-1"), true) => planner_layering_example1(),
-        (Some("planner-layering-3a"), true) => planner_layering_example3a(),
-        (Some("planner-layering-3b"), true) => planner_layering_example3b(),
+        (Some("planner-layering-1"), true) => example1(),
+        (Some("planner-layering-3a"), true) => {
+            pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed)
+        }
+        (Some("planner-layering-3b"), true) => pattern_b(),
         (Some(other), true) => return Err(format!("unknown example {other}")),
         (None, false) => {
             let accuracy = match (epsilon, delta) {
@@ -107,88 +102,39 @@ fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 fn stage_pipeline(workload: &PlanningWorkload, max_candidates: usize) -> Result<Value, String> {
-    // PromQL rows carry each series' full identity as a column: the row
-    // representation per-series state needs at runtime.
-    let roots = asap_frontend_promql::lower_promql_query_workload(workload, 0)
-        .map_err(|e| format!("lowering: {e}"))?
-        .into_iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => with_promql_series_identity(&node)
-                .map(QueryRoot::Operator)
-                .map_err(|e| format!("series identity: {e}")),
-            scalar => Ok(scalar),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let frontends_dag = export(&roots)?;
-    let inventory = generate_per_computation_candidates(roots.into_iter().enumerate().collect())
-        .map_err(|e| format!("Pass 1: {e}"))?;
-    let combinations = inventory
-        .targets
+    let roots = lower_promql_roots(workload)?;
+    let run = run_planning_stages(workload, roots, Some(max_candidates))?;
+    // A choice that composition cannot substitute yet is listed with its
+    // error rather than ending the run.
+    let candidates: Vec<_> = run
+        .logical
         .iter()
-        .map(|target| target.choices.candidates.len())
-        .product::<usize>();
-    let owners = target_owners(&inventory);
-    let mut candidates = Vec::new();
-    let mut physical = Vec::new();
-    let mut pruned = Vec::new();
-    let mut choice = vec![0; inventory.targets.len()];
-    for index in 0..combinations.min(max_candidates) {
-        let (id, label) = (
-            format!("L{}", index + 1),
-            label(&inventory, &owners, &choice),
-        );
-        let mut candidate = json!({ "id": id, "label": label });
-        // A choice that composition cannot substitute yet is listed with its
-        // error rather than ending the run.
-        match compose_logical_candidate(&inventory, &choice) {
-            Ok(roots) => {
-                let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
-                candidate["dag"] = json!(export(&roots)?);
-                match optimize_physical_asap(&id, &roots) {
-                    Ok(mut physical_candidate) => {
-                        physical_candidate.id = format!("P{}", index + 1);
-                        physical_candidate.label = label;
-                        physical.push(physical_candidate);
-                    }
-                    Err(e) => pruned.push(
-                        json!({ "from_logical": id, "label": label, "reason": e.to_string() }),
-                    ),
-                }
-            }
-            Err(error) => candidate["error"] = json!(error.to_string()),
-        }
-        candidates.push(candidate);
-        // Mixed-radix increment: the last target varies fastest.
-        for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
-            *digit += 1;
-            if *digit < target.choices.candidates.len() {
-                break;
-            }
-            *digit = 0;
-        }
-    }
-    let targets: Vec<_> = workload
-        .query_workload
-        .entries()
-        .map(|entry| Some(entry.requirements.accuracy.target()))
+        .map(|c| match &c.roots {
+            Ok(roots) => json!({ "id": c.id, "label": c.label, "dag": export(roots) }),
+            Err(error) => json!({ "id": c.id, "label": c.label, "error": error }),
+        })
         .collect();
-    let data = workload.data_workload.clone().unwrap_or_default();
-    let selection = select_plan(&physical, &targets, &data, PlanningModels::builtin());
-    let physical_json: Vec<_> = physical
+    let physical: Vec<_> = run
+        .physical
         .iter()
         .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "label": p.label, "dag": p.dag }))
+        .collect();
+    let pruned: Vec<_> = run
+        .pruned
+        .iter()
+        .map(|p| json!({ "from_logical": p.from_logical, "label": p.label, "reason": p.reason }))
         .collect();
     Ok(json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": workload_queries(workload) },
-        "language_specific_frontends": { "dag": frontends_dag },
+        "language_specific_frontends": { "dag": export(&run.frontends) },
         "logical_asap_optimization": {
-            "combinations": combinations,
-            "capped": combinations > max_candidates,
+            "combinations": run.combinations,
+            "capped": run.capped(),
             "candidates": candidates,
         },
-        "physical_asap_optimization": { "candidates": physical_json, "pruned": pruned },
-        "plan_selection": plan_selection_json(&selection),
+        "physical_asap_optimization": { "candidates": physical, "pruned": pruned },
+        "plan_selection": plan_selection_json(&run.selection),
     }))
 }
 
@@ -238,83 +184,8 @@ fn rejections_json(rejected: &[Rejection]) -> Vec<Value> {
 
 /// A logical DAG as a flat node list: node `i` is `nodes[i]`, and children are
 /// node indices inside each operator.
-fn export(roots: &[QueryRoot]) -> Result<FlatDag, String> {
-    for root in roots {
-        root.validate_structure()
-            .map_err(|e| format!("validation: {e}"))?;
-    }
-    Ok(flatten(roots).0)
-}
-
-/// The first query whose plan reaches each target (enumeration order).
-fn target_owners(inventory: &PerComputationCandidates<usize>) -> Vec<usize> {
-    inventory
-        .targets
-        .iter()
-        .map(|target| {
-            inventory
-                .roots
-                .iter()
-                .position(|(_, root)| {
-                    let operators = match root {
-                        QueryRoot::Operator(node) => vec![node],
-                        QueryRoot::Scalar(expr) => expr.operator_refs(),
-                    };
-                    operators.into_iter().any(|node| {
-                        OperatorNode::reachable(node)
-                            .iter()
-                            .any(|n| Rc::ptr_eq(n, &target.target))
-                    })
-                })
-                .expect("every target is reached from a root")
-        })
-        .collect()
-}
-
-/// E.g. "Q1 exact · Q2 CMS+heap"; exact accumulators are listed in parentheses.
-fn label(
-    inventory: &PerComputationCandidates<usize>,
-    owners: &[usize],
-    choice: &[usize],
-) -> String {
-    (0..inventory.roots.len())
-        .map(|query| {
-            let mut sketches = Vec::new();
-            let mut accumulators = Vec::new();
-            for (target, (&owner, &index)) in
-                inventory.targets.iter().zip(owners.iter().zip(choice))
-            {
-                if owner != query {
-                    continue;
-                }
-                match &target.choices.candidates[index] {
-                    ComputationCandidate::Exact => {}
-                    ComputationCandidate::ExactAccumulator { kind, .. } => {
-                        accumulators.push(format!("{kind:?} acc"))
-                    }
-                    ComputationCandidate::AvgAsSumCount => {
-                        accumulators.push("Sum/Count acc".into())
-                    }
-                    ComputationCandidate::Summary(algorithm) => sketches.push(match algorithm {
-                        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-                        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-                        other => format!("{other:?}"),
-                    }),
-                }
-            }
-            let mut text = format!("Q{} ", query + 1);
-            text += &if sketches.is_empty() {
-                "exact".to_string()
-            } else {
-                sketches.join(" + ")
-            };
-            if !accumulators.is_empty() {
-                text += &format!(" ({})", accumulators.join(", "));
-            }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
+fn export(roots: &[QueryRoot]) -> FlatDag {
+    flatten(roots).0
 }
 
 fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
@@ -349,14 +220,6 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
         .collect()
 }
 
-fn declared<T>(value: T) -> Evidence<T> {
-    Evidence {
-        value: Some(value),
-        source: EvidenceSource::Declared,
-        ..Default::default()
-    }
-}
-
 fn promql_batch(
     queries: &[String],
     accuracy: AccuracyTarget,
@@ -387,143 +250,6 @@ fn promql_batch(
             data_ingestion_interval: declared(DurationMs(interval_ms)),
             ..Default::default()
         }),
-    }
-}
-
-/// #509 Example 1 (docs/design_docs/proposals/planner-layering.md) over its
-/// shared data workload; matches the acceptance spec's test workload.
-fn planner_layering_example1() -> PlanningWorkload {
-    let panel = |query: &str, accuracy, response_latency| RepeatingEntry {
-        query: Query(query.into()),
-        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
-        requirements: QueryRequirements {
-            accuracy: AccuracyRequirement::Explicit(accuracy),
-            response_latency,
-        },
-        predictability: Predictability::Predictable { known_at: None },
-        time_selection: TimeSelection {
-            scope: QueryTimeScope::RealTime,
-            lookback: Some(DurationMs(60_000)),
-            as_of: None,
-        },
-    };
-    PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: None,
-            repeating_queries: Some(vec![
-                panel(
-                    "sum by (job) (rate(http_requests_total[1m]))",
-                    AccuracyTarget::Exact,
-                    LatencyRequirement::Unspecified,
-                ),
-                panel(
-                    "topk by (job) (10, sum_over_time(http_requests_total[1m]))",
-                    AccuracyTarget::EpsilonDelta {
-                        epsilon: 0.01,
-                        delta: 0.001,
-                    },
-                    LatencyRequirement::ExplicitMaxMs(100.0),
-                ),
-            ]),
-        },
-        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
-    }
-}
-
-/// The shared data workload of #509 with `arrival`.
-fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
-    DataWorkload {
-        arrival,
-        data_ingestion_interval: declared(DurationMs(15_000)),
-        ingestion_volume: Evidence::default(),
-        ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
-        input_cardinality: declared(1_000_000),
-        distribution: declared(DataDistribution::Zipf),
-    }
-}
-
-/// #509 Example 3, Pattern A: an ad hoc batch of five p99 reports over
-/// historical intervals, run once at T (2026-01-01), over mixed data.
-fn planner_layering_example3a() -> PlanningWorkload {
-    const YEAR_MS: u64 = 365 * 24 * 3_600_000;
-    const T_MS: u64 = 1_767_225_600_000;
-    let queries = [
-        ("quantile_over_time(0.99, latency_ms[5y])", 5 * YEAR_MS, 0),
-        ("quantile_over_time(0.99, latency_ms[1y])", YEAR_MS, 0),
-        (
-            "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
-            YEAR_MS,
-            YEAR_MS,
-        ),
-        (
-            "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
-            YEAR_MS,
-            2 * YEAR_MS,
-        ),
-        (
-            "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
-            3 * YEAR_MS,
-            2 * YEAR_MS,
-        ),
-    ];
-    PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: Some(
-                queries
-                    .into_iter()
-                    .map(|(query, lookback, before_t)| BatchEntry {
-                        query: Query(query.into()),
-                        requirements: QueryRequirements {
-                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                                epsilon: 0.005,
-                                delta: 0.01,
-                            }),
-                            response_latency: LatencyRequirement::Unspecified,
-                        },
-                        predictability: Predictability::AdHoc,
-                        invocations: 1,
-                        execute_at: Some(TimestampMs(T_MS)),
-                        time_selection: TimeSelection {
-                            scope: QueryTimeScope::Longitudinal,
-                            lookback: Some(DurationMs(lookback)),
-                            as_of: Some(TimestampMs(T_MS - before_t)),
-                        },
-                    })
-                    .collect(),
-            ),
-            repeating_queries: None,
-        },
-        data_workload: Some(shared_data_workload(DataArrival::Mixed)),
-    }
-}
-
-/// #509 Example 3, Pattern B: a p99 panel over the last 5 min, every minute.
-fn planner_layering_example3b() -> PlanningWorkload {
-    PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: None,
-            repeating_queries: Some(vec![RepeatingEntry {
-                query: Query("quantile_over_time(0.99, latency_ms[5m])".into()),
-                demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
-                requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                        epsilon: 0.01,
-                        delta: 0.01,
-                    }),
-                    response_latency: LatencyRequirement::ExplicitMaxMs(200.0),
-                },
-                predictability: Predictability::Predictable { known_at: None },
-                time_selection: TimeSelection {
-                    scope: QueryTimeScope::RealTime,
-                    lookback: Some(DurationMs(300_000)),
-                    as_of: None,
-                },
-            }]),
-        },
-        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
     }
 }
 
