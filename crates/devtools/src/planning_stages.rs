@@ -37,6 +37,26 @@ pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>,
         .collect()
 }
 
+/// Lower a SQL workload over the tables of `catalog`.
+pub fn lower_sql_roots(
+    workload: &PlanningWorkload,
+    catalog: &asap_frontend_sql::SqlCatalog,
+) -> Result<Vec<QueryRoot>, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|e| e.to_string())?
+        .block_on(asap_frontend_sql::lower_sql_batch(
+            &workload.query_workload,
+            catalog,
+        ))
+        .into_iter()
+        .map(|root| {
+            root.map(QueryRoot::Operator)
+                .map_err(|e| format!("lowering: {e}"))
+        })
+        .collect()
+}
+
 /// Logical ASAP-aware optimization (Pass 1 and composition; no Pass 2),
 /// physical ASAP-aware optimization and plan selection over `roots`, the
 /// lowered entries of `workload`: the library's planner pipeline

@@ -4,6 +4,10 @@
 // Patterns A and B; 3a has 243 candidates, all priced, 64 shown by default)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
+// cargo run -p asap-devtools --bin stage_pipeline -- \
+//     --table '{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"},
+//               {"name": "service", "type": "utf8"}], "time_index": 0}' \
+//     --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --out run.json
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
 // four planner stages (#509 MVP):
@@ -28,9 +32,13 @@
 //     query. When selection fails, `selected` is null, with the rejections,
 //     or with `error` for any other failure.
 //
-// `--promql` may repeat. `--epsilon`/`--delta` apply to every `--promql`
-// query; without them the queries are exact. `--interval-ms` is the source
-// cadence PromQL needs (default 15000).
+// `--promql` and `--sql` may repeat; a run is one language. `--epsilon`/
+// `--delta` apply to every query; without them the queries are exact.
+// `--interval-ms` is the source cadence (default 15000). `--table '<json>'`
+// (repeatable) declares a table the SQL queries read: `{"name": ...,
+// "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
+// int64|bigint", "nullable": true}], "time_index": 0}` (`nullable` defaults
+// to true; without `time_index` the table has no time column).
 
 use std::collections::HashSet;
 
@@ -38,20 +46,23 @@ use asap_aware_mapping::stage3_plan_selection::{Rejection, Selection, SelectionE
 use asap_devtools::planner_layering_examples::{
     declared, example1, pattern_a, pattern_b, PatternARecurrence,
 };
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
+use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots, run_planning_stages};
+use asap_devtools::SqlCatalog;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::QueryRoot;
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, LatencyRequirement,
     PlanningWorkload, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload,
-    RepeatedDemand,
+    RepeatedDemand, SqlDialect,
 };
 use serde_json::{json, Value};
 
 const USAGE: &str =
-    "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | --promql <query>... \
-[--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) [--max-displayed <n>] --out <file>";
+    "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | (--promql <query>... \
+| --table <json>... --sql <query>...) [--epsilon <f64> --delta <f64>] [--interval-ms <u64>]) \
+[--max-displayed <n>] --out <file>";
 
 fn main() {
     if let Err(message) = run(std::env::args().skip(1).collect()) {
@@ -62,7 +73,7 @@ fn main() {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let mut example = None;
-    let mut queries = Vec::new();
+    let (mut promql, mut sql, mut tables) = (Vec::new(), Vec::new(), Vec::new());
     let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
     let mut max_displayed = 64usize;
     let mut out = None;
@@ -72,7 +83,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
         let number = |v: String| v.parse::<f64>().map_err(|e| format!("{v}: {e}"));
         match flag.as_str() {
             "--example" => example = Some(value()?),
-            "--promql" => queries.push(value()?),
+            "--promql" => promql.push(value()?),
+            "--sql" => sql.push(value()?),
+            "--table" => tables.push(value()?),
             "--epsilon" => epsilon = Some(number(value()?)?),
             "--delta" => delta = Some(number(value()?)?),
             "--interval-ms" => interval_ms = value()?.parse().map_err(|e| format!("{e}"))?,
@@ -80,6 +93,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "--out" => out = Some(value()?),
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    let (language, queries) = match (promql.is_empty(), sql.is_empty()) {
+        (false, false) => return Err("a run is one language: give --promql or --sql".into()),
+        (true, false) => (QueryLanguage::SQL(SqlDialect::DataFusionSQL), sql),
+        _ => (QueryLanguage::PromQL, promql),
+    };
+    if !tables.is_empty() && language == QueryLanguage::PromQL {
+        return Err("--table needs --sql".into());
     }
     let workload = match (example.as_deref(), queries.is_empty()) {
         (Some("planner-layering-1"), true) => example1(),
@@ -95,18 +116,25 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 (Some(epsilon), Some(delta)) => AccuracyTarget::EpsilonDelta { epsilon, delta },
                 (None, Some(_)) => return Err("--delta needs --epsilon".into()),
             };
-            promql_batch(&queries, accuracy, interval_ms)
+            query_batch(language, &queries, accuracy, interval_ms)
         }
-        _ => return Err("give exactly one of --example or --promql".into()),
+        _ => return Err("give exactly one of --example, --promql or --sql".into()),
     };
     let out = out.ok_or("--out is required")?;
-    let document = stage_pipeline(&workload, max_displayed)?;
+    let roots = match workload.query_workload.language {
+        QueryLanguage::PromQL => lower_promql_roots(&workload)?,
+        _ => lower_sql_roots(&workload, &sql_catalog(&tables)?)?,
+    };
+    let document = stage_pipeline(&workload, roots, max_displayed)?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))
 }
 
-fn stage_pipeline(workload: &PlanningWorkload, max_displayed: usize) -> Result<Value, String> {
-    let roots = lower_promql_roots(workload)?;
+fn stage_pipeline(
+    workload: &PlanningWorkload,
+    roots: Vec<QueryRoot>,
+    max_displayed: usize,
+) -> Result<Value, String> {
     let run = run_planning_stages(workload, roots)?;
     // The display keeps the first `max_displayed` candidates and the
     // selected one; plan selection has already ranked all of them.
@@ -233,6 +261,10 @@ fn export(roots: &[QueryRoot]) -> FlatDag {
 }
 
 fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
+    let language = match workload.query_workload.language {
+        QueryLanguage::PromQL => "promql",
+        _ => "sql",
+    };
     workload
         .query_workload
         .entries()
@@ -256,7 +288,7 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
             }
             json!({
                 "id": format!("q{}", index + 1),
-                "language": "promql",
+                "language": language,
                 "text": entry.query.0,
                 "requirements": requirements,
             })
@@ -264,14 +296,55 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
         .collect()
 }
 
-fn promql_batch(
+/// The tables `--table` declares.
+fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
+    let mut catalog = SqlCatalog::new();
+    for raw in tables {
+        let table: Value = serde_json::from_str(raw).map_err(|e| format!("--table: {e}"))?;
+        let name = table["name"]
+            .as_str()
+            .ok_or("--table: name must be a string")?;
+        let columns = table["columns"]
+            .as_array()
+            .ok_or("--table: columns must be an array")?
+            .iter()
+            .map(|column| {
+                let column_name = column["name"]
+                    .as_str()
+                    .ok_or("--table: column name must be a string")?;
+                let dtype = match column["type"]
+                    .as_str()
+                    .map(str::to_ascii_lowercase)
+                    .as_deref()
+                {
+                    Some("timestamp") => DataType::Timestamp,
+                    Some("utf8" | "string") => DataType::Utf8,
+                    Some("float64" | "double") => DataType::Float64,
+                    Some("int64" | "bigint") => DataType::Int64,
+                    other => return Err(format!("--table: unsupported column type {other:?}")),
+                };
+                let nullable = column["nullable"].as_bool().unwrap_or(true);
+                Ok(Field::plain(column_name, dtype, nullable))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let schema = match table["time_index"].as_u64() {
+            Some(index) => Schema::with_time_index(columns, index as usize, vec![]),
+            None => Schema::new(columns),
+        };
+        catalog = catalog.with_table(name, schema);
+    }
+    Ok(catalog)
+}
+
+fn query_batch(
+    language: QueryLanguage,
     queries: &[String],
     accuracy: AccuracyTarget,
     interval_ms: u64,
 ) -> PlanningWorkload {
     PlanningWorkload {
         query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
+            language,
             query_batch: Some(
                 queries
                     .iter()
@@ -326,8 +399,14 @@ mod tests {
     /// candidate and its cost, chosen among all candidates.
     #[test]
     fn display_cap_keeps_the_selected_candidate() {
-        let workload = promql_batch(&["sum(m)".into()], AccuracyTarget::Exact, 15_000);
-        let document = stage_pipeline(&workload, 0).unwrap();
+        let workload = query_batch(
+            QueryLanguage::PromQL,
+            &["sum(m)".into()],
+            AccuracyTarget::Exact,
+            15_000,
+        );
+        let roots = lower_promql_roots(&workload).unwrap();
+        let document = stage_pipeline(&workload, roots, 0).unwrap();
         let selected = document["stage3_plan_selection"]["selected"]
             .as_str()
             .unwrap();

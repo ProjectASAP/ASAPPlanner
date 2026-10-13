@@ -205,3 +205,33 @@ fn example3a_selects_the_cheapest_of_all_candidates() {
         .unwrap();
     assert!(physical.iter().any(|p| p["id"] == expected.as_str()));
 }
+
+/// SQL queries over tables declared with `--table` are planned through the
+/// same stages, and the document records each query's language.
+#[test]
+fn sql_queries_over_declared_tables_are_planned() {
+    let out = std::env::temp_dir().join(format!("stage_pipeline_{}_sql.json", std::process::id()));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--table",
+            r#"{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp", "nullable": false},
+                {"name": "service", "type": "utf8", "nullable": false},
+                {"name": "latency", "type": "float64", "nullable": false}], "time_index": 0}"#,
+            "--sql",
+            "SELECT service, COUNT(*) FROM metrics GROUP BY service",
+            "--sql",
+            "SELECT service, AVG(latency) FROM metrics GROUP BY service",
+            "--out",
+        ])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    let queries = document["workload"]["queries"].as_array().unwrap();
+    assert_eq!(queries.len(), 2);
+    assert!(queries.iter().all(|q| q["language"] == "sql"));
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
+    assert!(document["stage3_plan_selection"]["selected"].is_string());
+}
