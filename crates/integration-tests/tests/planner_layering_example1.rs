@@ -155,18 +155,22 @@ fn stage0_query_language_frontends_queries_do_not_share_nodes() {
 
 // ── Logical ASAP-aware optimization ──────────────────────────────────────
 
-/// Pass 1 gives 1 × 3 = 3 candidates: Q2's top-k is exact, Count-Min + heap or CountSketch + heap.
+/// Pass 1 gives 1 × 3 = 3 candidates without a shared input: Q2's top-k is
+/// exact, Count-Min + heap or CountSketch + heap. (#588 adds a shared-input
+/// variant of each.)
 #[test]
 fn stage1_logical_asap_optimization_has_three_pass1_candidates() {
     let run = pipeline();
-    assert_eq!(run.logical.len(), 3);
-    let found: BTreeSet<_> = run
+    let found: Vec<_> = run
         .logical
         .iter()
         .map(|c| classify(&c.dag, &c.query_roots))
+        .filter(|(_, shared)| !shared)
         .collect();
-    let expected: BTreeSet<_> = PASS1_Q2_OPTIONS.into_iter().map(|o| (o, false)).collect();
-    assert_eq!(found, expected, "each Q2 option exactly once");
+    let expected: Vec<_> = PASS1_Q2_OPTIONS.into_iter().map(|o| (o, false)).collect();
+    let mut sorted = found.clone();
+    sorted.sort();
+    assert_eq!(sorted, expected, "each Q2 option exactly once: {found:?}");
 }
 
 /// Q1 is exact in every candidate: no summary is reachable from its root.
@@ -277,12 +281,18 @@ fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 
 // ── Physical ASAP-aware optimization ─────────────────────────────────────
 
-/// No candidate is discarded before plan selection: the 3 logical candidates map one-to-one.
+/// No candidate is discarded before plan selection: the logical candidates
+/// map one-to-one, 3 of them without a shared input.
 #[test]
 fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let run = pipeline();
     assert_one_physical_candidate_per_logical(&run);
-    assert_eq!(run.physical.len(), 3);
+    let unshared = run
+        .physical
+        .iter()
+        .filter(|p| !classify(p.dag(), &p.query_roots).1)
+        .count();
+    assert_eq!(unshared, 3);
 }
 
 /// Each physical candidate keeps its logical Q2 option and input sharing.
@@ -535,7 +545,7 @@ fn materialized_case() -> Run {
 /// The charging helper agrees with plan selection when a node is
 /// materialized.
 #[test]
-fn charging_helper_follows_plan_selection_with_a_materialized_node() {
+fn stage3_plan_selection_charging_helper_follows_plan_selection_with_a_materialized_node() {
     let run = materialized_case();
     let p = &run.physical[0];
     let mut by_kind: Vec<_> = run.selection.costs[&p.id]
@@ -562,7 +572,7 @@ fn charging_helper_follows_plan_selection_with_a_materialized_node() {
 /// Charging the scan under a materialized node once per query is caught.
 #[test]
 #[should_panic(expected = "multiplier of")]
-fn charging_helper_rejects_recounting_below_a_materialized_node() {
+fn stage3_plan_selection_charging_helper_rejects_recounting_below_a_materialized_node() {
     let mut run = materialized_case();
     let p = run.physical[0].clone();
     let scan = p

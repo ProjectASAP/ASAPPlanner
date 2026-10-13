@@ -135,7 +135,7 @@ Invariants:
   once. A `NotMaterialized` node is charged once per consumer that reads it
   (its multiplier), where a consumer is a query or a materialized node and
   a read stops at materialized nodes. Every node is `NotMaterialized` today;
-  `charging_helper_*` check the helper on a hand-built candidate with a
+  `stage3_plan_selection_charging_helper_*` check the helper on a hand-built candidate with a
   materialized node.
 * The selected plan is no more expensive than any valid candidate.
 * The selected plan compiles in the physical planner.
@@ -144,8 +144,9 @@ Ignored until Pass 2 (#588): for each Q2 option, the shared-input candidate
 costs no more than its separate counterpart.
 
 When #588's shared-input candidates land, each Q2 option has two
-candidates. The tests already pick a Q2 option's candidate by (option,
-queries share no node) and check only that every invalid candidate is a
+candidates. The tests already count only candidates whose queries share no
+node (Pass 1's 3 logical and 3 physical), pick a Q2 option's candidate by
+(option, no shared input), and check only that every invalid candidate is a
 heap one, not that exactly two are invalid, so they need no change.
 
 The doc's typical winners need window forms or materialization, and its
