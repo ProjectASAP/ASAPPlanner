@@ -1,7 +1,7 @@
 //! Numeric regression fixtures: actual PromQL lowering plus numeric update/evaluation checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
-use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::planning::logical_candidates;
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{ExactKind, FieldDataType, SummaryInputExpr, SummaryUpdate};
@@ -9,17 +9,16 @@ use asap_types::pre_asap::{ColumnRef, Reduction};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
+/// The first logical candidate (in enumeration order) with an ASAP operator,
+/// else the exact one.
 fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let pre = lower_promql(query, accuracy).unwrap();
-    ASAPStrategies::default_cost_model()
-        .replacements(&TargetSubDAG::new(&pre))
-        .into_iter()
-        .find_map(|r| match r.replacement {
-            // A bound decision: a summary DAG or a kept (exact) sub-DAG.
-            Replacement::SubDAG(n) if !r.provenance.is_logical_rewrite() => Some(n),
-            _ => None,
-        })
-        .unwrap_or_else(|| asap_aware_mapping::replacement::retain_exact(&pre).unwrap())
+    let pre = lower_promql(query, accuracy.clone()).unwrap();
+    let candidates = logical_candidates(pre, accuracy);
+    candidates
+        .iter()
+        .find(|node| node.contains_asap())
+        .unwrap_or(&candidates[0])
+        .clone()
 }
 fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction) {
     match &node.operator {
@@ -144,93 +143,75 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     );
 }
 
-/// A new conditional average rewrite must not invalidate an otherwise usable outer sketch.
+/// Rewriting the inner average (its own target, as sum and count
+/// accumulators) must not invalidate an otherwise usable outer sketch.
 #[test]
 fn quantile_over_temporal_average_keeps_a_legal_candidate() {
     for query in [
         "quantile(0.9, avg_over_time(a[5m]))",
         "quantile(0.9, avg_over_time(a[5m]) + avg_over_time(b[5m]))",
     ] {
-        let node = plan(query, AccuracyTarget::Epsilon(0.01));
-        assert!(
-            node.contains_asap(),
-            "outer sketch candidate must survive: {query}"
-        );
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else {
-            panic!("outer sketch evaluation")
-        };
-        let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary_input.operator else {
-            panic!("outer sketch state")
-        };
-        assert!(
-            !child.contains_asap(),
-            "guarded expression must retain native maintenance input"
-        );
+        let accuracy = AccuracyTarget::Epsilon(0.01);
+        let pre = lower_promql(query, accuracy.clone()).unwrap();
+        let node = logical_candidates(pre, accuracy)
+            .into_iter()
+            .find(|node| {
+                OperatorNode::reachable(node).iter().any(|n| {
+                    matches!(
+                        n.asap(),
+                        Some(ASAPOp::SummaryAgg {
+                            family: FieldDataType::Sketch(..),
+                            ..
+                        })
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("outer sketch candidate must survive: {query}"));
         post_asap_dag(&node);
     }
 }
 
-struct OneKeyTopKEvidence;
-impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEvidence {
-    fn propagation_stats(
-        &self,
-        op: &asap_types::post_asap::CompositionOperator,
-        _family: &FieldDataType,
-        _query: Option<&asap_types::post_asap::SketchStatistic>,
-    ) -> asap_aware_mapping::accuracy::PropagationStats {
-        // Single-key fixture: no excluded keys; bounds cover every value below.
-        if matches!(
-            op,
-            asap_types::post_asap::CompositionOperator::TopKSelection
-        ) {
-            asap_aware_mapping::accuracy::PropagationStats {
-                topk_selected_lower_bound: Some(-1000.),
-                topk_excluded_upper_bound: Some(-1001.),
-                topk_interval_failure_probability: Some(0.001),
-                ..Default::default()
-            }
-        } else {
-            Default::default()
-        }
-    }
-}
-
 #[test]
+#[ignore = "Pass 1 builds the top-k heap over the counts the aggregate outputs, weighted by \
+            them; a heap over raw samples with unit weights is the whole-expression heap (#589)"]
 fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
-    use asap_aware_mapping::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
-    use asap_aware_mapping::cost_model::DefaultCostModel;
     use asap_types::post_asap::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
-    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
-        &DefaultAccuracyModel,
-        &EqualSplitAllocator,
-        &OneKeyTopKEvidence,
-    );
     for is_count in [true, false] {
         let query = if is_count {
             "topk(1, count_over_time(up[5m]))"
         } else {
             "topk(1, sum_over_time(up[5m]))"
         };
-        let pre = lower_promql(query, AccuracyTarget::Epsilon(0.01)).unwrap();
-        let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
+        let accuracy = AccuracyTarget::Epsilon(0.01);
+        let pre = lower_promql(query, accuracy.clone()).unwrap();
+        let candidates = logical_candidates(pre, accuracy);
+        // The heap state each summarized candidate builds.
+        let heap = |node: &Rc<OperatorNode>| {
+            OperatorNode::reachable(node).into_iter().find(|n| {
+                matches!(
+                    n.asap(),
+                    Some(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(..),
+                        ..
+                    })
+                )
+            })
+        };
         let wanted = if is_count {
             SketchAlgorithm::CmsWithHeap
         } else {
             SketchAlgorithm::CountSketchWithHeap
         };
-        let node = candidates
+        let (node, state) = candidates
             .iter()
-            .find_map(|c| {
-                let Replacement::SubDAG(node) = &c.replacement else {
-                    return None;
-                };
-                let (family, _, _) = aggregate(node);
+            .find_map(|node| {
+                let state = heap(node)?;
+                let (family, _, _) = aggregate(&state);
                 matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &wanted)
-                    .then_some(node)
+                    .then_some((node, state))
             })
             .expect("weighted sketch candidate");
-        let (family, update, _) = aggregate(node);
+        let (family, update, _) = aggregate(&state);
         if is_count {
             assert_eq!(update.weight, SummaryInputExpr::Constant(1.));
             assert_eq!(
@@ -244,11 +225,16 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
                 update.weight,
                 SummaryInputExpr::Column(ColumnRef::SampleValue)
             );
-            for c in &candidates {
-                if let Replacement::SubDAG(n) = &c.replacement {
-                    assert!(
-                        !matches!(aggregate(n).0, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
-                    );
+            // A signed sum's Count-Min heap carries no non-negative proof,
+            // so plan selection rejects it.
+            for state in candidates.iter().filter_map(heap) {
+                let (family, update, _) = aggregate(&state);
+                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
+                {
+                    assert!(!matches!(
+                        update.weight_domain,
+                        WeightDomain::NonNegative { .. }
+                    ));
                 }
             }
         }

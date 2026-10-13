@@ -1,18 +1,17 @@
 //! Query string → planned summary state → `coverage()`, for the examples of
 //! the ASAP primitive schema design doc (#573 §4.2.2). Each query is lowered
-//! and searched, and the quantile's KLL `SummaryAgg` candidate in the search
-//! space is checked: what its `definition` keeps and what its `selection`
-//! takes, row by row of §4.2.2's "More examples". The tests read the
-//! candidate list, not a cost model's selection, so they do not depend on
-//! which candidate a cost model prefers.
+//! and its logical candidates composed, and the quantile's KLL `SummaryAgg`
+//! is checked: what its `definition` keeps and what its `selection` takes,
+//! row by row of §4.2.2's "More examples". The tests read the candidates, not
+//! plan selection's choice, so they do not depend on which candidate is
+//! cheapest.
 
 use std::ops::Bound;
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::Replacement;
-use asap_aware_mapping::search_workload;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::planning::logical_candidates;
 use asap_types::ir::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
@@ -27,21 +26,17 @@ fn accuracy() -> AccuracyTarget {
     }
 }
 
-/// The single KLL `SummaryAgg` among the search space's candidates for `pre`.
+/// The single KLL `SummaryAgg` among the logical candidates for `pre`.
 fn kll_state(pre: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    let space = search_workload(vec![("query", pre)]).unwrap();
     let mut states: Vec<Rc<OperatorNode>> = Vec::new();
-    for group in space.target_subdag_candidates() {
-        for candidate in &group.candidates {
-            let Replacement::SubDAG(dag) = &candidate.replacement else {
-                continue;
-            };
-            for node in OperatorNode::reachable(dag) {
-                let is_kll = matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                    if kind.algorithm() == &SketchAlgorithm::Kll);
-                if is_kll && !states.iter().any(|s| Rc::ptr_eq(s, &node)) {
-                    states.push(node);
-                }
+    for dag in logical_candidates(pre, accuracy()) {
+        for node in OperatorNode::reachable(&dag) {
+            let is_kll = matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+                if kind.algorithm() == &SketchAlgorithm::Kll);
+            // Each candidate is composed on its own: the same state is
+            // structurally equal across candidates.
+            if is_kll && !states.iter().any(|s| **s == *node) {
+                states.push(node);
             }
         }
     }

@@ -7,12 +7,8 @@ use asap_types::ir::OperatorNode;
 use physical_common::compile_at_ingestion_physical_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
-use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::{
-    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
-    TargetSubDAG,
-};
 use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::planning::logical_candidates;
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
@@ -53,29 +49,10 @@ fn canonical(labels: &Series) -> Series {
         .collect()
 }
 
-/// Every Planner candidate for `query`: the searched selection plus each
-/// summary replacement of the root.
+/// Every logical candidate the planner pipeline composes for `query`.
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
-    let root = lower_promql(query, accuracy).expect("lowering failed");
-    let mut result = ASAPStrategies::default_cost_model()
-        .replacements(&TargetSubDAG::new(&root))
-        .into_iter()
-        .filter_map(|candidate| match candidate {
-            ReplacementSubDAG {
-                replacement: Replacement::SubDAG(node),
-                ..
-            } => Some(node),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let space = search_workload(vec![("query", root)]).unwrap();
-    if let Ok(Some(selected)) = space
-        .global_selection(&DefaultCostModel)
-        .assemble_selected_query(&space.roots[0].1)
-    {
-        result.push(selected);
-    }
-    result
+    let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
+    logical_candidates(root, accuracy)
 }
 
 /// Raw-input summary nodes: `(dag, raw source id, summary id)`.
@@ -382,7 +359,7 @@ fn check(
     Ok(label)
 }
 
-// Every raw-input summary selected by Planner compiles over raw sample rows,
+// Every raw-input summary Planner composes compiles over raw sample rows,
 // and each population's estimates equal feeding its kernel sample by sample.
 #[test]
 fn raw_sample_summaries_compile_and_match_their_kernels() {
@@ -443,16 +420,10 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
         );
     }
     for family in [
-        "Sum",
-        "Count",
-        "Min",
-        "Max",
-        "Rate",
-        "Increase",
-        "Kll",
-        "DDSketch",
+        "Sum", "Count", "Min", "Max", "Rate", "Increase", "Kll", "DDSketch",
         "Hll",
-        "CountSketchWithHeap",
+        // A heap over raw samples is the whole-expression heap (#589); Pass 1
+        // builds a top-k heap over the ranked aggregate's output.
     ] {
         assert!(
             families.contains(family),

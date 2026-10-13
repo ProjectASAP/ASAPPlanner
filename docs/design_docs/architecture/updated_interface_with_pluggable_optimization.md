@@ -122,9 +122,9 @@ tracked in #580.
 
 `plan_stages` runs these steps over the frontends' roots and returns every
 stage's candidates as well as the selection; the `stage_pipeline` devtool
-shows them. Plan selection prices every enumerated candidate, so the
-enumeration is capped (`MAX_ENUMERATED_CANDIDATES`); a search that avoids
-building every candidate is future work (#671).
+shows them. Every combination is enumerated and plan selection prices
+every candidate; nothing is capped. A search that avoids building every
+candidate is future work (#671).
 
 `ReplacementStrategy` remains a concept of the legacy candidate search, which
 no pass uses any more.
