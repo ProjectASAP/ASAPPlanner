@@ -1,23 +1,28 @@
 # Planner layering, Example 1: acceptance spec (MVP)
 
-Audience: planner designers and the Phase C implementer.
+Audience: planner designers and the implementers of the planning stages.
 Source: [planner-layering.md](planner-layering.md), "Example 1: Aggregation over
-dimensions". Tests: `crates/integration-tests/tests/planner_layering_example1.rs`.
-Viewer fixture shape: `tools/dag-viewer/examples/planner-layering-example1.expected.json`.
+dimensions". Tests: `crates/integration-tests/tests/planner_layering_example1.rs`
+(helpers in `tests/planner_layering_common/`). Viewer fixture:
+`tools/dag-viewer/examples/planner-layering-example1.json`, written by
+`stage_pipeline --example planner-layering-1`.
 
-This spec was written by a test designer who did not implement the stages.
+This spec was written by a test designer before the stages existed. A test
+whose expectation needs a feature that is not in the stack yet is
+`#[ignore]`d with the PR or issue that delivers it.
 
 ## Scope
 
 | Stage | Doc (#509) | MVP (this spec) |
 |---|---|---|
-| 0. Frontends | 1 workload `LogicalDAG` | same |
-| 1. Logical ASAP | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 × identical-expression rule = **6**. Window composition is blocked on #511 (#518, #522). |
-| 2. Physical ASAP | Materialization options per window form = **156** | Physical operator implementation only, no materialization = **6** (the doc's Raw/Raw plans) |
-| 3. Selection | 1 plan | 1 plan |
+| Language-specific frontends | 1 workload `LogicalDAG` | same |
+| Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 only = **3**. Pass 2 is not implemented: the identical-expression rule is #588, window composition #601. |
+| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, every sub-DAG `NotMaterialized` = **3** (the doc's Raw plans). Materialization enumeration is #604. |
+| Plan selection | 1 plan | 1 plan |
 
-Every MVP candidate is one of the doc's candidates: in Stage 1, the one with no
-window summary for either query; in Stage 2, the one where both queries are
+Every MVP candidate is one of the doc's candidates: in logical ASAP-aware
+optimization, the one with separate inputs and no window summary for either
+query; in physical ASAP-aware optimization, the one where both queries are
 **Raw** (state rebuilt from the last 1 min of raw samples at every refresh).
 
 ## Workload
@@ -30,7 +35,7 @@ Shared data workload: `continuously_ingesting`, 15 s ingestion interval,
 | Q1 `sum by (job) (rate(http_requests_total[1m]))` | 10 s | 1 m | evaluation time | exact | none |
 | Q2 `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 10 s | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
 
-## Stage 0: 1 candidate
+## Language-specific frontends: 1 candidate
 
 | Query | Chain |
 |---|---|
@@ -40,111 +45,129 @@ Shared data workload: `continuously_ingesting`, 15 s ingestion interval,
 Invariants:
 
 * Exactly one candidate, with one root per query, in workload entry order.
-* No summary node (sketch `summary_agg`, `summary_estimate`, `summary_merge`).
-* Q1 and Q2 share no node. Sharing is a Stage 1 decision.
+* No summary node (sketch `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`).
+* Q1 and Q2 share no node. Sharing is a logical ASAP-aware optimization
+  decision.
 
-## Stage 1: 6 candidates
+## Logical ASAP-aware optimization: 3 candidates
 
-| Id | Q1 | Q2 | Input |
-|---|---|---|---|
-| L1 | exact | exact (per-series sum, top 10 per job) | separate |
-| L2 | exact | exact | shared |
-| L3 | exact | Count-Min + top-*k* heap, one per job | separate |
-| L4 | exact | Count-Min + top-*k* heap, one per job | shared |
-| L5 | exact | Hydra (CMS) over all (job, series) keys, heap per job | separate |
-| L6 | exact | Hydra (CMS) | shared |
+Pass 1 targets and their per-computation candidates:
 
-"Shared" means Q1 and Q2 read one `http_requests_total[1m]` input node
-(scan and range). Ids and order are illustrative; tests identify candidates by
-structure.
+| Query | Target | Candidates |
+|---|---|---|
+| Q1 | per-series `rate` | exact Rate accumulator |
+| Q1 | per-`job` `sum` | exact Sum accumulator |
+| Q2 | per-series `sum_over_time` | exact Sum accumulator |
+| Q2 | per-`job` top-*k* | exact, Count-Min + heap per job, CountSketch + heap per job |
+
+| Id | Q1 | Q2 top-*k* |
+|---|---|---|
+| L1 | exact | exact (sort + limit 10 per job) |
+| L2 | exact | Count-Min + top-*k* heap, one per job |
+| L3 | exact | CountSketch + top-*k* heap, one per job |
+
+Ids follow the enumeration order; tests identify candidates by structure.
 
 Invariants:
 
-* Exactly 6 candidates, one per (Q2 option, separate or shared). No duplicates.
+* Exactly 3 candidates, one per Q2 option. No duplicates.
 * Every candidate covers both queries.
 * Q1 never reaches a summary node.
-* The sketch families in Q2 are exactly {`CmsWithHeap` per subpopulation,
-  Hydra `HydraCms`}. Exact Q2 has no sketch.
-* For each Q2 option, both the independent and the shared variant are present.
-* Only the scan and range nodes may be shared. No summary is shared.
-* Nothing is pruned: Count-Min and Hydra are admitted by ε = 0.01, δ = 0.001,
+* Every target's exact option is its exact accumulator (`SummaryAgg` with an
+  exact family → `FinalizeExactAccumulator`): three per candidate.
+* Q2's sketch families are exactly {`CmsWithHeap`, `CountSketchWithHeap`},
+  each per subpopulation (job). Exact Q2 has no sketch.
+* Only the scan and range nodes may be shared between the queries. No summary
+  is shared. (Today nothing is shared.)
+* Nothing is pruned: the heap sketches are admitted by ε = 0.01, δ = 0.001,
   and Q1's exact target admits only the exact option.
 
-## Stage 2: 6 candidates
+Ignored until their feature lands:
 
-| Id | From | Q2 physical operators | Timing |
+* Hydra (`HydraCms` over all (job, series) keys, a heap per job) as a third
+  Q2 summary (#605).
+* A shared-input variant of every Q2 option next to the independent one
+  (Pass 2 identical-expression rule, #588).
+
+## Physical ASAP-aware optimization: 3 candidates
+
+| Id | From | Q2 physical operators | Materialization |
 |---|---|---|---|
-| P1 | L1 | sort (partition by job) → limit 10 | all query time |
-| P2 | L2 | sort → limit 10 | all query time |
-| P3 | L3 | CMS + heap build → top-10 estimate | all query time |
-| P4 | L4 | CMS + heap build → top-10 estimate | all query time |
-| P5 | L5 | Hydra build → top-10 estimate per job | all query time |
-| P6 | L6 | Hydra build → top-10 estimate per job | all query time |
+| P1 | L1 | sort (partition by job) → limit 10 | all `NotMaterialized` |
+| P2 | L2 | CMS + heap build → top-10 estimate | all `NotMaterialized` |
+| P3 | L3 | CountSketch + heap build → top-10 estimate | all `NotMaterialized` |
 
-Q1 is the same in all six: scan → range → per-series rate → sum by (job).
+Q1 is the same in all three: scan → range → rate accumulator → sum
+accumulator, each finalized.
 
 Invariants:
 
-* Exactly one physical candidate per logical candidate. `from_logical` is a
-  bijection onto the Stage 1 ids, so no valid candidate is dropped before
-  Stage 3.
+* Exactly one physical candidate per logical candidate, and none pruned.
+  `from_logical` is a bijection onto the logical ids, so no candidate is
+  dropped before plan selection.
 * Each physical candidate keeps its logical Q2 option and input sharing.
-* Exact TopK is implemented as a sort followed by a limit.
+* Exact top-*k* is implemented as a sort followed by a limit.
 * A summary Q2 is a sketch build node feeding an estimation node. There is no
-  merge node, because the MVP has no window summaries.
-* No node runs at ingestion time, because the MVP has no materialization.
+  merge node, because there are no window summaries.
+* Every node is `NotMaterialized` and runs at query time.
 
-## Stage 3: 1 plan
+Runtime capability check (not part of the doc): every candidate compiles in
+the physical planner. Ignored on two runtime gaps: CMS + heap needs a
+non-negative weight contract (#593), and the CountSketch + heap estimate's
+output is not the keyed-evaluation shape the physical planner builds (#579).
+
+## Plan selection: 1 plan
+
+| Id | Outcome | Reason |
+|---|---|---|
+| P1 | selected | the only valid candidate |
+| P2 | invalid | Count-Min needs non-negative update weights, and `sum_over_time` weights are not proven non-negative |
+| P3 | invalid | a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |
 
 Invariants:
 
 * One selected id. Every other candidate is listed once as rejected, with a
-  reason, and marked invalid (accuracy, latency or capability) or valid but
-  costlier.
-* Each candidate's cost has one entry per DAG node, and `total` is their sum.
-  A shared node is therefore charged once, for all its consumers.
+  reason, and marked invalid or valid but costlier.
+* Only valid candidates are priced. Each valid candidate's cost has one entry
+  per DAG node, and `total` is their sum, so a shared node is charged once.
 * The selected plan is no more expensive than any valid candidate.
-* For each Q2 option, the shared-input candidate costs no more than its
-  separate counterpart.
+* The selected plan compiles in the physical planner.
 
-Expected outcome, not asserted because it depends on the cost and accuracy
-models: a shared-input candidate wins, matching the doc's "Raw with a shared
-input" winner. An exact Q2 (P1, P2) may be rejected for missing the 100 ms
-bound. The doc's other typical winners need window forms or materialization and
-are out of MVP scope.
+Ignored until Pass 2 (#588): for each Q2 option, the shared-input candidate
+costs no more than its separate counterpart.
 
-## Ambiguities and MVP deviations
+The doc's typical winners need window forms or materialization, and its
+"Raw with a shared input" needs Pass 2. Latency bounds are not checked, so
+whether an exact Q2 misses 100 ms is not tested.
 
-1. **Stage 2 is materialization-only in the doc.** Example 1 lists only
-   window-form or materialization options. The MVP reads "physical operator
-   implementation" from the Stage 2 section: "TopK as a sort followed by a
-   limit". This gives one physical candidate per logical candidate. The doc
-   names no alternative implementation (for example hash versus sort
-   aggregation) for this example.
-2. **Where exact TopK becomes sort + limit.** The Pass 1 diagram already
-   draws exact Q2 as "sort + limit 10 per job", but the Stage 2 section calls
-   this a physical choice. Today the frontend emits `aggregate[top_k]`. The
-   spec requires sort → limit only by Stage 2.
-3. **Minimal Pass 2.** Only the identical-expression rule applies. The
-   window-composition rule adds 48 of the doc's 54 candidates, and its
-   tumbling and sliding variants wait on #511.
-4. **"Shared summary charged once"** does not apply literally: the doc says no
-   summary is shared in Example 1. The tests check the general form (each node
-   charged once) on the shared input node.
-5. **Workload DAG with two roots.** `LogicalASAPDAG` has one `root`, but
-   Example 1 needs one DAG for both queries. The stubs carry `query_roots`
-   until the export supports several roots.
-6. **Where cost is computed.** The viewer contract puts `cost` on Stage 2
-   candidates, but the doc says only Stage 3 uses the cost model. The spec has
-   Stage 3 produce costs, and the viewer document attaches them to Stage 2
-   entries.
-7. **Hydra's inner sketch.** The doc says "Hydra over the whole `job`
-   column" without naming the inner sketch. The spec assumes `HydraCms`, the
-   construction with the proven guarantee for frequencies.
-8. **Other top-*k* families.** The code also knows `CountSketchWithHeap`. The
-   doc lists only Count-Min + heap and Hydra, so a third family fails the
-   tests until the doc adds it.
-9. **Latency.** The doc says an exact top 10 rebuilt at every refresh "may
-   miss" 100 ms. Whether P1 and P2 are rejected is left to the cost model.
-10. **Accuracy of Count-Min heap merges** matters only with tumbling windows,
-    which are out of MVP scope.
+## Where the doc and the planner differ
+
+1. **Q2's top-*k* options.** The doc lists "exact, Count-Min + heap, Hydra".
+   The planner offers exact, Count-Min + heap and CountSketch + heap; Hydra
+   comes in #605. The tests follow the planner.
+2. **Count-Min + heap is invalid.** The doc expects the accuracy model to
+   judge it. Plan selection admits Count-Min only over weights proven
+   non-negative, which `sum_over_time` over an arbitrary metric is not
+   (counter declarations: #593).
+3. **No summary is selectable.** The doc expects a summary for Q2 to win in
+   most deployments. A composed top-*k* estimate has no guarantee, so without
+   deployment evidence every heap candidate is invalid and the exact plan is
+   selected.
+4. **Stage 2 is materialization in the doc's example.** Example 1 lists only
+   window-form and materialization options. The MVP reads "physical operator
+   implementation" from the Stage 2 section ("TopK as a sort followed by a
+   limit"), which gives one physical candidate per logical candidate.
+5. **Where exact top-*k* becomes sort + limit.** The Pass 1 diagram draws
+   exact Q2 as "sort + limit 10 per job", but the frontend emits
+   `Aggregate{[TopK]}` and the Stage 2 section calls sort + limit a physical
+   choice. The tests require sort → limit only after physical ASAP-aware
+   optimization.
+6. **Hydra's inner sketch.** The doc says "Hydra over the whole `job`
+   column" without naming the inner sketch. The test assumes `HydraCms`.
+7. **"Shared summary charged once"** does not apply literally: the doc says
+   no summary is shared in Example 1. The tests check the general form (each
+   node charged once).
+8. **Latency.** The doc says an exact top 10 rebuilt at every refresh "may
+   miss" 100 ms. Plan selection does not check latency yet.
+9. **Accuracy of Count-Min heap merges** matters only with tumbling windows,
+   which are out of MVP scope.
