@@ -229,7 +229,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             };
             let catalog = sql_catalog(&tables)?;
             let mut names = HashSet::new();
-            let (mut described, mut roots) = (Vec::new(), Vec::new());
+            let (mut described, mut roots, mut recurrence) = (Vec::new(), Vec::new(), Vec::new());
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
                 let (name, defaulted) = match name {
                     Some(name) => (name, false),
@@ -252,6 +252,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     QueryLanguage::PromQL => lower_promql_roots(&one)?,
                     _ => lower_sql_roots(&one, &catalog)?,
                 });
+                recurrence.extend(one.query_workload.entries().map(|entry| entry.recurrence));
                 let mut query = workload_queries(&one).remove(0);
                 query["id"] = json!(name);
                 described.push(query);
@@ -261,8 +262,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 data_ingestion_interval: declared(DurationMs(interval_ms)),
                 ..Default::default()
             };
-            let result =
-                run_planning_stages_over(roots.clone(), &targets, &data, Some(max_combinations));
+            let result = run_planning_stages_over(
+                roots.clone(),
+                &targets,
+                &recurrence,
+                &data,
+                Some(max_combinations),
+            );
             document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
