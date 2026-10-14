@@ -1,8 +1,8 @@
 # Planner Layering: Stage Components, Algorithms and Code Interfaces
 
-Status: describes `main` @ `6665fcc3`. Audience: developers of ASAPPlanner who
-read [ASAPPlanner Planning Stages Design](proposals/planner-layering.md)
-and need to know how each stage is built today.
+Status: describes `main` @ `80fc72e1`. Audience: developers of ASAPPlanner who
+read [ASAPPlanner Planning Stages Design](proposals/planner-layering.md) and
+need to know how each stage is built today.
 
 planner-layering.md defines the stages and passes and their algorithms. This
 document follows the same order and, for every stage, describes its core
@@ -18,60 +18,53 @@ flowchart TB
   S0["Stage 0, query-language frontends"]
   P1["Stage 1, logical ASAP-aware optimization<br/>Pass 1: per-computation candidate generation"]
   C1["Stage 1: composition and sizing<br/>(Cartesian product of per-computation candidates)"]
+  P2["Stage 1, Pass 2: ASAP-aware CSE<br/>(identical-expression rule)"]
   S2["Stage 2, physical ASAP-aware optimization"]
   S3["Stage 3, plan selection"]
   S4["Stage 4, execution (deployment)"]
   W --> S0
   S0 -- "Vec#lt;QueryRoot#gt;: one LogicalDAG per query" --> P1
   P1 -- "PerComputationCandidates" --> C1
-  C1 -- "Vec#lt;LogicalCandidate#gt;: CandidateLogicalASAPDAGs" --> S2
+  C1 -- "one composed candidate at a time" --> P2
+  P2 -- "Stage1Candidate stream: CandidateLogicalASAPDAGs" --> S2
   S2 -- "Vec#lt;PhysicalCandidate#gt;: CandidatePhysicalASAPDAGs<br/>+ pruned candidates" --> S3
   S3 -- "Selection: one PhysicalASAPDAG" --> S4
 ```
 
-Pass 2 (ASAP-aware CSE) runs after Pass 1 and before sizing in the design; it
-is not wired into the pipeline on `main` (Section 3.3).
-
-Every stage of the pipeline is one plain function over one workload. The
-`asap-planner` facade runs Stage 0 and then an `OptimizationPass`; the default
-pass, `Stage1ToStage3Pass`, calls `run_stage1_to_stage3`, which runs Stage 1,
-Stage 2 and Stage 3 in order and keeps every stage's candidates in a
-`Stage1ToStage3Run`:
+Every stage is one plain function over one workload. The `asap-planner` facade
+runs Stage 0 and then an `OptimizationPass`; the default pass,
+`Stage1ToStage3Pass`, reads one accuracy target and one recurrence per
+workload entry and calls `run_stage1_to_stage3`:
 
 ```text
-run_stage1_to_stage3(roots, targets, data, models):
-    inventory ← generate_per_computation_candidates(roots)          // Stage 1, Pass 1
-    combinations ← Π_t |inventory.targets[t].choices.candidates|    // saturating
-    for each choice in the Cartesian product (mixed radix, last target fastest):
-        L_n ← compose_logical_candidate(inventory, choice)            // Stage 1, composition + sizing
-        if L_n composed:
-            P_n ← optimize_physical_asap(L_n) or prune L_n with the error   // Stage 2
-    selection ← select_plan(all P_n, targets, data, models)          // Stage 3
+run_stage1_to_stage3(roots, targets, recurrence, data, models):
+    inventory ← generate_per_computation_candidates(roots)             // Stage 1, Pass 1
+    stage1 ← stage1_logical_asap_optimization(inventory)                // lazy stream:
+        for each choice in the Cartesian product (mixed radix, last target fastest):
+            skip choices that differ only inside a target an absorbing candidate removes
+            L ← compose_logical_candidate(inventory, choice)              // composition + sizing
+            yield L, then each Pass 2 identical-expression candidate of L
+    for each L_n in stage1:                                              // Stage 2
+        P_n ← optimize_physical_asap(L_n) or prune L_n with the error
+    selection ← select_plan(all P_n, targets, recurrence, data, models)  // Stage 3
 ```
 
 Only a Pass 1 error fails the run. A candidate that does not compose keeps its
-error in the run, a candidate Stage 2 cannot implement is pruned with a reason,
-and a failed selection is reported as the Stage 3 result. Every combination is
-enumerated and priced; nothing is capped; a search that avoids building every
-candidate is future work.
+error, a candidate Stage 2 cannot implement is pruned with a reason, and a
+failed selection is reported as the Stage 3 result. The library enumerates and
+prices every candidate and never caps. Because Stage 1 is a lazy stream, a
+caller can count candidates as they are produced and stop early:
+`run_stage1_to_stage3_from_pass1` takes a finished Pass 1 inventory, and
+`run_stage2_and_stage3` takes the Stage 1 candidates a caller enumerated.
 
 ### Code interface
 
 ```rust
-// crates/planner/src/lib.rs
-pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
-
-// crates/asap-aware-mapping/src/pass/mod.rs
-pub struct PlanningModels<'a> {
-    pub cost: &'a dyn CostModel,
-    pub accuracy: &'a dyn AccuracyModel,
-    pub evidence: &'a dyn AccuracyEvidenceProvider,
-}
-
 // crates/asap-aware-mapping/src/pass/stage1_to_stage3.rs
 pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
     targets: &[Option<AccuracyTarget>],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
@@ -79,10 +72,19 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
 pub struct Stage1ToStage3Run<Id> {
     pub stage1_pass1_per_computation: PerComputationCandidates<Id>,
     pub combinations: usize,
+    pub stage1_pass2_identical_expression: Vec<IdenticalExpressionCandidate>,
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
     pub stage2_pruned: Vec<PrunedCandidate>,
     pub stage3_plan_selection: Result<Selection, SelectionError>,
+    pub stage3_selected_logical: Option<Vec<QueryRoot>>,
+}
+
+// crates/asap-aware-mapping/src/pass/mod.rs
+pub struct PlanningModels<'a> {
+    pub cost: &'a dyn CostModel,
+    pub accuracy: &'a dyn AccuracyModel,
+    pub evidence: &'a dyn AccuracyEvidenceProvider,
 }
 ```
 
@@ -99,7 +101,7 @@ Design: [0. Language-specific frontends](proposals/planner-layering.md#0-languag
 | MetricsQL frontend (`crates/frontend-metricsql`) | Converts the MetricsQL AST into the same tree. |
 | Shared resolver (`crates/frontend-common`) | `UnresolvedOp` tree with name-based column references; `resolve_root` binds each name to a positional `ColumnId` and derives every schema. |
 | Unified IR (`crates/types/src/ir/`) | One operator DAG type for every stage: `OperatorNode` with `NonASAPOp` or `ASAPOp` operators. |
-| Workload (`crates/types/src/workload.rs`) | `QueryWorkload` (queries, recurrence, accuracy and latency requirements) and `DataWorkload` (arrival, ingestion interval, volume, rate, cardinality, distribution, each as `Evidence<T>`). |
+| Workload (`crates/types/src/workload.rs`) | `QueryWorkload` (queries, recurrence, accuracy and latency requirements) and `DataWorkload` (arrival, ingestion interval, volume, rate, cardinality, distribution, stream norms, per-source distinct bounds, declared metric types). |
 
 ### Core algorithm
 
@@ -158,10 +160,11 @@ Design: [1. Logical ASAP-aware optimization](proposals/planner-layering.md#1-log
 | Component | What it does |
 |---|---|
 | Pass 1 (`crates/asap-aware-mapping/src/per_computation_candidates.rs`, `generate_per_computation_candidates`) | Finds every computation target and its unranked, unsized candidates, with pruned candidates and reasons. |
-| Composition (same file, `compose_logical_candidate`) | Builds one whole-workload candidate DAG from one choice per target, sizes its summaries and gives every node a guarantee. |
+| Composition (same file, `compose_logical_candidate`) | Builds one whole-workload candidate from one choice per target, sizes its summaries and composes every node's guarantee. |
+| Pass 2 (`crates/asap-aware-mapping/src/asap_aware_cse.rs`) | The identical-expression rule: `sharing_groups` and `identical_expression_variants`. |
+| Enumeration (`crates/asap-aware-mapping/src/pass/stage1_to_stage3.rs`, `stage1_logical_asap_optimization`) | Streams composed candidates, each followed by its Pass 2 candidates. |
 | Summary realization (`crates/asap-aware-mapping/src/realization.rs`) | The summary families per intent (`summary_candidates`), the `(ε, δ)` budget of a target, and default sizing. |
-| Accuracy model (`crates/asap-aware-mapping/src/accuracy/`) | `DefaultAccuracyModel`: local error bounds of sized families, propagation rules (`composition.rs`), and per-family sizing (`estimators/`). |
-| Enumeration (`crates/asap-aware-mapping/src/pass/stage1_to_stage3.rs`) | Walks the Cartesian product of per-computation candidates into `LogicalCandidate`s `L1, L2, …`. |
+| Accuracy model (`crates/asap-aware-mapping/src/accuracy/`) | `DefaultAccuracyModel`: local error bounds of sized families, composition rules (`composition.rs`), and per-family sizing and confidence (`estimators/`). |
 
 ### 3.1 Pass 1: Per-computation candidate generation
 
@@ -173,14 +176,13 @@ Algorithms 1 and 1.1.
 On `main`, a computation target is one measure of an `Aggregate`, and
 Algorithm 1.1's `MATCH` is reading that measure's `AggIntent`: the intent
 binds the input column, grouping (`Reduction`), filter and parameters such as
-`k` or `q`. The rule templates are fixed per candidate kind (Section 3.2), and
-the families that fill a summary slot come from a static table,
+`k` or `q`. The families that fill a summary slot come from a static table,
 `summary_candidates(intent)`:
 
 | Intent | Summary families |
 |---|---|
 | `Quantile` | KLL, DDSketch |
-| `Cardinality` | HLL, Theta, KMV, UnivMon (not UnivMon over a tuple) |
+| `Cardinality` | HLL, KMV, UnivMon (not UnivMon over a tuple) |
 | `FrequencyL2`, `FrequencyEntropy` | UnivMon |
 | `TopK` | CMS with heap, Count Sketch with heap |
 | `Count` | CMS, Count Sketch, UnivMon |
@@ -198,7 +200,9 @@ generate_per_computation_candidates(roots):
             choices ← computation_candidates_for_intent(i)
             skip m if its only option is plain Exact
             if i is avg over a possibly-null input: prune AvgAsSumCount (NullableAvgInput)
-            emit target (a, m, choices, filter of m, HAVING entries)
+            samples_of ← the metric whose raw samples (or plain sums of them) a reads
+            emit target (a, m, choices, filter of m, HAVING entries, samples_of)
+    ADD_WHOLE_EXPRESSION_CANDIDATES(targets)
 
 computation_candidates_for_intent(i):
     exact option ← ExactAccumulator(kind)  for Count, Sum, Min, Max, Rate, IRate, Increase
@@ -207,11 +211,21 @@ computation_candidates_for_intent(i):
     if i has an accuracy target:
         if the target is Exact: prune every summary_candidates(i) (RequiresExact)
         else: check ε, δ ∈ (0, 1); add Summary(f) for every f in summary_candidates(i)
+
+ADD_WHOLE_EXPRESSION_CANDIDATES(targets):
+    for each top-k target t directly over a per-item sum or count target u:
+        if u has no other consumer, neither has a filter or HAVING,
+           and the keyed-additive rule realizes a heap over u's input:
+            replace t's heap candidates by WholeExpression(same family)
+            t.absorbs ← u          // choosing one removes u's aggregate
 ```
 
-Each target thus has exactly one exact option, and pruning happens only for a
+Each target has exactly one exact option, and pruning happens only for a
 provable reason. Nested aggregates are separate targets, and their options
-multiply in composition. Pass 1 uses no cost or accuracy model.
+multiply in composition. A whole-expression top-k ranks items over the raw
+input, weighted by the summed value; when those weights are the samples of a
+metric, the summary carries the open requirement that the metric's samples are
+non-negative, which Stage 3 confirms. Pass 1 uses no cost or accuracy model.
 
 Differences from the design: candidates are not checked against a family's
 capability beyond the table, and the design's Hydra template for `TopK`
@@ -236,11 +250,8 @@ pub struct ComputationTarget {
     pub choices: ComputationChoices,
     pub filter: Option<Predicate>,
     pub having: Vec<HavingEntry>,
-}
-
-pub struct ComputationChoices {
-    pub candidates: Vec<ComputationCandidate>,
-    pub pruned: Vec<(ComputationCandidate, PruneReason)>,
+    pub absorbs: Option<usize>,
+    pub samples_of: Option<String>,
 }
 
 pub enum ComputationCandidate {
@@ -251,6 +262,7 @@ pub enum ComputationCandidate {
     },
     Summary(SketchAlgorithm),
     AvgAsSumCount,
+    WholeExpression(SketchAlgorithm),
 }
 ```
 
@@ -260,21 +272,24 @@ Design: Algorithm 1, lines 18–21 (`SUBSTITUTE`), and sizing after Pass 2.
 
 #### Core algorithm
 
-`run_stage1_to_stage3` enumerates the Cartesian product of the targets'
-candidates. `choice[t]` indexes `targets[t].choices.candidates`; the choice
-vector is incremented in mixed radix, last target fastest, and `L<n>` is the
-`n`-th choice. The run records the product's size in `combinations`
-(saturating at `usize::MAX`). For each choice, `compose_logical_candidate`
-rewrites the workload bottom-up:
+Composition enumerates the Cartesian product of the targets' candidates.
+`choice[t]` indexes `targets[t].choices.candidates`; the choice vector is
+incremented in mixed radix, last target fastest. A choice that picks a
+whole-expression candidate and anything but the first candidate of the target
+it absorbs gives the same candidate as with the first, so it is skipped.
+`PerComputationCandidates::combinations` counts the rest without enumerating
+them: an absorbing pair with `n` candidates over `m`, `w` of them
+whole-expression, counts `(n − w) · m + w` (saturating at `usize::MAX`).
 
 ```text
 compose_logical_candidate(inventory, choice):
     for each aggregate a with a chosen candidate other than Exact:
         replace a measure by measure, over a's input:
-            ExactAccumulator → SummaryAgg(exact family) → FinalizeExactAccumulator
-            Summary(f)       → SummaryAgg(SIZED(f, acc(m))) → SummaryEstimate
-            AvgAsSumCount    → finalized sum and count, divided
-            Exact            → a single-measure Aggregate
+            ExactAccumulator   → SummaryAgg(exact family) → FinalizeExactAccumulator
+            Summary(f)         → SummaryAgg(SIZED(f, acc(m))) → SummaryEstimate
+            WholeExpression(f) → SummaryAgg(SIZED(f)) over the absorbed aggregate's input → SummaryEstimate
+            AvgAsSumCount      → finalized sum and count, divided
+            Exact              → a single-measure Aggregate
         join several measures back on the group keys; keep a's column names
         measure filter → SummaryAgg.filter
         HAVING BelowAggregate → Filter below the state (consumer Filter dropped)
@@ -283,26 +298,33 @@ compose_logical_candidate(inventory, choice):
     for each node, bottom-up: node.guarantee ← COMPOSED_GUARANTEE(node)
 
 SIZED(f, acc):
-    (ε, δ) ← accuracy_budget(acc)            // δ defaults to 0.01
-    params ← default_size_params(f, intent, ε, δ)   // accuracy/estimators: invert f's error bound
+    (ε, δ) ← accuracy_budget(acc)                     // δ defaults to 0.01
+    params ← default_size_params(f, intent, ε, δ)    // accuracy/estimators: invert f's error bound
+                                                      // (KLL: scaled for δ by a Gaussian quantile ratio)
 
-COMPOSED_GUARANTEE(node):
-    FinalizeExactAccumulator over exact input      → exact
-    SummaryEstimate over exact input, bound applies → DefaultAccuracyModel.local_guarantee(f, query)
-    Project of plain columns                       → the child's guarantee
-    non-ASAP operator over exact inputs            → exact
-    anything else (incl. any value computed from an approximate input) → None
+COMPOSED_GUARANTEE(node):            // built-in DefaultAccuracyModel; no data or evidence
+    non-ASAP operator over exact inputs                 → exact
+    FinalizeExactAccumulator over exact input           → exact
+    FinalizeExactAccumulator over approximate input     → its function's rule (sum, extremum, rate, …)
+    SummaryEstimate whose family bound applies          → local_guarantee(f, query),
+                                                          composed with its input's if approximate
+    Aggregate / arithmetic over approximate values      → the function's or arithmetic composition rule
+    Project of plain columns                            → the child's guarantee
+    comparison or value predicate over approximate      → None
 ```
 
-A summary estimate's bound "applies" unless the query is Top-K (a heap sketch
-bounds item frequencies, not membership) or the family is Count-Min over
-weights not proven non-negative. A `None` guarantee does not reject the
-candidate here; Stage 3 decides.
+A rule that needs a statistic Stage 1 does not have (an input row count, a
+source's stream norm, a metric's sign, an operand domain, classic HLL's
+distinct bound) keeps it symbolic as an `Unknown` leaf of the guarantee's
+`BoundExpr` or `ProbabilityExpr`; Stage 3 binds it. A family bound does not
+apply to Top-K membership (a heap sketch bounds item frequencies), and a
+Count-Min bound assumes non-negative weights. A `None` guarantee does not
+reject the candidate here; Stage 3 decides.
 
-Differences from the design: with no Pass 2, each summary is sized for its own
-measure's requirement, which is the post-Pass-2 sizing with nothing shared.
-Guarantees are not yet propagated through operators over approximate values
-(`AccuracyModel::propagate` exists but composition does not call it).
+Differences from the design: summaries are sized per measure, before Pass 2,
+because the only Pass 2 rule on `main` shares identical nodes, which already
+have the same size. A guarantee holds per output point and is not scaled by the
+number of output groups.
 
 #### Code interface
 
@@ -313,6 +335,9 @@ pub fn compose_logical_candidate<Id: Clone>(
     choice: &[usize],
 ) -> Result<Vec<(Id, QueryRoot)>, PerComputationCandidateError> {
 
+impl<Id> PerComputationCandidates<Id> {
+    pub fn combinations(&self) -> usize {
+
 // crates/asap-aware-mapping/src/realization.rs
 pub fn default_size_params(
     kind: SketchAlgorithm,
@@ -321,44 +346,71 @@ pub fn default_size_params(
     delta: f64,
 ) -> SketchParams {
 
-// crates/asap-aware-mapping/src/pass/stage1_to_stage3.rs
-pub struct LogicalCandidate {
-    pub id: String,
-    pub display_name: String,
-    pub choice: Vec<usize>,
-    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+// crates/types/src/post_asap/guarantee.rs
+pub struct AccuracyGuarantee {
+    pub metric: ErrorMetric,
+    pub bound: BoundExpr,
+    pub failure_probability: ProbabilityExpr,
+    pub provenance: Vec<GuaranteeSource>,
 }
 ```
 
 ### 3.3 Pass 2: ASAP-aware common-subexpression elimination
 
 Design: [Pass 2](proposals/planner-layering.md#pass-2-asap-aware-common-subexpression-elimination),
-Algorithm 2 (identical-expression, summary-capability and window-composition
-rules).
+Algorithm 2.
 
 #### Core algorithm
 
-Not implemented on `main`: `run_stage1_to_stage3` goes from Pass 1 straight to
-composition, so no candidate shares a summary across computations, and a sub-DAG
-is shared only when the frontends already produced it once. Two building
-blocks exist outside the pipeline:
+Of the three rules, only the identical-expression rule is implemented. It runs
+on each composed candidate:
 
-- **Structural CSE** (`crates/types/src/ir/cse.rs`, `share_common_sub_dags`):
-  bottom-up hash-consing of the IR; a hash narrows the search and typed
-  equality decides sharing. It is the structural core of the
-  identical-expression rule; only the legacy search calls it today.
-- **Summary coverage** (`crates/types/src/ir/summary_coverage.rs`,
-  `SummaryCoverage::derive`): what a summary state computes (`definition`) and
-  which rows it took (`selection`), the comparison of summary input data that
-  the sharing rules need.
+```text
+sharing_groups(roots):
+    intern the roots with share_common_sub_dags      // hash narrows, typed equality decides
+    group the original nodes by interned representative, children first
+    keep groups of two or more legal-to-share nodes   // ASAP nodes and nodes with a unique key
+
+identical_expression_variants(roots, groups):
+    // Algorithm 2, line 31: one candidate per non-empty subset of the groups.
+    // Sharing a group also shares every group whose nodes all lie below it,
+    // so many subsets give the same candidate. The distinct candidates are the
+    // closed subsets; enumerate them directly with Ganter's Next Closure
+    // (one closure per step and group) instead of trying all 2^g subsets.
+    for each closed subset S, in binary-counter order:
+        emit roots with every group in S made one node serving all its consumers
+```
+
+The independent (unshared) candidate is kept beside its Pass 2 candidates, so
+Stage 3 compares sharing against not sharing. Each Pass 2 candidate is recorded
+as an `IdenticalExpressionCandidate` naming the candidate it derives from and
+its shared groups.
+
+Differences from the design: the summary-capability and window-composition
+rules are not implemented, so no summary serves several different estimates or
+windows. `SummaryCoverage::derive` (`crates/types/src/ir/summary_coverage.rs`),
+which compares the summary input data of two states, exists for those rules.
 
 #### Code interface
 
 ```rust
-// crates/types/src/ir/cse.rs
-pub fn share_common_sub_dags<Id>(
-    roots: Vec<(Id, Rc<OperatorNode>)>,
-) -> Vec<(Id, Rc<OperatorNode>)> {
+// crates/asap-aware-mapping/src/asap_aware_cse.rs
+pub fn sharing_groups(roots: &[QueryRoot]) -> Vec<SharingGroup> {
+
+pub fn identical_expression_variants(
+    roots: &[QueryRoot],
+    groups: &[SharingGroup],
+) -> Vec<IdenticalExpressionVariant> {
+
+pub struct IdenticalExpressionVariant {
+    pub shared_groups: Vec<usize>,
+    pub roots: Vec<QueryRoot>,
+}
+
+// crates/asap-aware-mapping/src/pass/stage1_to_stage3.rs
+pub fn stage1_logical_asap_optimization<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+) -> impl Iterator<Item = Stage1Candidate> + '_ {
 ```
 
 ## 4. Stage 2, physical ASAP-aware optimization
@@ -399,8 +451,9 @@ Stage 2 removes, and each is provably invalid (it cannot be implemented).
 Differences from the design: materialization offers one option, so each logical
 candidate yields exactly one physical candidate. Algorithm 3's enumeration of
 `MatAtIngestion(medium)` and `MatAtQuery(medium)` per sub-DAG, its
-ingestion-time upstream constraint and retention are not implemented. Parallelism,
-partitioning and resource management are TODO in the design as well.
+ingestion-time upstream constraint and retention are not implemented.
+Parallelism, partitioning and resource management are TODO in the design as
+well.
 
 ### Code interface
 
@@ -435,55 +488,64 @@ Design: [3. Plan selection](proposals/planner-layering.md#3-plan-selection).
 
 | Component | What it does |
 |---|---|
-| Plan selection (`crates/asap-aware-mapping/src/stage3_plan_selection.rs`, `select_plan`) | Rejects candidates that miss an accuracy target, prices the rest over their physical DAG and selects the cheapest. |
-| Accuracy model (`AccuracyModel::satisfies`, `crates/asap-aware-mapping/src/accuracy/mod.rs`) | Decides whether a guarantee meets an `AccuracyTarget`. |
-| Accuracy evidence (`AccuracyEvidenceProvider`, `crates/asap-aware-mapping/src/accuracy/evidence.rs`) | The deployment's empirical accuracy; `output_guarantee` gives evidence for one candidate's whole query output. `NoAccuracyEvidence` supplies none. |
-| Analytical cost (`crates/asap-aware-mapping/src/analytical_cost.rs`) | `estimate_operator`: resource estimate (CPU ops, scan bytes, retained bytes) of one physical operator over edge statistics (`physical_operator_statistics.rs`); `ResourceCalibration` turns it into one number. |
+| Plan selection (`crates/asap-aware-mapping/src/stage3_plan_selection.rs`, `select_plan`) | Confirms weight requirements, binds symbolic statistics, rejects candidates that miss an accuracy target, prices the rest per second and selects the cheapest. |
+| Accuracy model (`AccuracyModel::satisfies`, `crates/asap-aware-mapping/src/accuracy/mod.rs`) | Decides whether a bound guarantee meets an `AccuracyTarget`; an unknown statistic never meets one. |
+| Accuracy evidence (`AccuracyEvidenceProvider`, `crates/asap-aware-mapping/src/accuracy/evidence.rs`) | The deployment's contracts and empirical accuracy: `operand_domain` (enforced value range of an operand), `output_guarantee` (evidence for one candidate's whole query output). `NoAccuracyEvidence` supplies none. |
+| Data workload (`DataWorkload`) | Statistics Stage 3 binds: input cardinality, `stream_norms`, `max_distinct_per_evaluation`, `metric_types`. |
+| Analytical cost (`crates/asap-aware-mapping/src/analytical_cost.rs`) | `estimate_operator`: CPU operations, scanned bytes and peak memory of one physical operator over edge statistics; `ResourceCalibration` turns them into a price. |
 
 ### Core algorithm
 
 ```text
-select_plan(candidates, targets, data, models):
+select_plan(candidates, targets, recurrence, data, models):
     for each candidate P:
         // accuracy check (output-level)
         for each query q with a target T:
-            if q reads a Count-Min SummaryAgg whose weights are not proven non-negative:
-                reject P (valid = false)
+            for each Count-Min SummaryAgg q reads:
+                weights ← confirmed_weights(weight domain, data)   // samples of a declared counter → proven
+                if weights are not proven non-negative: reject P (valid = false)
             g ← root guarantee of q (composed in Stage 1)
+            g ← g.bind(statistic ↦ value)       // from never-expiring DataWorkload evidence
+                                                // and models.evidence.operand_domain
             if not (g satisfies T under models.accuracy
                     or models.evidence.output_guarantee(q) satisfies T):
                 reject P (valid = false)
-        // cost
-        cost(P) ← PRICE(P.dag, data)
-    selected ← the valid candidate with the least cost (the first on ties)
-    every other valid candidate → rejected (valid = true, "costlier: …")
+        cost(P) ← PRICE(P.dag, recurrence, data, illustrative_calibration())
+    selected ← the valid candidate with the least cost (the first on a tie)
+    every other valid candidate → rejected (valid = true, "costlier" or "tied")
+    plan ← the selected candidate's roots with confirmed weights
     no valid candidate → SelectionError::NoValidCandidate
 
-PRICE(dag, data):
-    series, rows/ms ← data.input_cardinality, data.ingestion_rate (or defaults)
+PRICE(dag, recurrence, data, calibration):          // cost per second of wall time
     for each node, children first:
         estimate ← estimate_operator(physical operator, edge statistics)
-                   // Scan, HashAggregate, Sort, Limit, …; SummaryAgg: rows × sketch depth;
-                   // SummaryEstimate: groups × k
-        multiplier ← 1 if materialized, else the number of consumers that reach it
-                     (queries, and materialized nodes, without looking through one)
-        node cost ← estimate.calibrated_cost(calibration) × multiplier
+            // SummaryAgg: rows × update operations per row (sketch depth; +1 per heap;
+            //             UnivMon: expected layers updated); state bytes from the sketch's params
+            // SummaryEstimate: groups × k
+        per_second ← how often the node is computed:
+            NotMaterialized: once per consumer that reaches it, at that consumer's rate
+            MatAtQuery:      once, at the combined rate of the queries reaching it
+            MatAtIngestion:  once per second of arriving rows
+            // a query repeating every I ms runs 1000 / I times per second;
+            // one-off and unknown queries are spread over calibration.horizon_s
+        cost ← estimate.calibrated_cost(CPU ops, scanned bytes) × per_second
+        cost += kept state bytes × cost_per_retained_byte_second   // materialized nodes only
     return Σ node costs
 ```
 
 The check is on the query output, not on the summaries inside the plan: a
 certified estimate is not enough on its own, since a difference or ratio of
 estimates can be unbounded. Cost is computed for the whole workload, so a
-node shared by several queries is charged per computation; with every node
-`NotMaterialized`, a shared node is charged once per query.
+shared `NotMaterialized` node is charged for each consumer that recomputes it,
+and queries with different recurrences add up.
 
-Differences from the design: pricing uses a fixed illustrative
-`ResourceCalibration` (`illustrative-v1`) and default statistics
-(`DEFAULT_GROUP_COUNT` groups and default series and rates when the
-`DataWorkload` declares none), so prices are not calibrated; `select_plan` does
-not read `PlanningModels::cost`. A binary, join or concat node is priced from
-its first input only. Latency bounds and deployment capabilities are not
-checked yet.
+Differences from the design: pricing uses a fixed `illustrative_calibration`
+(`illustrative-v2`) and default statistics (a default group count, and default
+series and rates when the `DataWorkload` declares none), so prices are not
+calibrated; `select_plan` does not read `PlanningModels::cost`. Memory is
+charged only as state kept between computations, not as peak capacity. A
+binary, join or concat node is priced from its first input only. Latency
+bounds and deployment capabilities are not checked.
 
 ### Code interface
 
@@ -492,30 +554,41 @@ checked yet.
 pub fn select_plan(
     cands: &[PhysicalCandidate],
     targets: &[Option<AccuracyTarget>],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Selection, SelectionError> {
 
 pub struct Selection {
     pub selected: String,
+    pub plan: Vec<QueryRoot>,
     pub costs: BTreeMap<String, CandidateCost>,
     pub rejected: Vec<Rejection>,
 }
 
-pub struct Rejection {
-    pub id: String,
-    pub valid: bool,
-    pub reason: String,
+pub struct NodeCost {
+    pub cost: f64,
+    pub multiplier: u64,
+    pub per_second: f64,
+    pub detail: String,
 }
 
 // crates/asap-aware-mapping/src/accuracy/evidence.rs
-    fn output_guarantee(&self, _output: &QueryRoot) -> Option<ResultGuarantee> {
+    fn operand_domain(&self, _operand: &OperatorNode) -> Option<OperandDomain> {
+    fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
+
+// crates/types/src/post_asap/guarantee.rs
+    pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
 
 // crates/asap-aware-mapping/src/analytical_cost.rs
-pub fn estimate_operator(
-    operator: PhysicalOperator,
-    statistics: OperatorStatistics,
-) -> Result<ResourceEstimate, AnalyticalCostError> {
+pub struct ResourceCalibration {
+    pub cost_per_cpu_op: f64,
+    pub cost_per_scan_byte: f64,
+    pub cost_per_retained_byte: f64,
+    pub cost_per_retained_byte_second: f64,
+    pub horizon_s: f64,
+    pub version: String,
+}
 ```
 
 ## 6. Stage 4, execution
@@ -533,11 +606,12 @@ Design: [4. Execution](proposals/planner-layering.md#4-execution) and
 ### Core algorithm
 
 The planner hands off the selected candidate's `PhysicalASAPDAG`
-(`PhysicalCandidate::dag`; through the facade, `PlanOutput` and its
-`execution_timed_dag`). The deployment runs it as given: it does not choose
-among summaries or change materialization. Ingestion-time nodes form the
-precompute DAG and the rest the query DAG; `compile` builds native operators
-with typed inputs, which the deployment binds to its data sources.
+(`PhysicalCandidate::dag`) together with `Selection::plan`, the selected roots
+with every weight requirement Stage 3 confirmed, so the executor reads no data
+workload. The deployment runs the plan as given: it does not choose among
+summaries or change materialization. Ingestion-time nodes form the precompute
+DAG and the rest the query DAG; `compile` builds native operators with typed
+inputs, which the deployment binds to its data sources.
 
 ### Code interface
 
@@ -561,29 +635,30 @@ pub fn compile(
 ## 7. Tooling and legacy code
 
 - `run_planning_stages` (`crates/devtools/src/planning_stages.rs`) runs Stage 0
-  through Stage 3 for one workload; the `stage_pipeline` binary writes every
-  stage's candidates as an `asap-stage-pipeline/v1` document, and the
-  planner-layering acceptance tests use the same function.
-- `tools/dag-viewer` is the browser viewer; on `main` its server plans through
-  the `dag_export` binary.
+  through Stage 3 for one workload with the built-in models. With
+  `max_combinations`, it counts Stage 1 candidates as they are enumerated and
+  refuses the workload once the count passes the limit; it never truncates.
+- The `stage_pipeline` binary writes every stage's candidates as an
+  `asap-stage-pipeline/v1` document (default limit 10^4 Stage 1 candidates).
+  `tools/dag-viewer` plans through it and shows the stages.
 - Legacy, to be deleted once the stages implement what it does: `replacement.rs`
   (the old candidate search, `search_workload`), `accuracy/reconciliation.rs`,
-  the modules only that search uses, and `dag_export`. The stage pipeline
-  does not call them.
+  and the modules only that search uses. The stage pipeline does not call them.
 
 ## 8. Not yet on main
 
-- **Pass 2, ASAP-aware CSE.** None of the three sharing rules runs in the
-  pipeline; summaries are sized per computation, never for the strictest
-  requirement among shared consumers.
-- **Guarantee composition.** Guarantees are not propagated through arithmetic
-  or comparisons over approximate values; such outputs carry no guarantee and
-  are admitted only with deployment evidence.
+- **Pass 2, summary sharing.** The summary-capability and window-composition
+  rules are not implemented; no summary serves several estimates or windows,
+  and no shared summary is sized for the strictest of its consumers.
 - **Materialization.** Stage 2 assigns `NotMaterialized` everywhere; the
   per-sub-DAG choice of ingestion time or query time and medium is not
   enumerated.
-- **Cost.** Stage 3 prices with fixed illustrative statistics and calibration,
-  does not price retained state by its size, and does not use the deployment's
-  cost model; latency bounds and capabilities are not checked.
-- **Layout and tooling.** Crates and modules are not yet organized by stage,
-  and the viewer does not yet plan through `stage_pipeline`.
+- **Guarantees.** A guarantee is per output point and not scaled by the number
+  of groups; comparisons and value predicates over approximate values have no
+  composition rule.
+- **Cost.** Stage 3 prices with illustrative statistics and calibration and
+  does not use the deployment's cost model; peak memory capacity, latency
+  bounds and capabilities are not checked.
+- **Search.** Every candidate is built and priced; a large workload needs early
+  pruning or a search that avoids enumerating the whole product.
+- **Layout.** Crates and modules are not yet organized by stage.
