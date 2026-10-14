@@ -152,10 +152,16 @@ impl AggregateCore for HydraCmsGroup {
         }
     }
 
-    /// The whole shared grid: groups of one build share it, so this
-    /// over-reserves, which is the safe direction.
+    /// The group's own view; the grid it shares is [`Self::shared_state`].
     fn approx_memory_bytes(&self) -> usize {
-        self.grid.approx_memory_bytes() + self.group.len()
+        std::mem::size_of::<Self>() + self.group.len()
+    }
+
+    fn shared_state(&self) -> Option<(usize, usize)> {
+        Some((
+            Arc::as_ptr(&self.grid) as usize,
+            self.grid.approx_memory_bytes(),
+        ))
     }
 }
 

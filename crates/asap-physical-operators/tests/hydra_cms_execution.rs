@@ -398,3 +398,20 @@ fn filtered_hydra_cms_counts_matching_rows_and_keeps_groups() {
     assert_eq!(points["batch"], 0.0);
     assert!(points["api"] >= 2.0 && points["db"] >= 1.0);
 }
+
+// Groups of one build share one grid, so merging two builds over many groups
+// merges the grids once and accounts for each grid once: 400 groups fit the
+// default memory limit, which 400 grid copies (about 160 KiB each) exceed.
+#[test]
+fn many_groups_merge_one_grid_pair() {
+    let jobs: Vec<String> = (0..400).map(|i| format!("job{i}")).collect();
+    let rows: Vec<(&str, &str, f64)> = jobs
+        .iter()
+        .map(|job| (job.as_str(), "checkout", 1.0))
+        .collect();
+    // Every group is in both builds, so every group's state merges.
+    let merged = try_run(unit_count(), None, vec![batch(&rows), batch(&rows)])
+        .expect("merge within the memory limit");
+    assert_eq!(merged.len(), 400);
+    assert!(merged.values().all(|point| *point >= 2.0));
+}

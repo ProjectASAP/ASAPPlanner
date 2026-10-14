@@ -239,6 +239,16 @@ impl Batch {
         &self.rows
     }
     pub fn bytes(&self) -> usize {
+        // A summary state shared by several rows is counted once.
+        let shared = self
+            .rows
+            .iter()
+            .flat_map(|r| r.iter())
+            .filter_map(|v| match v {
+                Value::Summary { state, .. } => state.shared_state(),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         std::mem::size_of::<Self>()
             + self.rows.capacity() * std::mem::size_of::<Vec<Value>>()
             + self
@@ -247,6 +257,7 @@ impl Batch {
                 .flat_map(|r| r.iter())
                 .map(Value::bytes)
                 .sum::<usize>()
+            + shared.values().sum::<usize>()
     }
 }
 pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>, Error> {
