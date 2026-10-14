@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Local interactive server: plans Query planner workloads with `stage_pipeline` and serves the DAG viewer."""
+"""Local server for the ASAPPlanner Stage Viewer: serves the page, writes the
+example documents into out/, and plans editor queries with `stage_pipeline`."""
 
 from __future__ import annotations
 
@@ -13,11 +14,10 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from render import load_document
-
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 BINARY = Path(os.environ.get("CARGO_TARGET_DIR", REPO / "target")) / "debug" / "stage_pipeline"
+EXAMPLES = HERE / "examples.json"
 
 
 def build_planner() -> None:
@@ -26,6 +26,22 @@ def build_planner() -> None:
         cwd=REPO,
         check=True,
     )
+
+
+def write_examples(force: bool) -> None:
+    """Write each examples.json document that is missing (all with `force`)
+    into out/, which git ignores."""
+    for example in json.loads(EXAMPLES.read_text(encoding="utf-8")):
+        out = HERE / example["file"]
+        if out.exists() and not force:
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[examples] writing {example['file']}", flush=True)
+        subprocess.run(
+            [str(BINARY), "--example", example["example"], "--out", str(out)],
+            cwd=REPO,
+            check=True,
+        )
 
 
 class PlanRejected(ValueError):
@@ -163,15 +179,6 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as error:  # surface planner failures to this local UI
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path == "/api/example":
-            try:
-                self._send_json(HTTPStatus.OK, load_document(HERE / "dag.example.json"))
-            except Exception as error:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
-            return
-        super().do_GET()
-
     def end_headers(self) -> None:
         # This is a local development viewer: stale HTML/JS/example JSON is
         # more harmful than the tiny files are expensive to reload.
@@ -192,13 +199,15 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--skip-build", action="store_true", help="reuse an already-built stage_pipeline")
+    parser.add_argument("--regenerate", action="store_true", help="rewrite the example documents in out/")
     args = parser.parse_args()
     if not args.skip_build:
         build_planner()
     if not BINARY.exists():
         parser.error(f"{BINARY} does not exist; start without --skip-build")
+    write_examples(args.regenerate)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"ASAP DAG viewer: http://{args.host}:{args.port}")
+    print(f"ASAPPlanner Stage Viewer: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
