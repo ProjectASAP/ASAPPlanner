@@ -21,6 +21,7 @@ use super::asap::ASAPOp;
 use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 use super::scalar::{Predicate, ScalarExpr};
+use crate::post_asap::family_capability::{FamilyCapability, SelectionRelation};
 use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
 use crate::pre_asap::schema::{ColumnId, Schema};
 
@@ -71,14 +72,18 @@ pub enum CoverageError {
     EmptyMerge,
     #[error("summary merge inputs compute different things")]
     DefinitionMismatch,
-    #[error("summary merge inputs are not proven disjoint")]
+    #[error(
+        "summary merge inputs are not proven disjoint and the family counts shared rows twice"
+    )]
     PossibleOverlap,
 }
 
 impl SummaryCoverage {
     /// Coverage of a `SummaryAgg` or `SummaryMerge`. A merge fails unless
     /// every input has the same definition and their selections are
-    /// pairwise disjoint.
+    /// pairwise disjoint; a family whose merge is idempotent
+    /// ([`SelectionRelation::OverlapAllowed`] in the family-capability
+    /// table) may also merge overlapping selections.
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
         match node.asap() {
             Some(ASAPOp::SummaryAgg { .. }) => Ok(of_summary_agg(node)),
@@ -88,17 +93,24 @@ impl SummaryCoverage {
                     .map(|child| child.coverage().ok_or(CoverageError::NotSummary))
                     .collect::<Result<Vec<_>, _>>()?;
                 let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
+                let may_overlap = matches!(
+                    first.definition.asap(),
+                    Some(ASAPOp::SummaryAgg { family, .. })
+                        if FamilyCapability::of(family).merge.map(|m| m.inputs)
+                            == Some(SelectionRelation::OverlapAllowed)
+                );
                 let mut proven = HashSet::new();
                 for (i, input) in inputs.iter().enumerate() {
                     if !same_definition(&first.definition, &input.definition, &mut proven) {
                         return Err(CoverageError::DefinitionMismatch);
                     }
-                    let overlaps = inputs[..i].iter().any(|other| {
-                        input
-                            .selection
-                            .iter()
-                            .any(|a| other.selection.iter().any(|b| !a.disjoint(b)))
-                    });
+                    let overlaps = !may_overlap
+                        && inputs[..i].iter().any(|other| {
+                            input
+                                .selection
+                                .iter()
+                                .any(|a| other.selection.iter().any(|b| !a.disjoint(b)))
+                        });
                     if overlaps {
                         return Err(CoverageError::PossibleOverlap);
                     }
@@ -669,6 +681,9 @@ fn union(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
 }
 
 fn join(a: &SelectionBox, b: &SelectionBox) -> Option<SelectionBox> {
+    if a == b {
+        return Some(a.clone());
+    }
     if a.columns == b.columns {
         let ((al, au), (bl, bu)) = (a.relative_time.as_ref()?, b.relative_time.as_ref()?);
         let time = touching((al, au), (bl, bu), |x: &i64, y: &i64| Some(x.cmp(y)))?;
