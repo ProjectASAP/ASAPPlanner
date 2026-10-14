@@ -81,7 +81,11 @@ pub const KLL_MAX_K: u32 = 26_602;
 /// instance. The variant must correspond to the associated `SketchAlgorithm`;
 /// mismatches are caught at post-ASAP bind time, before any later,
 /// deployment-specific stage ever sees the plan.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Equality compares the sketch that is built: a KLL's `failure_probability`
+/// records what it was sized for, not its structure, so two KLLs with the
+/// same `k` are equal (they share, and match the same offline evidence).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SketchParams {
     UnivMon {
         heap_size: u32,
@@ -93,6 +97,9 @@ pub enum SketchParams {
         k: u32,
         /// The failure probability `k` was sized for, when below the
         /// empirical 99% calibration's 0.01; `None` is that calibration.
+        /// Sizing never records `Some(δ)` for δ ≥ 0.01; a hand-built one is
+        /// read as a claim at that δ with the calibration's error bound, and
+        /// one outside (0, 1) gives no guarantee. Ignored by equality.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure_probability: Option<f64>,
     },
@@ -126,6 +133,88 @@ pub enum SketchParams {
         depth: u32,
         heap_size: u32,
     },
+}
+
+impl PartialEq for SketchParams {
+    fn eq(&self, other: &Self) -> bool {
+        use SketchParams as P;
+        match (self, other) {
+            (P::Kll { k: a, .. }, P::Kll { k: b, .. }) => a == b,
+            (
+                P::UnivMon {
+                    heap_size: a0,
+                    sketch_rows: a1,
+                    sketch_cols: a2,
+                    layers: a3,
+                },
+                P::UnivMon {
+                    heap_size: b0,
+                    sketch_rows: b1,
+                    sketch_cols: b2,
+                    layers: b3,
+                },
+            ) => (a0, a1, a2, a3) == (b0, b1, b2, b3),
+            (
+                P::Cms {
+                    width: a0,
+                    depth: a1,
+                },
+                P::Cms {
+                    width: b0,
+                    depth: b1,
+                },
+            )
+            | (
+                P::CountSketch {
+                    width: a0,
+                    depth: a1,
+                },
+                P::CountSketch {
+                    width: b0,
+                    depth: b1,
+                },
+            ) => (a0, a1) == (b0, b1),
+            (
+                P::CmsWithHeap {
+                    width: a0,
+                    depth: a1,
+                    heap_size: a2,
+                },
+                P::CmsWithHeap {
+                    width: b0,
+                    depth: b1,
+                    heap_size: b2,
+                },
+            )
+            | (
+                P::CountSketchWithHeap {
+                    width: a0,
+                    depth: a1,
+                    heap_size: a2,
+                },
+                P::CountSketchWithHeap {
+                    width: b0,
+                    depth: b1,
+                    heap_size: b2,
+                },
+            ) => (a0, a1, a2) == (b0, b1, b2),
+            (P::Hll { precision: a }, P::Hll { precision: b }) => a == b,
+            (P::DDSketch { alpha: a }, P::DDSketch { alpha: b }) => a == b,
+            (P::Kmv { k: a }, P::Kmv { k: b }) | (P::Theta { k: a }, P::Theta { k: b }) => a == b,
+            // Different variants. Listed by `self`'s variant, not `_`, so a
+            // new variant fails to compile here until it is compared above.
+            (P::UnivMon { .. }, _)
+            | (P::Kll { .. }, _)
+            | (P::Cms { .. }, _)
+            | (P::Hll { .. }, _)
+            | (P::DDSketch { .. }, _)
+            | (P::CmsWithHeap { .. }, _)
+            | (P::Kmv { .. }, _)
+            | (P::Theta { .. }, _)
+            | (P::CountSketch { .. }, _)
+            | (P::CountSketchWithHeap { .. }, _) => false,
+        }
+    }
 }
 
 /// The query category served by a committed sketch.
@@ -675,6 +764,27 @@ mod tests {
         );
         assert_eq!(kind.category(), SketchCategory::Quantile);
         assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
+    }
+
+    /// Two KLLs with the same `k` are the same sketch, whatever failure
+    /// probability each was sized for, so they compare equal and can be shared.
+    #[test]
+    fn kll_params_compare_equal_whatever_their_failure_probability() {
+        let kll = |k, failure_probability| SketchParams::Kll {
+            k,
+            failure_probability,
+        };
+        assert_eq!(kll(331, Some(0.001)), kll(331, None));
+        assert_eq!(kll(331, Some(0.001)), kll(331, Some(0.0001)));
+        assert_ne!(kll(331, None), kll(269, None));
+        assert_ne!(kll(331, None), SketchParams::Kmv { k: 331 });
+        let family = |params| {
+            crate::post_asap::FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::Kll, params),
+                GroupingStrategy::default(),
+            )
+        };
+        assert_eq!(family(kll(331, Some(0.001))), family(kll(331, None)));
     }
 
     #[test]
