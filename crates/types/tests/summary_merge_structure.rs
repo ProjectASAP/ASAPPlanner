@@ -138,8 +138,8 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
 /// which subtract.
 #[test]
 fn family_capability_table() {
-    use MergedError::{Exact, SameAsUnionBuild};
-    use SelectionRelation::{Disjoint, OverlapAllowed};
+    use MergedError::{Approximate, Exact, SameAsUnionBuild};
+    use SelectionRelation::{Disjoint, DisjointInTime, OverlapAllowed};
     let (width, depth, heap_size) = (64, 4, 10);
     for (family, merge, subtractable) in [
         (
@@ -162,10 +162,15 @@ fn family_capability_table() {
             Some((OverlapAllowed, Exact)),
             false,
         ),
-        (exact(ExactKind::Rate, ExactParams::Rate), None, false),
+        // Counter panes merge exactly when ordered and disjoint in time.
+        (
+            exact(ExactKind::Rate, ExactParams::Rate),
+            Some((DisjointInTime, Exact)),
+            false,
+        ),
         (
             exact(ExactKind::Increase, ExactParams::Increase),
-            None,
+            Some((DisjointInTime, Exact)),
             false,
         ),
         (exact(ExactKind::IRate, ExactParams::IRate), None, false),
@@ -202,7 +207,7 @@ fn family_capability_table() {
                     layers: 8,
                 },
             ),
-            Some((Disjoint, SameAsUnionBuild)),
+            Some((Disjoint, Approximate)),
             false,
         ),
         // KMV keeps the k smallest hashes under one shared seed: the merge
@@ -217,7 +222,7 @@ fn family_capability_table() {
             None,
             false,
         ),
-        (cms_with_heap(), None, false),
+        (cms_with_heap(), Some((Disjoint, SameAsUnionBuild)), false),
         (
             sketch(
                 SketchAlgorithm::CountSketchWithHeap,
@@ -227,7 +232,7 @@ fn family_capability_table() {
                     heap_size,
                 },
             ),
-            None,
+            Some((Disjoint, SameAsUnionBuild)),
             false,
         ),
         // Hydra over a linear sketch is a grid of linear sketches; Hydra
@@ -290,13 +295,18 @@ fn family_capability_table() {
     }
 }
 
-/// A merged UnivMon keeps the guarantee of readouts from its additive
-/// layer-0 counters (L2, point counts); readouts from its per-layer heaps
-/// (distinct count, entropy, top-k) are uncertified after a merge. Other
-/// families' readouts share the family's merged error.
+/// Heap readouts (distinct count, entropy, top-k) of a merged state are
+/// approximate: each part's heaps keep only that part's heavy items. At the
+/// pinned `asap_sketchlib`, UnivMon's L2 and distinct count also read the
+/// merged heaps, so every UnivMon readout is approximate after a merge.
+/// Counter readouts of a heap family (point counts) keep their guarantee.
 #[test]
 fn merged_error_depends_on_the_readout() {
     use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
+    let point = || SketchStatistic::PointCount {
+        key: ColumnRef::Named("k".into()),
+        value: None,
+    };
     let univmon = FamilyCapability::of(&sketch(
         SketchAlgorithm::UnivMon,
         SketchParams::UnivMon {
@@ -306,19 +316,28 @@ fn merged_error_depends_on_the_readout() {
             layers: 8,
         },
     ));
-    let point = SketchStatistic::PointCount {
-        key: ColumnRef::Named("k".into()),
-        value: None,
-    };
-    for (readout, error) in [
-        (FrequencyL2, MergedError::SameAsUnionBuild),
-        (point, MergedError::SameAsUnionBuild),
-        (Cardinality, MergedError::Uncertified),
-        (FrequencyEntropy, MergedError::Uncertified),
-        (TopK { k: 5 }, MergedError::Uncertified),
+    for readout in [
+        FrequencyL2,
+        point(),
+        Cardinality,
+        FrequencyEntropy,
+        TopK { k: 5 },
     ] {
-        assert_eq!(univmon.merged_error(&readout), Some(error), "{readout:?}");
+        assert_eq!(
+            univmon.merged_error(&readout),
+            Some(MergedError::Approximate),
+            "{readout:?}"
+        );
     }
+    let heap = FamilyCapability::of(&cms_with_heap());
+    assert_eq!(
+        heap.merged_error(&TopK { k: 5 }),
+        Some(MergedError::Approximate)
+    );
+    assert_eq!(
+        heap.merged_error(&point()),
+        Some(MergedError::SameAsUnionBuild)
+    );
     assert_eq!(
         FamilyCapability::of(&hll()).merged_error(&Cardinality),
         Some(MergedError::SameAsUnionBuild)
@@ -327,24 +346,23 @@ fn merged_error_depends_on_the_readout() {
         FamilyCapability::of(&kll()).merged_error(&SketchStatistic::Quantile { q: 0.99 }),
         Some(MergedError::SameAsUnionBuild)
     );
-    assert_eq!(
-        FamilyCapability::of(&cms_with_heap()).merged_error(&TopK { k: 5 }),
-        None
-    );
+    let irate = exact(ExactKind::IRate, ExactParams::IRate);
+    assert_eq!(FamilyCapability::of(&irate).merged_error(&point()), None);
 }
 
-/// The IR does not reject a merge by family: a heap state has no sound
+/// The IR does not reject a merge by family: exact IRate has no sound
 /// merge, but only the table's consumers (the planner rules and the
 /// executor) decide that.
 #[test]
 fn summary_merge_is_permissive_about_the_family() {
+    let irate = || exact(ExactKind::IRate, ExactParams::IRate);
     let merged = merge(vec![
-        family_state(cms_with_heap(), "us"),
-        family_state(cms_with_heap(), "eu"),
+        family_state(irate(), "us"),
+        family_state(irate(), "eu"),
     ])
     .unwrap();
     merged.validate_structure().unwrap();
-    assert_eq!(FamilyCapability::of(&cms_with_heap()).merge, None);
+    assert_eq!(FamilyCapability::of(&irate()).merge, None);
 }
 
 /// Idempotent families (HLL, exact Min/Max) merge states that may share

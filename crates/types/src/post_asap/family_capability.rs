@@ -31,7 +31,7 @@ pub struct MergeCapability {
     pub error: MergedError,
     /// The merged error of readouts that read the family's heavy-hitter
     /// heaps (distinct count, entropy, top-k), when it differs from
-    /// `error`: each part's heaps keep only that part's heavy items.
+    /// `error`.
     pub heap_readouts: Option<MergedError>,
 }
 
@@ -41,6 +41,10 @@ pub struct MergeCapability {
 pub enum SelectionRelation {
     /// No row in two inputs: the family counts a shared row twice.
     Disjoint,
+    /// The inputs' time windows do not overlap. Counter states (Rate,
+    /// Increase) join consecutive windows in time order, so inputs that are
+    /// disjoint only by a value predicate would interleave in time.
+    DisjointInTime,
     /// Inputs may share rows: the merge is idempotent.
     OverlapAllowed,
 }
@@ -55,8 +59,9 @@ pub enum MergedError {
     /// not grow with the number of parts, so a state sized for the whole
     /// window may be built in parts.
     SameAsUnionBuild,
-    /// The merged state's readout has no guarantee; it is evidence only.
-    Uncertified,
+    /// The merge is allowed, but the merged readout has no guarantee; it is
+    /// evidence only, for plan selection to judge.
+    Approximate,
 }
 
 impl FamilyCapability {
@@ -64,6 +69,7 @@ impl FamilyCapability {
     /// (they fail closed).
     pub fn of(family: &FieldDataType) -> Self {
         use ExactKind as E;
+        use SelectionRelation::{Disjoint, DisjointInTime, OverlapAllowed};
         use SketchAlgorithm as S;
         let merge = |inputs, error| {
             Some(MergeCapability {
@@ -72,71 +78,68 @@ impl FamilyCapability {
                 heap_readouts: None,
             })
         };
+        // A heavy-hitter heap keeps only the heavy items of its own part:
+        // an item heavy over the window but in no single part is lost.
+        let with_heaps = |error| {
+            Some(MergeCapability {
+                inputs: Disjoint,
+                error,
+                heap_readouts: Some(MergedError::Approximate),
+            })
+        };
         let (merge, subtractable) = match family {
-            // Rate/Increase/IRate read the samples at the window edges, so
-            // their parts do not compose into the window's value.
             FieldDataType::ExactAggregate(kind, _) => match kind {
-                E::Sum | E::Count => (merge(SelectionRelation::Disjoint, MergedError::Exact), true),
-                E::Min | E::Max => (
-                    merge(SelectionRelation::OverlapAllowed, MergedError::Exact),
-                    false,
-                ),
-                E::Rate | E::Increase | E::IRate => (None, false),
+                E::Sum | E::Count => (merge(Disjoint, MergedError::Exact), true),
+                E::Min | E::Max => (merge(OverlapAllowed, MergedError::Exact), false),
+                // The counter accumulator joins time-ordered windows with
+                // reset handling (`IncreaseAccumulator::merge_pair`).
+                E::Rate | E::Increase => (merge(DisjointInTime, MergedError::Exact), false),
+                // IRate reads the last two samples of the window, which a
+                // pane does not keep across its boundary.
+                E::IRate => (None, false),
             },
             // Hydra over a linear sketch is a shared grid of linear
             // sketches: cells add and subtract. Hydra over KLL has no
             // accuracy model.
             FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
                 match kind {
-                    HydraKind::HydraCms | HydraKind::HydraCountSketch => (
-                        merge(SelectionRelation::Disjoint, MergedError::SameAsUnionBuild),
-                        true,
-                    ),
+                    HydraKind::HydraCms | HydraKind::HydraCountSketch => {
+                        (merge(Disjoint, MergedError::SameAsUnionBuild), true)
+                    }
                     HydraKind::HydraKll => (None, false),
                 }
             }
             FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
                 match kind.algorithm() {
                     // Linear sketches: counters add and subtract.
-                    S::Cms | S::CountSketch => (
-                        merge(SelectionRelation::Disjoint, MergedError::SameAsUnionBuild),
-                        true,
-                    ),
-                    S::Kll | S::DDSketch => (
-                        merge(SelectionRelation::Disjoint, MergedError::SameAsUnionBuild),
-                        false,
-                    ),
-                    // Layer-0 counters add exactly, so L2 and point counts
-                    // keep their guarantee; the per-layer heaps do not.
-                    S::UnivMon => (
-                        Some(MergeCapability {
-                            inputs: SelectionRelation::Disjoint,
-                            error: MergedError::SameAsUnionBuild,
-                            heap_readouts: Some(MergedError::Uncertified),
-                        }),
-                        false,
-                    ),
+                    S::Cms | S::CountSketch => {
+                        (merge(Disjoint, MergedError::SameAsUnionBuild), true)
+                    }
+                    S::Kll | S::DDSketch => (merge(Disjoint, MergedError::SameAsUnionBuild), false),
+                    // Point counts read the linear counters; top-k reads the
+                    // heap.
+                    S::CmsWithHeap | S::CountSketchWithHeap => {
+                        (with_heaps(MergedError::SameAsUnionBuild), false)
+                    }
+                    // At the pinned `asap_sketchlib`, `UnivMon::merge`
+                    // rebuilds each layer's heap from the parts' heap keys,
+                    // and L2 and distinct count read those heaps, so every
+                    // readout is approximate after a merge.
+                    // TODO(univmon-certification): when the pin moves past
+                    // upstream asap_sketchlib #221, L2 reads layer 0's
+                    // Count-Sketch directly: set `error` to
+                    // `SameAsUnionBuild` (and revisit distinct count);
+                    // entropy stays approximate.
+                    S::UnivMon => (with_heaps(MergedError::Approximate), false),
                     // `asap_sketchlib`'s KMV hashes every item with one
                     // shared seed (`CANONICAL_HASH_SEED`), and `KMV::merge`
                     // keeps the k smallest distinct hashes: the state of
-                    // the union.
-                    S::Kmv => (
-                        merge(
-                            SelectionRelation::OverlapAllowed,
-                            MergedError::SameAsUnionBuild,
-                        ),
-                        false,
-                    ),
-                    S::Hll => (
-                        merge(
-                            SelectionRelation::OverlapAllowed,
-                            MergedError::SameAsUnionBuild,
-                        ),
-                        false,
-                    ),
-                    // Merged heap top-k states have no accuracy model;
+                    // the union. The executor has no KMV kernel yet (#697).
+                    S::Kmv | S::Hll => {
+                        (merge(OverlapAllowed, MergedError::SameAsUnionBuild), false)
+                    }
                     // Theta is not offered.
-                    S::CmsWithHeap | S::CountSketchWithHeap | S::Theta => (None, false),
+                    S::Theta => (None, false),
                 }
             }
             FieldDataType::Plain(_)

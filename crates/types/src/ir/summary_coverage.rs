@@ -76,6 +76,8 @@ pub enum CoverageError {
         "summary merge inputs are not proven disjoint and the family counts shared rows twice"
     )]
     PossibleOverlap,
+    #[error("summary merge inputs are not proven disjoint in time, which counter states need")]
+    NotDisjointInTime,
 }
 
 impl SummaryCoverage {
@@ -83,7 +85,8 @@ impl SummaryCoverage {
     /// every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
     /// ([`SelectionRelation::OverlapAllowed`] in the family-capability
-    /// table) may also merge overlapping selections.
+    /// table) may also merge overlapping selections, and a counter family
+    /// ([`SelectionRelation::DisjointInTime`]) needs disjoint time windows.
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
         match node.asap() {
             Some(ASAPOp::SummaryAgg { .. }) => Ok(of_summary_agg(node)),
@@ -93,26 +96,37 @@ impl SummaryCoverage {
                     .map(|child| child.coverage().ok_or(CoverageError::NotSummary))
                     .collect::<Result<Vec<_>, _>>()?;
                 let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
-                let may_overlap = matches!(
-                    first.definition.asap(),
-                    Some(ASAPOp::SummaryAgg { family, .. })
-                        if FamilyCapability::of(family).merge.map(|m| m.inputs)
-                            == Some(SelectionRelation::OverlapAllowed)
-                );
+                let relation = match first.definition.asap() {
+                    Some(ASAPOp::SummaryAgg { family, .. }) => {
+                        FamilyCapability::of(family).merge.map(|m| m.inputs)
+                    }
+                    _ => None,
+                };
                 let mut proven = HashSet::new();
                 for (i, input) in inputs.iter().enumerate() {
                     if !same_definition(&first.definition, &input.definition, &mut proven) {
                         return Err(CoverageError::DefinitionMismatch);
                     }
-                    let overlaps = !may_overlap
-                        && inputs[..i].iter().any(|other| {
+                    let any_pair = |separated: fn(&SelectionBox, &SelectionBox) -> bool| {
+                        inputs[..i].iter().any(|other| {
                             input
                                 .selection
                                 .iter()
-                                .any(|a| other.selection.iter().any(|b| !a.disjoint(b)))
-                        });
-                    if overlaps {
-                        return Err(CoverageError::PossibleOverlap);
+                                .any(|a| other.selection.iter().any(|b| !separated(a, b)))
+                        })
+                    };
+                    match relation {
+                        Some(SelectionRelation::OverlapAllowed) => {}
+                        Some(SelectionRelation::DisjointInTime) => {
+                            if any_pair(SelectionBox::disjoint_in_time) {
+                                return Err(CoverageError::NotDisjointInTime);
+                            }
+                        }
+                        Some(SelectionRelation::Disjoint) | None => {
+                            if any_pair(SelectionBox::disjoint) {
+                                return Err(CoverageError::PossibleOverlap);
+                            }
+                        }
                     }
                 }
                 Ok(Self {
@@ -648,16 +662,21 @@ impl SelectionBox {
     /// Whether no row lies in both boxes: some column, or the time window,
     /// is restricted by both and the restrictions are disjoint.
     fn disjoint(&self, other: &Self) -> bool {
-        let time = match (&self.relative_time, &other.relative_time) {
+        self.disjoint_in_time(other)
+            || self
+                .columns
+                .iter()
+                .any(|(column, a)| other.columns.get(column).is_some_and(|b| a.disjoint(b)))
+    }
+
+    /// Whether the boxes' time windows do not overlap.
+    fn disjoint_in_time(&self, other: &Self) -> bool {
+        match (&self.relative_time, &other.relative_time) {
             (Some((al, au)), Some((bl, bu))) => {
                 intervals_disjoint((al, au), (bl, bu), |a: &i64, b: &i64| Some(a.cmp(b)))
             }
             _ => false,
-        };
-        time || self
-            .columns
-            .iter()
-            .any(|(column, a)| other.columns.get(column).is_some_and(|b| a.disjoint(b)))
+        }
     }
 }
 

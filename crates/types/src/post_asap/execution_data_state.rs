@@ -185,9 +185,8 @@ pub enum ExecutionDataStateError {
     #[error("exact operator consumes non-plain column {column:?} ({dtype})")]
     NonPlainOperand { column: String, dtype: String },
     /// An ASAP operator with no execution timing contract yet in an
-    /// executable plan: `SummaryMerge` (schema and coverage are implemented)
-    /// and the reserved `SummarySubtract`, `SummaryDelete`, `SummaryJoin`
-    /// and `Extension`.
+    /// executable plan: the reserved `SummarySubtract`, `SummaryDelete`,
+    /// `SummaryJoin` and `Extension`.
     #[error("{operator} has no execution timing contract yet")]
     UnimplementedOperator { operator: &'static str },
     /// A node assigned `MatAtIngestion` over a sub-DAG that can only run at
