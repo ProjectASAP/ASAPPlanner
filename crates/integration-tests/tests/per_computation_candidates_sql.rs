@@ -61,3 +61,54 @@ async fn mixed_key_and_value_having_stays_above() {
             .await;
     assert_eq!(placements(&targets), vec![HavingPlacement::AboveOutput]);
 }
+
+/// Whether `node` reads a quantile sketch (KLL or DDSketch) anywhere below it.
+fn reads_quantile_sketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
+    use asap_types::post_asap::SketchAlgorithm;
+    asap_types::ir::OperatorNode::reachable(node)
+        .iter()
+        .any(|node| {
+            matches!(
+                node.asap(),
+                Some(asap_types::ir::ASAPOp::SummaryAgg {
+                    family: asap_types::post_asap::FieldDataType::Sketch(kind, _),
+                    ..
+                }) if matches!(kind.algorithm(), SketchAlgorithm::Kll | SketchAlgorithm::DDSketch)
+            )
+        })
+}
+
+/// A measure filter that reads an approximate value decides which rows
+/// count by an estimate, so an estimate near its threshold can flip the
+/// result arbitrarily: the output has no guarantee (#669), whether the
+/// measure counts rows or folds the estimate itself.
+#[tokio::test]
+async fn a_measure_filter_over_an_estimate_has_no_guarantee() {
+    let catalog = SqlCatalog::new().with_table(
+        "flows",
+        Schema::new(vec![
+            Field::plain("src", DataType::Utf8, false),
+            Field::plain("bytes", DataType::Float64, false),
+        ]),
+    );
+    let accuracy = AccuracyTarget::Epsilon(0.01);
+    for sql in [
+        "SELECT count(*) FILTER (WHERE p > 5) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
+        "SELECT max(p) FILTER (WHERE p < 100) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
+    ] {
+        let root = lower_sql(sql, &catalog, accuracy.clone())
+            .await
+            .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
+        let candidates: Vec<_> =
+            asap_integration_tests::planning::logical_candidates(root, accuracy.clone())
+                .into_iter()
+                .filter(reads_quantile_sketch)
+                .collect();
+        assert!(!candidates.is_empty(), "{sql}");
+        for candidate in candidates {
+            assert_eq!(candidate.guarantee, None, "{sql}");
+        }
+    }
+}

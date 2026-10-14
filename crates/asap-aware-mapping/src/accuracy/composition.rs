@@ -12,6 +12,32 @@ pub(crate) const VALUES_NON_NEGATIVE: &str = "values_non_negative";
 /// The relative bound of a quantile ratio, given enforced operand domains
 /// (`QuantileInputDomain`).
 pub(crate) const DIVISION_OPERAND_DOMAINS: &str = "division_operand_domains";
+/// The absolute bound of a product of two estimates,
+/// `|x|·e_y + |y|·e_x + e_x·e_y`, given enforced operand domains.
+pub(crate) const PRODUCT_OPERAND_DOMAINS: &str = "product_operand_domains";
+/// The absolute bound of a quotient with an approximate denominator,
+/// `(|x|·e_y + |y|·e_x) / (|y|·(|y| − e_y))`, given enforced operand domains
+/// with the denominator's bounded away from zero.
+pub(crate) const QUOTIENT_OPERAND_DOMAINS: &str = "quotient_operand_domains";
+/// `‖f‖₁` of the stream a Count-Min bound is normalized by.
+pub(crate) const STREAM_L1_NORM: &str = "stream_l1_norm";
+/// `‖f‖₂` of the stream a Count Sketch bound is normalized by.
+pub(crate) const STREAM_L2_NORM: &str = "stream_l2_norm";
+
+/// The statistic for `norm` ([`STREAM_L1_NORM`] or [`STREAM_L2_NORM`]) of
+/// one source's stream, e.g. `stream_l1_norm[m]`.
+pub(crate) fn source_norm_statistic(norm: &str, source: &str) -> String {
+    format!("{norm}[{source}]")
+}
+
+/// The norm and source a [`source_norm_statistic`] names.
+pub(crate) fn parse_source_norm_statistic(statistic: &str) -> Option<(&str, &str)> {
+    let (norm, rest) = statistic.split_once('[')?;
+    let source = rest.strip_suffix(']')?;
+    [STREAM_L1_NORM, STREAM_L2_NORM]
+        .contains(&norm)
+        .then_some((norm, source))
+}
 
 impl DefaultAccuracyModel {
     fn additive(
@@ -484,14 +510,16 @@ fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) ->
     }
 }
 
-/// `input`'s bound converted to absolute value units, multiplying a
-/// normalized metric by the (unknown) statistic it is normalized by. `None`
-/// for a metric with no such conversion (`Rank`, `TopKMembership`).
 /// `input` with a Count-Min ([`ErrorMetric::Frequency`]) or Count Sketch
 /// ([`ErrorMetric::L2Frequency`]) bound restated as an additive absolute
 /// error: the normalized bound times its stream norm, a symbolic statistic
-/// until bound. Any other guarantee is returned unchanged.
-pub(crate) fn additive_as_absolute(input: ResultGuarantee) -> ResultGuarantee {
+/// until bound. The norm is `source`'s ([`source_norm_statistic`]), which
+/// plan selection can bind; without a source it is a statistic nothing
+/// binds. Any other guarantee is returned unchanged.
+pub(crate) fn additive_as_absolute(
+    input: ResultGuarantee,
+    source: Option<&str>,
+) -> ResultGuarantee {
     if !matches!(
         input.metric,
         ErrorMetric::Frequency | ErrorMetric::L2Frequency
@@ -499,7 +527,14 @@ pub(crate) fn additive_as_absolute(input: ResultGuarantee) -> ResultGuarantee {
     {
         return input;
     }
-    let bound = absolute_bound(&input).expect("additive metrics convert to absolute errors");
+    let mut bound = absolute_bound(&input).expect("additive metrics convert to absolute errors");
+    if let (Some(source), BoundExpr::Product { factors }) = (source, &mut bound) {
+        for factor in factors {
+            if let BoundExpr::Unknown { statistic } = factor {
+                *statistic = source_norm_statistic(statistic, source);
+            }
+        }
+    }
     let mut provenance = input.provenance;
     if let BoundExpr::Product { factors } = &bound {
         provenance.extend(factors.iter().filter_map(|factor| match factor {
@@ -517,13 +552,16 @@ pub(crate) fn additive_as_absolute(input: ResultGuarantee) -> ResultGuarantee {
     }
 }
 
+/// `input`'s bound converted to absolute value units, multiplying a
+/// normalized metric by the (unknown) statistic it is normalized by. `None`
+/// for a metric with no such conversion (`Rank`, `TopKMembership`).
 fn absolute_bound(input: &ResultGuarantee) -> Option<BoundExpr> {
     let normalizer = match input.metric {
         ErrorMetric::AbsoluteValue => return Some(input.bound.clone()),
         ErrorMetric::RelativeValue => "true_value_magnitude",
         ErrorMetric::Cardinality => "true_cardinality",
-        ErrorMetric::Frequency => "stream_l1_norm",
-        ErrorMetric::L2Frequency => "stream_l2_norm",
+        ErrorMetric::Frequency => STREAM_L1_NORM,
+        ErrorMetric::L2Frequency => STREAM_L2_NORM,
         // `Rank` has no distribution-free conversion to a value error; a
         // metric this crate does not know has no registered conversion.
         ErrorMetric::Rank | ErrorMetric::TopKMembership | _ => return None,

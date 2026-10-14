@@ -459,8 +459,9 @@ fn combined_scalar_references_keep_summary_candidates() {
 /// The vector form of a combination of approximate values keeps its summary
 /// candidates (nothing prunes them), but a difference or a comparison of
 /// estimates composes to no guarantee in the MVP (#669; a comparison's band
-/// guarantee is later work) and the built-in models have no empirical output-level evidence
-/// (plan selection, #576), so it is not selected automatically: the exact plan is.
+/// guarantee is later work) and the built-in models have no empirical
+/// output-level evidence (plan selection, #576), so it is not selected
+/// automatically: the exact plan is.
 #[tokio::test]
 async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
     for query in [
