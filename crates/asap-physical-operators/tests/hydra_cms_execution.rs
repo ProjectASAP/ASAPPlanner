@@ -167,6 +167,15 @@ fn run(
     filter: Option<Predicate<usize>>,
     batches: Vec<Batch>,
 ) -> BTreeMap<String, f64> {
+    try_run(update, filter, batches).unwrap()
+}
+
+/// As [`run`], returning the first execution error.
+fn try_run(
+    update: SummaryUpdate,
+    filter: Option<Predicate<usize>>,
+    batches: Vec<Batch>,
+) -> Result<BTreeMap<String, f64>, String> {
     let input = input_schema();
     let build = compile_node(&summary_agg(update, filter), std::slice::from_ref(&input)).unwrap();
     let state = build.schema();
@@ -223,14 +232,18 @@ fn run(
             .remove(0)
             .collect::<Vec<_>>(),
     );
-    batches
-        .into_iter()
-        .flat_map(|batch| batch.unwrap().rows().to_vec())
-        .map(|row| match (&row[0], &row[1]) {
-            (Value::Utf8(job), Value::Float64(point)) => (job.to_string(), *point),
-            other => panic!("unexpected row {other:?}"),
-        })
-        .collect()
+    let mut points = BTreeMap::new();
+    for batch in batches {
+        for row in batch.map_err(|e| e.to_string())?.rows() {
+            match (&row[0], &row[1]) {
+                (Value::Utf8(job), Value::Float64(point)) => {
+                    points.insert(job.to_string(), *point);
+                }
+                other => panic!("unexpected row {other:?}"),
+            }
+        }
+    }
+    Ok(points)
 }
 
 fn exact(job: &str, service: &str) -> f64 {
@@ -271,21 +284,77 @@ fn hydra_cms_merges_like_one_build() {
     );
 }
 
-// HydraCms counts rows: a weight column, signed or not, is rejected at binding.
+fn weighted(weight_domain: WeightDomain) -> SummaryUpdate {
+    SummaryUpdate {
+        weight: SummaryInputExpr::Column(ColumnRef::Named("weight".into())),
+        weight_domain,
+        ..unit_count()
+    }
+}
+
+fn non_negative() -> WeightDomain {
+    WeightDomain::NonNegative {
+        proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
+    }
+}
+
+// A non-negative weight column sums each item's weight within its group
+// (e.g. bytes per service per job), within the Count-Min bound over the
+// stream's total weight; a split-stream merge answers as one build.
 #[test]
-fn weighted_update_is_rejected() {
-    for weight_domain in [
-        WeightDomain::UnknownOrSigned,
-        WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
-        },
+fn weighted_hydra_cms_sums_item_weights_per_group() {
+    let points = run(weighted(non_negative()), None, vec![batch(&ROWS)]);
+    let total: f64 = ROWS.iter().map(|(_, _, w)| w).sum();
+    let slack =
+        std::f64::consts::E * total * (1. / f64::from(SHARED_COLUMNS) + 1. / f64::from(WIDTH));
+    for job in ["api", "batch", "db"] {
+        let truth: f64 = ROWS
+            .iter()
+            .filter(|(j, s, _)| *j == job && *s == "checkout")
+            .map(|(_, _, w)| w)
+            .sum();
+        let point = points[job];
+        assert!(point >= truth && point <= truth + slack, "{job}: {point}");
+    }
+    let (left, right) = ROWS.split_at(5);
+    assert_eq!(
+        run(
+            weighted(non_negative()),
+            None,
+            vec![batch(left), batch(right)]
+        ),
+        points
+    );
+}
+
+// A weight column of unknown sign is rejected at binding: a Count-Min point
+// count only overestimates when no weight is negative.
+#[test]
+fn unknown_sign_weight_is_rejected() {
+    let error = compile_node(
+        &summary_agg(weighted(WeightDomain::UnknownOrSigned), None),
+        &[input_schema()],
+    )
+    .err()
+    .expect("unknown-sign weight");
+    assert!(error.to_string().contains("non-negative"), "{error}");
+}
+
+// sketchlib's Hydra adds integer weights, so a negative, fractional or
+// non-finite weight value fails the build with a clear error.
+#[test]
+fn invalid_weight_values_fail_the_build() {
+    for (weight, expected) in [
+        (-1.0, "non-negative"),
+        (1.5, "integer"),
+        (f64::NAN, "integer"),
+        (f64::INFINITY, "integer"),
     ] {
-        let update = SummaryUpdate {
-            weight: SummaryInputExpr::Column(ColumnRef::Named("weight".into())),
-            weight_domain,
-            ..unit_count()
-        };
-        assert!(compile_node(&summary_agg(update, None), &[input_schema()]).is_err());
+        let rows = [("api", "checkout", 1.0), ("api", "checkout", weight)];
+        let error = try_run(weighted(non_negative()), None, vec![batch(&rows)])
+            .err()
+            .unwrap_or_else(|| panic!("{weight} accepted"));
+        assert!(error.contains(expected), "{weight}: {error}");
     }
 }
 
@@ -301,7 +370,15 @@ fn group_total_is_rejected_until_sketchlib_offers_it() {
         key: ColumnRef::SampleValue,
         value: None,
     };
-    assert!(compile_node(&estimate(3, total, DataType::Int64), &[state]).is_err());
+    let error = compile_node(&estimate(3, total, DataType::Int64), &[state])
+        .err()
+        .expect("group total");
+    assert!(
+        error
+            .to_string()
+            .contains("HydraCms does not answer a group total"),
+        "{error}"
+    );
 }
 
 // A filtered HydraCms build updates the grid only from rows where the filter

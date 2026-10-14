@@ -63,11 +63,13 @@ impl Operator {
         })
     }
     /// One HydraCms state shared by every group, emitted as one row per group
-    /// that reads it. Each row counts one occurrence of its `item` value.
+    /// that reads it. Each row adds its `weight` column's value (1 without
+    /// one) to its `item` value; a row whose weight is NULL adds nothing.
     pub fn shared_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
         item: usize,
+        weight: Option<usize>,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
         crate::values::validate_family(&family)?;
@@ -80,6 +82,14 @@ impl Operator {
             return Err(invalid(
                 "HydraCms items must be non-null Utf8, Int64 or Bool",
             ));
+        }
+        if let Some(weight) = weight {
+            if !matches!(
+                plain(&input, weight)?.0,
+                DataType::Float64 | DataType::Int64
+            ) {
+                return Err(invalid("HydraCms weights must be Float64 or Int64"));
+            }
         }
         let mut fields = groups
             .iter()
@@ -95,6 +105,7 @@ impl Operator {
             kind: Kind::SharedSummaryBuild {
                 family,
                 item,
+                weight,
                 groups,
                 filter: None,
             },
@@ -322,12 +333,13 @@ pub(super) fn execute<'a>(
         Kind::SharedSummaryBuild {
             family,
             item,
+            weight,
             groups,
             filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_shared_summary(input, family, *item, groups, filter.as_deref(), &context)
+                build_shared_summary(input, family, *item, *weight, groups, filter.as_deref(), &context)
                     .await?,
             )
         })
@@ -722,6 +734,7 @@ async fn build_shared_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
     item: usize,
+    weight: Option<usize>,
     groups: &[usize],
     filter: Option<&Expression>,
     context: &RunContext,
@@ -755,13 +768,18 @@ async fn build_shared_summary(
             if !selected(filter, row)? {
                 continue;
             }
+            let weight = match weight.map(|i| &row[i]) {
+                None => 1,
+                Some(Value::Null) => continue,
+                Some(value) => hydra_weight(value)?,
+            };
             let item = match &row[item] {
                 Value::Utf8(v) => v.to_string(),
                 Value::Int64(v) => v.to_string(),
                 Value::Bool(v) => v.to_string(),
                 _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
             };
-            grid.count(&seen[&key].1, &item)
+            grid.count(&seen[&key].1, &item, weight)
                 .map_err(|e| Error::Operator(e.to_string()))?;
         }
     }
@@ -779,4 +797,25 @@ async fn build_shared_summary(
             labels
         })
         .collect())
+}
+
+/// One row's HydraCms weight. sketchlib's Hydra adds `i32` weights, so a
+/// weight must be a non-negative integer within `i32`.
+fn hydra_weight(value: &Value) -> Result<i32, Error> {
+    let weight = match value {
+        Value::Int64(v) => *v as f64,
+        Value::Float64(v) => *v,
+        _ => return Err(Error::Operator("HydraCms weight type".into())),
+    };
+    if weight < 0.0 {
+        return Err(Error::Operator(format!(
+            "HydraCms weights must be non-negative, got {weight}"
+        )));
+    }
+    if !(weight.is_finite() && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)) {
+        return Err(Error::Operator(format!(
+            "HydraCms weights must be integers within i32 (asap_sketchlib's Hydra adds i32 weights), got {weight}"
+        )));
+    }
+    Ok(weight as i32)
 }
