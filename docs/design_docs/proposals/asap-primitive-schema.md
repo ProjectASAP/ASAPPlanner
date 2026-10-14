@@ -87,7 +87,7 @@ Based on our requirement, each field should contain the following information.
      | Intent | Candidate types | Evaluation |
      |---|---|---|
      | `Quantile` | `Sketch`: `Kll`, `DDSketch` | `SummaryEstimate(Quantile { q })` |
-     | `Cardinality` | `Sketch`: `Hll`, `Theta`, `Kmv`, `UnivMon` (one column only) | `SummaryEstimate(Cardinality)` |
+     | `Cardinality` | `Sketch`: `Hll`, `Kmv`, `UnivMon` (one column only) | `SummaryEstimate(Cardinality)` |
      | `Count` (approximate) | `Sketch`: `Cms`, `CountSketch`, `UnivMon` | `SummaryEstimate(PointCount { .. })` |
      | `TopK` | `Sketch`: `CmsWithHeap`, `CountSketchWithHeap` | `SummaryEstimate(TopK { k })` |
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
@@ -1158,6 +1158,7 @@ impl SketchKind {
 }
 pub enum SketchCategory { Universal, Quantile, Cardinality, Frequency, TopK }
 // Universal: UnivMon | Quantile: Kll, DDSketch | Cardinality: Hll, Theta, Kmv
+// (Theta is not offered as a candidate until asap_sketchlib has a Theta sketch)
 // Frequency: Cms, CountSketch | TopK: CmsWithHeap, CountSketchWithHeap
 pub enum SketchAlgorithm { UnivMon, Kll, Cms, Hll, DDSketch, CmsWithHeap, Kmv, Theta, CountSketch, CountSketchWithHeap }
 

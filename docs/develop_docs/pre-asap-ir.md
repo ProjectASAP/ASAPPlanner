@@ -293,7 +293,7 @@ before `Cardinality` took a list, SQL lowering dropped every argument after the
 first, reporting single-column cardinality as tuple cardinality.
 
 Realization is the single-column one with a wider item: a tuple becomes a
-`SummaryInputExpr::Tuple`, which the distinct-count sketches (HLL, Theta, KMV)
+`SummaryInputExpr::Tuple`, which the distinct-count sketches (HLL, KMV)
 hash as one value. UnivMon is withheld from a tuple — it estimates frequency
 moments over a single value stream. At `AccuracyTarget::Exact` the node stays a
 logical pass-through at any arity. Each SQL argument must be a bare column,

@@ -440,7 +440,7 @@ Check the identities or kinds of all candidates, not just the preferred one.
 The current sketch-family tests explicitly verify that:
 
 - quantile returns both KLL and DDSketch,
-- cardinality returns HLL, Theta, and KMV.
+- cardinality returns HLL and KMV (Theta is not offered until `asap_sketchlib` has a Theta sketch).
 
 This is the most important regression test for a strategy.
 
