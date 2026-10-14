@@ -3,8 +3,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
-use asap_devtools::planner_layering_examples::{pattern_a, PatternARecurrence};
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
+use asap_devtools::planner_layering_examples::{example1, pattern_a, PatternARecurrence};
+use asap_devtools::planning_stages::{
+    lower_promql_roots, run_planning_stages, PlanningStagesError,
+};
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
 use asap_types::ir::QueryRoot;
@@ -296,22 +298,30 @@ fn failure(args: &[&str]) -> (Option<i32>, String) {
     )
 }
 
-/// Above `--max-combinations`, the run is rejected before enumeration with
-/// the count and the limit, rather than truncated.
+/// `--max-combinations` limits the Stage 1 candidates, Pass 2's included:
+/// Example 1 has 9 (3 Pass 1 candidates, each with 2 Pass 2 candidates).
+/// Above the limit the run stops with an error as soon as the count passes
+/// it, rather than truncating.
 #[test]
-fn workload_above_the_combination_limit_is_rejected() {
-    let (status, stderr) = failure(&["--example", "planner-layering-1", "--max-combinations", "2"]);
-    assert_eq!(status, Some(3));
-    assert!(
-        stderr.contains(
-            "workload has 3 candidate combinations (limit 2); planning it needs early pruning (#673)"
-        ),
-        "{stderr}"
-    );
-    // At the limit, it plans. The limit counts Pass 1's combinations; the
-    // document lists every Stage 1 candidate, each Pass 1 candidate with its
-    // 2 Pass 2 candidates.
-    let document = generate(&["--max-combinations", "3"]);
+fn workload_above_the_candidate_limit_is_rejected() {
+    for limit in ["3", "8"] {
+        let (status, stderr) = failure(&[
+            "--example",
+            "planner-layering-1",
+            "--max-combinations",
+            limit,
+        ]);
+        assert_eq!(status, Some(3), "{limit}");
+        assert!(
+            stderr.contains(&format!(
+                "workload has more than {limit} Stage 1 candidates, Pass 2's included; \
+                 planning it needs early pruning (#673)"
+            )),
+            "{stderr}"
+        );
+    }
+    // At the limit, it plans every candidate.
+    let document = generate(&["--max-combinations", "9"]);
     assert_eq!(
         document["stage1_logical_asap_optimization"]["combinations"],
         9
@@ -319,9 +329,9 @@ fn workload_above_the_combination_limit_is_rejected() {
 }
 
 /// The default limit is 10^4: nine approximate Top-K queries (3^9 = 19683
-/// combinations) are rejected without being enumerated.
+/// Pass 1 combinations) are rejected once the count passes it.
 #[test]
-fn default_combination_limit_is_ten_thousand() {
+fn default_candidate_limit_is_ten_thousand() {
     let queries: Vec<String> = (1..=9)
         .map(|i| format!("topk(5, rate(m{i}[5m]))"))
         .collect();
@@ -333,9 +343,22 @@ fn default_combination_limit_is_ten_thousand() {
     let (status, stderr) = failure(&args);
     assert_eq!(status, Some(3));
     assert!(
-        stderr.contains("workload has 19683 candidate combinations (limit 10000)"),
+        stderr.contains("workload has more than 10000 Stage 1 candidates"),
         "{stderr}"
     );
+}
+
+/// The library never caps: without a limit every candidate is planned.
+#[test]
+fn planning_stages_without_a_limit_plan_every_candidate() {
+    let workload = example1();
+    let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
+    assert_eq!(run.stage1_logical_asap_optimization.len(), 9);
+    let limited = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), Some(8));
+    assert!(matches!(
+        limited,
+        Err(PlanningStagesError::TooManyCandidates { limit: 8 })
+    ));
 }
 
 #[test]

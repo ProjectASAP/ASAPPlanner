@@ -151,9 +151,84 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     ))
 }
 
-/// [`run_stage1_to_stage3`] after Pass 1: enumerates every whole-workload
+/// One Stage 1 candidate in enumeration order, before Stage 2 numbers it.
+#[derive(Debug)]
+pub struct Stage1Candidate {
+    /// Human-readable name, used only for display.
+    pub display_name: String,
+    /// The Pass 1 choice (`targets[t].choices.candidates[choice[t]]`); a
+    /// Pass 2 candidate has its Pass 1 candidate's.
+    pub choice: Vec<usize>,
+    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+    /// For a Pass 2 candidate: the position, in the enumeration, of the
+    /// Pass 1 candidate it shares the identical sub-DAGs of, and the shared
+    /// groups (operator kinds, children first).
+    pub pass2_of: Option<(usize, Vec<String>)>,
+}
+
+/// Stage 1 (logical ASAP-aware optimization) over the Pass 1 inventory, one
+/// candidate at a time: each composed Pass 1 candidate (every choice of a
+/// per-computation candidate for every target, the last target varying
+/// fastest), followed by its Pass 2 identical-expression candidates. Lazy
+/// and uncapped: a caller that limits the candidates stops consuming it.
+pub fn stage1_logical_asap_optimization<Id: Clone>(
+    per_computation: &PerComputationCandidates<Id>,
+) -> impl Iterator<Item = Stage1Candidate> + '_ {
+    let query_of_target = query_of_target(per_computation);
+    let mut choice = Some(vec![0; per_computation.targets.len()]);
+    let mut queue = std::collections::VecDeque::new();
+    let mut position = 0usize;
+    std::iter::from_fn(move || {
+        while queue.is_empty() {
+            let current = choice.as_mut()?;
+            let skip = per_computation.absorbed_choice_varies(current);
+            let this = current.clone();
+            if !next_choice(per_computation, current) {
+                choice = None;
+            }
+            if skip {
+                continue;
+            }
+            let display_name = display_name(per_computation, &query_of_target, &this);
+            let roots = compose_logical_candidate(per_computation, &this)
+                .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
+            let (groups, variants) = match &roots {
+                Ok(roots) => (
+                    crate::asap_aware_cse::sharing_groups(roots),
+                    identical_expression_variants(roots),
+                ),
+                Err(_) => (Vec::new(), Vec::new()),
+            };
+            let from = position + queue.len();
+            queue.push_back(Stage1Candidate {
+                display_name: display_name.clone(),
+                choice: this.clone(),
+                roots,
+                pass2_of: None,
+            });
+            for variant in variants {
+                let shared: Vec<String> = variant
+                    .shared_groups
+                    .iter()
+                    .map(|&g| groups[g].nodes[0].operator.kind_name().to_string())
+                    .collect();
+                queue.push_back(Stage1Candidate {
+                    display_name: format!("{display_name} · shared {}", shared.join(", ")),
+                    choice: this.clone(),
+                    roots: Ok(variant.roots),
+                    pass2_of: Some((from, shared)),
+                });
+            }
+        }
+        position += 1;
+        queue.pop_front()
+    })
+}
+
+/// [`run_stage1_to_stage3`] after Pass 1: enumerates every Stage 1
 /// candidate of `per_computation` (the Pass 1 inventory of the frontends'
-/// roots), so a caller can read the inventory, e.g. its
+/// roots, [`stage1_logical_asap_optimization`]), so a caller can read the
+/// inventory, e.g. its
 /// [`combinations`](PerComputationCandidates::combinations), before
 /// enumerating.
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
@@ -163,81 +238,56 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
+    let stage1 = stage1_logical_asap_optimization(&per_computation).collect();
+    run_stage2_and_stage3(per_computation, stage1, targets, recurrence, data, models)
+}
+
+/// Stage 2 and Stage 3 over `stage1`, the Stage 1 candidates of
+/// `per_computation` in enumeration order (all of them, or the ones a caller
+/// enumerated): candidate `n` (from 1) is `L<n>`, implemented as `P<n>`.
+pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
+    per_computation: PerComputationCandidates<Id>,
+    stage1: Vec<Stage1Candidate>,
+    targets: &[Option<AccuracyTarget>],
+    recurrence: &[QueryRecurrence],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Stage1ToStage3Run<Id> {
     let combinations = per_computation.combinations();
-    let query_of_target = query_of_target(&per_computation);
     let mut logical: Vec<LogicalCandidate> = Vec::new();
     let mut physical = Vec::new();
     let mut pruned = Vec::new();
     let mut pass2 = Vec::new();
-    // Stage 2 for one Stage 1 candidate, numbered after the ones before it.
-    let mut add = |logical: &mut Vec<LogicalCandidate>,
-                   display_name: String,
-                   choice: &[usize],
-                   roots: Result<Vec<QueryRoot>, PerComputationCandidateError>| {
-        let number = logical.len() + 1;
+    for (index, candidate) in stage1.into_iter().enumerate() {
+        let number = index + 1;
         let id = format!("L{number}");
-        if let Ok(roots) = &roots {
+        if let Ok(roots) = &candidate.roots {
             match optimize_physical_asap(&id, roots) {
-                Ok(mut candidate) => {
-                    candidate.id = format!("P{number}");
-                    candidate.display_name = display_name.clone();
-                    physical.push(candidate);
+                Ok(mut implemented) => {
+                    implemented.id = format!("P{number}");
+                    implemented.display_name = candidate.display_name.clone();
+                    physical.push(implemented);
                 }
                 Err(error) => pruned.push(PrunedCandidate {
                     from_logical: id.clone(),
-                    display_name: display_name.clone(),
+                    display_name: candidate.display_name.clone(),
                     reason: error.to_string(),
                 }),
             }
         }
-        logical.push(LogicalCandidate {
-            id: id.clone(),
-            display_name,
-            choice: choice.to_vec(),
-            roots,
-        });
-        id
-    };
-    let mut choice = vec![0; per_computation.targets.len()];
-    loop {
-        if per_computation.absorbed_choice_varies(&choice) {
-            if next_choice(&per_computation, &mut choice) {
-                continue;
-            }
-            break;
-        }
-        let display_name = display_name(&per_computation, &query_of_target, &choice);
-        let roots = compose_logical_candidate(&per_computation, &choice)
-            .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
-        let (groups, variants) = match &roots {
-            Ok(roots) => (
-                crate::asap_aware_cse::sharing_groups(roots),
-                identical_expression_variants(roots),
-            ),
-            Err(_) => (Vec::new(), Vec::new()),
-        };
-        let from_logical = add(&mut logical, display_name.clone(), &choice, roots);
-        for variant in variants {
-            let shared: Vec<String> = variant
-                .shared_groups
-                .iter()
-                .map(|&g| groups[g].nodes[0].operator.kind_name().to_string())
-                .collect();
-            let id = add(
-                &mut logical,
-                format!("{display_name} · shared {}", shared.join(", ")),
-                &choice,
-                Ok(variant.roots),
-            );
+        if let Some((from, shared)) = candidate.pass2_of {
             pass2.push(IdenticalExpressionCandidate {
-                id,
-                from_logical: from_logical.clone(),
+                id: id.clone(),
+                from_logical: format!("L{}", from + 1),
                 shared,
             });
         }
-        if !next_choice(&per_computation, &mut choice) {
-            break;
-        }
+        logical.push(LogicalCandidate {
+            id,
+            display_name: candidate.display_name,
+            choice: candidate.choice,
+            roots: candidate.roots,
+        });
     }
     let selection = select_plan(&physical, targets, recurrence, data, models);
     Stage1ToStage3Run {
