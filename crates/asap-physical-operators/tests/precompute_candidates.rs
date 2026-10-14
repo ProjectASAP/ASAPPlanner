@@ -735,6 +735,8 @@ fn cut_candidate_rejects_invalid_frontiers() {
 /// A candidate that does not compose fails `logical_candidates` instead of
 /// being skipped, so an assertion over every candidate cannot pass on none.
 /// An aggregate over a top-k output does not compose yet (#672).
+/// This test relies on that bug: when #672 is fixed, the query composes and
+/// this test must switch to another candidate that does not compose.
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
