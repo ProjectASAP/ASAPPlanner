@@ -3,7 +3,6 @@
 Developer documentation describes current code contracts, extension points,
 formats, evidence, and verification workflows.
 
-- [Planner layering code map: stages and passes to code](planner-layering-code-map.md)
 - [Public library functions and examples](library-api.md)
 - [ASAP-aware mapping architecture](asap-aware-mapping-architecture.md)
 - [ASAP-aware mapping contracts](asap-aware-mapping-contracts.md)
