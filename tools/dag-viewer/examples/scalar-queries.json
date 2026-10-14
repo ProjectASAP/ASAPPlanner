@@ -2687,17 +2687,17 @@
       "P1": {
         "per_node": {
           "0": {
-            "cost": 0.000010833777777777777,
+            "cost": 0.000010833333333333334,
             "detail": "scan 15000 samples; x 0.0003/s",
             "multiplier": 1
           },
           "1": {
-            "cost": 4.167111111111111e-6,
+            "cost": 4.166666666666667e-6,
             "detail": "time range 15s: pass 15000 rows; x 0.0003/s",
             "multiplier": 1
           },
           "10": {
-            "cost": 4.188888888888888e-6,
+            "cost": 4.166666666666667e-6,
             "detail": "build exact Sum accumulator into 100 states: 15000 rows x depth 1; x 0.0003/s",
             "multiplier": 1
           },
@@ -2707,7 +2707,7 @@
             "multiplier": 1
           },
           "2": {
-            "cost": 4.1668888888888884e-6,
+            "cost": 4.166666666666667e-6,
             "detail": "build exact Sum accumulator into 1 states: 15000 rows x depth 1; x 0.0003/s",
             "multiplier": 1
           },
@@ -2717,17 +2717,17 @@
             "multiplier": 1
           },
           "4": {
-            "cost": 0.000017500888888888888,
+            "cost": 0.0000175,
             "detail": "scan 15000 samples; x 0.0003/s",
             "multiplier": 1
           },
           "5": {
-            "cost": 4.167555555555556e-6,
+            "cost": 4.166666666666667e-6,
             "detail": "time range 15s: pass 15000 rows; x 0.0003/s",
             "multiplier": 1
           },
           "6": {
-            "cost": 4.1668888888888884e-6,
+            "cost": 4.166666666666667e-6,
             "detail": "build exact Sum accumulator into 1 states: 15000 rows x depth 1; x 0.0003/s",
             "multiplier": 1
           },
@@ -2737,18 +2737,18 @@
             "multiplier": 1
           },
           "8": {
-            "cost": 0.000024168,
+            "cost": 0.000024166666666666663,
             "detail": "scan 15000 samples; x 0.0003/s",
             "multiplier": 1
           },
           "9": {
-            "cost": 4.168e-6,
+            "cost": 4.166666666666667e-6,
             "detail": "time range 15s: pass 15000 rows; x 0.0003/s",
             "multiplier": 1
           }
         },
         "source": "analytical-cost-v2 (illustrative statistics)",
-        "total": 0.00007755633333333333,
+        "total": 0.00007752833333333333,
         "unit": "cost_per_second"
       }
     },
