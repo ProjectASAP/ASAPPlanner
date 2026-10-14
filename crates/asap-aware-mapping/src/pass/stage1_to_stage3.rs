@@ -9,13 +9,17 @@
 //! 1. Stage 1, logical ASAP-aware optimization: Pass 1 per-computation candidate
 //!    generation, then composition of one whole-workload candidate per choice
 //!    of a per-computation candidate for every target (the Cartesian product,
-//!    in mixed-radix order, the last target varying fastest);
-//! 2. Stage 2, physical ASAP-aware optimization of every composed candidate
+//!    in mixed-radix order, the last target varying fastest), each followed
+//!    by its Pass 2 candidates from the identical-expression rule
+//!    ([`identical_expression_variants`]: one per subset of its sharing
+//!    groups; the independent candidate is kept);
+//! 2. Stage 2, physical ASAP-aware optimization of every Stage 1 candidate
 //!    ([`optimize_physical_asap`]);
 //! 3. Stage 3, plan selection over the physical candidates ([`select_plan`]).
 //!
 //! Stage 0, the query-language frontends, runs before it (the `asap-planner`
-//! facade lowers the workload). Pass 2 (ASAP-aware CSE) is not planned yet.
+//! facade lowers the workload). Pass 2's summary-capability and
+//! window-composition rules are not planned yet.
 //!
 //! Every combination is enumerated and plan selection prices every
 //! candidate; nothing is capped. A search that avoids building every
@@ -30,6 +34,7 @@ use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryLanguage};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
+use crate::asap_aware_cse::identical_expression_variants;
 use crate::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     PerComputationCandidateError, PerComputationCandidates,
@@ -52,6 +57,17 @@ pub struct LogicalCandidate {
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
 
+/// A Stage 1 candidate Pass 2's identical-expression rule added: `id` is
+/// `from_logical` with the nodes of each group in `shared` (named by
+/// operator kind, children first) made one node. It has `from_logical`'s
+/// `choice`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdenticalExpressionCandidate {
+    pub id: String,
+    pub from_logical: String,
+    pub shared: Vec<String>,
+}
+
 /// A composed logical candidate that physical ASAP-aware optimization could
 /// not implement, with the reason.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,11 +86,16 @@ pub struct Stage1ToStage3Run<Id> {
     /// Stage 1, Pass 1: the per-computation candidates, with the roots they
     /// read.
     pub stage1_pass1_per_computation: PerComputationCandidates<Id>,
-    /// Stage 1: the number of whole-workload candidates, the size of the
-    /// Cartesian product of the targets' candidates, saturating at
-    /// `usize::MAX`.
+    /// Stage 1, Pass 1: the number of composed whole-workload candidates,
+    /// the size of the Cartesian product of the targets' candidates,
+    /// saturating at `usize::MAX`. Pass 2 adds to them.
     pub combinations: usize,
-    /// Stage 1: every whole-workload logical candidate, in enumeration order.
+    /// Stage 1, Pass 2: the candidates the identical-expression rule added,
+    /// in enumeration order.
+    pub stage1_pass2_identical_expression: Vec<IdenticalExpressionCandidate>,
+    /// Stage 1: every whole-workload logical candidate, in enumeration
+    /// order: each composed Pass 1 candidate, followed by its Pass 2
+    /// candidates.
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     /// Stage 2: one physical candidate (`P<n>` from `L<n>`) per Stage 1
     /// candidate that composed and was implemented.
@@ -141,19 +162,21 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
 ) -> Stage1ToStage3Run<Id> {
     let combinations = per_computation.combinations();
     let query_of_target = query_of_target(&per_computation);
-    let mut logical = Vec::new();
+    let mut logical: Vec<LogicalCandidate> = Vec::new();
     let mut physical = Vec::new();
     let mut pruned = Vec::new();
-    let mut choice = vec![0; per_computation.targets.len()];
-    for index in 0usize.. {
-        let id = format!("L{}", index + 1);
-        let display_name = display_name(&per_computation, &query_of_target, &choice);
-        let roots = compose_logical_candidate(&per_computation, &choice)
-            .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
+    let mut pass2 = Vec::new();
+    // Stage 2 for one Stage 1 candidate, numbered after the ones before it.
+    let mut add = |logical: &mut Vec<LogicalCandidate>,
+                   display_name: String,
+                   choice: &[usize],
+                   roots: Result<Vec<QueryRoot>, PerComputationCandidateError>| {
+        let number = logical.len() + 1;
+        let id = format!("L{number}");
         if let Ok(roots) = &roots {
             match optimize_physical_asap(&id, roots) {
                 Ok(mut candidate) => {
-                    candidate.id = format!("P{}", index + 1);
+                    candidate.id = format!("P{number}");
                     candidate.display_name = display_name.clone();
                     physical.push(candidate);
                 }
@@ -165,11 +188,44 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
             }
         }
         logical.push(LogicalCandidate {
-            id,
+            id: id.clone(),
             display_name,
-            choice: choice.clone(),
+            choice: choice.to_vec(),
             roots,
         });
+        id
+    };
+    let mut choice = vec![0; per_computation.targets.len()];
+    loop {
+        let display_name = display_name(&per_computation, &query_of_target, &choice);
+        let roots = compose_logical_candidate(&per_computation, &choice)
+            .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
+        let (groups, variants) = match &roots {
+            Ok(roots) => (
+                crate::asap_aware_cse::sharing_groups(roots),
+                identical_expression_variants(roots),
+            ),
+            Err(_) => (Vec::new(), Vec::new()),
+        };
+        let from_logical = add(&mut logical, display_name.clone(), &choice, roots);
+        for variant in variants {
+            let shared: Vec<String> = variant
+                .shared_groups
+                .iter()
+                .map(|&g| groups[g].nodes[0].operator.kind_name().to_string())
+                .collect();
+            let id = add(
+                &mut logical,
+                format!("{display_name} · shared {}", shared.join(", ")),
+                &choice,
+                Ok(variant.roots),
+            );
+            pass2.push(IdenticalExpressionCandidate {
+                id,
+                from_logical: from_logical.clone(),
+                shared,
+            });
+        }
         // Mixed-radix increment: the last target varies fastest; a carry
         // out of the first target ends the enumeration.
         let mut carry = true;
@@ -189,6 +245,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     Stage1ToStage3Run {
         stage1_pass1_per_computation: per_computation,
         combinations,
+        stage1_pass2_identical_expression: pass2,
         stage1_logical_asap_optimization: logical,
         stage2_physical_asap_optimization: physical,
         stage2_pruned: pruned,

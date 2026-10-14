@@ -35,8 +35,8 @@ use crate::per_computation_candidates::PerComputationCandidateError;
 use crate::stage3_plan_selection::{Selection, SelectionError};
 
 pub use stage1_to_stage3::{
-    run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, LogicalCandidate, PrunedCandidate,
-    Stage1ToStage3Pass, Stage1ToStage3Run,
+    run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, IdenticalExpressionCandidate,
+    LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;

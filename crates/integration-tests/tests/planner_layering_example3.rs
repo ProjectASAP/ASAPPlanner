@@ -159,7 +159,6 @@ fn stage1_logical_asap_optimization_a_keeps_five_independent_klls() {
 
 /// The identical-expression rule shares only raw input (scan, range, shift), never a quantile or summary, and keeps the unshared variant.
 #[test]
-#[ignore = "needs the Pass 2 identical-expression rule (#588)"]
 fn stage1_logical_asap_optimization_a_identical_expression_rule_shares_only_raw_input() {
     let run = run_a();
     assert!(run.logical.iter().any(|c| c.shared_input()));
@@ -272,7 +271,7 @@ fn stage3_plan_selection_a_charges_each_node_per_consuming_query() {
 
 /// Sharing the scan never costs more than scanning separately, for the same per-computation choices.
 #[test]
-#[ignore = "needs the Pass 2 identical-expression rule (#588) and plan selection row estimates for time-shifted scans and narrower time ranges (#632)"]
+#[ignore = "needs plan selection row estimates for time-shifted scans and narrower time ranges (#632)"]
 fn stage3_plan_selection_a_shared_scan_is_not_costlier() {
     let run = run_a();
     let key = |c: &Logical| {

@@ -157,7 +157,7 @@ pub fn select_plan(
             node,
             error,
         })?;
-        if best.is_none_or(|(_, total)| cost.total < total) {
+        if best.is_none_or(|(_, total)| cheaper(cost.total, total)) {
             best = Some((&candidate.id, cost.total));
         }
         costs.insert(candidate.id.clone(), cost);
@@ -182,6 +182,13 @@ pub fn select_plan(
         costs,
         rejected,
     })
+}
+
+/// Whether `cost` is cheaper than `best`. Totals that differ only by
+/// floating-point rounding (summing the same charges in another grouping)
+/// tie, and a tie keeps the earlier candidate.
+fn cheaper(cost: f64, best: f64) -> bool {
+    cost < best - best.abs() * 1e-9
 }
 
 /// The first query whose output is not shown to meet its target, as a
@@ -744,6 +751,20 @@ mod tests {
             );
             assert!(!selection.costs.contains_key(*id));
         }
+    }
+
+    /// Totals that differ only by rounding tie, so the earlier candidate is
+    /// kept; a real difference is cheaper.
+    #[test]
+    fn totals_differing_by_rounding_tie() {
+        // One unit in the last place apart, as the same charges summed in
+        // another grouping can be.
+        let separate = 0.336006_f64;
+        let together = f64::from_bits(separate.to_bits() - 1);
+        assert!(!cheaper(separate, together));
+        assert!(!cheaper(together, separate));
+        assert!(cheaper(0.3, 0.4));
+        assert!(!cheaper(0.4, 0.3));
     }
 
     /// For a query with a target, Count-Min over weights not proven
