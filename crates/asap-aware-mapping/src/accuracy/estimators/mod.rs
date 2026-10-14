@@ -15,7 +15,7 @@ pub(super) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
-) -> Option<ResultGuarantee> {
+) -> Option<AccuracyGuarantee> {
     match params {
         SketchParams::Kll { .. } => kll::guarantee(algorithm, params, query),
         SketchParams::DDSketch { .. } => ddsketch::guarantee(algorithm, params, query),
@@ -41,8 +41,8 @@ fn bounded_guarantee(
     bound: f64,
     delta: ProbabilityExpr,
     contract: &str,
-) -> ResultGuarantee {
-    ResultGuarantee {
+) -> AccuracyGuarantee {
+    AccuracyGuarantee {
         metric,
         bound: BoundExpr::Constant { value: bound },
         failure_probability: delta,
@@ -58,12 +58,12 @@ fn bounded_guarantee(
 pub(super) fn local_guarantee(
     family: &FieldDataType,
     query: &SketchStatistic,
-) -> Option<ResultGuarantee> {
+) -> Option<AccuracyGuarantee> {
     match family {
-        FieldDataType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
-        FieldDataType::ExactAggregate(kind, _) => {
-            Some(ResultGuarantee::exact(format!("ExactAggregate({kind:?})")))
-        }
+        FieldDataType::Plain(_) => Some(AccuracyGuarantee::exact("Plain value")),
+        FieldDataType::ExactAggregate(kind, _) => Some(AccuracyGuarantee::exact(format!(
+            "ExactAggregate({kind:?})"
+        ))),
         FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
         // No error model is registered for these families.
         FieldDataType::Sample(..) | FieldDataType::Wavelet(..) | FieldDataType::StatModel(..) => {
@@ -197,7 +197,7 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
         &self,
         family: &FieldDataType,
         query: &SketchStatistic,
-    ) -> Option<ResultGuarantee> {
+    ) -> Option<AccuracyGuarantee> {
         if let (Some(_), FieldDataType::Sketch(kind, grouping), SketchStatistic::Cardinality) =
             (self.contract, family, query)
         {
@@ -215,13 +215,13 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
     fn propagate(
         &self,
         op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
+        inputs: &[AccuracyGuarantee],
+        local: Option<&AccuracyGuarantee>,
         stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError> {
+    ) -> Result<AccuracyGuarantee, AccuracyError> {
         self.base.propagate(op, inputs, local, stats)
     }
-    fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
+    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
         self.base.satisfies(guarantee, target)
     }
 }

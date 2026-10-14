@@ -22,8 +22,8 @@ pub use evidence::{
 
 use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
-    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic,
+    AccuracyError, AccuracyGuarantee, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType,
+    GuaranteeSource, ProbabilityExpr, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -52,7 +52,7 @@ pub trait AccuracyModel {
         &self,
         family: &FieldDataType,
         query: &SketchStatistic,
-    ) -> Option<ResultGuarantee>;
+    ) -> Option<AccuracyGuarantee>;
 
     /// Compose `inputs`' guarantees (in the parent's child order) with the
     /// parent's own `local` guarantee under `op`. `Err` is the fail-closed
@@ -60,14 +60,14 @@ pub trait AccuracyModel {
     fn propagate(
         &self,
         op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
+        inputs: &[AccuracyGuarantee],
+        local: Option<&AccuracyGuarantee>,
         stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError>;
+    ) -> Result<AccuracyGuarantee, AccuracyError>;
 
     /// Compare the dimensions requested by `target`. Unknown required
     /// dimensions fail; selection separately excludes missing accuracy evidence.
-    fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool;
+    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool;
 }
 
 /// The built-in estimator and composition models, with conservative target checks.
@@ -85,7 +85,7 @@ impl DefaultAccuracyModel {
         algorithm: &SketchAlgorithm,
         params: &SketchParams,
         query: &SketchStatistic,
-    ) -> Option<ResultGuarantee> {
+    ) -> Option<AccuracyGuarantee> {
         estimators::sketch_guarantee(algorithm, params, query)
     }
 }
@@ -98,19 +98,19 @@ impl AccuracyModel for DefaultAccuracyModel {
         &self,
         family: &FieldDataType,
         query: &SketchStatistic,
-    ) -> Option<ResultGuarantee> {
+    ) -> Option<AccuracyGuarantee> {
         estimators::local_guarantee(family, query)
     }
     fn propagate(
         &self,
         op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
+        inputs: &[AccuracyGuarantee],
+        local: Option<&AccuracyGuarantee>,
         stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError> {
+    ) -> Result<AccuracyGuarantee, AccuracyError> {
         composition::propagate(op, inputs, local, stats)
     }
-    fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
+    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
         let within = |value: Option<f64>, limit: f64| {
             value.is_some_and(|v| v <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON)
         };
@@ -130,8 +130,8 @@ pub(crate) use estimators::topk_capacity;
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn abs(bound: f64, delta: f64) -> ResultGuarantee {
-        ResultGuarantee {
+    fn abs(bound: f64, delta: f64) -> AccuracyGuarantee {
+        AccuracyGuarantee {
             metric: ErrorMetric::AbsoluteValue,
             bound: BoundExpr::Constant { value: bound },
             failure_probability: ProbabilityExpr::Constant { value: delta },
@@ -140,7 +140,7 @@ mod tests {
     }
     #[test]
     fn satisfies_is_fail_closed_on_unknowns_and_exact() {
-        let unknown = ResultGuarantee {
+        let unknown = AccuracyGuarantee {
             bound: BoundExpr::Unknown {
                 statistic: "x".into(),
             },
@@ -149,7 +149,7 @@ mod tests {
         assert!(!DefaultAccuracyModel.satisfies(&unknown, &AccuracyTarget::Epsilon(1.0)));
         assert!(!DefaultAccuracyModel.satisfies(&abs(0.0, 0.01), &AccuracyTarget::Exact));
         assert!(
-            DefaultAccuracyModel.satisfies(&ResultGuarantee::exact("x"), &AccuracyTarget::Exact)
+            DefaultAccuracyModel.satisfies(&AccuracyGuarantee::exact("x"), &AccuracyTarget::Exact)
         );
     }
 }

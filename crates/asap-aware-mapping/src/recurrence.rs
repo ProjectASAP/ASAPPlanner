@@ -784,7 +784,7 @@ mod tests {
         ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr,
     };
     use asap_types::post_asap::{
-        ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, ResultGuarantee, Schema,
+        AccuracyGuarantee, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, Schema,
     };
     use asap_types::pre_asap::expr_ir::ColumnRef;
     use asap_types::pre_asap::schema::DataType;
@@ -813,7 +813,7 @@ mod tests {
             scan()
                 .as_ref()
                 .clone()
-                .with_guarantee(Some(ResultGuarantee::exact("RetainedExact"))),
+                .with_guarantee(Some(AccuracyGuarantee::exact("RetainedExact"))),
         );
         std::rc::Rc::new(
             OperatorNode::with_schema(

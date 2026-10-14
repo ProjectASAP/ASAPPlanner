@@ -76,7 +76,7 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// candidate search — never the sharing decision ([`same_node`] is).
 ///
 /// `OperatorNode` carries `f64`s (`ScalarValue::Float64`, quantile targets,
-/// `ResultGuarantee` bounds, …), so it cannot derive `std::hash::Hash`. The
+/// `AccuracyGuarantee` bounds, …), so it cannot derive `std::hash::Hash`. The
 /// hash is SipHash over two parts:
 ///
 /// 1. the canonical JSON of [`own_fields`] plus `result_kind`, `schema`,
@@ -285,7 +285,7 @@ mod tests {
     use crate::ir::operator_properties::{BinaryOpKind, GroupKeys, Reduction, Source};
     use crate::ir::ScalarExpr;
     use crate::ir::{BinaryOperator, NonASAPOp};
-    use crate::post_asap::guarantee::ResultGuarantee;
+    use crate::post_asap::guarantee::AccuracyGuarantee;
     use crate::post_asap::sketch::{
         GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     };
@@ -414,7 +414,7 @@ mod tests {
         let a = quantile_agg(vec![1], Some(2), 0.5)
             .as_ref()
             .clone()
-            .with_guarantee(Some(ResultGuarantee::exact("fixture")));
+            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")));
         let before = Rc::new(a);
         let (ra, _) = two_roots(Rc::clone(&before), Rc::clone(&before));
         assert_eq!(ra.as_ref(), before.as_ref());
@@ -490,7 +490,7 @@ mod tests {
 
     // ── ASAP nodes ──────────────────────────────────────────────────────
 
-    fn summary_agg(alpha: f64, guarantee: Option<ResultGuarantee>) -> Rc<OperatorNode> {
+    fn summary_agg(alpha: f64, guarantee: Option<AccuracyGuarantee>) -> Rc<OperatorNode> {
         let family = FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
             GroupingStrategy::default(),
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn asap_nodes_share_without_a_unique_key() {
-        let exact = || Some(ResultGuarantee::exact("fixture"));
+        let exact = || Some(AccuracyGuarantee::exact("fixture"));
         let (ra, rb) = two_roots(summary_agg(0.01, exact()), summary_agg(0.01, exact()));
         assert!(Rc::ptr_eq(&ra, &rb));
         assert!(ra.guarantee.is_some());
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn asap_nodes_with_distinct_parameters_or_guarantees_are_not_shared() {
-        let exact = || Some(ResultGuarantee::exact("fixture"));
+        let exact = || Some(AccuracyGuarantee::exact("fixture"));
         let (ra, rb) = two_roots(summary_agg(0.01, exact()), summary_agg(0.001, exact()));
         assert!(!Rc::ptr_eq(&ra, &rb), "different sketch parameters");
         let (ra, rb) = two_roots(summary_agg(0.01, exact()), summary_agg(0.01, None));

@@ -5,7 +5,7 @@ pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
-) -> Option<ResultGuarantee> {
+) -> Option<AccuracyGuarantee> {
     let (SketchParams::Kmv { k } | SketchParams::Theta { k }) = params else {
         return None;
     };

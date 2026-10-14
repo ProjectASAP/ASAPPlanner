@@ -125,7 +125,7 @@ pub trait AccuracyEvidenceProvider {
     /// shows the output meets it. Stage 1 composition never reads it: root
     /// guarantees there come from the built-in theoretical model. `None`
     /// means no evidence.
-    fn output_guarantee(&self, _output: &QueryRoot) -> Option<ResultGuarantee> {
+    fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
         None
     }
 

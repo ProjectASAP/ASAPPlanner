@@ -5,7 +5,7 @@ pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
-) -> Option<ResultGuarantee> {
+) -> Option<AccuracyGuarantee> {
     let SketchParams::DDSketch { alpha } = params else {
         return None;
     };
