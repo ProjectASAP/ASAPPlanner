@@ -270,16 +270,8 @@ impl ASAPOp {
                 {
                     dtype = DataType::Float64;
                 }
-                // A filtered quantile is NULL for a group without a matching
-                // row, as the filtered aggregate it realizes is.
                 let nullable = matches!(query, SketchStatistic::Quantile { .. })
-                    && matches!(
-                        summary_input.asap(),
-                        Some(SummaryAgg {
-                            filter: Some(_),
-                            ..
-                        })
-                    );
+                    && quantile_may_be_empty(summary_input);
                 let mut schema = input.clone();
                 for field in &mut schema.fields {
                     if !field.is_plain() {
@@ -652,5 +644,44 @@ fn source_kind(node: &OperatorNode) -> OperatorResultKind {
             OperatorResultKind::State => OperatorResultKind::Relation,
             other => other,
         },
+    }
+}
+
+/// Whether a quantile read from `state` can have no value to rank, and so is
+/// NULL as the SQL aggregate it realizes is: the `SummaryAgg` under it (seen
+/// through `SummaryMerge`) is filtered, or, over a relation, is global (zero
+/// rows give one empty state) or summarizes a nullable column (a group of
+/// NULLs gives an empty state).
+fn quantile_may_be_empty(state: &OperatorNode) -> bool {
+    match state.asap() {
+        Some(ASAPOp::SummaryMerge { children }) => {
+            children.iter().any(|child| quantile_may_be_empty(child))
+        }
+        Some(ASAPOp::SummaryAgg {
+            child,
+            input,
+            reduction,
+            filter,
+            ..
+        }) => {
+            if filter.is_some() {
+                return true;
+            }
+            if child.result_kind != OperatorResultKind::Relation {
+                return false;
+            }
+            let global = matches!(reduction, Reduction::Reduce(by) if by.keys().is_empty());
+            let nullable = match &input.weight {
+                crate::post_asap::sketch::SummaryInputExpr::Column(column) => {
+                    crate::pre_asap::resolve_column_ref(column, &child.schema)
+                        .ok()
+                        .and_then(|index| child.schema.fields.get(index))
+                        .is_some_and(|field| field.nullable)
+                }
+                _ => false,
+            };
+            global || nullable
+        }
+        _ => false,
     }
 }
