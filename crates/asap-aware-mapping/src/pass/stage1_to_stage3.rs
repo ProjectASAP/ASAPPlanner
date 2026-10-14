@@ -193,10 +193,11 @@ pub fn stage1_logical_asap_optimization<Id: Clone>(
             let roots = compose_logical_candidate(per_computation, &this)
                 .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
             let (groups, variants) = match &roots {
-                Ok(roots) => (
-                    crate::asap_aware_cse::sharing_groups(roots),
-                    identical_expression_variants(roots),
-                ),
+                Ok(roots) => {
+                    let groups = crate::asap_aware_cse::sharing_groups(roots);
+                    let variants = identical_expression_variants(roots, &groups);
+                    (groups, variants)
+                }
                 Err(_) => (Vec::new(), Vec::new()),
             };
             let from = position + queue.len();
@@ -210,7 +211,7 @@ pub fn stage1_logical_asap_optimization<Id: Clone>(
                 let shared: Vec<String> = variant
                     .shared_groups
                     .iter()
-                    .map(|&g| groups[g].nodes[0].operator.kind_name().to_string())
+                    .map(|&g| format!("{} #{}", groups[g].nodes[0].operator.kind_name(), g + 1))
                     .collect();
                 queue.push_back(Stage1Candidate {
                     display_name: format!("{display_name} · shared {}", shared.join(", ")),
