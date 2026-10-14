@@ -9,8 +9,8 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::accuracy::{
-    AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
-    QuantileInputDomain,
+    AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, OperandDomain,
+    PropagationStats,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{retain_exact, RealizationError};
@@ -1216,8 +1216,8 @@ struct FixtureQuantileDomain {
     upper: f64,
 }
 impl AccuracyEvidenceProvider for FixtureQuantileDomain {
-    fn quantile_input_domain(&self, _: &OperatorNode) -> Option<QuantileInputDomain> {
-        Some(QuantileInputDomain {
+    fn operand_domain(&self, _: &OperatorNode) -> Option<OperandDomain> {
+        Some(OperandDomain {
             lower: self.lower,
             upper: self.upper,
             max_samples: 1000,
@@ -1263,7 +1263,7 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
 fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
     struct PartialUnsafeDomain;
     impl AccuracyEvidenceProvider for PartialUnsafeDomain {
-        fn quantile_input_domain(&self, operand: &OperatorNode) -> Option<QuantileInputDomain> {
+        fn operand_domain(&self, operand: &OperatorNode) -> Option<OperandDomain> {
             let Some(NonASAPOp::Aggregate { measures, .. }) = operand.non_asap() else {
                 return None;
             };
@@ -1271,7 +1271,7 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
                 measures.as_slice(),
                 [asap_types::pre_asap::agg_intent::AggIntent::Quantile { q, .. }] if *q == 0.9
             )
-            .then(|| QuantileInputDomain {
+            .then(|| OperandDomain {
                 lower: -1.0,
                 upper: 1.0,
                 max_samples: 1000,
@@ -1367,8 +1367,8 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
 fn ddsketch_ratio_requires_a_supported_population_size() {
     struct PopulationEvidence(u64);
     impl AccuracyEvidenceProvider for PopulationEvidence {
-        fn quantile_input_domain(&self, _: &OperatorNode) -> Option<QuantileInputDomain> {
-            Some(QuantileInputDomain {
+        fn operand_domain(&self, _: &OperatorNode) -> Option<OperandDomain> {
+            Some(OperandDomain {
                 lower: 1.,
                 upper: 10.,
                 max_samples: self.0,

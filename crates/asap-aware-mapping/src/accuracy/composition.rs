@@ -1,5 +1,65 @@
 //! Registered propagation rules for computations over uncertain inputs.
+//! Stage 1 composes each candidate's guarantees with them
+//! (`per_computation_candidates`); a rule that needs a statistic leaves an
+//! `Unknown` leaf named by one of the constants below, which Stage 3 binds.
 use super::*;
+
+/// Rows an exact aggregation folds (per group): bounded by the data
+/// workload's input cardinality.
+pub(crate) const INPUT_ROW_COUNT: &str = "input_row_count";
+/// Rows one group of a SQL fold over an approximate relation folds: not
+/// bounded by the data workload's input cardinality, so plan selection
+/// leaves it unbound.
+pub(crate) const GROUP_ROW_COUNT: &str = "group_row_count";
+/// Whether every input value is non-negative.
+pub(crate) const VALUES_NON_NEGATIVE: &str = "values_non_negative";
+/// The relative bound of a quantile ratio, given enforced operand domains
+/// (`OperandDomain`).
+pub(crate) const DIVISION_OPERAND_DOMAINS: &str = "division_operand_domains";
+/// The absolute bound of a product of two estimates,
+/// `|x|·e_y + |y|·e_x + e_x·e_y`, given enforced operand domains.
+pub(crate) const PRODUCT_OPERAND_DOMAINS: &str = "product_operand_domains";
+/// The absolute bound of a quotient with an approximate denominator,
+/// `(|x|·e_y + |y|·e_x) / (|y|·(|y| − e_y))`, given enforced operand domains
+/// with the denominator's bounded away from zero.
+pub(crate) const QUOTIENT_OPERAND_DOMAINS: &str = "quotient_operand_domains";
+/// `‖f‖₁` of the stream a Count-Min bound is normalized by.
+pub(crate) const STREAM_L1_NORM: &str = "stream_l1_norm";
+/// `‖f‖₂` of the stream a Count Sketch bound is normalized by.
+pub(crate) const STREAM_L2_NORM: &str = "stream_l2_norm";
+/// Rows of one source's stream a summary folds: with a constant update
+/// weight `c`, `‖f‖₁ = |c| · rows` and `‖f‖₂ ≤ ‖f‖₁`.
+pub(crate) const STREAM_ROW_COUNT: &str = "stream_row_count";
+
+/// Which stream norm bounds a Count-Min or Count Sketch estimate, given its
+/// summary's update weight.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StreamNorm {
+    /// The weight is the source's raw value column: the source's norm
+    /// ([`source_norm_statistic`]).
+    Source(String),
+    /// A constant weight (a count): `|weight|` times the source's row count.
+    ConstantWeight { weight: f64, source: String },
+}
+
+/// The statistic for `norm` ([`STREAM_L1_NORM`] or [`STREAM_L2_NORM`]) of
+/// one source's stream, e.g. `stream_l1_norm[m]`.
+pub(crate) fn source_norm_statistic(norm: &str, source: &str) -> String {
+    format!("{norm}[{source}]")
+}
+
+/// The norm and source a [`source_norm_statistic`] names.
+pub(crate) fn parse_source_norm_statistic(statistic: &str) -> Option<(&'static str, &str)> {
+    [STREAM_L1_NORM, STREAM_L2_NORM]
+        .into_iter()
+        .find_map(|norm| {
+            let source = statistic
+                .strip_prefix(norm)?
+                .strip_prefix('[')?
+                .strip_suffix(']')?;
+            Some((norm, source))
+        })
+}
 
 impl DefaultAccuracyModel {
     fn additive(
@@ -115,6 +175,9 @@ impl DefaultAccuracyModel {
         inputs: &[ResultGuarantee],
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
+        if all_relative(inputs) {
+            return Self::relative_fold(op, inputs, stats, true, "exact_sum_relative");
+        }
         let mut terms = Vec::with_capacity(inputs.len());
         let mut deltas = Vec::with_capacity(inputs.len());
         let mut provenance = Vec::new();
@@ -172,6 +235,9 @@ impl DefaultAccuracyModel {
         inputs: &[ResultGuarantee],
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
+        if all_relative(inputs) {
+            return Self::relative_fold(op, inputs, stats, true, "exact_average_relative");
+        }
         if inputs
             .iter()
             .any(|input| input.metric != ErrorMetric::AbsoluteValue)
@@ -220,6 +286,9 @@ impl DefaultAccuracyModel {
         inputs: &[ResultGuarantee],
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
+        if all_relative(inputs) {
+            return Self::relative_fold(op, inputs, stats, false, "exact_extremum_relative");
+        }
         let metric = inputs[0].metric;
         if inputs
             .iter()
@@ -246,6 +315,63 @@ impl DefaultAccuracyModel {
             bound: BoundExpr::Max {
                 terms: inputs.iter().map(|g| g.bound.clone()).collect(),
             },
+            failure_probability: ProbabilityExpr::Scaled {
+                count,
+                inner: Box::new(ProbabilityExpr::UnionBound {
+                    terms: inputs
+                        .iter()
+                        .map(|g| g.failure_probability.clone())
+                        .collect(),
+                }),
+            },
+            provenance,
+        })
+    }
+
+    /// An exact sum, mean, max or min of values each within relative `α_i`
+    /// is within relative `max α_i`. A max or min holds whatever the signs;
+    /// a sum or mean only over non-negative values (no cancellation), so
+    /// with `needs_sign` and the sign unknown the bound is the symbolic
+    /// [`VALUES_NON_NEGATIVE`]. The failure probability is the union bound
+    /// over every input row.
+    fn relative_fold(
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        stats: &PropagationStats,
+        needs_sign: bool,
+        rule: &str,
+    ) -> Result<ResultGuarantee, AccuracyError> {
+        if needs_sign && stats.values_non_negative == Some(false) {
+            return Err(AccuracyError::UnsupportedComposition {
+                operator: op.clone(),
+                input_metrics: inputs.iter().map(|g| g.metric).collect(),
+                local_metric: None,
+                reason: "relative error of a sum over signed values is unbounded".into(),
+            });
+        }
+        let mut provenance = Vec::new();
+        let count = row_count(stats, &mut provenance);
+        let bound = if needs_sign && stats.values_non_negative.is_none() {
+            provenance.push(GuaranteeSource::UnavailableStatistic {
+                statistic: VALUES_NON_NEGATIVE.into(),
+            });
+            BoundExpr::Unknown {
+                statistic: VALUES_NON_NEGATIVE.into(),
+            }
+        } else {
+            BoundExpr::Max {
+                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+            }
+        };
+        provenance.extend(composed_provenance(
+            op,
+            inputs,
+            &ResultGuarantee::exact("exact aggregation"),
+            rule,
+        ));
+        Ok(ResultGuarantee {
+            metric: ErrorMetric::RelativeValue,
+            bound,
             failure_probability: ProbabilityExpr::Scaled {
                 count,
                 inner: Box::new(ProbabilityExpr::UnionBound {
@@ -382,19 +508,98 @@ impl DefaultAccuracyModel {
     }
 }
 
-/// `stats.input_row_count` as a bound factor, or an `Unknown` leaf (recorded
-/// in `provenance`) when absent.
+/// Every input carries a relative-value guarantee.
+fn all_relative(inputs: &[ResultGuarantee]) -> bool {
+    !inputs.is_empty()
+        && inputs
+            .iter()
+            .all(|g| g.metric == ErrorMetric::RelativeValue)
+}
+
+/// `stats.input_row_count` as a bound factor, or an `Unknown` leaf named by
+/// `stats.row_count_statistic` (recorded in `provenance`) when absent.
 fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) -> BoundExpr {
     match stats.input_row_count {
         Some(n) => BoundExpr::Constant { value: n as f64 },
         None => {
+            let statistic = stats.row_count_statistic.unwrap_or(INPUT_ROW_COUNT);
             provenance.push(GuaranteeSource::UnavailableStatistic {
-                statistic: "input_row_count".into(),
+                statistic: statistic.into(),
             });
             BoundExpr::Unknown {
-                statistic: "input_row_count".into(),
+                statistic: statistic.into(),
             }
         }
+    }
+}
+
+/// `input` with a Count-Min ([`ErrorMetric::Frequency`]) or Count Sketch
+/// ([`ErrorMetric::L2Frequency`]) bound restated as an additive absolute
+/// error: the normalized bound times its stream norm, a symbolic statistic
+/// until bound. The norm is the one `norm` names ([`StreamNorm`]), which
+/// plan selection can bind; without one (a weight computed from the
+/// values) it is a statistic nothing binds. Any other guarantee is
+/// returned unchanged.
+pub(crate) fn additive_as_absolute(
+    input: ResultGuarantee,
+    norm: Option<&StreamNorm>,
+) -> ResultGuarantee {
+    if !matches!(
+        input.metric,
+        ErrorMetric::Frequency | ErrorMetric::L2Frequency
+    ) || input.is_exact()
+    {
+        return input;
+    }
+    let mut bound = absolute_bound(&input).expect("additive metrics convert to absolute errors");
+    if let (Some(norm), BoundExpr::Product { factors }) = (norm, &mut bound) {
+        for factor in factors {
+            if let BoundExpr::Unknown { statistic } = factor {
+                *factor = match norm {
+                    StreamNorm::Source(source) => BoundExpr::Unknown {
+                        statistic: source_norm_statistic(statistic, source),
+                    },
+                    StreamNorm::ConstantWeight { weight, source } => BoundExpr::Product {
+                        factors: vec![
+                            BoundExpr::Constant {
+                                value: weight.abs(),
+                            },
+                            BoundExpr::Unknown {
+                                statistic: source_norm_statistic(STREAM_ROW_COUNT, source),
+                            },
+                        ],
+                    },
+                };
+            }
+        }
+    }
+    let mut provenance = input.provenance;
+    unknown_statistics(&bound, &mut |statistic| {
+        provenance.push(GuaranteeSource::UnavailableStatistic {
+            statistic: statistic.into(),
+        })
+    });
+    ResultGuarantee {
+        metric: ErrorMetric::AbsoluteValue,
+        bound,
+        provenance,
+        ..input
+    }
+}
+
+/// Every `Unknown` statistic in `bound`.
+fn unknown_statistics(bound: &BoundExpr, found: &mut dyn FnMut(&str)) {
+    match bound {
+        BoundExpr::Unknown { statistic } => found(statistic),
+        BoundExpr::Sum { terms }
+        | BoundExpr::Product { factors: terms }
+        | BoundExpr::Max { terms } => {
+            for term in terms {
+                unknown_statistics(term, found);
+            }
+        }
+        BoundExpr::Scaled { inner, .. } => unknown_statistics(inner, found),
+        _ => {}
     }
 }
 
@@ -406,8 +611,8 @@ fn absolute_bound(input: &ResultGuarantee) -> Option<BoundExpr> {
         ErrorMetric::AbsoluteValue => return Some(input.bound.clone()),
         ErrorMetric::RelativeValue => "true_value_magnitude",
         ErrorMetric::Cardinality => "true_cardinality",
-        ErrorMetric::Frequency => "stream_l1_norm",
-        ErrorMetric::L2Frequency => "stream_l2_norm",
+        ErrorMetric::Frequency => STREAM_L1_NORM,
+        ErrorMetric::L2Frequency => STREAM_L2_NORM,
         // `Rank` has no distribution-free conversion to a value error; a
         // metric this crate does not know has no registered conversion.
         ErrorMetric::Rank | ErrorMetric::TopKMembership | _ => return None,
@@ -575,15 +780,15 @@ pub(super) fn propagate(
                         );
                         provenance.extend(stats.evidence_provenance.clone());
                         provenance.push(GuaranteeSource::UnavailableStatistic {
-                            statistic: "values_non_negative".into(),
+                            statistic: VALUES_NON_NEGATIVE.into(),
                         });
                         return Ok(ResultGuarantee {
                             metric: ErrorMetric::RelativeValue,
                             bound: BoundExpr::Unknown {
-                                statistic: "values_non_negative".into(),
+                                statistic: VALUES_NON_NEGATIVE.into(),
                             },
                             failure_probability: ProbabilityExpr::Unknown {
-                                statistic: "values_non_negative".into(),
+                                statistic: VALUES_NON_NEGATIVE.into(),
                             },
                             provenance,
                         });
@@ -705,6 +910,29 @@ pub(super) fn propagate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source-norm statistic names its norm and source, whatever
+    /// characters the source holds; any other statistic is not one.
+    #[test]
+    fn source_norm_statistics_round_trip() {
+        for source in ["m", "a[b]", "]x[", "t.c", ""] {
+            for norm in [STREAM_L1_NORM, STREAM_L2_NORM] {
+                let statistic = source_norm_statistic(norm, source);
+                assert_eq!(
+                    parse_source_norm_statistic(&statistic),
+                    Some((norm, source))
+                );
+            }
+        }
+        for other in [
+            INPUT_ROW_COUNT,
+            STREAM_L1_NORM,
+            "stream_l3_norm[m]",
+            "stream_l1_norm[m",
+        ] {
+            assert_eq!(parse_source_norm_statistic(other), None, "{other}");
+        }
+    }
     use asap_types::pre_asap::AggIntent;
     fn abs(bound: f64, delta: f64) -> ResultGuarantee {
         ResultGuarantee {
@@ -722,8 +950,8 @@ mod tests {
             provenance: vec![],
         }
     }
-    fn domain(lower: f64, upper: f64) -> QuantileInputDomain {
-        QuantileInputDomain {
+    fn domain(lower: f64, upper: f64) -> OperandDomain {
+        OperandDomain {
             lower,
             upper,
             max_samples: 1000,
@@ -1009,6 +1237,60 @@ mod tests {
             .unwrap();
         assert!((out.bound.evaluate().unwrap() - 0.3).abs() < 1e-12);
         assert!((out.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
+    }
+    /// `max`/`min` of values each within relative `α_i` is within relative
+    /// `max α_i` of the true extremum, whatever the signs.
+    #[test]
+    fn exact_extremum_keeps_a_relative_value_bound() {
+        let out = DefaultAccuracyModel
+            .propagate(
+                &CompositionOperator::ExactExtremum,
+                &[rel(0.01), rel(0.02)],
+                None,
+                &PropagationStats {
+                    input_row_count: Some(3),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(out.metric, ErrorMetric::RelativeValue);
+        assert_eq!(out.bound.evaluate(), Some(0.02));
+        assert_eq!(out.failure_probability.evaluate(), Some(0.0));
+    }
+    /// A sum or mean of relative-error values keeps the relative bound only
+    /// over values known non-negative (cancellation otherwise); with the sign
+    /// unknown, the bound stays symbolic, and a known sign change rejects.
+    #[test]
+    fn exact_sum_and_average_keep_a_relative_bound_only_without_a_sign_change() {
+        for op in [
+            CompositionOperator::ExactSum,
+            CompositionOperator::ExactAverage,
+        ] {
+            let with = |values_non_negative| {
+                DefaultAccuracyModel.propagate(
+                    &op,
+                    &[rel(0.01)],
+                    None,
+                    &PropagationStats {
+                        values_non_negative,
+                        input_row_count: Some(3),
+                        ..Default::default()
+                    },
+                )
+            };
+            let known = with(Some(true)).unwrap();
+            assert_eq!(known.metric, ErrorMetric::RelativeValue);
+            assert_eq!(known.bound.evaluate(), Some(0.01), "{op:?}");
+            let unknown = with(None).unwrap();
+            assert_eq!(unknown.metric, ErrorMetric::RelativeValue);
+            assert_eq!(
+                unknown.bound,
+                BoundExpr::Unknown {
+                    statistic: VALUES_NON_NEGATIVE.into()
+                }
+            );
+            assert!(with(Some(false)).is_err(), "{op:?}");
+        }
     }
     #[test]
     fn exact_average_has_its_own_absolute_error_rule() {

@@ -11,21 +11,25 @@ pub enum EstimatorContract {
     ClassicHll { max_distinct_per_evaluation: u32 },
 }
 
-/// An enforced domain for every sample of a direct quantile operand, in every
-/// evaluation window. The provider promises a nonempty population containing
-/// only finite values in this interval. Sampled min/max statistics are not a
-/// proof: the contract must be enforced by the source or execution layer.
+/// An enforced domain for the true values of one operand of an exact
+/// arithmetic operation, in every evaluation: they are finite and lie in
+/// `[lower, upper]`. Plan selection uses it to bound a product or quotient
+/// of estimates; for a quantile operand of a ratio (one use) it also
+/// promises a nonempty sample population in this interval, which the
+/// DDSketch ratio rule needs. Sampled min/max statistics are not a proof:
+/// the contract must be enforced by the source or execution layer.
 #[derive(Debug, Clone, PartialEq)]
-pub struct QuantileInputDomain {
+pub struct OperandDomain {
     pub lower: f64,
     pub upper: f64,
     /// Upper bound on samples per evaluation, matching the pinned evaluation's
-    /// exact Float64 rank limit. The population must also be nonempty.
+    /// exact Float64 rank limit; the population must also be nonempty. Only
+    /// the quantile ratio rule reads it.
     pub max_samples: u64,
     pub contract: String,
 }
 
-impl QuantileInputDomain {
+impl OperandDomain {
     pub(crate) fn supports_ddsketch(&self, alpha: f64) -> bool {
         if !alpha.is_finite()
             || alpha <= 0.0
@@ -55,7 +59,7 @@ impl QuantileInputDomain {
 pub struct PropagationStats {
     /// Certified finite ranges for the true numerator and denominator values.
     /// Quantile ratios obtain these from their enforced input domains.
-    pub division_operand_domains: Option<[QuantileInputDomain; 2]>,
+    pub division_operand_domains: Option<[OperandDomain; 2]>,
     /// Provenance for supplied evidence (source, observation identity, etc.).
     pub evidence_provenance: Vec<GuaranteeSource>,
     /// Whether every input value is known to be non-negative — required by
@@ -66,6 +70,10 @@ pub struct PropagationStats {
     /// of groups a function folds), for exact aggregate union bounds
     /// bound over per-input failures.
     pub input_row_count: Option<u64>,
+    /// The statistic an unknown row count is named by (default
+    /// `input_row_count`), so a fold whose rows the data workload's input
+    /// cardinality does not bound can leave a statistic nothing binds.
+    pub row_count_statistic: Option<&'static str>,
     /// Fresh key-frequency distribution evidence from the data workload.
     /// Built-in rules preserve it for deployment-specific accuracy models;
     /// they do not assume a favorable distribution when it is absent.
@@ -101,9 +109,12 @@ pub trait AccuracyEvidenceProvider {
         None
     }
 
-    /// Proof scoped to this complete quantile expression, including its source,
-    /// filters, grouping and window. `None` means unknown, including emptiness.
-    fn quantile_input_domain(&self, _operand: &OperatorNode) -> Option<QuantileInputDomain> {
+    /// Enforced domain of `operand`'s true values ([`OperandDomain`]), scoped
+    /// to this complete expression, including its source, filters, grouping
+    /// and window: a quantile ratio's operands, or the operands of a
+    /// product or quotient of estimates. `None` means unknown, including
+    /// emptiness.
+    fn operand_domain(&self, _operand: &OperatorNode) -> Option<OperandDomain> {
         None
     }
 

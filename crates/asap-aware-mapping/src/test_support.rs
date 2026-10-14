@@ -211,3 +211,72 @@ pub(crate) fn time_and_export(
     )?;
     asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
 }
+
+/// The Count-Min summary of a Stage 1 candidate of `query`.
+pub(crate) fn cms_summary(query: &str) -> OperatorNode {
+    use asap_types::ir::{ASAPOp, QueryRoot};
+    use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.01,
+        delta: 0.01,
+    };
+    let root = lower_promql(query, target.clone());
+    let run = crate::pass::run_stage1_to_stage3(
+        vec![(0, QueryRoot::Operator(root))],
+        &[Some(target)],
+        &DataWorkload::default(),
+        crate::PlanningModels::builtin(),
+    )
+    .unwrap();
+    run.stage1_logical_asap_optimization
+        .into_iter()
+        .filter_map(|candidate| candidate.roots.ok())
+        .flat_map(|roots| match &roots[0] {
+            QueryRoot::Operator(node) => OperatorNode::reachable(node),
+            QueryRoot::Scalar(_) => vec![],
+        })
+        .find(|node| {
+            matches!(
+                node.asap(),
+                Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) if *kind.algorithm() == SketchAlgorithm::Cms
+            )
+        })
+        .map(|node| (*node).clone())
+        .unwrap_or_else(|| panic!("{query}: a Count-Min summary"))
+}
+
+/// `summary` with its update weight replaced by `weight`.
+pub(crate) fn weighted(
+    mut summary: OperatorNode,
+    weight: asap_types::post_asap::SummaryInputExpr,
+) -> Rc<OperatorNode> {
+    use asap_types::ir::{ASAPOp, Operator};
+    if let Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) = &mut summary.operator {
+        input.weight = weight;
+    }
+    Rc::new(summary)
+}
+
+/// A point-count estimate over `summary` carrying `guarantee`.
+pub(crate) fn estimate_over(
+    summary: Rc<OperatorNode>,
+    guarantee: asap_types::post_asap::ResultGuarantee,
+) -> Rc<OperatorNode> {
+    use asap_types::ir::{ASAPOp, Operator};
+    use asap_types::post_asap::SketchStatistic;
+    use asap_types::pre_asap::ColumnRef;
+    Rc::new(
+        OperatorNode::new(Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: summary,
+            query: SketchStatistic::PointCount {
+                key: ColumnRef::SampleValue,
+                value: None,
+            },
+        }))
+        .unwrap()
+        .with_guarantee(Some(guarantee)),
+    )
+}

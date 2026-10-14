@@ -129,6 +129,26 @@ impl BoundExpr {
         }
     }
 
+    /// See [`ResultGuarantee::bind`].
+    pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
+        let all = |terms: &[BoundExpr]| terms.iter().map(|t| t.bind(value)).collect();
+        match self {
+            BoundExpr::Zero | BoundExpr::Constant { .. } => self.clone(),
+            BoundExpr::Sum { terms } => BoundExpr::Sum { terms: all(terms) },
+            BoundExpr::Product { factors } => BoundExpr::Product {
+                factors: all(factors),
+            },
+            BoundExpr::Max { terms } => BoundExpr::Max { terms: all(terms) },
+            BoundExpr::Scaled { factor, inner } => BoundExpr::Scaled {
+                factor: *factor,
+                inner: Box::new(inner.bind(value)),
+            },
+            BoundExpr::Unknown { statistic } => {
+                value(statistic).map_or_else(|| self.clone(), |value| BoundExpr::Constant { value })
+            }
+        }
+    }
+
     /// Whether evaluation depends on a statistic not yet supplied.
     pub fn has_unknown(&self) -> bool {
         match self {
@@ -248,6 +268,22 @@ impl ProbabilityExpr {
         raw.is_finite().then(|| raw.clamp(0.0, 1.0))
     }
 
+    /// See [`ResultGuarantee::bind`].
+    pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
+        match self {
+            ProbabilityExpr::Zero | ProbabilityExpr::Constant { .. } => self.clone(),
+            ProbabilityExpr::UnionBound { terms } => ProbabilityExpr::UnionBound {
+                terms: terms.iter().map(|t| t.bind(value)).collect(),
+            },
+            ProbabilityExpr::Scaled { count, inner } => ProbabilityExpr::Scaled {
+                count: count.bind(value),
+                inner: Box::new(inner.bind(value)),
+            },
+            ProbabilityExpr::Unknown { statistic } => value(statistic)
+                .map_or_else(|| self.clone(), |value| ProbabilityExpr::Constant { value }),
+        }
+    }
+
     /// `true` iff this probability is structurally zero.
     pub fn is_zero(&self) -> bool {
         match self {
@@ -293,6 +329,11 @@ pub enum CompositionOperator {
     /// `(a + b) / (1 - b)`, requiring finite operand domains, a nonzero
     /// denominator, and representable true and estimated quotients.
     ExactDivision,
+    /// Exact multiplication of two estimates. For absolute errors `e_x`,
+    /// `e_y` the output bound is `|x|·e_y + |y|·e_x + e_x·e_y`, requiring
+    /// finite operand domains; for relative errors `a`, `b` it is
+    /// `(1 + a)(1 + b) − 1`.
+    ExactProduct,
     /// PromQL `rate`: reset correction plus range-boundary extrapolation.
     CounterRate,
     /// PromQL `irate`: reset-aware slope over the final two samples.
@@ -383,6 +424,18 @@ pub struct ResultGuarantee {
 }
 
 impl ResultGuarantee {
+    /// This guarantee with every [`BoundExpr::Unknown`] (and
+    /// [`ProbabilityExpr::Unknown`]) leaf whose statistic `value` supplies
+    /// replaced by that value. Plan selection binds statistics this way;
+    /// a statistic `value` does not supply stays unknown.
+    pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
+        Self {
+            bound: self.bound.bind(value),
+            failure_probability: self.failure_probability.bind(value),
+            ..self.clone()
+        }
+    }
+
     /// Optimistic lower bound used only to reject an impossible target.
     /// Replacing unknown non-negative contributions by zero cannot certify
     /// this candidate; the original guarantee remains unresolved.
@@ -601,5 +654,30 @@ mod tests {
         assert_eq!(json["bound"]["op"], "sum");
         let back: ResultGuarantee = serde_json::from_value(json).unwrap();
         assert_eq!(back, g);
+    }
+
+    /// A supplied statistic replaces its `Unknown` leaves, in the bound and
+    /// in the failure probability; any other statistic stays unknown.
+    #[test]
+    fn binding_a_statistic_replaces_only_its_unknown_leaves() {
+        let rows = || BoundExpr::Unknown {
+            statistic: "input_row_count".into(),
+        };
+        let g = ResultGuarantee {
+            metric: ErrorMetric::AbsoluteValue,
+            bound: BoundExpr::Product {
+                factors: vec![BoundExpr::Constant { value: 0.01 }, rows()],
+            },
+            failure_probability: ProbabilityExpr::Scaled {
+                count: rows(),
+                inner: Box::new(ProbabilityExpr::Constant { value: 1e-4 }),
+            },
+            provenance: vec![],
+        };
+        let bound = g.bind(&|statistic| (statistic == "input_row_count").then_some(10.0));
+        assert_eq!(bound.bound.evaluate(), Some(0.1));
+        assert!((bound.failure_probability.evaluate().unwrap() - 1e-3).abs() < 1e-12);
+        let unbound = g.bind(&|_| None);
+        assert_eq!(unbound, g);
     }
 }

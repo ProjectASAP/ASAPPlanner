@@ -1978,8 +1978,8 @@ fn realize_binary(
             .and_then(ddsketch_ratio_operand_target)
         {
             let (alpha, _) = accuracy_budget(&target);
-            let lhs_domain = planning_inputs.evidence.quantile_input_domain(lhs);
-            let rhs_domain = planning_inputs.evidence.quantile_input_domain(rhs);
+            let lhs_domain = planning_inputs.evidence.operand_domain(lhs);
+            let rhs_domain = planning_inputs.evidence.operand_domain(rhs);
             if [&lhs_domain, &rhs_domain]
                 .into_iter()
                 .flatten()
@@ -7211,11 +7211,8 @@ mod tests {
     fn bounded_mean_quantile_ratio_is_certified() {
         struct Domain;
         impl AccuracyEvidenceProvider for Domain {
-            fn quantile_input_domain(
-                &self,
-                _: &OperatorNode,
-            ) -> Option<crate::accuracy::QuantileInputDomain> {
-                Some(crate::accuracy::QuantileInputDomain {
+            fn operand_domain(&self, _: &OperatorNode) -> Option<crate::accuracy::OperandDomain> {
+                Some(crate::accuracy::OperandDomain {
                     lower: 1.0,
                     upper: 1000.0,
                     max_samples: 10000,

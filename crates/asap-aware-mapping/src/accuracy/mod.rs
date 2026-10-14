@@ -16,8 +16,8 @@ pub use allocation::{
 };
 pub(crate) use estimators::EstimatorAccuracy;
 pub use evidence::{
-    AccuracyEvidenceProvider, EstimatorContract, NoAccuracyEvidence, PropagationStats,
-    QuantileInputDomain, WorkloadAccuracyEvidence,
+    AccuracyEvidenceProvider, EstimatorContract, NoAccuracyEvidence, OperandDomain,
+    PropagationStats, WorkloadAccuracyEvidence,
 };
 
 use asap_types::ir::OperatorNode;
