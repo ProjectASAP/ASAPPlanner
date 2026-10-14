@@ -799,7 +799,7 @@ fn price(
                     rows: group_count,
                     bytes: group_count * state_bytes,
                 };
-                let ops = input.rows as f64 * depth as f64;
+                let ops = input.rows as f64 * depth;
                 (
                     out,
                     Ok(ResourceEstimate::new(ops, out.bytes, 0)),
@@ -908,13 +908,15 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// - UnivMon: per layer, a `rows × cols` Count-Sketch of 8-byte counters and
 ///   a heap of `heap_size` 24-byte entries.
 ///
-/// Update operations stay 1 per row for every sketch but Count-Min and
-/// Count-Sketch, which update one counter per row of depth.
-fn summary_shape(family: &FieldDataType) -> (u64, u64) {
+/// Update operations per input row: one counter per row of depth for
+/// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
+/// for UnivMon, the same per layer it updates ([`univmon_expected_layers`]);
+/// 1 for every other sketch.
+fn summary_shape(family: &FieldDataType) -> (f64, u64) {
     match family {
         FieldDataType::Sketch(kind, _) => match kind.params() {
             SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
-                (u64::from(*depth), 8 * u64::from(*width) * u64::from(*depth))
+                (f64::from(*depth), 8 * u64::from(*width) * u64::from(*depth))
             }
             SketchParams::CmsWithHeap {
                 width,
@@ -926,27 +928,36 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
                 depth,
                 heap_size,
             } => (
-                u64::from(*depth) + 1,
+                f64::from(*depth) + 1.0,
                 8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
             ),
-            SketchParams::Kll { k, .. } => (1, 8 * 3 * u64::from(*k)),
-            SketchParams::DDSketch { alpha } => (1, ddsketch_bins(*alpha).saturating_mul(8)),
-            SketchParams::Hll { precision } => (1, 1u64 << (*precision).min(63)),
-            SketchParams::Kmv { k } | SketchParams::Theta { k } => (1, 8 * u64::from(*k)),
+            SketchParams::Kll { k, .. } => (1.0, 8 * 3 * u64::from(*k)),
+            SketchParams::DDSketch { alpha } => (1.0, ddsketch_bins(*alpha).saturating_mul(8)),
+            SketchParams::Hll { precision } => (1.0, 1u64 << (*precision).min(63)),
+            SketchParams::Kmv { k } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
             SketchParams::UnivMon {
                 heap_size,
                 sketch_rows,
                 sketch_cols,
                 layers,
             } => (
-                1,
+                univmon_expected_layers(*layers) * (f64::from(*sketch_rows) + 1.0),
                 u64::from(*layers)
                     * (8 * u64::from(*sketch_rows) * u64::from(*sketch_cols)
                         + 24 * u64::from(*heap_size)),
             ),
         },
-        _ => (1, 8),
+        _ => (1.0, 8),
     }
+}
+
+/// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
+/// layers `0..=b`, with bottom layer `b` the index of the first zero among
+/// hash bits `1..layers`, capped at `layers - 1`; so it reaches layer `j`
+/// with probability `2^-j`, and the expectation is
+/// `sum_{j < layers} 2^-j = 2 - 2^(1 - layers)`.
+fn univmon_expected_layers(layers: u8) -> f64 {
+    2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
 }
 
 /// Ratio of the largest to the smallest positive value a DDSketch is assumed
@@ -1427,6 +1438,32 @@ mod tests {
             ),
             16 * (8 * 5 * 1_024 + 24 * 256)
         );
+    }
+
+    /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is
+    /// geometric (`asap_sketchlib`'s `bottom_layer_for_hash`), so
+    /// `2 - 2^(1 - layers)` layers in expectation; each updates one counter
+    /// per sketch row and its heap.
+    #[test]
+    fn univmon_update_cost_is_expected_layers_times_rows_and_heap() {
+        let ops = |layers| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::UnivMon,
+                    SketchParams::UnivMon {
+                        heap_size: 256,
+                        sketch_rows: 5,
+                        sketch_cols: 1_024,
+                        layers,
+                    },
+                ),
+                GroupingStrategy::default(),
+            ))
+            .0
+        };
+        assert_eq!(ops(1), 6.0);
+        assert_eq!(ops(2), 1.5 * 6.0);
+        assert_eq!(ops(16), (2.0 - 2f64.powi(-15)) * 6.0);
     }
 
     /// Exact distinct-count state keeps every item of its group: over 10 000
