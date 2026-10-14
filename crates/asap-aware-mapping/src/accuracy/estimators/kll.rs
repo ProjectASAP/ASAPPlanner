@@ -2,6 +2,7 @@
 //! and, below a 0.01 failure probability, that calibration scaled by the KLL
 //! bound's dependence on the failure probability.
 use super::*;
+use asap_types::post_asap::sketch::KLL_MAX_K;
 
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
@@ -15,6 +16,9 @@ pub(super) fn guarantee(
     else {
         return None;
     };
+    if *k > KLL_MAX_K {
+        return None;
+    }
     let delta = failure_probability.unwrap_or(KLL_CALIBRATED_FAILURE_PROBABILITY);
     let scale = delta_scale(delta)?;
     let contract = if delta < KLL_CALIBRATED_FAILURE_PROBABILITY {
@@ -49,12 +53,14 @@ pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
 }
 
 /// Invert Apache DataSketches' empirical 99th-percentile, single-sided KLL
-/// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`.
+/// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`. Capped at
+/// [`KLL_MAX_K`], the largest `k` `asap_sketchlib` builds; an `eps` that
+/// needs more gets that `k`, whose guarantee then misses the target.
 pub(crate) fn kll_k(eps: f64) -> u32 {
     saturating_ceil(
         (KLL_RANK_ERROR_COEFFICIENT_99 / eps).powf(1.0 / KLL_RANK_ERROR_EXPONENT_99),
         8,
-        65_535,
+        KLL_MAX_K,
     )
 }
 
@@ -180,6 +186,31 @@ mod tests {
             contract(0.001),
             "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b"
         );
+    }
+
+    /// `k` never exceeds the 26 602 `asap_sketchlib` silently caps it at, so
+    /// a guarantee never claims a larger `k` than runs.
+    #[test]
+    fn kll_k_is_capped_at_the_library_maximum() {
+        assert_eq!(kll_k(1e-6), KLL_MAX_K);
+        assert_eq!(KLL_MAX_K, 26_602);
+    }
+
+    /// A hand-built `k` above the library's cap gives no guarantee.
+    #[test]
+    fn a_k_above_the_library_cap_gives_no_guarantee() {
+        let g = |k| {
+            guarantee(
+                &SketchAlgorithm::Kll,
+                &SketchParams::Kll {
+                    k,
+                    failure_probability: None,
+                },
+                &SketchStatistic::Quantile { q: 0.99 },
+            )
+        };
+        assert!(g(KLL_MAX_K).is_some());
+        assert!(g(KLL_MAX_K + 1).is_none());
     }
 
     /// A hand-built failure probability outside (0, 1) gives no guarantee

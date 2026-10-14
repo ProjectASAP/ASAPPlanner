@@ -52,6 +52,7 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
 };
+use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::{
     CompositionOperator, ErrorMetric, FieldDataType, Materialization, ResultGuarantee,
     SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
@@ -898,8 +899,7 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// parameters as `asap_sketchlib` allocates it:
 /// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
 ///   24-byte entry per heap slot for the top-k variants;
-/// - KLL: at most about `3k` 8-byte items (its level capacities shrink
-///   geometrically by 2/3);
+/// - KLL: the 8-byte item array it allocates up front ([`kll_items`]);
 /// - DDSketch: one 8-byte count per bin it touches over an assumed nine
 ///   decades of values ([`ddsketch_bins`]);
 /// - HLL: one 1-byte register per bucket, `2^precision`;
@@ -931,7 +931,7 @@ fn summary_shape(family: &FieldDataType) -> (f64, u64) {
                 f64::from(*depth) + 1.0,
                 8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
             ),
-            SketchParams::Kll { k, .. } => (1.0, 8 * 3 * u64::from(*k)),
+            SketchParams::Kll { k, .. } => (1.0, 8 * kll_items(*k)),
             SketchParams::DDSketch { alpha } => (1.0, ddsketch_bins(*alpha).saturating_mul(8)),
             SketchParams::Hll { precision } => (1.0, 1u64 << (*precision).min(63)),
             SketchParams::Kmv { k } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
@@ -949,6 +949,23 @@ fn summary_shape(family: &FieldDataType) -> (f64, u64) {
         },
         _ => (1.0, 8),
     }
+}
+
+/// Items `asap_sketchlib`'s KLL allocates up front for `k`
+/// (`KLL::init_internal` → `compute_max_capacity(k, 8)`): over its 61 levels,
+/// `max(ceil(k · (2/3)^i), 8)` each, with `k` capped at [`KLL_MAX_K`] as the
+/// library caps it. 1,206 items at `k` = 269.
+fn kll_items(k: u32) -> u64 {
+    const LEVELS: usize = 61;
+    const MIN_LEVEL_CAPACITY: f64 = 8.0;
+    let k = f64::from(k.min(KLL_MAX_K));
+    let mut scale = 1.0_f64;
+    let mut total = 0;
+    for _ in 0..LEVELS {
+        total += (k * scale).ceil().max(MIN_LEVEL_CAPACITY) as u64;
+        scale *= 2.0 / 3.0;
+    }
+    total
 }
 
 /// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
@@ -1438,6 +1455,28 @@ mod tests {
             ),
             16 * (8 * 5 * 1_024 + 24 * 256)
         );
+    }
+
+    /// KLL state is the item array `asap_sketchlib` allocates up front:
+    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
+    #[test]
+    fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
+        let bytes = |k| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k,
+                        failure_probability: None,
+                    },
+                ),
+                GroupingStrategy::default(),
+            ))
+            .1
+        };
+        assert_eq!(bytes(269), 8 * 1_206);
+        assert_eq!(bytes(26_602), 8 * 80_118);
+        assert_eq!(bytes(30_000), 8 * 80_118);
     }
 
     /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is

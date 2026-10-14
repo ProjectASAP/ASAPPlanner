@@ -121,6 +121,37 @@ fn blocking_inputs_require_an_explicit_finite_source() {
     }
 }
 
+/// A KLL kernel accepts `k` only up to the 26 602 `asap_sketchlib` caps it at.
+#[test]
+fn kll_kernel_rejects_a_k_above_the_library_cap() {
+    use asap_physical_operators::capability::validate_summary_kernel;
+    use planner_types::post_asap::{
+        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryInputExpr,
+        SummaryUpdate,
+    };
+    use planner_types::pre_asap::ColumnRef;
+    let grouping = GroupingStrategy::default();
+    let update = SummaryUpdate {
+        item: None,
+        weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+        weight_domain: Default::default(),
+    };
+    let kll = |k| {
+        FieldDataType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k,
+                    failure_probability: None,
+                },
+            ),
+            grouping.clone(),
+        )
+    };
+    assert!(validate_summary_kernel(&kll(26_602), &update, &grouping).is_ok());
+    assert!(validate_summary_kernel(&kll(26_603), &update, &grouping).is_err());
+}
+
 // Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
