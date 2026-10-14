@@ -1,0 +1,23 @@
+[
+  {
+    "id": "example1",
+    "name": "1 · dashboard panels",
+    "example": "planner-layering-1",
+    "file": "out/example1.json",
+    "story": "Two PromQL panels over the last minute, every 10 s: Q1 the exact per-job request rate, Q2 the top-10 series per job within ε = 0.01, δ = 0.001 and 100 ms."
+  },
+  {
+    "id": "example3a",
+    "name": "3a · historical p99 batch",
+    "example": "planner-layering-3a",
+    "file": "out/example3a.json",
+    "story": "An ad hoc batch of five p99 reports over historical intervals of 1 to 5 years, run once."
+  },
+  {
+    "id": "example3b",
+    "name": "3b · live p99 panel",
+    "example": "planner-layering-3b",
+    "file": "out/example3b.json",
+    "story": "A p99 panel over the last 5 min, every minute, within 200 ms."
+  }
+]
