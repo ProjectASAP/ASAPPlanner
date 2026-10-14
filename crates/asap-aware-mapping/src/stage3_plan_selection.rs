@@ -59,7 +59,7 @@ use crate::accuracy::composition::{
     parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS, INPUT_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
-use crate::accuracy::{PropagationStats, QuantileInputDomain};
+use crate::accuracy::{OperandDomain, PropagationStats};
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
@@ -288,9 +288,10 @@ fn root_guarantee(root: &QueryRoot) -> Option<ResultGuarantee> {
 ///   operand domains ([`operand_domain_bounds`]).
 ///
 /// Data-workload evidence is used only while fresh. Stage 3 has no planning
-/// time, so it uses only evidence that holds at any planning time (no
-/// validity window). Any other statistic stays unknown, and an unknown
-/// statistic never meets a target.
+/// time and, by design, stays conservative: it uses only evidence that
+/// holds at any planning time (no validity window); evidence with a
+/// validity window is never used. Any other statistic stays unknown, and
+/// an unknown statistic never meets a target.
 fn bound_root_guarantee(
     root: &QueryRoot,
     data: &DataWorkload,
@@ -324,7 +325,7 @@ fn workload_statistic(statistic: &str, data: &DataWorkload) -> Option<f64> {
 
 /// One operand of a product or quotient, as Stage 3 finds its domain.
 enum DomainOperand<'a> {
-    /// A planned operator: the deployment's `QuantileInputDomain` for it.
+    /// A planned operator: the deployment's `OperandDomain` for it.
     Node(&'a Rc<OperatorNode>),
     /// A literal: itself.
     Literal(f64),
@@ -344,10 +345,10 @@ impl<'a> DomainOperand<'a> {
         }
     }
 
-    fn domain(&self, models: &PlanningModels<'_>) -> Option<QuantileInputDomain> {
+    fn domain(&self, models: &PlanningModels<'_>) -> Option<OperandDomain> {
         match self {
-            Self::Node(node) => models.evidence.quantile_input_domain(node),
-            Self::Literal(value) => Some(QuantileInputDomain {
+            Self::Node(node) => models.evidence.operand_domain(node),
+            Self::Literal(value) => Some(OperandDomain {
                 lower: *value,
                 upper: *value,
                 max_samples: 1,
@@ -484,11 +485,11 @@ fn domain_bound(
             .evaluate();
     }
     let valid =
-        |d: &QuantileInputDomain| d.lower.is_finite() && d.upper.is_finite() && d.lower <= d.upper;
+        |d: &OperandDomain| d.lower.is_finite() && d.upper.is_finite() && d.lower <= d.upper;
     if !(valid(&dx) && valid(&dy)) {
         return None;
     }
-    let magnitude = |d: &QuantileInputDomain| d.lower.abs().max(d.upper.abs());
+    let magnitude = |d: &OperandDomain| d.lower.abs().max(d.upper.abs());
     let (mx, my) = (magnitude(&dx), magnitude(&dy));
     let error = |g: &ResultGuarantee, m: f64| {
         let bound = g.bound.evaluate()?;
@@ -1489,11 +1490,11 @@ mod tests {
     struct BoundedQuantiles;
 
     impl AccuracyEvidenceProvider for BoundedQuantiles {
-        fn quantile_input_domain(
+        fn operand_domain(
             &self,
             _operand: &OperatorNode,
-        ) -> Option<crate::accuracy::QuantileInputDomain> {
-            Some(crate::accuracy::QuantileInputDomain {
+        ) -> Option<crate::accuracy::OperandDomain> {
+            Some(crate::accuracy::OperandDomain {
                 lower: 1.0,
                 upper: 1_000.0,
                 max_samples: 1_000_000,
@@ -1504,7 +1505,7 @@ mod tests {
 
     /// A ratio of two DDSketch quantiles has a relative bound only with an
     /// enforced operand domain: Stage 3 binds it from the deployment's
-    /// `QuantileInputDomain` contract; without one the target is unmet. (A
+    /// `OperandDomain` contract; without one the target is unmet. (A
     /// DDSketch quantile over an exact one keeps its relative bound.) Each
     /// operand is sized for the entry's target, so the ratio's bound, about
     /// twice that, is checked against a looser one.

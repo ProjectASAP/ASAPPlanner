@@ -10,7 +10,7 @@ pub(crate) const INPUT_ROW_COUNT: &str = "input_row_count";
 /// Whether every input value is non-negative.
 pub(crate) const VALUES_NON_NEGATIVE: &str = "values_non_negative";
 /// The relative bound of a quantile ratio, given enforced operand domains
-/// (`QuantileInputDomain`).
+/// (`OperandDomain`).
 pub(crate) const DIVISION_OPERAND_DOMAINS: &str = "division_operand_domains";
 /// The absolute bound of a product of two estimates,
 /// `|x|·e_y + |y|·e_x + e_x·e_y`, given enforced operand domains.
@@ -876,8 +876,8 @@ mod tests {
             provenance: vec![],
         }
     }
-    fn domain(lower: f64, upper: f64) -> QuantileInputDomain {
-        QuantileInputDomain {
+    fn domain(lower: f64, upper: f64) -> OperandDomain {
+        OperandDomain {
             lower,
             upper,
             max_samples: 1000,

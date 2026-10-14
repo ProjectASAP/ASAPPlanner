@@ -607,8 +607,8 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
     let exact_inputs = |state: &OperatorNode| state.children().into_iter().all(|c| exact(c));
     // Over approximate input rows, a summary's filter must not decide which
     // rows count by an estimate: it may read no input column (guarantees are
-    // per node, so any column may carry the estimate), and its subqueries
-    // must be exact.
+    // per node, so any column may carry the estimate; column-level tracking
+    // is #689), and its subqueries must be exact.
     let exact_filter = |state: &OperatorNode| {
         let Some(ASAPOp::SummaryAgg { filter, .. }) = state.asap() else {
             return false;
