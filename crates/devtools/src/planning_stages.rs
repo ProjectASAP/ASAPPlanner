@@ -2,7 +2,7 @@
 //! one pipeline behind `stage_pipeline` and the planner-layering acceptance
 //! tests, so both see the same candidates, ids and selection.
 
-use asap_aware_mapping::pass::run_stage1_to_stage3_from_pass1;
+use asap_aware_mapping::pass::{run_stage2_and_stage3, stage1_logical_asap_optimization};
 pub use asap_aware_mapping::pass::{LogicalCandidate, PrunedCandidate};
 use asap_aware_mapping::per_computation_candidates::generate_per_computation_candidates;
 use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
@@ -11,7 +11,7 @@ use asap_aware_mapping::PlanningModels;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataWorkload, PlanningWorkload};
+use asap_types::workload::{DataWorkload, PlanningWorkload, QueryRecurrence};
 
 #[derive(Debug)]
 pub struct PlanningStagesRun {
@@ -64,9 +64,9 @@ pub fn lower_sql_roots(
 pub enum PlanningStagesError {
     /// Pass 1 failed: there are no candidates, only the frontends' roots.
     Pass1(String),
-    /// Stage 1 would enumerate more whole-workload candidates than the
-    /// caller's limit; nothing was enumerated.
-    TooManyCombinations { combinations: usize, limit: usize },
+    /// Stage 1 enumerated more candidates (Pass 1's and Pass 2's) than the
+    /// caller's limit; enumeration stopped there and nothing was planned.
+    TooManyCandidates { limit: usize },
     /// The frontends' roots or a composed candidate failed validation.
     Validation(String),
 }
@@ -75,12 +75,9 @@ impl std::fmt::Display for PlanningStagesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pass1(error) => write!(f, "Pass 1: {error}"),
-            Self::TooManyCombinations {
-                combinations,
-                limit,
-            } => write!(
+            Self::TooManyCandidates { limit } => write!(
                 f,
-                "workload has {combinations} candidate combinations (limit {limit}); \
+                "workload has more than {limit} Stage 1 candidates, Pass 2's included; \
 planning it needs early pruning (#673)"
             ),
             Self::Validation(error) => write!(f, "validation: {error}"),
@@ -94,17 +91,20 @@ impl From<PlanningStagesError> for String {
     }
 }
 
-/// Logical ASAP-aware optimization (Pass 1 and composition; no Pass 2),
+/// Logical ASAP-aware optimization (Pass 1, composition and Pass 2's
+/// identical-expression rule),
 /// physical ASAP-aware optimization and plan selection over `roots`, the
 /// lowered entries of `workload`: the library's planner pipeline
-/// ([`run_stage1_to_stage3_from_pass1`]) with the built-in models. Logical
-/// candidates are every choice of a per-computation candidate for every
-/// target, the last target varying fastest. Every candidate is enumerated
-/// and priced, so the selection is the cheapest of all; a caller that shows
-/// fewer cuts only its display. With `max_combinations`, a workload with more
-/// whole-workload candidates is refused after Pass 1, before any is
-/// enumerated. Plan selection reads only the accuracy targets and the data
-/// workload. The frontends' roots and every composed candidate are
+/// ([`stage1_logical_asap_optimization`], [`run_stage2_and_stage3`]) with
+/// the built-in models. Logical candidates are every choice of a
+/// per-computation candidate for every target, the last target varying
+/// fastest, each followed by its Pass 2 candidates. Every candidate is
+/// enumerated and priced, so the selection is the cheapest of all; a caller
+/// that shows fewer cuts only its display. With `max_combinations`, Stage 1
+/// candidates (Pass 2's included) are counted as they are enumerated, and a
+/// workload with more is refused as soon as the count passes the limit; the
+/// library itself never caps. Plan selection reads the accuracy targets,
+/// the recurrences and the data workload. The frontends' roots and every composed candidate are
 /// validated.
 pub fn run_planning_stages(
     workload: &PlanningWorkload,
@@ -116,15 +116,22 @@ pub fn run_planning_stages(
         .entries()
         .map(|entry| entry.requirements.accuracy.target())
         .collect();
+    let recurrence: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.recurrence)
+        .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    run_planning_stages_over(roots, &targets, &data, max_combinations)
+    run_planning_stages_over(roots, &targets, &recurrence, &data, max_combinations)
 }
 
 /// [`run_planning_stages`] over roots lowered from any mix of query
-/// languages: query `i` is `roots[i]` with accuracy target `targets[i]`.
+/// languages: query `i` is `roots[i]` with accuracy target `targets[i]`,
+/// evaluated as `recurrence[i]` says.
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
     targets: &[AccuracyTarget],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     max_combinations: Option<usize>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
@@ -133,15 +140,25 @@ pub fn run_planning_stages_over(
     let per_computation =
         generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
             .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
-    let combinations = per_computation.combinations();
-    if let Some(limit) = max_combinations.filter(|limit| combinations > *limit) {
-        return Err(PlanningStagesError::TooManyCombinations {
-            combinations,
-            limit,
-        });
+    // Count Stage 1 candidates as they are enumerated and stop as soon as
+    // the count passes the limit; never truncate.
+    let mut stage1 = Vec::new();
+    for candidate in stage1_logical_asap_optimization(&per_computation) {
+        if max_combinations.is_some_and(|limit| stage1.len() == limit) {
+            return Err(PlanningStagesError::TooManyCandidates {
+                limit: stage1.len(),
+            });
+        }
+        stage1.push(candidate);
     }
-    let run =
-        run_stage1_to_stage3_from_pass1(per_computation, &targets, data, PlanningModels::builtin());
+    let run = run_stage2_and_stage3(
+        per_computation,
+        stage1,
+        &targets,
+        recurrence,
+        data,
+        PlanningModels::builtin(),
+    );
     for candidate in &run.stage1_logical_asap_optimization {
         if let Ok(roots) = &candidate.roots {
             validate(roots)?;

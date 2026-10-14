@@ -1,7 +1,7 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --example planner-layering-1 --out planner-layering-example1.json
 // (also planner-layering-3a and planner-layering-3b: #509 Example 3,
-// Patterns A and B; 3a has 243 candidates, all priced, 64 shown by default)
+// Patterns A and B; 3a has 972 candidates, all priced, 64 shown by default)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
@@ -14,7 +14,8 @@
 //   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
 //   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
-//     product), in enumeration order. Every candidate is optimized and
+//     product), each followed by its Pass 2 identical-expression candidates
+//     (one per subset of its sharing groups), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)
 //     and the selected one, with `combinations` (how many exist) and
 //     `capped` (whether some are not shown). A candidate that cannot be
@@ -34,9 +35,10 @@
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
-// A workload with more than `--max-combinations` (default 10^4)
-// whole-workload candidates is refused before Stage 1 enumerates any: the
-// run exits with status 3, the count and the limit, and writes no document.
+// A workload with more than `--max-combinations` (default 10^4) Stage 1
+// candidates, Pass 2's included, is refused as soon as enumeration passes
+// the limit: the run exits with status 3 and the limit, and writes no
+// document.
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
 //
@@ -77,16 +79,16 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64>] [--interval-ms <u64>])) \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
-/// The default `--max-combinations`: the most whole-workload candidates a
-/// run enumerates.
+/// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
+/// included) a run enumerates.
 const MAX_COMBINATIONS: usize = 10_000;
 
 /// Why a run wrote no document.
 enum Failure {
     /// Bad arguments or a query that does not plan (exit status 2).
     Usage(String),
-    /// More candidate combinations than `--max-combinations` (exit status 3).
-    TooManyCombinations { combinations: usize, limit: usize },
+    /// More Stage 1 candidates than `--max-combinations` (exit status 3).
+    TooManyCandidates(PlanningStagesError),
 }
 
 impl From<String> for Failure {
@@ -108,14 +110,8 @@ fn main() {
             eprintln!("stage_pipeline: {message}\n{USAGE}");
             std::process::exit(2);
         }
-        Err(Failure::TooManyCombinations {
-            combinations,
-            limit,
-        }) => {
-            eprintln!(
-                "stage_pipeline: workload has {combinations} candidate combinations \
-(limit {limit}); planning it needs early pruning (#673)"
-            );
+        Err(Failure::TooManyCandidates(error)) => {
+            eprintln!("stage_pipeline: {error}");
             std::process::exit(3);
         }
     }
@@ -146,13 +142,9 @@ fn document_of(
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
             "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [] },
         })),
-        Err(PlanningStagesError::TooManyCombinations {
-            combinations,
-            limit,
-        }) => Err(Failure::TooManyCombinations {
-            combinations,
-            limit,
-        }),
+        Err(error @ PlanningStagesError::TooManyCandidates { .. }) => {
+            Err(Failure::TooManyCandidates(error))
+        }
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
 }
@@ -227,7 +219,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             };
             let catalog = sql_catalog(&tables)?;
             let mut names = HashSet::new();
-            let (mut described, mut roots) = (Vec::new(), Vec::new());
+            let (mut described, mut roots, mut recurrence) = (Vec::new(), Vec::new(), Vec::new());
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
                 let (name, defaulted) = match name {
                     Some(name) => (name, false),
@@ -250,6 +242,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     QueryLanguage::PromQL => lower_promql_roots(&one)?,
                     _ => lower_sql_roots(&one, &catalog)?,
                 });
+                recurrence.extend(one.query_workload.entries().map(|entry| entry.recurrence));
                 let mut query = workload_queries(&one).remove(0);
                 query["id"] = json!(name);
                 described.push(query);
@@ -259,8 +252,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 data_ingestion_interval: declared(DurationMs(interval_ms)),
                 ..Default::default()
             };
-            let result =
-                run_planning_stages_over(roots.clone(), &targets, &data, Some(max_combinations));
+            let result = run_planning_stages_over(
+                roots.clone(),
+                &targets,
+                &recurrence,
+                &data,
+                Some(max_combinations),
+            );
             document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),

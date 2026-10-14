@@ -557,6 +557,11 @@ pub struct DataWorkload {
     /// without a bound leaves that probability unknown.
     #[serde(default)]
     pub max_distinct_per_evaluation: Evidence<BTreeMap<String, u64>>,
+    /// Declared type of each metric, by metric name (Prometheus `# TYPE`
+    /// metadata). The planner never infers a type from a name such as
+    /// `_total`; an undeclared metric's samples may take any value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metric_types: BTreeMap<String, MetricType>,
 }
 
 /// Upper bounds on the norms of the frequency (weight) vector any one
@@ -570,6 +575,17 @@ pub struct StreamNorms {
     pub l1: Option<f64>,
     /// `‖f‖₂`: Count Sketch's bound is `ε · ‖f‖₂`.
     pub l2: Option<f64>,
+}
+
+/// The Prometheus type of a metric's samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricType {
+    /// Starts at zero and only increases, or resets to zero: every sample is
+    /// non-negative.
+    Counter,
+    /// May take any value.
+    Gauge,
 }
 
 // ── Top-level workload ────────────────────────────────────────────────────────

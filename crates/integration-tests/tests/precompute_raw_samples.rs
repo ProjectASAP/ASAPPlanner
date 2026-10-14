@@ -49,10 +49,28 @@ fn canonical(labels: &Series) -> Series {
         .collect()
 }
 
-/// Every logical candidate the planner pipeline composes for `query`.
+/// Every logical candidate the planner pipeline composes for `query`, with
+/// `m` declared a counter: plan selection's answer to a heap's open
+/// requirement that its weights are counter samples, which the executor
+/// needs before it builds a Count-Min heap.
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
+    use asap_aware_mapping::stage3_plan_selection::with_confirmed_weights;
+    use asap_types::ir::QueryRoot;
+    use asap_types::workload::{DataWorkload, MetricType};
     let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
+    let data = DataWorkload {
+        metric_types: [("m".to_string(), MetricType::Counter)].into(),
+        ..Default::default()
+    };
     logical_candidates(root, accuracy)
+        .into_iter()
+        .map(|candidate| {
+            match &with_confirmed_weights(&[QueryRoot::Operator(candidate)], &data)[..] {
+                [QueryRoot::Operator(confirmed)] => Rc::clone(confirmed),
+                _ => unreachable!("one operator root"),
+            }
+        })
+        .collect()
 }
 
 /// Raw-input summary nodes: `(dag, raw source id, summary id)`.
@@ -420,10 +438,18 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
         );
     }
     for family in [
-        "Sum", "Count", "Min", "Max", "Rate", "Increase", "Kll", "DDSketch",
+        "Sum",
+        "Count",
+        "Min",
+        "Max",
+        "Rate",
+        "Increase",
+        "Kll",
+        "DDSketch",
         "Hll",
-        // A heap over raw samples is the whole-expression heap (#589); Pass 1
-        // builds a top-k heap over the ranked aggregate's output.
+        // The whole-expression heaps over raw samples.
+        "CmsWithHeap",
+        "CountSketchWithHeap",
     ] {
         assert!(
             families.contains(family),

@@ -31,13 +31,12 @@ use asap_types::ir::physical_export::{
     compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
 };
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
+    apply_materialization_timings, MaterializationAssignment, NonASAPOp, Operator, OperatorNode,
+    ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
 };
 use asap_types::post_asap::{ExecutionDataStateError, Materialization};
 use asap_types::pre_asap::column_resolution::resolve_column_ref;
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::schema::ColumnId;
 use asap_types::pre_asap::{AggIntent, Reduction};
 use thiserror::Error;
 
@@ -176,7 +175,8 @@ fn implement_topk(
         return Err(unsupported("HAVING"));
     }
     let child = memo[&Rc::as_ptr(child)].clone();
-    let value = ranked_column(&child)?;
+    let value = crate::realization::ranked_column(&child)
+        .map_err(|e| unsupported(&format!("no ranked column: {e}")))?;
     let sorted = Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Sort {
             keys: vec![SortKey {
@@ -226,52 +226,6 @@ fn implement_topk(
         }))?
         .with_guarantee(node.guarantee.clone()),
     ))
-}
-
-/// The column exact top-k ranks `child` by. Over a one-measure grouped
-/// aggregate (the SQL heavy-hitter shape and PromQL `topk(k, sum by ..)`) it
-/// is that measure, the last column after the group keys, whichever Stage 1
-/// candidate realizes it: the aggregate itself, or a `SummaryAgg` read by
-/// `FinalizeExactAccumulator` or `SummaryEstimate`, under the `Project`
-/// restoring its names (a renaming) and a value `HAVING`'s `Filter`. Over per-series rows
-/// (PromQL `topk by (..) (k, rows)`) it is the sample value.
-fn ranked_column(child: &OperatorNode) -> Result<ColumnId, PhysicalASAPOptimizationError> {
-    let mut node = child;
-    let reduction = loop {
-        match &node.operator {
-            // Only a renaming keeps the measure last.
-            Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
-                if cols.len() == child.schema.fields.len()
-                    && cols
-                        .iter()
-                        .enumerate()
-                        .all(|(i, item)| item.expr == ScalarExpr::Column(i)) =>
-            {
-                node = child
-            }
-            Operator::NonASAP(NonASAPOp::Filter { child, .. })
-            | Operator::ASAP(
-                ASAPOp::FinalizeExactAccumulator { child }
-                | ASAPOp::SummaryEstimate {
-                    summary_input: child,
-                    ..
-                },
-            ) => node = child,
-            Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => break Some(reduction),
-            Operator::NonASAP(NonASAPOp::Aggregate {
-                reduction,
-                measures,
-                ..
-            }) if measures.len() == 1 => break Some(reduction),
-            _ => break None,
-        }
-    };
-    match reduction {
-        Some(Reduction::Reduce(_)) => Ok(child.schema.fields.len() - 1),
-        _ => resolve_column_ref(&ColumnRef::SampleValue, &child.schema).map_err(|e| {
-            PhysicalASAPOptimizationError::ExactTopK(format!("no ranked column: {e}"))
-        }),
-    }
 }
 
 /// `node` over its implemented children; the same `Rc` when none changed.

@@ -128,7 +128,12 @@ async fn facade_plans_match_run_stage1_to_stage3() {
         targets.push(Some(accuracy));
     }
     let data = workload.data_workload.clone().unwrap();
-    let run = run_stage1_to_stage3(roots, &targets, &data, models).unwrap();
+    let recurrence: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.recurrence)
+        .collect();
+    let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, models).unwrap();
     let selection = run
         .stage3_plan_selection
         .as_ref()

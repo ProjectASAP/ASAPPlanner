@@ -172,8 +172,6 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
 }
 
 #[test]
-#[ignore = "Pass 1 builds the top-k heap over the counts the aggregate outputs, weighted by \
-            them; a heap over raw samples with unit weights is the whole-expression heap (#589)"]
 fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
     use asap_types::post_asap::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
     for is_count in [true, false] {

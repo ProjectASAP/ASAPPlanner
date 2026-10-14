@@ -95,6 +95,11 @@ fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
     run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
         &targets,
+        &workload
+            .query_workload
+            .entries()
+            .map(|entry| entry.recurrence)
+            .collect::<Vec<_>>(),
         &workload.data_workload.clone().unwrap(),
         PlanningModels::builtin(),
     )
@@ -494,15 +499,16 @@ async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
 }
 
 /// Front ends build structurally identical references as separate nodes.
-/// Until Pass 2 merges them (#580), each is planned on its own; the plan
-/// holds one plan per distinct reference and satisfies the plan contract.
+/// Pass 2's identical-expression rule merges them, and the merged candidate
+/// computes the reference once per query, so it is selected: the plan holds
+/// one plan per distinct reference and satisfies the plan contract.
 #[tokio::test]
 async fn identical_scalar_references_satisfy_the_plan_contract() {
     for (query, distinct) in [
-        ("scalar(rate(x[5m])) - scalar(rate(x[5m]))", 2),
+        ("scalar(rate(x[5m])) - scalar(rate(x[5m]))", 1),
         (
             "scalar(sum(rate(x[5m]))) / scalar(sum(rate(x[5m]))) + scalar(count(x))",
-            3,
+            2,
         ),
     ] {
         let output = plan_promql(&[(query, 0.01)]).await;
