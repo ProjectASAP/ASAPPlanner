@@ -1,5 +1,4 @@
-// Operator kinds (`Operator::kind_name`) exported by
-// crates/types/src/dag_export.rs. Categories describe the visible logical DAG
+// Operator kinds (`Operator::kind_name`) of the IR's operators. Categories describe the visible logical DAG
 // shape. They do not model hidden physical inputs: for example,
 // PromqlInfoEnrich is a one-child enrichment here even if physical costing
 // later accounts for an auxiliary source scan.
@@ -106,6 +105,13 @@ const CATEGORIES = {
     light: { bg: '#f1f2f4', border: '#4b5563' },
     dark: { bg: '#20242b', border: '#9ca3af' },
   },
+  // Not an operator: a standalone scalar query's root (stage-workload.js).
+  scalar: {
+    label: 'Scalar query',
+    description: 'A standalone scalar query (e.g. time(), scalar(v), 1 + 2): its expression, over the operator nodes it reads',
+    light: { bg: '#fafaf9', border: '#57534e' },
+    dark: { bg: '#1c1917', border: '#d6d3d1' },
+  },
   // Loud fallback for malformed or version-skewed exports.
   unknown: {
     label: 'Unknown kind',
@@ -133,6 +139,7 @@ function isDarkMode() {
 }
 
 function categoryOf(kind) {
+  if (kind === 'Scalar') return 'scalar';
   const category = KIND_CATEGORY[kind];
   if (category) return category;
   console.warn(

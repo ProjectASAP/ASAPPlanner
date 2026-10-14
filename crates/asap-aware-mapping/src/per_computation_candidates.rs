@@ -205,6 +205,17 @@ pub struct PerComputationCandidates<Id> {
     pub targets: Vec<ComputationTarget>,
 }
 
+impl<Id> PerComputationCandidates<Id> {
+    /// The number of whole-workload candidates: the size of the Cartesian
+    /// product of the targets' candidates, saturating at `usize::MAX`.
+    pub fn combinations(&self) -> usize {
+        self.targets
+            .iter()
+            .map(|target| target.choices.candidates.len())
+            .fold(1usize, usize::saturating_mul)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PerComputationCandidateError {
     #[error(transparent)]

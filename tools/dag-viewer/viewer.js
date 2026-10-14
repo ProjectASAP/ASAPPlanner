@@ -1,31 +1,16 @@
-// Shared viewer logic for tools/dag-viewer, used two ways:
-//   1. index.html loads this via <script src="viewer.js"> for the normal
-//      drag-and-drop page.
-//   2. render.py inlines this file's text verbatim into a standalone HTML
-//      file it generates from a dag_export JSON — see render.py's docstring
-//      and the "Render a standalone page from Python" section of README.md.
-// Both consumers share one copy of this logic; render.py never forks it.
+// Viewer logic for tools/dag-viewer, used two ways:
+//   1. index.html loads this via <script src="viewer.js">.
+//   2. render.py inlines this file verbatim into a standalone HTML page that
+//      embeds one stage_pipeline document.
+// The viewer reads only `asap-stage-pipeline/v1` documents (stage-workload.js).
 cytoscape.use(window.cytoscapeDagre);
 
 // ── State ────────────────────────────────────────────────────────────────
-// queries: [{ name, dag: { nodes, root }, replacements?, post_dag? }],
-// flattened across every loaded file (a later file whose query name
-// collides with an earlier one is kept distinct by suffixing the file
-// index). `replacements` is the optional --post-asap array of
-// ReplacementSite entries for that query (each with its own `before`/`after`
-// sub-DAG) — defaulted to `[]` when the loaded JSON omits the field, so
-// callers never need an extra existence check. `post_dag` is the optional
-// --post-asap whole-query merged post-ASAP DAG (same flattened
-// `{nodes, root}` shape as `dag`, but nodes may be post-ASAP-only kinds
-// like "SummaryAgg" mixed in, and any such node has no `hash` — there's no
-// corresponding OperatorNode to hash) — left `undefined` when absent (omitted
-// whenever --post-asap wasn't set, or this query had zero replacements),
-// unlike `replacements` which always defaults to an array. `workload_cost`
-// is the optional per-query `NamedDAG.workload_cost` (issue #286), also
-// left `undefined` when absent. `sourceBatch` is a viewer-assigned integer
-// (never present in the JSON itself) shared by every query loaded from the
-// same document — see computeSelectionWorkloadCost's own doc for why it
-// exists and how it's used.
+// stageDocument: the loaded asap-stage-pipeline/v1 document.
+// queries: stageWorkload(stageDocument).queries — [{ name, source, dag,
+// post_dag? }], `dag` the query's part of Stage 0 and `post_dag` its part of
+// the Stage 3 selected plan (absent when Stage 3 selected none).
+let stageDocument = null;
 let queries = [];
 let activeIndex = -1;
 let cy = null;
@@ -34,14 +19,6 @@ let zoom = 1;
 // The viewer has one Pre/Post-ASAP mode. One selected query renders its own
 // two DAGs; multiple selected queries union each stage into one workload DAG.
 let participants = new Set();
-// Every query pushed from the *same* loaded JSON document (one `dag_export`
-// process invocation) shares one `sourceBatch` id, assigned here. Needed
-// because `DAGDecision.id` is only unique *within* one dag_export run, not
-// across independently-generated files — computeSelectionWorkloadCost below
-// dedups by `${sourceBatch}:${decision.id}`, never `decision.id` alone, so
-// two files that happen to reuse the same small integer id never collide.
-let nextSourceBatch = 0;
-
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const clearBtn = document.getElementById('clearBtn');
@@ -71,6 +48,7 @@ dropzone.addEventListener('drop', (e) => {
 });
 fileInput.addEventListener('change', (e) => loadFiles(e.target.files));
 clearBtn.addEventListener('click', () => {
+  stageDocument = null;
   queries = [];
   activeIndex = -1;
   participants = new Set();
@@ -114,37 +92,19 @@ sideResizeHandle.addEventListener('pointerup', (event) => {
 });
 
 function loadFiles(fileList) {
-  const files = Array.from(fileList || []);
-  let pending = files.length;
-  if (pending === 0) return;
-  files.forEach((file, fileIdx) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result);
-        const incoming = parsed.queries || [];
-        const existingNames = new Set(queries.map((q) => q.name));
-        // One batch id per *file* — every query this one dag_export
-        // invocation produced shares its decision.id numbering.
-        const sourceBatch = nextSourceBatch++;
-        incoming.forEach((q) => {
-          let name = q.name;
-          if (existingNames.has(name)) name = `${q.name} (${file.name})`;
-          existingNames.add(name);
-          queries.push({ name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, sourceBatch });
-        });
-      } catch (err) {
-        alert(`Failed to parse ${file.name}: ${err.message}`);
-      }
-      pending -= 1;
-      if (pending === 0) {
-        if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
-        if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
-        render();
-      }
-    };
-    reader.readAsText(file);
-  });
+  const file = Array.from(fileList || [])[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      if (!isStagePipelineDocument(parsed)) throw new Error(`not an ${STAGE_PIPELINE_FORMAT} document; write one with stage_pipeline`);
+      showDocument(parsed);
+    } catch (err) {
+      alert(`Failed to load ${file.name}: ${err.message}`);
+    }
+  };
+  reader.readAsText(file);
   fileInput.value = '';
 }
 
@@ -302,26 +262,6 @@ function buildCyStyle() {
       },
     },
     {
-      selector: 'node.costImprovement',
-      style: {
-        'border-color': '#15803d',
-        'border-width': 2.5,
-        'underlay-color': '#15803d',
-        'underlay-opacity': 0.1,
-        'underlay-padding': 4,
-      },
-    },
-    {
-      selector: 'node.costRegression',
-      style: {
-        'border-color': '#b91c1c',
-        'border-width': 2.5,
-        'underlay-color': '#b91c1c',
-        'underlay-opacity': 0.1,
-        'underlay-padding': 4,
-      },
-    },
-    {
       // Pre/Post-ASAP lane container (a compound parent node).
       selector: 'node.laneParent',
       style: {
@@ -362,16 +302,6 @@ function buildCyStyle() {
         'transition-property': 'opacity',
         'transition-duration': '260ms',
         'transition-timing-function': 'ease-in-out',
-      },
-    },
-    {
-      selector: 'edge.costAnnotated',
-      style: {
-        'width': 3,
-        'line-color': ringColor,
-        'target-arrow-color': ringColor,
-        'label': 'data(edgeCostLabel)',
-        'font-weight': 700,
       },
     },
   ];
@@ -452,29 +382,22 @@ function renderPrePostAsap() {
     showModeHint('Select one query for a complete pre/post DAG, or several queries for a batch workload view.');
     return;
   }
-  const missing = selected.filter((q) => !q.post_dag);
-  if (missing.length > 0) {
-    viewTitleEl.textContent = selected.length === 1 ? `Pre/Post-ASAP: ${selected[0].name}` : `Pre/Post-ASAP workload: ${selected.length} queries`;
-    const action = document.getElementById('plannerRun')
-      ? 'Open Query planner and click “Plan selected workload”, or re-export with dag_export --post-asap.'
-      : 'Re-export with dag_export --post-asap.';
-    showModeHint(`No post-ASAP DAG for: ${missing.map((q) => q.name).join(', ')}. ${action}`);
-    return;
-  }
+  // Without a selected plan (planning failed), Stage 0 is still shown.
+  const planned = selected.every((q) => q.post_dag);
   hideModeHint();
-  viewTitleEl.textContent = selected.length === 1
+  viewTitleEl.textContent = (selected.length === 1
     ? `Pre/Post-ASAP: ${selected[0].name}`
-    : `Pre/Post-ASAP workload union: ${selected.length} queries`;
+    : `Pre/Post-ASAP workload union: ${selected.length} queries`)
+    + (planned ? '' : ' · no plan selected; see the candidate table');
 
-  const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
   const elements = selected.length === 1
     ? [
-        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].dag, selected[0], 'pre', costSummary && costSummary.baseline_cost),
-        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_dag, selected[0], 'post', costSummary && costSummary.selected_cost),
+        ...laneElements('pre-asap', `${selected[0].name} · Stage 0 query-language frontends`, selected[0].dag, selected[0], 'pre'),
+        ...(planned ? laneElements('post-asap', `${selected[0].name} · Stage 3 selected plan`, selected[0].post_dag, selected[0], 'post') : []),
       ]
     : [
-        ...unionStageLaneElements('pre', chosen, costSummary && costSummary.baseline_cost),
-        ...unionStageLaneElements('post', chosen, costSummary && costSummary.selected_cost),
+        ...unionStageLaneElements('pre', chosen),
+        ...(planned ? unionStageLaneElements('post', chosen) : []),
       ];
 
   buildCy(elements);
@@ -492,8 +415,8 @@ function renderPrePostAsap() {
   fitAndSyncZoom();
 }
 
-function unionStageLaneElements(stage, chosen, laneCost) {
-  // Workload merging is an exporter decision. `workload_node_id` is the
+function unionStageLaneElements(stage, chosen) {
+  // Workload merging is the planner's decision. `workload_node_id` is the
   // explicit JSON mapping; do not reconstruct identity from node content.
   const laneId = `${stage}-asap-union`;
   const dagFor = (query) => (stage === 'pre' ? query.dag : query.post_dag);
@@ -524,7 +447,7 @@ function unionStageLaneElements(stage, chosen, laneCost) {
     // which defaults to false for nodes, and the lane covers most of the
     // canvas once the DAG is zoomed past the viewport. Still not grabbable:
     // cytoscape overrides `grabbable` for a pannable node.
-    { data: { id: laneId, label: laneCostLabel(`${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
+    { data: { id: laneId, label: `${stage === 'pre' ? 'Stage 0 query-language frontends' : 'Stage 3 selected plan'} · workload union`, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
   ];
 
   chosen.forEach((qIdx) => {
@@ -535,13 +458,10 @@ function unionStageLaneElements(stage, chosen, laneCost) {
       const key = keyFor(qIdx, node);
       let entry = entries.get(key);
       if (!entry) {
-        entry = { node, sourceQueries: new Set(), rootFor: new Set(), decisions: new Map() };
+        entry = { node, sourceQueries: new Set(), rootFor: new Set() };
         entries.set(key, entry);
       }
       entry.sourceQueries.add(query.name);
-      for (const decision of translationsForNode(query, node, stage)) {
-        entry.decisions.set(decision.id, decision);
-      }
       if (node.id === dag.root) entry.rootFor.add(query.name);
       node.children.forEach((childId) => {
         const childKey = keyFor(qIdx, byId.get(childId));
@@ -565,7 +485,6 @@ function unionStageLaneElements(stage, chosen, laneCost) {
       isPrePost: true,
       stage,
       queryName: Array.from(entry.sourceQueries)[0],
-      translations: Array.from(entry.decisions.values()),
     },
     classes: entry.sourceQueries.size > 1 ? 'unionShared' : '',
   }));
@@ -578,33 +497,21 @@ function unionStageLaneElements(stage, chosen, laneCost) {
 }
 
 // Builds one Pre/Post-ASAP lane (a dashed compound parent plus its
-// nodes/edges). `nodes` is either a plain pre-ASAP
-// DAGNode list (the `before` sub-DAG, or an `after.kind === "Rewrite"`
-// DAG) or a SummaryDAGNode list (an `after.kind === "Summary"` DAG) —
-// both shapes carry id/kind/label/detail/children, which is all a lane
-// needs; SummaryDAGNode's missing `hash`/`notes` fields are simply never
-// read by this function or by showPrePostDetail below.
-function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
+// nodes/edges) from a stageWorkload DAG: nodes carry
+// id/kind/label/schema/detail/children.
+function laneElements(laneId, laneLabel, dag, query, stage) {
   const nodes = dag.nodes;
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  // Keep the delimiter escaped in source. A literal NUL is replaced by the
-  // HTML tokenizer when viewer.js is embedded by render.py, which otherwise
-  // makes these keys differ from the lookup below.
-  const edgeCostByPair = new Map((dag.edge_annotations || []).map((edge) => [`${edge.from}\u0000${edge.to}`, edge.cost]));
   const elements = [
     // Pannable for the same reason as the union lane above.
-    { data: { id: laneId, label: laneCostLabel(laneLabel, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
+    { data: { id: laneId, label: laneLabel, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
   ];
   for (const node of nodes) {
     elements.push({
       data: {
         id: `${laneId}-${node.id}`,
         parent: laneId,
-        // On-DAG label carries a concise cost/benefit badge (issue #286)
-        // when this node's decision has one; `node.label` itself (nested,
-        // used everywhere else — the sidebar, schema derivation, …) stays
-        // exactly the plain IR label.
-        label: node.label + nodeCostBadgeSuffix(node),
+        label: node.label,
         node,
         // Cytoscape selectors read flat data fields.
         kind: node.kind,
@@ -614,11 +521,7 @@ function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
         laneId,
         stage,
         queryName: query.name,
-        translations: translationsForNode(query, node, stage),
       },
-      classes: node.decision && typeof node.decision.benefit?.value === 'number'
-        ? (node.decision.benefit.value >= 0 ? 'costImprovement' : 'costRegression')
-        : '',
     });
   }
   for (const node of nodes) {
@@ -631,206 +534,11 @@ function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
           source: `${laneId}-${childId}`,
           target: `${laneId}-${node.id}`,
           schemaLabel: formatSchema(byId.get(childId).schema),
-          // Optional edge cost supplied by a physical-evidence layer for
-          // this exact (child -> node) edge; `undefined` otherwise.
-          edgeCost: edgeCostByPair.get(`${childId}\u0000${node.id}`),
-          edgeCostLabel: edgeCostByPair.has(`${childId}\u0000${node.id}`)
-            ? `edge cost ${compactCost(edgeCostByPair.get(`${childId}\u0000${node.id}`))}`
-            : '',
         },
-        classes: edgeCostByPair.has(`${childId}\u0000${node.id}`) ? 'costAnnotated' : '',
       });
     }
   }
   return elements;
-}
-
-// ── Structured cost/benefit annotations ───────────────────────────────────
-// Renders only what a `dag_export` JSON export explicitly carries
-// (`CostAnnotation`/`WorkloadCostSummary`/`EdgeCostAnnotation` from
-// crates/types/src/cost.rs) — no client-side cost estimation. A value with
-// no `source: "Modeled"|"Measured"` (i.e. `Unavailable`, or the field
-// simply absent from an older export) always reads "Not estimated", never
-// a fabricated number.
-
-function formatCostUnit(unit) {
-  switch (unit) {
-    case 'CostUnitsPerSecond': return 'cost units/s';
-    case 'CostUnits': return 'cost units';
-    default: return unit || 'unknown unit';
-  }
-}
-
-function formatBaselineRef(baseline) {
-  if (!baseline) return '';
-  switch (baseline.kind) {
-    case 'PreAsapRecomputation': return 'pre-ASAP recomputation';
-    case 'HighestRankedNonSelectedCandidate':
-      return `best non-selected candidate (rank ${baseline.detail && baseline.detail.rank})`;
-    case 'Named': return String(baseline.detail || '');
-    default: return baseline.kind || '';
-  }
-}
-
-function formatCostNumber(value) {
-  // Trim display values to at most 3 decimals without trailing zeros. The
-  // complete modeled inputs and provenance remain available in the panel.
-  return Number(value.toFixed(3)).toString();
-}
-
-function compactCost(annotation) {
-  if (!annotation || annotation.value === null || annotation.value === undefined) return 'Not estimated';
-  return `${formatCostNumber(annotation.value)} ${formatCostUnit(annotation.unit)}`;
-}
-
-function laneCostLabel(label, annotation, stage) {
-  if (!annotation) return label;
-  return `${label}\n${stage === 'pre' ? 'Baseline' : 'Selected'} cost: ${compactCost(annotation)}`;
-}
-
-// One `<title, CostAnnotation>` block for the sidebar: value + unit +
-// Modeled/Measured/Unavailable badge, baseline/delta/ratio when present,
-// model/evidence/benchmark provenance, and the raw `inputs` the value was built
-// from. `annotation` may be `undefined` (an older export with no
-// annotation at all) or `null`/missing `value` (an explicit `Unavailable`)
-// — both render as "Not estimated", never a number.
-function renderCostAnnotation(title, annotation) {
-  if (!annotation) return '';
-  const source = annotation.source || 'Unavailable';
-  const badgeClass = source === 'Modeled' ? 'costBadge--modeled' : source === 'Measured' ? 'costBadge--measured' : 'costBadge--unavailable';
-  if (annotation.value === null || annotation.value === undefined) {
-    return `<div class="costRow"><span class="costLabel">${escapeHtml(title)}</span><span class="costValue">Not estimated</span><span class="costBadge ${badgeClass}">${escapeHtml(source)}</span></div>`;
-  }
-  const unit = formatCostUnit(annotation.unit);
-  const valueText = `${formatCostNumber(annotation.value)} ${unit}`;
-  const metaParts = [];
-  if (annotation.baseline) metaParts.push(`vs ${formatBaselineRef(annotation.baseline)}`);
-  if (typeof annotation.delta === 'number') metaParts.push(`Δ ${formatCostNumber(annotation.delta)} ${unit}`);
-  if (typeof annotation.benefit_ratio === 'number') metaParts.push(`ratio ${(annotation.benefit_ratio * 100).toFixed(1)}%`);
-  const provenanceParts = [];
-  if (annotation.model_version) provenanceParts.push(`model ${annotation.model_version}`);
-  if (annotation.evidence_version) provenanceParts.push(`evidence ${annotation.evidence_version}`);
-  if (annotation.cache_profile) provenanceParts.push(`cache ${annotation.cache_profile}`);
-  if (annotation.benchmark_id) provenanceParts.push(`benchmark ${annotation.benchmark_id}`);
-  const inputsHtml = (annotation.inputs || []).length
-    ? `<ul class="costInputs">${annotation.inputs.map((input) => `<li><span>${escapeHtml(input.name)}</span><span>${escapeHtml(String(input.value))}${input.unit ? ' ' + escapeHtml(input.unit) : ''}</span></li>`).join('')}</ul>`
-    : '';
-  return `
-    <div class="costRow">
-      <span class="costLabel">${escapeHtml(title)}</span>
-      <span class="costValue">${escapeHtml(valueText)}</span>
-      <span class="costBadge ${badgeClass}">${escapeHtml(source)}</span>
-    </div>
-    ${metaParts.length ? `<div class="costMeta">${escapeHtml(metaParts.join(' · '))}</div>` : ''}
-    ${provenanceParts.length ? `<div class="costMeta">${escapeHtml(provenanceParts.join(' · '))}</div>` : ''}
-    ${inputsHtml}
-  `;
-}
-
-// Baseline/selected/benefit trio for one replacement decision, matching
-// `DAGDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
-function renderDecisionCostBlock(entry) {
-  if (!entry.baseline_cost && !entry.selected_cost && !entry.benefit) return '';
-  return `<div class="costBlock">
-    <h4>Cost / benefit</h4>
-    ${renderCostAnnotation('Baseline', entry.baseline_cost)}
-    ${renderCostAnnotation('Selected', entry.selected_cost)}
-    ${renderCostAnnotation('Benefit', entry.benefit)}
-  </div>`;
-}
-
-// Short, on-DAG badge text for a post-ASAP node's own winning decision —
-// "concise on-DAG benefit/cost badges" per issue #286; the full
-// breakdown only ever appears in the sidebar (`renderDecisionCostBlock`).
-// Empty string whenever there's nothing to show (no decision, or its
-// benefit is `Unavailable`) so an un-costed node's label is untouched.
-function nodeCostBadgeSuffix(node) {
-  const benefit = node.decision && node.decision.benefit;
-  if (!benefit || benefit.value === null || benefit.value === undefined) return '';
-  if (typeof benefit.benefit_ratio === 'number') {
-    const pct = Math.abs(benefit.benefit_ratio * 100);
-    return `\n${benefit.benefit_ratio >= 0 ? '▼' : '▲'}${pct >= 10 ? Math.round(pct) : pct.toFixed(1)}%`;
-  }
-  return `\n${benefit.value >= 0 ? '▼' : '▲'}${formatCostNumber(Math.abs(benefit.value))}`;
-}
-
-// Workload-wide baseline/selected/benefit for the currently selected
-// queries, deduplicated by `decision.id` *within one loaded document* — the
-// same collision-free key `crates/devtools/src/bin/dag_export.rs`'s own
-// `decision_cost_entries` dedupes by (a decision spans every node in its
-// replacement region, and a CSE-shared target can appear in more than one
-// selected query from the same dag_export run). `decision.id` is only
-// unique within the one `dag_export` process invocation that produced it,
-// never across independently-generated files — the viewer explicitly
-// supports loading and selecting across several files at once — so the
-// dedup key is `${query.sourceBatch}:${decision.id}`, not `decision.id`
-// alone; two files that happen to reuse the same small integer id must
-// never collide and silently drop one file's cost from the total.
-//
-// This aggregates explicit per-node `CostAnnotation`s already in the
-// export; it never estimates a cost itself. Returns `null` when nothing in
-// the selection carries a cost annotation, or when selected annotations
-// disagree on unit (unit-incompatible aggregation is refused, not mixed).
-function computeSelectionWorkloadCost(selected) {
-  const seenDecisions = new Set();
-  let unit = null;
-  let baselineSum = 0;
-  let selectedSum = 0;
-  let any = false;
-  let unavailable = false;
-  let cacheProfile = null;
-  let hasCacheProfile = false;
-  for (const query of selected) {
-    const nodes = (query.post_dag && query.post_dag.nodes) || [];
-    for (const node of nodes) {
-      const decision = node.decision;
-      if (!decision) continue;
-      const dedupKey = `${query.sourceBatch}:${decision.id}`;
-      if (seenDecisions.has(dedupKey)) continue;
-      seenDecisions.add(dedupKey);
-      const baseline = decision.baseline_cost;
-      const selectedCost = decision.selected_cost;
-      if (!baseline || !selectedCost) continue;
-      if (unit === null) unit = baseline.unit;
-      if (baseline.unit !== unit || selectedCost.unit !== unit) return null; // unit-incompatible aggregation is rejected
-      any = true;
-      // Preserve legacy models without cache provenance, but never mix them
-      // with cache-aware estimates (matching Rust workload aggregation).
-      const profile = baseline.cache_profile ?? null;
-      if ((profile !== null && (typeof profile !== 'string' || !profile.trim()))
-          || (selectedCost.cache_profile ?? null) !== profile
-          || (hasCacheProfile && cacheProfile !== profile)) {
-        unavailable = true;
-      } else {
-        cacheProfile = profile;
-        hasCacheProfile = true;
-      }
-      if (baseline.value === null || baseline.value === undefined || selectedCost.value === null || selectedCost.value === undefined) {
-        unavailable = true;
-        continue;
-      }
-      baselineSum += baseline.value;
-      selectedSum += selectedCost.value;
-    }
-  }
-  if (!any) return null;
-  if (unavailable) {
-    const missing = { value: null, unit, source: 'Unavailable' };
-    return { baseline_cost: missing, selected_cost: missing, benefit: missing };
-  }
-  const delta = baselineSum - selectedSum;
-  return {
-    baseline_cost: { value: baselineSum, unit, source: 'Modeled', cache_profile: cacheProfile },
-    selected_cost: { value: selectedSum, unit, source: 'Modeled', cache_profile: cacheProfile },
-    benefit: {
-      value: delta,
-      unit,
-      source: 'Modeled',
-      cache_profile: cacheProfile,
-      baseline: { kind: 'PreAsapRecomputation' },
-      benefit_ratio: baselineSum > 0 ? delta / baselineSum : null,
-    },
-  };
 }
 
 function formatSchema(schema) {
@@ -839,7 +547,7 @@ function formatSchema(schema) {
   if (!Array.isArray(fields) || fields.length === 0) return 'empty schema';
   const rows = fields.map((field, index) => {
     const name = field && field.name !== undefined ? field.name : '?';
-    // A plain value is tagged `{"Plain": <dtype>}`; older exports wrote it bare.
+    // A plain value is tagged `{"Plain": <dtype>}`.
     const raw = field && field.dtype !== undefined ? field.dtype : '?';
     const plain = raw && typeof raw === 'object' && 'Plain' in raw ? raw.Plain : raw;
     const dtype = typeof plain === 'string' ? plain : JSON.stringify(plain);
@@ -871,7 +579,7 @@ function schemaDerivation(target) {
     case 'SummaryEstimate': return 'SummaryEstimate reads the selected summary state and emits the requested estimate schema.';
     case 'TimeRange': return 'TimeRange restricts the temporal input window and preserves the row schema.';
     case 'Scan': return 'Scan obtains this schema from the bound table or metric source.';
-    default: return `${node.kind} applies the IR operation shown below; its declared output schema is exported by the planner.`;
+    default: return `${node.kind} applies the IR operation shown below; its declared output schema is in the stage document.`;
   }
 }
 
@@ -881,10 +589,6 @@ function showEdgeDetail(edge) {
   const sourceNode = source.data('node') || {};
   const targetNode = target.data('node') || {};
   const edgeSchema = edge.data('schemaLabel') || formatSchema(sourceNode.schema);
-  const edgeCost = edge.data('edgeCost');
-  const edgeCostHtml = edgeCost
-    ? `<div class="costBlock"><h4>Edge cost</h4>${renderCostAnnotation('Materialization', edgeCost)}</div>`
-    : '';
   detailSection.innerHTML = `
     <h2>Selected edge</h2>
     <div class="translationBlock">
@@ -892,7 +596,6 @@ function showEdgeDetail(edge) {
       <div><strong>From:</strong> ${escapeHtml(sourceNode.label || source.id())}</div>
       <div><strong>To:</strong> ${escapeHtml(targetNode.label || target.id())}</div>
     </div>
-    ${edgeCostHtml}
     <h3 class="detailSubhead">Schema carried by this edge</h3>
     <pre>${escapeHtml(edgeSchema || '(schema unavailable)')}</pre>
     <h3 class="detailSubhead">How the schema is produced</h3>
@@ -906,51 +609,17 @@ function showEdgeDetail(edge) {
 
 function renderScopeSummary(selected) {
   scopePickerEl.classList.add('visible');
-  const strategies = new Set();
-  selected.forEach((query) => (query.post_dag?.nodes || []).forEach((node) => {
-    if (node.decision && node.decision.rank === 0) strategies.add(node.decision.strategy);
-  }));
   const scope = selected.length === 1 ? 'Single query' : `Batch workload · ${selected.length} queries`;
-  const strategyText = strategies.size ? `Winning strategies: ${Array.from(strategies).join(', ')}` : 'No selected replacements';
-  // Single query: use the exporter's own precomputed `NamedDAG.workload_cost`
-  // directly. Multiple queries: no single precomputed field covers exactly
-  // this subset, so aggregate the explicit per-decision annotations already
-  // in the export (dedup by `decision.id`) — see
-  // computeSelectionWorkloadCost's own doc for why this is aggregation, not
-  // client-side cost estimation.
-  const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
-  const benefitValue = costSummary && costSummary.benefit && costSummary.benefit.value;
-  const hasEdgeCosts = selected.some((query) => (query.post_dag?.edge_annotations || []).length > 0);
-  const outcomeLabel = typeof benefitValue !== 'number'
-    ? 'difference'
-    : benefitValue > 0 ? 'saved' : benefitValue < 0 ? 'additional cost' : 'no change';
-  const costHtml = costSummary
-    ? `<div class="scopeGroup costComparisonGroup">
-        <div class="scopeGroupLabel">Pre/post cost comparison</div>
-        <div class="costComparison">
-          <div class="costStage costStage--pre"><span>pre-ASAP baseline</span><strong>${escapeHtml(compactCost(costSummary.baseline_cost))}</strong></div>
-          <div class="costArrow" aria-label="rewritten to">→</div>
-          <div class="costStage costStage--post"><span>post-ASAP selected</span><strong>${escapeHtml(compactCost(costSummary.selected_cost))}</strong></div>
-          <div class="costSaving ${typeof benefitValue === 'number' && benefitValue < 0 ? 'costSaving--regression' : ''}"><span>${escapeHtml(outcomeLabel)}</span><strong>${escapeHtml(compactCost(costSummary.benefit))}${typeof costSummary.benefit?.benefit_ratio === 'number' ? ` (${(costSummary.benefit.benefit_ratio * 100).toFixed(1)}%)` : ''}</strong></div>
-        </div>
-        <div class="costComparisonHint">The same values are attached to the lane headers below. Green/red nodes show lower/higher replacement cost.${hasEdgeCosts ? ' Highlighted edges carry an explicitly supplied physical edge cost.' : ''}</div>
-      </div>`
-    : '';
-  scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>${costHtml}`;
-}
-
-function translationsForNode(query, node, stage) {
-  // The pre lane is deliberately the original pre-ASAP IR only. Strategy
-  // metadata belongs to nodes in the post lane.
-  if (stage === 'pre') return [];
-  const replacements = (query.replacements || []).filter((replacement) => replacement.rank === 0);
-  if (!node.decision) return [];
-  const replacement = replacements.find((entry) => entry.decision_id === node.decision.id);
-  return [{
-    ...node.decision,
-    target_pre_id: replacement ? replacement.target_pre_id : undefined,
-    output_kind: replacement ? replacement.after?.kind : undefined,
-  }];
+  const rows = stageCandidateRows(stageDocument).map((row) => `
+    <tr class="candidate candidate--${row.status.replace(' ', '-')}">
+      <td>${escapeHtml(row.id)}</td>
+      <td>${escapeHtml(row.display_name || '')}</td>
+      <td>${row.total === null ? '' : `${escapeHtml(Number(row.total.toPrecision(4)))} ${escapeHtml(row.unit || '')}`}</td>
+      <td>${escapeHtml(row.status)}${row.reason ? `: ${escapeHtml(row.reason)}` : ''}</td>
+    </tr>`).join('');
+  scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span></div></div>
+    <div class="scopeGroup"><div class="scopeGroupLabel">${escapeHtml(stageCandidateHeader(stageDocument))}</div>
+    <table class="candidateTable"><thead><tr><th>Candidate</th><th>Choices</th><th>Cost</th><th>Outcome</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function showPrePostDetail(data) {
@@ -966,29 +635,17 @@ function showPrePostDetail(data) {
     ? `<div class="rootNote">Root of the complete ${stageName} DAG for: ${rootNames.map(escapeHtml).join(', ')}.</div>`
     : '';
 
-  const decisions = data.translations || [];
-  let translationHtml = '';
-  if (decisions.length > 0) {
-    const cards = decisions.map((entry) => `
-      <div class="translationCard">
-        <div class="translationStrategy">${escapeHtml(entry.strategy)}</div>
-        <div class="translationMeta">rank ${entry.rank} · estimated cost ${escapeHtml(entry.cost)}</div>
-        <div class="translationMeta">${entry.role === 'replacement_root' ? 'This node replaces the pre-ASAP target.' : 'This node is generated or carried inside the replacement region.'}</div>
-        <div class="translationReason">${escapeHtml(entry.rationale || 'No rationale recorded.')}</div>
-        <div class="translationTarget">${entry.target_pre_id === undefined ? `decision #${entry.id}` : `pre-ASAP target node #${entry.target_pre_id}`} · output ${escapeHtml(entry.output_kind || node.kind)}</div>
-        ${renderDecisionCostBlock(entry)}
-      </div>`).join('');
-    translationHtml = `<div class="translationBlock"><h3>Why this post-ASAP translation</h3>${cards}</div>`;
-  } else if (data.stage === 'post') {
-    translationHtml = `<div class="translationBlock unchanged"><h3>Translation</h3><div>No replacement targets this node; it is unchanged support structure in the post-ASAP DAG.</div></div>`;
-  }
+  const cost = node.detail && node.detail.cost;
+  const costHtml = cost
+    ? `<div class="translationBlock"><h3>Stage 3 cost</h3><div>${escapeHtml(cost.cost)} × ${escapeHtml(cost.multiplier)}${cost.detail ? ` · ${escapeHtml(cost.detail)}` : ''}</div></div>`
+    : '';
 
   detailSection.innerHTML = `
     <h2>Selected node</h2>
     <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(chipLabel)}</span>
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
-    ${translationHtml}
+    ${costHtml}
     <h3 class="detailSubhead">IR node content</h3>
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
@@ -1010,12 +667,12 @@ function renderSourcePanel(qs) {
       sourceBox.textContent = q.source;
       sourceBox.classList.remove('placeholder');
     } else {
-      sourceBox.textContent = 'No source text in this export.';
+      sourceBox.textContent = 'No source text in this document.';
       sourceBox.classList.add('placeholder');
     }
     return;
   }
-  const blocks = qs.map((q) => `— ${q.name} —\n${q.source || '(no source text in this export)'}`);
+  const blocks = qs.map((q) => `— ${q.name} —\n${q.source || '(no source text in this document)'}`);
   sourceBox.textContent = blocks.join('\n\n');
   sourceBox.classList.remove('placeholder');
 }
@@ -1079,7 +736,7 @@ function renderLegend() {
   const ringColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2563eb';
   const rootColor = getComputedStyle(document.documentElement).getPropertyValue('--cat-output-border').trim() || '#b42318';
   rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${ringColor}"></span>
-    <span><span class="swatchLabel">Shared workload node</span><span class="swatchDesc">Explicitly identified by the exporter as shared across selected queries</span></span></div>`);
+    <span><span class="swatchLabel">Shared workload node</span><span class="swatchDesc">One stage DAG node shared by the selected queries</span></span></div>`);
   rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${rootColor}"></span>
     <span><span class="swatchLabel">Query root</span><span class="swatchDesc">${escapeHtml(ROOT_BADGE.description)}</span></span></div>`);
   legendList.innerHTML = rows.join('');
@@ -1106,51 +763,33 @@ document.getElementById('zoomInBtn').addEventListener('click', () => { zoom = Ma
 document.getElementById('fitBtn').addEventListener('click', () => { if (cy) { cy.fit(undefined, 30); zoom = cy.zoom(); zoomSlider.value = Math.round(zoom * 100); zoomLabel.textContent = Math.round(zoom * 100) + '%'; } });
 document.getElementById('resetBtn').addEventListener('click', () => { zoom = 1; applyZoom(); });
 
-function loadWorkload(parsed) {
-  const incoming = (parsed && parsed.queries) || [];
-  // One batch id for this whole document — see `sourceBatch`'s own doc above.
-  const sourceBatch = nextSourceBatch++;
-  incoming.forEach((q) => queries.push({ name: q.name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, sourceBatch }));
-  if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
-  if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
-}
-
-// Entry point used by planner-ui.js after the local HTTP backend returns a
-// freshly generated WorkloadDAG. Replace (rather than append to) the
-// current data and open the complete workload pre/post view.
-window.renderPlannerWorkload = function renderPlannerWorkload(parsed) {
-  queries = [];
-  participants = new Set();
-  activeIndex = -1;
-  loadWorkload(parsed);
-  queries.forEach((_, index) => participants.add(index));
+// Show `doc` (an asap-stage-pipeline/v1 document), replacing what is
+// loaded, with every query selected. Used by file loads, planner-ui.js and
+// the startup load below.
+function showDocument(doc) {
+  stageDocument = doc;
+  queries = stageWorkload(doc).queries;
+  activeIndex = queries.length ? 0 : -1;
+  participants = new Set(queries.map((_, index) => index));
   render();
-};
+}
+window.renderPlannerWorkload = showDocument;
 
-// render.py's standalone output bakes the WorkloadDAG JSON directly into
-// the page as a <script type="application/json"> tag instead of relying on
-// fetch('dag.json') — a `file://` page can't fetch a sibling file in most
-// browsers (blocked as cross-origin), which is exactly the "no browser
-// dev-server available" case that tool exists for. `window.__DAG_RENDER__`
-// is an optional config object the same generated page may also set, e.g.
-// The generated page always opens in Pre/Post-ASAP mode.
+// render.py's standalone page embeds the document as a
+// <script type="application/json"> tag: a `file://` page can't fetch a
+// sibling file in most browsers.
 const embeddedEl = document.getElementById('embedded-workload');
 if (embeddedEl) {
   try {
-    loadWorkload(JSON.parse(embeddedEl.textContent));
+    showDocument(JSON.parse(embeddedEl.textContent));
   } catch (err) {
-    console.error('tools/dag-viewer: failed to parse embedded workload data', err);
+    console.error('tools/dag-viewer: failed to parse the embedded document', err);
+    render();
   }
-  if (queries.length > 0 && participants.size === 0) participants.add(0);
-  render();
 } else {
-  // Plain index.html starts with the committed, post-ASAP-generated example.
-  // Do not silently prefer a leftover scratch dag.json: it may predate
-  // post_dag and make Pre/Post-ASAP appear broken. Users can load scratch
-  // exports explicitly with the picker or run them through Query planner.
+  // Plain index.html starts with the committed example document.
   fetch('/api/example', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : fetch('dag.example.json', { cache: 'no-store' }).then((fallback) => fallback.json())))
-    .then(loadWorkload)
-    .catch(() => {})
-    .finally(render);
+    .then(showDocument)
+    .catch(() => render());
 }

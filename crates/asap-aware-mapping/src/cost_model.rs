@@ -67,7 +67,35 @@ use crate::replacement::{
 
 // ── Recurring-cost vocabulary for mixed exact/summary plans (issue #171) ──
 
-pub use asap_types::cost::CostUnit;
+/// The unit a cost is expressed in. Costs in different units are never
+/// compared or aggregated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CostUnit {
+    /// A recurring cost expressed per second (`cost_units / s`); it requires
+    /// an explicit recurrence interval or rate.
+    CostUnitsPerSecond,
+    /// A finite-run or one-shot total at some horizon.
+    CostUnits,
+}
+
+impl CostUnit {
+    /// Stable machine-readable name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CostUnitsPerSecond => "cost_units_per_second",
+            Self::CostUnits => "cost_units",
+        }
+    }
+}
+
+impl std::fmt::Display for CostUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CostUnit::CostUnitsPerSecond => write!(f, "cost units/s"),
+            CostUnit::CostUnits => write!(f, "cost units"),
+        }
+    }
+}
 
 /// Who produced a set of [`ExactCompositionCostInputs`], and under which
 /// model version — carried into every composed decision's explanation and
@@ -1154,9 +1182,9 @@ mod tests {
     #[test]
     fn recurring_formulas_require_the_shared_rate_unit() {
         let mut inputs = known_inputs();
-        let shared: asap_types::cost::CostUnit = inputs.unit;
+        let shared: CostUnit = inputs.unit;
         assert_eq!(shared.as_str(), "cost_units_per_second");
-        inputs.unit = asap_types::cost::CostUnit::CostUnits;
+        inputs.unit = CostUnit::CostUnits;
         assert_eq!(read_operation_plan_cost_rate(&inputs), None);
         assert_eq!(maintenance_operation_plan_cost_rate(&inputs), None);
         assert_eq!(raw_recompute_cost_rate(&inputs), None);

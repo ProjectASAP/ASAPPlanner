@@ -192,7 +192,7 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
 #[test]
 fn example3a_selects_the_cheapest_of_all_candidates() {
     let workload = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
-    let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap()).unwrap();
+    let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
     assert_eq!(run.stage1_logical_asap_optimization.len(), 243);
     let expected = run.stage3_plan_selection.unwrap().selected;
 
@@ -204,4 +204,279 @@ fn example3a_selects_the_cheapest_of_all_candidates() {
         .as_array()
         .unwrap();
     assert!(physical.iter().any(|p| p["id"] == expected.as_str()));
+}
+
+/// SQL queries over tables declared with `--table` are planned through the
+/// same stages, and the document records each query's language.
+#[test]
+fn sql_queries_over_declared_tables_are_planned() {
+    let out = std::env::temp_dir().join(format!("stage_pipeline_{}_sql.json", std::process::id()));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--table",
+            r#"{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp", "nullable": false},
+                {"name": "service", "type": "utf8", "nullable": false},
+                {"name": "latency", "type": "float64", "nullable": false}], "time_index": 0}"#,
+            "--sql",
+            "SELECT service, COUNT(*) FROM metrics GROUP BY service",
+            "--sql",
+            "SELECT service, AVG(latency) FROM metrics GROUP BY service",
+            "--out",
+        ])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    let queries = document["workload"]["queries"].as_array().unwrap();
+    assert_eq!(queries.len(), 2);
+    assert!(queries.iter().all(|q| q["language"] == "sql"));
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
+    assert!(document["stage3_plan_selection"]["selected"].is_string());
+}
+
+/// One run mixes SQL (over declared tables) and PromQL queries, in the
+/// order given, each named with `--name`.
+#[test]
+fn mixed_sql_and_promql_queries_are_planned_with_their_names() {
+    let out =
+        std::env::temp_dir().join(format!("stage_pipeline_{}_mixed.json", std::process::id()));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--table",
+            r#"{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp", "nullable": false},
+                {"name": "service", "type": "utf8", "nullable": false}], "time_index": 0}"#,
+            "--sql",
+            "SELECT service, COUNT(*) FROM metrics GROUP BY service",
+            "--name",
+            "count_by_service",
+            "--promql",
+            "topk(5, rate(http_requests_total[5m]))",
+            "--epsilon",
+            "0.01",
+            "--out",
+        ])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    let queries = document["workload"]["queries"].as_array().unwrap();
+    let described: Vec<_> = queries
+        .iter()
+        .map(|q| (q["id"].as_str().unwrap(), q["language"].as_str().unwrap()))
+        .collect();
+    assert_eq!(described, [("count_by_service", "sql"), ("q2", "promql")]);
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
+    assert!(document["stage3_plan_selection"]["selected"].is_string());
+}
+
+/// Runs `stage_pipeline` with `args` (and a throwaway `--out`), expecting it
+/// to fail: its exit status and stderr.
+fn failure(args: &[&str]) -> (Option<i32>, String) {
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_failure.json",
+        std::process::id()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(args)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!out.exists(), "a rejected run writes no document");
+    (
+        output.status.code(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+/// Above `--max-combinations`, the run is rejected before enumeration with
+/// the count and the limit, rather than truncated.
+#[test]
+fn workload_above_the_combination_limit_is_rejected() {
+    let (status, stderr) = failure(&["--example", "planner-layering-1", "--max-combinations", "2"]);
+    assert_eq!(status, Some(3));
+    assert!(
+        stderr.contains(
+            "workload has 3 candidate combinations (limit 2); planning it needs early pruning (#673)"
+        ),
+        "{stderr}"
+    );
+    // At the limit, it plans.
+    let document = generate(&["--max-combinations", "3"]);
+    assert_eq!(
+        document["stage1_logical_asap_optimization"]["combinations"],
+        3
+    );
+}
+
+/// The default limit is 10^4: nine approximate Top-K queries (3^9 = 19683
+/// combinations) are rejected without being enumerated.
+#[test]
+fn default_combination_limit_is_ten_thousand() {
+    let queries: Vec<String> = (1..=9)
+        .map(|i| format!("topk(5, rate(m{i}[5m]))"))
+        .collect();
+    let mut args = Vec::new();
+    for query in &queries {
+        args.extend(["--promql", query.as_str()]);
+    }
+    args.extend(["--epsilon", "0.01", "--delta", "0.001"]);
+    let (status, stderr) = failure(&args);
+    assert_eq!(status, Some(3));
+    assert!(
+        stderr.contains("workload has 19683 candidate combinations (limit 10000)"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn table_declared_twice_is_rejected() {
+    let table =
+        r#"{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}], "time_index": 0}"#;
+    let (status, stderr) = failure(&[
+        "--table",
+        table,
+        "--table",
+        table,
+        "--sql",
+        "SELECT COUNT(*) FROM metrics",
+    ]);
+    assert_eq!(status, Some(2));
+    assert!(
+        stderr.contains("--table: table metrics is declared twice"),
+        "{stderr}"
+    );
+}
+
+/// A defaulted name that collides says it is the default.
+#[test]
+fn duplicate_default_name_says_it_is_the_default() {
+    let (_, stderr) = failure(&["--promql", "sum(a)", "--name", "q2", "--promql", "sum(b)"]);
+    assert!(
+        stderr.contains("duplicate query name q2 (the default name of query 2)"),
+        "{stderr}"
+    );
+    let (_, stderr) = failure(&["--promql", "sum(a)", "--promql", "sum(b)", "--name", "q1"]);
+    assert!(stderr.contains("duplicate query name q1\n"), "{stderr}");
+}
+
+/// Runs `stage_pipeline` with `args`, expecting a document.
+fn document_of(args: &[&str]) -> Value {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_{call}_document.json",
+        std::process::id()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(args)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    document
+}
+
+/// When Pass 1 fails, the document still carries the Stage 0 DAG, with the
+/// error under Stage 1 and no selection, so the viewer can show both.
+#[test]
+fn pass1_failure_still_writes_stage0_and_the_error() {
+    let document = document_of(&[
+        "--promql",
+        "topk(5, rate(m[5m]))",
+        "--epsilon",
+        "1.5",
+        "--delta",
+        "0.1",
+    ]);
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], 1);
+    let logical = &document["stage1_logical_asap_optimization"];
+    assert!(
+        logical["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Pass 1: approximate accuracy"),
+        "{logical}"
+    );
+    assert_eq!(logical["combinations"], 0);
+    assert_eq!(logical["candidates"], serde_json::json!([]));
+    assert_eq!(
+        document["stage2_physical_asap_optimization"],
+        serde_json::json!({ "candidates": [], "pruned": [] })
+    );
+    assert!(document["stage3_plan_selection"]["selected"].is_null());
+}
+
+/// The scalar-queries viewer fixture: standalone scalar queries first, in
+/// the middle and last, which the physical DAG keeps in `scalar_roots`.
+const SCALAR_QUERIES: &str = "../../tools/dag-viewer/examples/scalar-queries.json";
+const SCALAR_QUERIES_ARGS: &[&str] = &[
+    "--promql",
+    "scalar(sum(m))",
+    "--promql",
+    "sum(n)",
+    "--promql",
+    "time()",
+    "--promql",
+    "sum by (job) (k)",
+    "--promql",
+    "1 + 2",
+];
+
+#[test]
+fn scalar_queries_fixture_is_current() {
+    let document = document_of(SCALAR_QUERIES_ARGS);
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCALAR_QUERIES))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(document, committed, "regenerate the committed fixture");
+    let selected = document["stage3_plan_selection"]["selected"]
+        .as_str()
+        .unwrap();
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == selected)
+        .unwrap();
+    let positions: Vec<_> = physical["dag"]["scalar_roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry[0].as_u64().unwrap())
+        .collect();
+    assert_eq!(positions, [0, 2, 4]);
+}
+
+/// `time_index` must be a column index; anything else is an error rather
+/// than a table without a time column.
+#[test]
+fn table_time_index_must_be_a_column_index() {
+    for index in [r#""0""#, "-1", "1.5", "3"] {
+        let table = format!(
+            r#"{{"name": "metrics", "columns": [{{"name": "ts", "type": "timestamp"}}], "time_index": {index}}}"#
+        );
+        let (status, stderr) =
+            failure(&["--table", &table, "--sql", "SELECT COUNT(*) FROM metrics"]);
+        assert_eq!(status, Some(2), "{index}");
+        assert!(
+            stderr
+                .contains("--table metrics: time_index must be the index of one of its 1 columns"),
+            "{index}: {stderr}"
+        );
+    }
 }

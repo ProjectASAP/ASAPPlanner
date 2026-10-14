@@ -120,11 +120,26 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     models: PlanningModels<'_>,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
     let per_computation = generate_per_computation_candidates(roots)?;
-    let combinations = per_computation
-        .targets
-        .iter()
-        .map(|target| target.choices.candidates.len())
-        .fold(1usize, usize::saturating_mul);
+    Ok(run_stage1_to_stage3_from_pass1(
+        per_computation,
+        targets,
+        data,
+        models,
+    ))
+}
+
+/// [`run_stage1_to_stage3`] after Pass 1: enumerates every whole-workload
+/// candidate of `per_computation` (the Pass 1 inventory of the frontends'
+/// roots), so a caller can read the inventory, e.g. its
+/// [`combinations`](PerComputationCandidates::combinations), before
+/// enumerating.
+pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
+    per_computation: PerComputationCandidates<Id>,
+    targets: &[Option<AccuracyTarget>],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Stage1ToStage3Run<Id> {
+    let combinations = per_computation.combinations();
     let query_of_target = query_of_target(&per_computation);
     let mut logical = Vec::new();
     let mut physical = Vec::new();
@@ -171,14 +186,14 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
         }
     }
     let selection = select_plan(&physical, targets, data, models);
-    Ok(Stage1ToStage3Run {
+    Stage1ToStage3Run {
         stage1_pass1_per_computation: per_computation,
         combinations,
         stage1_logical_asap_optimization: logical,
         stage2_physical_asap_optimization: physical,
         stage2_pruned: pruned,
         stage3_plan_selection: selection,
-    })
+    }
 }
 
 /// `query_of_target[t]`: the index of the query root that first reads target

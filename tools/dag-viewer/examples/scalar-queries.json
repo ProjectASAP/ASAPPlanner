@@ -1,0 +1,2692 @@
+{
+  "format": "asap-stage-pipeline/v1",
+  "stage0_query_language_frontends": {
+    "dag": {
+      "nodes": [
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": false,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "m"
+                  }
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": false,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "instant",
+                "range": {
+                  "nanos": 0,
+                  "secs": 15
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": false,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 1,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": []
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "n"
+                  }
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 3,
+                "kind": "instant",
+                "range": {
+                  "nanos": 0,
+                  "secs": 15
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 4,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": []
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "job",
+                      "nullable": true,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "k"
+                  }
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 6,
+                "kind": "instant",
+                "range": {
+                  "nanos": 0,
+                  "secs": 15
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "timing": null
+        },
+        {
+          "guarantee": null,
+          "materialization": "NotMaterialized",
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 7,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "timing": null
+        }
+      ],
+      "roots": [
+        {
+          "Scalar": {
+            "PromqlScalarFromVector": 2
+          }
+        },
+        {
+          "Operator": 5
+        },
+        {
+          "Scalar": "EvalTimestamp"
+        },
+        {
+          "Operator": 8
+        },
+        {
+          "Scalar": {
+            "Literal": {
+              "Float64": 3.0
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stage1_logical_asap_optimization": {
+    "candidates": [
+      {
+        "dag": {
+          "nodes": [
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": false,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "value",
+                          "nullable": false,
+                          "table": null
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "m"
+                      }
+                    }
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": false,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 0,
+                    "kind": "instant",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 15
+                    }
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": false,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": null,
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 1,
+                    "family": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": "SampleValue"
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": []
+                    }
+                  }
+                }
+              },
+              "result_kind": "state",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact accumulator over exact input"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "FinalizeExactAccumulator": {
+                    "child": 2
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "sum",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "value",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "$promql_series_identity",
+                          "nullable": false,
+                          "table": null
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "n"
+                      }
+                    }
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 4,
+                    "kind": "instant",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 15
+                    }
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": null,
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 5,
+                    "family": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": "SampleValue"
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": []
+                    }
+                  }
+                }
+              },
+              "result_kind": "state",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact accumulator over exact input"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "FinalizeExactAccumulator": {
+                    "child": 6
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "sum",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "value",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "job",
+                          "nullable": true,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "$promql_series_identity",
+                          "nullable": false,
+                          "table": null
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "k"
+                      }
+                    }
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 8,
+                    "kind": "instant",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 15
+                    }
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "timing": null
+            },
+            {
+              "guarantee": null,
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 9,
+                    "family": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": "SampleValue"
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": [
+                        2
+                      ]
+                    }
+                  }
+                }
+              },
+              "result_kind": "state",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact accumulator over exact input"
+                  }
+                ]
+              },
+              "materialization": "NotMaterialized",
+              "operator": {
+                "ASAP": {
+                  "FinalizeExactAccumulator": {
+                    "child": 10
+                  }
+                }
+              },
+              "result_kind": "instant_vector",
+              "schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "sum",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "timing": null
+            }
+          ],
+          "roots": [
+            {
+              "Scalar": {
+                "PromqlScalarFromVector": 3
+              }
+            },
+            {
+              "Operator": 7
+            },
+            {
+              "Scalar": "EvalTimestamp"
+            },
+            {
+              "Operator": 11
+            },
+            {
+              "Scalar": {
+                "Literal": {
+                  "Float64": 3.0
+                }
+              }
+            }
+          ]
+        },
+        "display_name": "Q1 exact (Sum acc) · Q2 exact (Sum acc) · Q3 exact · Q4 exact (Sum acc) · Q5 exact",
+        "id": "L1"
+      }
+    ],
+    "capped": false,
+    "combinations": 1
+  },
+  "stage2_physical_asap_optimization": {
+    "candidates": [
+      {
+        "dag": {
+          "edges": [
+            {
+              "consumer": 1,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": false,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 0,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 2,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": false,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 1,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 3,
+              "data_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "producer": 2,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 5,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 4,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 6,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 5,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 7,
+              "data_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "producer": 6,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 9,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 8,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 10,
+              "data_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "producer": 9,
+              "role": "Input",
+              "window": "NotApplicable"
+            },
+            {
+              "consumer": 11,
+              "data_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "grouping": "NotApplicable",
+              "intermediate_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "producer": 10,
+              "role": "Input",
+              "window": "NotApplicable"
+            }
+          ],
+          "nodes": [
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "id": 0,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": false,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": false,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "value",
+                          "nullable": false,
+                          "table": null
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "m"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "id": 1,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": false,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 0,
+                    "kind": "instant",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 15
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": null,
+              "id": 2,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 1,
+                    "family": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": "SampleValue"
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": []
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact accumulator over exact input"
+                  }
+                ]
+              },
+              "id": 3,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "sum",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "FinalizeExactAccumulator": {
+                    "child": 2
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "id": 4,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "value",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "$promql_series_identity",
+                          "nullable": false,
+                          "table": null
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "n"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "id": 5,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 4,
+                    "kind": "instant",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 15
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": null,
+              "id": 6,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 5,
+                    "family": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": "SampleValue"
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": []
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact accumulator over exact input"
+                  }
+                ]
+              },
+              "id": 7,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "sum",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "FinalizeExactAccumulator": {
+                    "child": 6
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "id": 8,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "Scan": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "fields": [
+                        {
+                          "dtype": {
+                            "Plain": "timestamp"
+                          },
+                          "name": "ts",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "float64"
+                          },
+                          "name": "value",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "job",
+                          "nullable": true,
+                          "table": null
+                        },
+                        {
+                          "dtype": {
+                            "Plain": "utf8"
+                          },
+                          "name": "$promql_series_identity",
+                          "nullable": false,
+                          "table": null
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "k"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact over exact inputs"
+                  }
+                ]
+              },
+              "id": 9,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "$promql_series_identity",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "NonASAP": {
+                  "TimeRange": {
+                    "child": 8,
+                    "kind": "instant",
+                    "range": {
+                      "nanos": 0,
+                      "secs": 15
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": null,
+              "id": 10,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "name": "state",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "SummaryState",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "SummaryAgg": {
+                    "child": 9,
+                    "family": {
+                      "ExactAggregate": [
+                        "Sum",
+                        "Sum"
+                      ]
+                    },
+                    "filter": null,
+                    "grouping": "PerSubpopulationInstance",
+                    "input": {
+                      "item": null,
+                      "weight": {
+                        "Column": "SampleValue"
+                      },
+                      "weight_domain": {
+                        "kind": "unknown_or_signed"
+                      }
+                    },
+                    "reduction": {
+                      "Reduce": [
+                        2
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "guarantee": {
+                "bound": {
+                  "op": "zero"
+                },
+                "failure_probability": {
+                  "op": "zero"
+                },
+                "metric": "absolute_value",
+                "provenance": [
+                  {
+                    "kind": "exact",
+                    "reason": "exact accumulator over exact input"
+                  }
+                ]
+              },
+              "id": 11,
+              "materialization": "NotMaterialized",
+              "output_schema": {
+                "closed": true,
+                "fields": [
+                  {
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "name": "job",
+                    "nullable": true,
+                    "table": null
+                  },
+                  {
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "name": "sum",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": [
+                  [
+                    0
+                  ]
+                ]
+              },
+              "output_state": {
+                "primitive": "Raw",
+                "timing": "query_time"
+              },
+              "payload": {
+                "ASAP": {
+                  "FinalizeExactAccumulator": {
+                    "child": 10
+                  }
+                }
+              }
+            }
+          ],
+          "roots": [
+            7,
+            11
+          ],
+          "scalar_roots": [
+            [
+              0,
+              {
+                "PromqlScalarFromVector": 3
+              }
+            ],
+            [
+              2,
+              "EvalTimestamp"
+            ],
+            [
+              4,
+              {
+                "Literal": {
+                  "Float64": 3.0
+                }
+              }
+            ]
+          ]
+        },
+        "display_name": "Q1 exact (Sum acc) · Q2 exact (Sum acc) · Q3 exact · Q4 exact (Sum acc) · Q5 exact",
+        "from_logical": "L1",
+        "id": "P1"
+      }
+    ],
+    "pruned": []
+  },
+  "stage3_plan_selection": {
+    "costs": {
+      "P1": {
+        "per_node": {
+          "0": {
+            "cost": 0.039,
+            "detail": "scan 15000 samples",
+            "multiplier": 1
+          },
+          "1": {
+            "cost": 0.015,
+            "detail": "time range 15s: pass 15000 rows",
+            "multiplier": 1
+          },
+          "10": {
+            "cost": 0.015,
+            "detail": "build exact Sum accumulator into 100 states: 15000 rows x depth 1",
+            "multiplier": 1
+          },
+          "11": {
+            "cost": 0.00009999999999999999,
+            "detail": "finalize 100 accumulators",
+            "multiplier": 1
+          },
+          "2": {
+            "cost": 0.015,
+            "detail": "build exact Sum accumulator into 1 states: 15000 rows x depth 1",
+            "multiplier": 1
+          },
+          "3": {
+            "cost": 1e-6,
+            "detail": "finalize 1 accumulators",
+            "multiplier": 1
+          },
+          "4": {
+            "cost": 0.063,
+            "detail": "scan 15000 samples",
+            "multiplier": 1
+          },
+          "5": {
+            "cost": 0.015,
+            "detail": "time range 15s: pass 15000 rows",
+            "multiplier": 1
+          },
+          "6": {
+            "cost": 0.015,
+            "detail": "build exact Sum accumulator into 1 states: 15000 rows x depth 1",
+            "multiplier": 1
+          },
+          "7": {
+            "cost": 1e-6,
+            "detail": "finalize 1 accumulators",
+            "multiplier": 1
+          },
+          "8": {
+            "cost": 0.087,
+            "detail": "scan 15000 samples",
+            "multiplier": 1
+          },
+          "9": {
+            "cost": 0.015,
+            "detail": "time range 15s: pass 15000 rows",
+            "multiplier": 1
+          }
+        },
+        "source": "analytical-cost-v1 (illustrative statistics)",
+        "total": 0.279102,
+        "unit": "cpu_ms_per_workload_evaluation"
+      }
+    },
+    "rejected": [],
+    "selected": "P1"
+  },
+  "workload": {
+    "queries": [
+      {
+        "id": "q1",
+        "language": "promql",
+        "requirements": {
+          "accuracy": "exact"
+        },
+        "text": "scalar(sum(m))"
+      },
+      {
+        "id": "q2",
+        "language": "promql",
+        "requirements": {
+          "accuracy": "exact"
+        },
+        "text": "sum(n)"
+      },
+      {
+        "id": "q3",
+        "language": "promql",
+        "requirements": {
+          "accuracy": "exact"
+        },
+        "text": "time()"
+      },
+      {
+        "id": "q4",
+        "language": "promql",
+        "requirements": {
+          "accuracy": "exact"
+        },
+        "text": "sum by (job) (k)"
+      },
+      {
+        "id": "q5",
+        "language": "promql",
+        "requirements": {
+          "accuracy": "exact"
+        },
+        "text": "1 + 2"
+      }
+    ]
+  }
+}

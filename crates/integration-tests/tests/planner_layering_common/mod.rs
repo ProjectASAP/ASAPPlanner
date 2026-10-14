@@ -168,7 +168,7 @@ fn logical(id: String, display_name: String, roots: Vec<QueryRoot>) -> Logical {
 /// plan selection selects one. Recurrence and predictability (which
 /// materialization needs, Example 4) are not passed to plan selection.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    let run = run_planning_stages(workload, roots).expect("planning stages run");
+    let run = run_planning_stages(workload, roots, None).expect("planning stages run");
     let logical_candidates = run
         .stage1_logical_asap_optimization
         .into_iter()
