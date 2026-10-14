@@ -524,6 +524,29 @@ mod tests {
         )
     }
 
+    /// A KLL measurement matches a KLL of the same `k` whatever failure
+    /// probability either was sized for.
+    #[test]
+    fn lookup_ignores_the_kll_failure_probability() {
+        let (mut artifact, context, _) = fixture();
+        artifact.records.truncate(1);
+        artifact.records[0].algorithm = SketchAlgorithm::Kll;
+        artifact.records[0].params = SketchParams::Kll {
+            k: 331,
+            failure_probability: None,
+        };
+        let provider = EmpiricalEvidenceProvider::new(artifact, context).unwrap();
+        assert!(provider
+            .lookup(
+                &SketchAlgorithm::Kll,
+                &SketchParams::Kll {
+                    k: 331,
+                    failure_probability: Some(0.001),
+                },
+            )
+            .is_ok());
+    }
+
     /// Real replacement generation follows measured update ranking while keeping
     /// every candidate and the same formally sized parameter configurations.
     #[test]
