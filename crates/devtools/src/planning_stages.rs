@@ -2,7 +2,7 @@
 //! one pipeline behind `stage_pipeline` and the planner-layering acceptance
 //! tests, so both see the same candidates, ids and selection.
 
-use asap_aware_mapping::pass::run_stage1_to_stage3;
+use asap_aware_mapping::pass::run_stage1_to_stage3_from_pass1;
 pub use asap_aware_mapping::pass::{LogicalCandidate, PrunedCandidate};
 use asap_aware_mapping::per_computation_candidates::generate_per_computation_candidates;
 use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
@@ -59,43 +59,65 @@ pub fn lower_sql_roots(
         .collect()
 }
 
+/// Why [`run_planning_stages`] produced no run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanningStagesError {
+    /// Pass 1 failed: there are no candidates, only the frontends' roots.
+    Pass1(String),
+    /// Stage 1 would enumerate more whole-workload candidates than the
+    /// caller's limit; nothing was enumerated.
+    TooManyCombinations { combinations: usize, limit: usize },
+    /// The frontends' roots or a composed candidate failed validation.
+    Validation(String),
+}
+
+impl std::fmt::Display for PlanningStagesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pass1(error) => write!(f, "Pass 1: {error}"),
+            Self::TooManyCombinations {
+                combinations,
+                limit,
+            } => write!(
+                f,
+                "workload has {combinations} candidate combinations (limit {limit}); \
+planning it needs early pruning (#673)"
+            ),
+            Self::Validation(error) => write!(f, "validation: {error}"),
+        }
+    }
+}
+
+impl From<PlanningStagesError> for String {
+    fn from(error: PlanningStagesError) -> Self {
+        error.to_string()
+    }
+}
+
 /// Logical ASAP-aware optimization (Pass 1 and composition; no Pass 2),
 /// physical ASAP-aware optimization and plan selection over `roots`, the
 /// lowered entries of `workload`: the library's planner pipeline
-/// ([`run_stage1_to_stage3`]) with the built-in models. Logical candidates are every
-/// choice of a per-computation candidate for every target, the last target
-/// varying fastest. Every candidate is enumerated and priced, so the
-/// selection is the cheapest of all; a caller that shows fewer cuts only its
-/// display. Plan selection reads only the accuracy targets and the data
+/// ([`run_stage1_to_stage3_from_pass1`]) with the built-in models. Logical
+/// candidates are every choice of a per-computation candidate for every
+/// target, the last target varying fastest. Every candidate is enumerated
+/// and priced, so the selection is the cheapest of all; a caller that shows
+/// fewer cuts only its display. With `max_combinations`, a workload with more
+/// whole-workload candidates is refused after Pass 1, before any is
+/// enumerated. Plan selection reads only the accuracy targets and the data
 /// workload. The frontends' roots and every composed candidate are
 /// validated.
 pub fn run_planning_stages(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-) -> Result<PlanningStagesRun, String> {
+    max_combinations: Option<usize>,
+) -> Result<PlanningStagesRun, PlanningStagesError> {
     let targets: Vec<_> = workload
         .query_workload
         .entries()
         .map(|entry| entry.requirements.accuracy.target())
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    run_planning_stages_over(roots, &targets, &data)
-}
-
-/// The number of whole-workload candidates Stage 1 would enumerate over
-/// `roots`: the product of the targets' Pass 1 candidate counts, saturating
-/// at `usize::MAX`. Runs Pass 1 only, so a caller can refuse a workload too
-/// large to enumerate before planning it.
-pub fn combinations(roots: &[QueryRoot]) -> Result<usize, String> {
-    validate(roots)?;
-    let per_computation =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
-            .map_err(|e| format!("Pass 1: {e}"))?;
-    Ok(per_computation
-        .targets
-        .iter()
-        .map(|target| target.choices.candidates.len())
-        .fold(1usize, usize::saturating_mul))
+    run_planning_stages_over(roots, &targets, &data, max_combinations)
 }
 
 /// [`run_planning_stages`] over roots lowered from any mix of query
@@ -104,16 +126,22 @@ pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
-) -> Result<PlanningStagesRun, String> {
+    max_combinations: Option<usize>,
+) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
     let targets: Vec<_> = targets.iter().cloned().map(Some).collect();
-    let run = run_stage1_to_stage3(
-        roots.iter().cloned().enumerate().collect(),
-        &targets,
-        data,
-        PlanningModels::builtin(),
-    )
-    .map_err(|e| format!("Pass 1: {e}"))?;
+    let per_computation =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
+            .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
+    let combinations = per_computation.combinations();
+    if let Some(limit) = max_combinations.filter(|limit| combinations > *limit) {
+        return Err(PlanningStagesError::TooManyCombinations {
+            combinations,
+            limit,
+        });
+    }
+    let run =
+        run_stage1_to_stage3_from_pass1(per_computation, &targets, data, PlanningModels::builtin());
     for candidate in &run.stage1_logical_asap_optimization {
         if let Ok(roots) = &candidate.roots {
             validate(roots)?;
@@ -128,9 +156,9 @@ pub fn run_planning_stages_over(
     })
 }
 
-fn validate(roots: &[QueryRoot]) -> Result<(), String> {
+fn validate(roots: &[QueryRoot]) -> Result<(), PlanningStagesError> {
     roots
         .iter()
         .try_for_each(|root| root.validate_structure())
-        .map_err(|e| format!("validation: {e}"))
+        .map_err(|e| PlanningStagesError::Validation(e.to_string()))
 }

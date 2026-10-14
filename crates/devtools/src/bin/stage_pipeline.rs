@@ -31,6 +31,8 @@
 //     that reads it, so a shared NotMaterialized node is charged once per
 //     query. When selection fails, `selected` is null, with the rejections,
 //     or with `error` for any other failure.
+// When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
+// `error` and no candidates, and nothing is selected.
 //
 // A workload with more than `--max-combinations` (default 10^4)
 // whole-workload candidates is refused before Stage 1 enumerates any: the
@@ -45,7 +47,8 @@
 // (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
 // int64|bigint", "nullable": true}], "time_index": 0}` (`nullable` defaults
-// to true; without `time_index` the table has no time column).
+// to true; without `time_index` the table has no time column; a
+// `time_index` that is not a column index is an error).
 
 use std::collections::HashSet;
 
@@ -54,8 +57,8 @@ use asap_devtools::planner_layering_examples::{
     declared, example1, pattern_a, pattern_b, PatternARecurrence,
 };
 use asap_devtools::planning_stages::{
-    combinations, lower_promql_roots, lower_sql_roots, run_planning_stages,
-    run_planning_stages_over, PlanningStagesRun,
+    lower_promql_roots, lower_sql_roots, run_planning_stages, run_planning_stages_over,
+    PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -118,18 +121,40 @@ fn main() {
     }
 }
 
-/// Refuses `roots` when Stage 1 would enumerate more than `limit`
-/// whole-workload candidates. Planning itself never caps; only this tool
-/// refuses, before enumerating anything.
-fn check_combinations(roots: &[QueryRoot], limit: usize) -> Result<(), Failure> {
-    let combinations = combinations(roots)?;
-    if combinations > limit {
-        return Err(Failure::TooManyCombinations {
+/// The document for a run that ended with `result` over the frontends'
+/// `roots`. A Pass 1 failure still gives a document: the Stage 0 DAG, the
+/// error under Stage 1 and no selection. Refusing too many combinations or
+/// a failed validation gives none.
+fn document_of(
+    queries: Vec<Value>,
+    roots: &[QueryRoot],
+    result: Result<PlanningStagesRun, PlanningStagesError>,
+    max_displayed: usize,
+) -> Result<Value, Failure> {
+    match result {
+        Ok(run) => Ok(stage_pipeline(queries, &run, max_displayed)),
+        Err(PlanningStagesError::Pass1(error)) => Ok(json!({
+            "format": "asap-stage-pipeline/v1",
+            "workload": { "queries": queries },
+            "stage0_query_language_frontends": { "dag": export(roots) },
+            "stage1_logical_asap_optimization": {
+                "combinations": 0,
+                "capped": false,
+                "candidates": [],
+                "error": format!("Pass 1: {error}"),
+            },
+            "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
+            "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [] },
+        })),
+        Err(PlanningStagesError::TooManyCombinations {
             combinations,
             limit,
-        });
+        }) => Err(Failure::TooManyCombinations {
+            combinations,
+            limit,
+        }),
+        Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
-    Ok(())
 }
 
 fn run(args: Vec<String>) -> Result<(), Failure> {
@@ -190,9 +215,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 other => return Err(format!("unknown example {other}").into()),
             };
             let roots = lower_promql_roots(&workload)?;
-            check_combinations(&roots, max_combinations)?;
-            let run = run_planning_stages(&workload, roots)?;
-            stage_pipeline(workload_queries(&workload), &run, max_displayed)
+            let result = run_planning_stages(&workload, roots.clone(), Some(max_combinations));
+            document_of(workload_queries(&workload), &roots, result, max_displayed)?
         }
         (None, false) => {
             let accuracy = match (epsilon, delta) {
@@ -235,9 +259,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 data_ingestion_interval: declared(DurationMs(interval_ms)),
                 ..Default::default()
             };
-            check_combinations(&roots, max_combinations)?;
-            let run = run_planning_stages_over(roots, &targets, &data)?;
-            stage_pipeline(described, &run, max_displayed)
+            let result =
+                run_planning_stages_over(roots.clone(), &targets, &data, Some(max_combinations));
+            document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
     };
@@ -442,9 +466,19 @@ fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
                 Ok(Field::plain(column_name, dtype, nullable))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let schema = match table["time_index"].as_u64() {
-            Some(index) => Schema::with_time_index(columns, index as usize, vec![]),
-            None => Schema::new(columns),
+        let schema = match table.get("time_index") {
+            None | Some(Value::Null) => Schema::new(columns),
+            Some(index) => match index.as_u64().map(|index| index as usize) {
+                Some(index) if index < columns.len() => {
+                    Schema::with_time_index(columns, index, vec![])
+                }
+                _ => {
+                    return Err(format!(
+                        "--table {name}: time_index must be the index of one of its {} columns",
+                        columns.len()
+                    ))
+                }
+            },
         };
         catalog = catalog.with_table(name, schema);
     }
@@ -520,7 +554,8 @@ mod tests {
             AccuracyTarget::Exact,
             15_000,
         );
-        let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap()).unwrap();
+        let run =
+            run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
         let document = stage_pipeline(workload_queries(&workload), &run, 0);
         let selected = document["stage3_plan_selection"]["selected"]
             .as_str()

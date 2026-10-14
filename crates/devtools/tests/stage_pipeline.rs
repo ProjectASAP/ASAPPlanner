@@ -192,7 +192,7 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
 #[test]
 fn example3a_selects_the_cheapest_of_all_candidates() {
     let workload = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
-    let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap()).unwrap();
+    let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
     assert_eq!(run.stage1_logical_asap_optimization.len(), 243);
     let expected = run.stage3_plan_selection.unwrap().selected;
 
@@ -363,4 +363,120 @@ fn duplicate_default_name_says_it_is_the_default() {
     );
     let (_, stderr) = failure(&["--promql", "sum(a)", "--promql", "sum(b)", "--name", "q1"]);
     assert!(stderr.contains("duplicate query name q1\n"), "{stderr}");
+}
+
+/// Runs `stage_pipeline` with `args`, expecting a document.
+fn document_of(args: &[&str]) -> Value {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_{call}_document.json",
+        std::process::id()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(args)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    document
+}
+
+/// When Pass 1 fails, the document still carries the Stage 0 DAG, with the
+/// error under Stage 1 and no selection, so the viewer can show both.
+#[test]
+fn pass1_failure_still_writes_stage0_and_the_error() {
+    let document = document_of(&[
+        "--promql",
+        "topk(5, rate(m[5m]))",
+        "--epsilon",
+        "1.5",
+        "--delta",
+        "0.1",
+    ]);
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], 1);
+    let logical = &document["stage1_logical_asap_optimization"];
+    assert!(
+        logical["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Pass 1: approximate accuracy"),
+        "{logical}"
+    );
+    assert_eq!(logical["combinations"], 0);
+    assert_eq!(logical["candidates"], serde_json::json!([]));
+    assert_eq!(
+        document["stage2_physical_asap_optimization"],
+        serde_json::json!({ "candidates": [], "pruned": [] })
+    );
+    assert!(document["stage3_plan_selection"]["selected"].is_null());
+}
+
+/// The scalar-queries viewer fixture: standalone scalar queries first, in
+/// the middle and last, which the physical DAG keeps in `scalar_roots`.
+const SCALAR_QUERIES: &str = "../../tools/dag-viewer/examples/scalar-queries.json";
+const SCALAR_QUERIES_ARGS: &[&str] = &[
+    "--promql",
+    "scalar(sum(m))",
+    "--promql",
+    "sum(n)",
+    "--promql",
+    "time()",
+    "--promql",
+    "sum by (job) (k)",
+    "--promql",
+    "1 + 2",
+];
+
+#[test]
+fn scalar_queries_fixture_is_current() {
+    let document = document_of(SCALAR_QUERIES_ARGS);
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCALAR_QUERIES))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(document, committed, "regenerate the committed fixture");
+    let selected = document["stage3_plan_selection"]["selected"]
+        .as_str()
+        .unwrap();
+    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == selected)
+        .unwrap();
+    let positions: Vec<_> = physical["dag"]["scalar_roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry[0].as_u64().unwrap())
+        .collect();
+    assert_eq!(positions, [0, 2, 4]);
+}
+
+/// `time_index` must be a column index; anything else is an error rather
+/// than a table without a time column.
+#[test]
+fn table_time_index_must_be_a_column_index() {
+    for index in [r#""0""#, "-1", "1.5", "3"] {
+        let table = format!(
+            r#"{{"name": "metrics", "columns": [{{"name": "ts", "type": "timestamp"}}], "time_index": {index}}}"#
+        );
+        let (status, stderr) =
+            failure(&["--table", &table, "--sql", "SELECT COUNT(*) FROM metrics"]);
+        assert_eq!(status, Some(2), "{index}");
+        assert!(
+            stderr
+                .contains("--table metrics: time_index must be the index of one of its 1 columns"),
+            "{index}: {stderr}"
+        );
+    }
 }
