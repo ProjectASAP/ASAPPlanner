@@ -105,6 +105,9 @@ pub struct Stage1ToStage3Run<Id> {
     pub stage2_pruned: Vec<PrunedCandidate>,
     /// Stage 3: plan selection over the Stage 2 candidates.
     pub stage3_plan_selection: Result<Selection, SelectionError>,
+    /// Stage 3: the selected candidate's logical roots, with the weight
+    /// requirements it confirmed made proofs ([`Self::selected_logical`]).
+    pub stage3_selected_logical: Option<Vec<QueryRoot>>,
 }
 
 impl<Id> Stage1ToStage3Run<Id> {
@@ -118,14 +121,10 @@ impl<Id> Stage1ToStage3Run<Id> {
 
     /// The composed roots of the logical candidate the selected physical
     /// candidate implements: the plan before physical operator
-    /// implementation and materialization.
+    /// implementation and materialization, with the weight requirements
+    /// Stage 3 confirmed made proofs, as in [`Selection::plan`].
     pub fn selected_logical(&self) -> Option<&[QueryRoot]> {
-        let from = &self.selected()?.from_logical;
-        let logical = self
-            .stage1_logical_asap_optimization
-            .iter()
-            .find(|l| &l.id == from)?;
-        logical.roots.as_deref().ok()
+        self.stage3_selected_logical.as_deref()
     }
 }
 
@@ -291,7 +290,23 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         });
     }
     let selection = select_plan(&physical, targets, recurrence, data, models);
+    let selected_logical = selection.as_ref().ok().and_then(|selection| {
+        let from = &physical
+            .iter()
+            .find(|p| p.id == selection.selected)?
+            .from_logical;
+        let roots = logical
+            .iter()
+            .find(|l| &l.id == from)?
+            .roots
+            .as_ref()
+            .ok()?;
+        Some(crate::stage3_plan_selection::with_confirmed_weights(
+            roots, data,
+        ))
+    });
     Stage1ToStage3Run {
+        stage3_selected_logical: selected_logical,
         stage1_pass1_per_computation: per_computation,
         combinations,
         stage1_pass2_identical_expression: pass2,
@@ -461,19 +476,8 @@ impl OptimizationPass for Stage1ToStage3Pass {
             .collect();
         let data = workload.data_workload().cloned().unwrap_or_default();
         let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, input.models)?;
-        let Stage1ToStage3Run {
-            stage2_physical_asap_optimization: physical,
-            stage3_plan_selection: selection,
-            ..
-        } = run;
-        let selection = selection?;
-        let selected = physical
-            .into_iter()
-            .find(|p| p.id == selection.selected)
-            .expect("the selected candidate is a physical candidate");
-        // The executor reads no data workload: answer every open weight
-        // requirement plan selection confirmed.
-        let roots = crate::stage3_plan_selection::with_confirmed_weights(&selected.roots, &data);
+        let selection = run.stage3_plan_selection?;
+        let roots = selection.plan.clone();
         let mut output = PlanOutput::new(Vec::new());
         for (entry_index, root) in roots.iter().enumerate() {
             match root {
