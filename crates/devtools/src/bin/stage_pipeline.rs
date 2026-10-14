@@ -1,7 +1,7 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --example planner-layering-1 --out planner-layering-example1.json
 // (also planner-layering-3a and planner-layering-3b: #509 Example 3,
-// Patterns A and B; 3a has 243 candidates, all priced, 64 shown by default)
+// Patterns A and B; 3a has 972 candidates, all priced, 64 shown by default)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
@@ -14,7 +14,8 @@
 //   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
 //   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
-//     product), in enumeration order. Every candidate is optimized and
+//     product), each followed by its Pass 2 identical-expression candidates
+//     (one per subset of its sharing groups), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)
 //     and the selected one, with `combinations` (how many exist) and
 //     `capped` (whether some are not shown). A candidate that cannot be
@@ -34,8 +35,9 @@
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
-// A workload with more than `--max-combinations` (default 10^4)
-// whole-workload candidates is refused before Stage 1 enumerates any: the
+// A workload with more than `--max-combinations` (default 10^4) Pass 1
+// whole-workload combinations is refused before Stage 1 enumerates any (Pass
+// 2 adds candidates to each, which is known only once it is composed): the
 // run exits with status 3, the count and the limit, and writes no document.
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
@@ -77,8 +79,8 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64>] [--interval-ms <u64>])) \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
-/// The default `--max-combinations`: the most whole-workload candidates a
-/// run enumerates.
+/// The default `--max-combinations`: the most Pass 1 whole-workload
+/// combinations a run enumerates.
 const MAX_COMBINATIONS: usize = 10_000;
 
 /// Why a run wrote no document.

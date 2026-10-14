@@ -94,12 +94,14 @@ impl From<PlanningStagesError> for String {
     }
 }
 
-/// Logical ASAP-aware optimization (Pass 1 and composition; no Pass 2),
+/// Logical ASAP-aware optimization (Pass 1, composition and Pass 2's
+/// identical-expression rule),
 /// physical ASAP-aware optimization and plan selection over `roots`, the
 /// lowered entries of `workload`: the library's planner pipeline
 /// ([`run_stage1_to_stage3_from_pass1`]) with the built-in models. Logical
 /// candidates are every choice of a per-computation candidate for every
-/// target, the last target varying fastest. Every candidate is enumerated
+/// target, the last target varying fastest, each followed by its Pass 2
+/// candidates. Every candidate is enumerated
 /// and priced, so the selection is the cheapest of all; a caller that shows
 /// fewer cuts only its display. With `max_combinations`, a workload with more
 /// whole-workload candidates is refused after Pass 1, before any is

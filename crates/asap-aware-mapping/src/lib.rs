@@ -214,6 +214,10 @@ pub mod maintained_population;
 /// assigned: that is a Stage 2 materialization decision.
 pub mod per_computation_candidates;
 
+/// Stage 1, Pass 2: ASAP-aware common-subexpression elimination (the
+/// identical-expression rule).
+pub mod asap_aware_cse;
+
 /// #509 Stage 2, physical ASAP-aware optimization (MVP): materialization
 /// (every sub-DAG `NotMaterialized`) and physical operator implementation,
 /// producing the CandidatePhysicalASAPDAGs.

@@ -139,8 +139,9 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
     let document = generate(&["--max-displayed", "1"]);
     let logical = &document["stage1_logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
-    assert!(logical["candidates"].as_array().unwrap().len() < 3);
-    assert_eq!(logical["combinations"], 3);
+    assert!(logical["candidates"].as_array().unwrap().len() < 9);
+    // 3 Pass 1 candidates, each with 2 Pass 2 candidates.
+    assert_eq!(logical["combinations"], 9);
     assert_eq!(
         document["stage3_plan_selection"]["selected"],
         full["stage3_plan_selection"]["selected"]
@@ -185,7 +186,8 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
     }
 }
 
-/// Example 3a (243 candidates) selects what the planning stages select over
+/// Example 3a (243 Pass 1 candidates, each with 3 Pass 2 candidates)
+/// selects what the planning stages select over
 /// every candidate, which the acceptance tests also run: the document's
 /// display cap does not change the selection, and the selected plan is
 /// displayed with its cost.
@@ -193,7 +195,7 @@ fn uncomposable_candidate_is_recorded_with_its_error() {
 fn example3a_selects_the_cheapest_of_all_candidates() {
     let workload = pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed);
     let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
-    assert_eq!(run.stage1_logical_asap_optimization.len(), 243);
+    assert_eq!(run.stage1_logical_asap_optimization.len(), 972);
     let expected = run.stage3_plan_selection.unwrap().selected;
 
     let document = generate_example("planner-layering-3a", &[]);
@@ -306,11 +308,13 @@ fn workload_above_the_combination_limit_is_rejected() {
         ),
         "{stderr}"
     );
-    // At the limit, it plans.
+    // At the limit, it plans. The limit counts Pass 1's combinations; the
+    // document lists every Stage 1 candidate, each Pass 1 candidate with its
+    // 2 Pass 2 candidates.
     let document = generate(&["--max-combinations", "3"]);
     assert_eq!(
         document["stage1_logical_asap_optimization"]["combinations"],
-        3
+        9
     );
 }
 
