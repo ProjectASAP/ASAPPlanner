@@ -35,10 +35,10 @@
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
-// A workload with more than `--max-combinations` (default 10^4) Pass 1
-// whole-workload combinations is refused before Stage 1 enumerates any (Pass
-// 2 adds candidates to each, which is known only once it is composed): the
-// run exits with status 3, the count and the limit, and writes no document.
+// A workload with more than `--max-combinations` (default 10^4) Stage 1
+// candidates, Pass 2's included, is refused as soon as enumeration passes
+// the limit: the run exits with status 3 and the limit, and writes no
+// document.
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
 //
@@ -79,16 +79,16 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64>] [--interval-ms <u64>])) \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
-/// The default `--max-combinations`: the most Pass 1 whole-workload
-/// combinations a run enumerates.
+/// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
+/// included) a run enumerates.
 const MAX_COMBINATIONS: usize = 10_000;
 
 /// Why a run wrote no document.
 enum Failure {
     /// Bad arguments or a query that does not plan (exit status 2).
     Usage(String),
-    /// More candidate combinations than `--max-combinations` (exit status 3).
-    TooManyCombinations { combinations: usize, limit: usize },
+    /// More Stage 1 candidates than `--max-combinations` (exit status 3).
+    TooManyCandidates(PlanningStagesError),
 }
 
 impl From<String> for Failure {
@@ -110,14 +110,8 @@ fn main() {
             eprintln!("stage_pipeline: {message}\n{USAGE}");
             std::process::exit(2);
         }
-        Err(Failure::TooManyCombinations {
-            combinations,
-            limit,
-        }) => {
-            eprintln!(
-                "stage_pipeline: workload has {combinations} candidate combinations \
-(limit {limit}); planning it needs early pruning (#673)"
-            );
+        Err(Failure::TooManyCandidates(error)) => {
+            eprintln!("stage_pipeline: {error}");
             std::process::exit(3);
         }
     }
@@ -148,13 +142,9 @@ fn document_of(
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
             "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [] },
         })),
-        Err(PlanningStagesError::TooManyCombinations {
-            combinations,
-            limit,
-        }) => Err(Failure::TooManyCombinations {
-            combinations,
-            limit,
-        }),
+        Err(error @ PlanningStagesError::TooManyCandidates { .. }) => {
+            Err(Failure::TooManyCandidates(error))
+        }
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
 }
