@@ -495,6 +495,30 @@ fn stage3_plan_selection_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&pipeline());
 }
 
+/// The distinct-count sketches with a guarantee (Theta, KMV) are priced by
+/// their own state sizes, so they do not tie.
+#[test]
+fn stage3_plan_selection_prices_each_distinct_count_sketch_by_its_size() {
+    let run = pipeline();
+    let cost = |family: &str| {
+        let build = format!("build {family} into");
+        run.selection
+            .costs
+            .values()
+            .find(|c| {
+                let builds: Vec<_> = c
+                    .per_node
+                    .values()
+                    .filter(|n| n.detail.starts_with("build "))
+                    .collect();
+                builds.len() == 1 && builds[0].detail.starts_with(&build)
+            })
+            .unwrap_or_else(|| panic!("no candidate builds only {family}"))
+            .total
+    };
+    assert_ne!(cost("Theta"), cost("Kmv"), "Theta and Kmv tie");
+}
+
 /// A UnivMon estimate has a guarantee, so plan selection judges it against its target instead of rejecting it for having none.
 #[test]
 #[ignore = "needs a UnivMon accuracy model: L2 in #621; distinct count and entropy have none yet"]
