@@ -357,7 +357,7 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
                 layers,
             },
         ) => *heap_size > 0 && *sketch_rows > 0 && *sketch_cols > 0 && (1..=64).contains(layers),
-        (SketchAlgorithm::Kll, SketchParams::Kll { k })
+        (SketchAlgorithm::Kll, SketchParams::Kll { k, .. })
         | (SketchAlgorithm::Kmv, SketchParams::Kmv { k })
         | (SketchAlgorithm::Theta, SketchParams::Theta { k }) => *k > 0,
         (SketchAlgorithm::Hll, SketchParams::Hll { precision }) => (4..=18).contains(precision),
@@ -522,6 +522,29 @@ mod tests {
             },
             intent,
         )
+    }
+
+    /// A KLL measurement matches a KLL of the same `k` whatever failure
+    /// probability either was sized for.
+    #[test]
+    fn lookup_ignores_the_kll_failure_probability() {
+        let (mut artifact, context, _) = fixture();
+        artifact.records.truncate(1);
+        artifact.records[0].algorithm = SketchAlgorithm::Kll;
+        artifact.records[0].params = SketchParams::Kll {
+            k: 331,
+            failure_probability: None,
+        };
+        let provider = EmpiricalEvidenceProvider::new(artifact, context).unwrap();
+        assert!(provider
+            .lookup(
+                &SketchAlgorithm::Kll,
+                &SketchParams::Kll {
+                    k: 331,
+                    failure_probability: Some(0.001),
+                },
+            )
+            .is_ok());
     }
 
     /// Real replacement generation follows measured update ranking while keeping

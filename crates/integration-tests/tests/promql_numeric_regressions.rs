@@ -265,3 +265,20 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
         post_asap_dag(node);
     }
 }
+
+/// A candidate that does not compose fails `logical_candidates` instead of
+/// being skipped, so an assertion over every candidate cannot pass on none.
+/// An aggregate over a top-k output does not compose yet (#672).
+/// This test relies on that bug: when #672 is fixed, the query composes and
+/// this test must switch to another candidate that does not compose.
+#[test]
+#[should_panic(expected = "does not compose")]
+fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
+    let accuracy = AccuracyTarget::Epsilon(0.01);
+    let pre = lower_promql(
+        "sum by (job) (topk by (job, instance) (1, rate(m[5m])))",
+        accuracy.clone(),
+    )
+    .unwrap();
+    logical_candidates(pre, accuracy);
+}

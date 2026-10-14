@@ -84,7 +84,13 @@ fn kll(child: Rc<OperatorNode>, column: &str) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child,
         family: FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None,
+                },
+            ),
             Default::default(),
         ),
         input: SummaryUpdate::column(ColumnRef::Named(column.into())),
@@ -584,7 +590,13 @@ fn design_doc_worked_example() {
     let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: project,
         family: FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None,
+                },
+            ),
             Default::default(),
         ),
         input: SummaryUpdate::column(ColumnRef::Named("latency".into())),

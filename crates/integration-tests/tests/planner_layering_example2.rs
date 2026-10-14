@@ -317,9 +317,7 @@ fn stage1_logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_stat
 fn stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary() {
     let found = options(&pipeline(), 0);
     assert!(
-        found
-            .iter()
-            .any(|o| ["Hll", "Theta", "Kmv"].contains(&o.as_str())),
+        found.iter().any(|o| ["Hll", "Kmv"].contains(&o.as_str())),
         "{found:?}"
     );
 }
@@ -493,6 +491,21 @@ fn stage3_plan_selection_selects_cheapest_valid() {
 #[test]
 fn stage3_plan_selection_charges_each_node_per_consuming_query() {
     assert_each_node_charged_per_consuming_query(&pipeline());
+}
+
+/// `asap_sketchlib` has no Theta sketch, so no candidate builds one.
+#[test]
+fn stage3_plan_selection_has_no_theta_candidate() {
+    let run = pipeline();
+    for (id, cost) in &run.selection.costs {
+        assert!(
+            !cost
+                .per_node
+                .values()
+                .any(|n| n.detail.starts_with("build Theta")),
+            "{id} builds Theta"
+        );
+    }
 }
 
 /// A UnivMon estimate has a guarantee, so plan selection judges it against its target instead of rejecting it for having none.

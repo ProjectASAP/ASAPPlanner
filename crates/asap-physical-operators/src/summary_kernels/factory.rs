@@ -563,9 +563,14 @@ pub fn create_planner_accumulator(
         return Err("Planner family and operator grouping disagree".into());
     }
     let updater: Box<dyn AccumulatorUpdater> = match (kind.algorithm(), kind.params()) {
-        (SketchAlgorithm::Kll, SketchParams::Kll { k }) => Box::new(KllAccumulatorUpdater::new(
-            u16::try_from(*k).map_err(|_| "KLL k exceeds runtime bound")?,
-        )),
+        (SketchAlgorithm::Kll, SketchParams::Kll { k, .. }) => {
+            if *k > planner_types::post_asap::sketch::KLL_MAX_K {
+                return Err("KLL k exceeds runtime bound".into());
+            }
+            Box::new(KllAccumulatorUpdater::new(
+                u16::try_from(*k).map_err(|_| "KLL k exceeds runtime bound")?,
+            ))
+        }
         (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }) => {
             Box::new(DDSketchAccumulatorUpdater::new(*alpha))
         }

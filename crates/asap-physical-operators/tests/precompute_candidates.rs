@@ -20,11 +20,16 @@ use std::{collections::BTreeMap, sync::Arc};
 
 /// `sum by(job)(rate(m[1m]))` with its rows carrying the series identity.
 fn grouped_rate_root() -> std::rc::Rc<planner_types::ir::OperatorNode> {
+    exact_promql_root("sum by(job)(rate(m[1m]))")
+}
+
+/// `query`, exact, lowered with its rows carrying the series identity.
+fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: Some(vec![BatchEntry {
-                query: Query("sum by(job)(rate(m[1m]))".into()),
+                query: Query(query.into()),
                 requirements: QueryRequirements {
                     accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
                     ..Default::default()
@@ -725,4 +730,18 @@ fn cut_candidate_rejects_invalid_frontiers() {
         assert!(cut_candidate(&compiled, &frontier).is_err(), "{frontier:?}");
         assert!(compile_candidate(&dag, inputs.clone(), &[root], &frontier).is_err());
     }
+}
+
+/// A candidate that does not compose fails `logical_candidates` instead of
+/// being skipped, so an assertion over every candidate cannot pass on none.
+/// An aggregate over a top-k output does not compose yet (#672).
+/// This test relies on that bug: when #672 is fixed, the query composes and
+/// this test must switch to another candidate that does not compose.
+#[test]
+#[should_panic(expected = "does not compose")]
+fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
+    logical_candidates(
+        exact_promql_root("sum by (job) (topk by (job, instance) (1, rate(m[5m])))"),
+        AccuracyTarget::Exact,
+    );
 }

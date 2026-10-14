@@ -10,7 +10,7 @@ pipeline in `asap_devtools::{planner_layering_examples, planning_stages}`).
 Devtool: `stage_pipeline --example planner-layering-3a` and
 `planner-layering-3b`. Both run every candidate (243 for 3a) through plan
 selection; `--max-displayed` (default 64) limits only how many the document
-shows, so 3a selects P122, KLL for all five queries.
+shows, so 3a selects P109: KLL for q1 and q2, exact for q3–q5.
 
 This spec was written by a test designer who does not implement the stages.
 Tests run the stages through `planner_layering_common::run_stages`, which
@@ -43,7 +43,7 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 | Logical ASAP-aware optimization, Pass 1 | A: exact or KLL over its own interval per query, 2⁵ = 32. B: exact, KLL. | A: exact, KLL (k = 547), DDSketch per query, 3⁵ = **243**. B: exact, KLL (k = 269), DDSketch, **3**. |
 | Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Not implemented: no shared input, no window summaries. |
 | Physical ASAP-aware optimization | See Example 4. | One physical candidate per logical candidate, every sub-DAG `NotMaterialized`. |
-| Plan selection | Not stated for Example 3. | Every candidate is valid. A: five independent KLLs (DDSketch ties on cost). B: KLL (DDSketch ties). |
+| Plan selection | Not stated for Example 3. | Every candidate is valid. A: KLL for q1 and q2, exact for q3–q5, whose rows are underestimated (#632); DDSketch costs slightly more than KLL. B: exact, since each window holds 20 samples per series; DDSketch and then KLL cost more. |
 
 ## Invariants and tests
 

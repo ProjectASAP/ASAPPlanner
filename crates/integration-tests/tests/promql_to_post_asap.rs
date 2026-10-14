@@ -902,7 +902,13 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert_eq!(
         family,
         &FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 269,
+                    failure_probability: None
+                }
+            ),
             GroupingStrategy::default()
         )
     );
@@ -915,7 +921,13 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert_eq!(
         dtype(&summary_input.schema, "value"),
         &FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 269,
+                    failure_probability: None
+                }
+            ),
             GroupingStrategy::default()
         )
     );

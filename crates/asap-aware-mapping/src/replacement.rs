@@ -7561,7 +7561,10 @@ mod tests {
             preferred(&approx),
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 269 },
+                SketchParams::Kll {
+                    k: 269,
+                    failure_probability: None
+                },
             ))
         );
 
@@ -7574,7 +7577,10 @@ mod tests {
             preferred(&looser),
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 52 },
+                SketchParams::Kll {
+                    k: 52,
+                    failure_probability: None
+                },
             ))
         );
     }
@@ -7675,7 +7681,6 @@ mod tests {
             summary_candidates(&default_cardinality()),
             &[
                 SketchAlgorithm::Hll,
-                SketchAlgorithm::Theta,
                 SketchAlgorithm::Kmv,
                 SketchAlgorithm::UnivMon
             ]
@@ -7730,7 +7735,10 @@ mod tests {
             preferred(&intent),
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 65_535 },
+                SketchParams::Kll {
+                    k: 26_602,
+                    failure_probability: None
+                },
             ))
         );
     }
@@ -7990,7 +7998,6 @@ mod tests {
             kinds,
             vec![
                 SketchAlgorithm::Hll,
-                SketchAlgorithm::Theta,
                 SketchAlgorithm::Kmv,
                 SketchAlgorithm::UnivMon,
             ]
@@ -8021,7 +8028,6 @@ mod tests {
             kinds,
             vec![
                 SketchAlgorithm::Hll,
-                SketchAlgorithm::Theta,
                 SketchAlgorithm::Kmv,
                 SketchAlgorithm::UnivMon,
             ]
@@ -8379,14 +8385,14 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_group_keeps_all_four_candidates() {
+    fn cardinality_group_keeps_all_three_candidates() {
         let root = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]).unwrap();
         let agg_group = space
             .target_subdag_candidates()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 4);
+        assert_eq!(agg_group.candidates.len(), 3);
         assert!(agg_group.candidates.iter().any(|candidate| matches!(
             &candidate.replacement,
             Replacement::SubDAG(node) if node.guarantee.is_none()
@@ -9763,7 +9769,13 @@ mod tests {
         assert_eq!(
             family,
             &FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k: 269,
+                        failure_probability: None
+                    }
+                ),
                 GroupingStrategy::default()
             )
         );
@@ -9774,7 +9786,13 @@ mod tests {
         assert_eq!(
             field(&summary_input.schema, "value").dtype,
             FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k: 269,
+                        failure_probability: None
+                    }
+                ),
                 GroupingStrategy::default()
             )
         );

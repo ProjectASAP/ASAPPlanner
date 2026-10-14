@@ -90,7 +90,6 @@ fn cardinality_keeps_exact_specialized_and_universal_candidates() {
         algorithms(&choices),
         vec![
             SketchAlgorithm::Hll,
-            SketchAlgorithm::Theta,
             SketchAlgorithm::Kmv,
             SketchAlgorithm::UnivMon
         ]
@@ -286,7 +285,13 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     let summary = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan(false),
         family: FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None,
+                },
+            ),
             Default::default(),
         ),
         input: SummaryUpdate::column(ColumnRef::SampleValue),

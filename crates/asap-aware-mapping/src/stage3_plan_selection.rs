@@ -31,8 +31,14 @@
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
-//! groups × k. These numbers are illustrative, not calibrated: a binary,
-//! join or concat node is priced from its first input only (MVP; follow-up).
+//! groups × k. State is priced by its bytes: a sketch by its parameters, a
+//! fixed-size exact accumulator (sum, count, min, max, rate, ...) as one
+//! value per group, and exact state that grows with the data (quantile,
+//! top-k, distinct count, L2, entropy keep every value or item) as one value
+//! per input row of its group, assuming rows spread evenly over groups and,
+//! for distinct items, that every row may be distinct. These numbers are
+//! illustrative, not calibrated: a binary, join or concat node is priced from
+//! its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
 //! bad declared rates. Latency bounds and deployment capabilities are not
 //! checked yet.
@@ -46,11 +52,12 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
 };
+use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::{
     CompositionOperator, ErrorMetric, FieldDataType, Materialization, ResultGuarantee,
     SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
-use asap_types::pre_asap::{DataType, Reduction, ScalarValue, Schema};
+use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::DataWorkload;
 use thiserror::Error;
@@ -103,7 +110,7 @@ pub struct CandidateCost {
 }
 
 /// A candidate that was not selected. `valid == false`: it failed a check;
-/// `true`: it lost on cost.
+/// `true`: it lost on cost, or tied and lost on enumeration order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rejection {
     pub id: String,
@@ -181,13 +188,19 @@ pub fn select_plan(
     };
     for candidate in cands {
         if candidate.id != selected && costs.contains_key(&candidate.id) {
+            let total = costs[&candidate.id].total;
+            let reason = if total == best_total {
+                format!(
+                    "tied with the selected candidate {selected} at {total:.3} {COST_UNIT}; \
+                     lost on enumeration order"
+                )
+            } else {
+                format!("costlier: {total:.3} vs {best_total:.3} {COST_UNIT}")
+            };
             rejected.push(Rejection {
                 id: candidate.id.clone(),
                 valid: true,
-                reason: format!(
-                    "costlier: {:.3} vs {:.3} {COST_UNIT}",
-                    costs[&candidate.id].total, best_total
-                ),
+                reason,
             });
         }
     }
@@ -617,7 +630,7 @@ fn price(
     let calibration = ResourceCalibration {
         cost_per_cpu_op: 1e-6,
         cost_per_scan_byte: 1e-7,
-        cost_per_retained_byte: 0.0,
+        cost_per_retained_byte: 1e-7,
         version: "illustrative-v1".into(),
     };
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
@@ -694,6 +707,7 @@ fn price(
                         _ => 1,
                     };
                     let out = edge(group_count);
+                    let held = input.rows.div_ceil(group_count.max(1));
                     let estimate = estimate_operator(
                         PhysicalOperator::HashAggregate {
                             grouping_key_count: keys,
@@ -703,7 +717,11 @@ fn price(
                             edges: unary(out),
                             group_count,
                             key_bytes: 16 * keys,
-                            accumulator_bytes_per_group: 8,
+                            accumulator_bytes_per_group: measures
+                                .iter()
+                                .map(|m| if keeps_every_value(m) { 8 * held } else { 8 })
+                                .sum::<u64>()
+                                .max(8),
                         },
                     );
                     (
@@ -782,7 +800,7 @@ fn price(
                     rows: group_count,
                     bytes: group_count * state_bytes,
                 };
-                let ops = input.rows as f64 * depth as f64;
+                let ops = input.rows as f64 * depth;
                 (
                     out,
                     Ok(ResourceEstimate::new(ops, out.bytes, 0)),
@@ -864,12 +882,41 @@ fn row_bytes(schema: &Schema) -> u64 {
         .max(1)
 }
 
-/// Update operations per input row and bytes per state.
-fn summary_shape(family: &FieldDataType) -> (u64, u64) {
+/// Exact state that keeps every value or item of its group, so grows with
+/// the data; other exact accumulators are fixed-size.
+fn keeps_every_value(measure: &AggIntent) -> bool {
+    matches!(
+        measure,
+        AggIntent::Quantile { .. }
+            | AggIntent::TopK { .. }
+            | AggIntent::Cardinality { .. }
+            | AggIntent::FrequencyL2 { .. }
+            | AggIntent::FrequencyEntropy { .. }
+    )
+}
+
+/// Update operations per input row and bytes per state, from the sketch's
+/// parameters as `asap_sketchlib` allocates it:
+/// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
+///   24-byte entry per heap slot for the top-k variants;
+/// - KLL: the 8-byte item array it allocates up front ([`kll_items`]);
+/// - DDSketch: one 8-byte count per bin it touches over an assumed nine
+///   decades of values ([`ddsketch_bins`]);
+/// - HLL: one 1-byte register per bucket, `2^precision`;
+/// - KMV: its `k` smallest 64-bit hashes (Theta, which candidate generation
+///   does not offer because `asap_sketchlib` has no Theta sketch, likewise);
+/// - UnivMon: per layer, a `rows × cols` Count-Sketch of 8-byte counters and
+///   a heap of `heap_size` 24-byte entries.
+///
+/// Update operations per input row: one counter per row of depth for
+/// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
+/// for UnivMon, the same per layer it updates ([`univmon_expected_layers`]);
+/// 1 for every other sketch.
+fn summary_shape(family: &FieldDataType) -> (f64, u64) {
     match family {
         FieldDataType::Sketch(kind, _) => match kind.params() {
             SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
-                (u64::from(*depth), 8 * u64::from(*width) * u64::from(*depth))
+                (f64::from(*depth), 8 * u64::from(*width) * u64::from(*depth))
             }
             SketchParams::CmsWithHeap {
                 width,
@@ -881,13 +928,76 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
                 depth,
                 heap_size,
             } => (
-                u64::from(*depth) + 1,
+                f64::from(*depth) + 1.0,
                 8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
             ),
-            _ => (1, 1_024),
+            SketchParams::Kll { k, .. } => (1.0, 8 * kll_items(*k)),
+            SketchParams::DDSketch { alpha } => (1.0, ddsketch_bins(*alpha).saturating_mul(8)),
+            SketchParams::Hll { precision } => (1.0, 1u64 << (*precision).min(63)),
+            SketchParams::Kmv { k } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
+            SketchParams::UnivMon {
+                heap_size,
+                sketch_rows,
+                sketch_cols,
+                layers,
+            } => (
+                univmon_expected_layers(*layers) * (f64::from(*sketch_rows) + 1.0),
+                u64::from(*layers)
+                    * (8 * u64::from(*sketch_rows) * u64::from(*sketch_cols)
+                        + 24 * u64::from(*heap_size)),
+            ),
         },
-        _ => (1, 8),
+        _ => (1.0, 8),
     }
+}
+
+/// Items `asap_sketchlib`'s KLL allocates up front for `k`
+/// (`KLL::init_internal` → `compute_max_capacity(k, 8)`): over its 61 levels,
+/// `max(ceil(k · (2/3)^i), 8)` each, with `k` capped at [`KLL_MAX_K`] as the
+/// library caps it. 1,206 items at `k` = 269.
+fn kll_items(k: u32) -> u64 {
+    const LEVELS: usize = 61;
+    const MIN_LEVEL_CAPACITY: f64 = 8.0;
+    let k = f64::from(k.min(KLL_MAX_K));
+    let mut scale = 1.0_f64;
+    let mut total = 0;
+    for _ in 0..LEVELS {
+        total += (k * scale).ceil().max(MIN_LEVEL_CAPACITY) as u64;
+        scale *= 2.0 / 3.0;
+    }
+    total
+}
+
+/// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
+/// layers `0..=b`, with bottom layer `b` the index of the first zero among
+/// hash bits `1..layers`, capped at `layers - 1`; so it reaches layer `j`
+/// with probability `2^-j`, and the expectation is
+/// `sum_{j < layers} 2^-j = 2 - 2^(1 - layers)`.
+fn univmon_expected_layers(layers: u8) -> f64 {
+    2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
+}
+
+/// Ratio of the largest to the smallest positive value a DDSketch is assumed
+/// to see: nine decades, e.g. latencies from 1 ns to 1 s. An assumption, not
+/// workload evidence: the data workload declares no value range.
+const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
+
+/// Bins a DDSketch with relative accuracy `alpha` touches, assuming its
+/// values span nine decades ([`DDSKETCH_ASSUMED_VALUE_RANGE`] = 1e9): its
+/// bins grow geometrically by `gamma = (1 + alpha) / (1 - alpha)`, so
+/// `ceil(ln(1e9) / ln(gamma))`, e.g. 1,037 bins at α = 0.01. The count is
+/// proportional to the decades spanned, so values over three decades would
+/// need a third of these bins and over twelve decades four thirds.
+/// `asap_sketchlib`'s store has no bin limit; the cap is the bins spanning
+/// every value it can index.
+fn ddsketch_bins(alpha: f64) -> u64 {
+    let log_gamma = ((1.0 + alpha) / (1.0 - alpha)).ln();
+    let (min, max) = asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(alpha);
+    let indexable = (max.ln() - min.ln()) / log_gamma;
+    (DDSKETCH_ASSUMED_VALUE_RANGE.ln() / log_gamma)
+        .min(indexable)
+        .ceil()
+        .max(1.0) as u64
 }
 
 #[cfg(test)]
@@ -897,7 +1007,9 @@ mod tests {
     use crate::stage2_physical_asap_optimization::optimize_physical_asap;
     use crate::test_support::lower_promql;
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    use asap_types::post_asap::{BoundExpr, ErrorMetric, ProbabilityExpr};
+    use asap_types::post_asap::{
+        BoundExpr, ErrorMetric, GroupingStrategy, ProbabilityExpr, SketchKind,
+    };
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::workload::{Evidence, Rate};
 
@@ -1209,6 +1321,269 @@ mod tests {
         for id in &summaries {
             assert!(measured.costs.contains_key(*id), "{id} is valid");
         }
+    }
+
+    /// Exact quantile state keeps every value of its group: over one group of
+    /// 10 000 values it costs more than a quantile sketch sized for
+    /// ε = 0.01, δ = 0.01, which is selected; over 100 groups of 100 values it
+    /// is smaller than the sketch and is selected.
+    #[test]
+    fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        for (query, sketch_wins) in [
+            ("quantile(0.99, rate(x[5m]))", true),
+            ("quantile by (job) (0.99, rate(x[5m]))", false),
+        ] {
+            let candidates = all_candidates(query, &target);
+            let selection = select_plan(
+                &candidates,
+                &[Some(target.clone())],
+                &data(),
+                PlanningModels::builtin(),
+            )
+            .unwrap();
+            let selected = candidates
+                .iter()
+                .find(|c| c.id == selection.selected)
+                .unwrap();
+            assert_eq!(
+                has_summary_estimate(selected),
+                sketch_wins,
+                "{query}: {selection:?}"
+            );
+        }
+    }
+
+    /// Exact L2 state keeps one counter per distinct value of its group, so
+    /// it is priced like exact quantile state, which keeps every value.
+    #[test]
+    fn exact_l2_state_is_priced_like_exact_quantile_state() {
+        let aggregate_cost = |query: &str| {
+            let candidates = all_candidates(query, &AccuracyTarget::Exact);
+            let selection =
+                select_plan(&candidates, &[None], &data(), PlanningModels::builtin()).unwrap();
+            let exact = candidates
+                .iter()
+                .find(|c| !has_summary_estimate(c))
+                .unwrap();
+            selection.costs[&exact.id]
+                .per_node
+                .values()
+                .find(|n| n.detail.starts_with("hash aggregate"))
+                .unwrap()
+                .cost
+        };
+        assert_eq!(
+            aggregate_cost("l2_over_time(x[5m])"),
+            aggregate_cost("quantile_over_time(0.99, x[5m])")
+        );
+    }
+
+    /// A DDSketch is sized for values over nine decades: 1,037 bins at
+    /// α = 0.01, 8 bytes each.
+    #[test]
+    fn ddsketch_bins_span_nine_decades() {
+        assert_eq!(ddsketch_bins(0.01), 1_037);
+        assert_eq!(
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::DDSketch,
+                    SketchParams::DDSketch { alpha: 0.01 }
+                ),
+                GroupingStrategy::default(),
+            ))
+            .1,
+            8 * 1_037
+        );
+    }
+
+    /// DDSketch state grows as its relative accuracy α tightens.
+    #[test]
+    fn ddsketch_state_grows_as_alpha_shrinks() {
+        let bytes = |alpha| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
+                GroupingStrategy::default(),
+            ))
+            .1
+        };
+        assert!(
+            bytes(0.1) < bytes(0.01),
+            "{} vs {}",
+            bytes(0.1),
+            bytes(0.01)
+        );
+        assert!(
+            bytes(0.01) < bytes(0.001),
+            "{} vs {}",
+            bytes(0.01),
+            bytes(0.001)
+        );
+    }
+
+    /// Every sketch family's state is sized from its parameters, as
+    /// `asap_sketchlib` allocates it.
+    #[test]
+    fn summary_state_is_sized_from_sketch_params() {
+        let bytes = |algorithm, params| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(algorithm, params),
+                GroupingStrategy::default(),
+            ))
+            .1
+        };
+        assert_eq!(
+            bytes(SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
+            1 << 14
+        );
+        assert_eq!(
+            bytes(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1_000 }),
+            8 * 1_000
+        );
+        assert_eq!(
+            bytes(
+                SketchAlgorithm::UnivMon,
+                SketchParams::UnivMon {
+                    heap_size: 256,
+                    sketch_rows: 5,
+                    sketch_cols: 1_024,
+                    layers: 16,
+                }
+            ),
+            16 * (8 * 5 * 1_024 + 24 * 256)
+        );
+    }
+
+    /// KLL state is the item array `asap_sketchlib` allocates up front:
+    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
+    #[test]
+    fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
+        let bytes = |k| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k,
+                        failure_probability: None,
+                    },
+                ),
+                GroupingStrategy::default(),
+            ))
+            .1
+        };
+        assert_eq!(bytes(269), 8 * 1_206);
+        assert_eq!(bytes(26_602), 8 * 80_118);
+        assert_eq!(bytes(30_000), 8 * 80_118);
+    }
+
+    /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is
+    /// geometric (`asap_sketchlib`'s `bottom_layer_for_hash`), so
+    /// `2 - 2^(1 - layers)` layers in expectation; each updates one counter
+    /// per sketch row and its heap.
+    #[test]
+    fn univmon_update_cost_is_expected_layers_times_rows_and_heap() {
+        let ops = |layers| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::UnivMon,
+                    SketchParams::UnivMon {
+                        heap_size: 256,
+                        sketch_rows: 5,
+                        sketch_cols: 1_024,
+                        layers,
+                    },
+                ),
+                GroupingStrategy::default(),
+            ))
+            .0
+        };
+        assert_eq!(ops(1), 6.0);
+        assert_eq!(ops(2), 1.5 * 6.0);
+        assert_eq!(ops(16), (2.0 - 2f64.powi(-15)) * 6.0);
+    }
+
+    /// Exact distinct-count state keeps every item of its group: over 10 000
+    /// groups of 300 rows it is smaller than a distinct-count sketch sized for
+    /// ε = 0.01 and is selected; over one group of 3 000 000 rows a sketch is.
+    #[test]
+    fn exact_distinct_count_beats_a_sketch_over_small_groups() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let one_series = DataWorkload {
+            input_cardinality: Evidence {
+                value: Some(1),
+                ..Default::default()
+            },
+            ..data()
+        };
+        for (data, sketch_wins) in [(data(), false), (one_series, true)] {
+            let candidates = all_candidates("distinct_over_time(x[5m])", &target);
+            let selection = select_plan(
+                &candidates,
+                &[Some(target.clone())],
+                &data,
+                PlanningModels::builtin(),
+            )
+            .unwrap();
+            let selected = candidates
+                .iter()
+                .find(|c| c.id == selection.selected)
+                .unwrap();
+            assert_eq!(has_summary_estimate(selected), sketch_wins, "{selection:?}");
+        }
+    }
+
+    /// A candidate that ties the selected one is rejected for losing on
+    /// enumeration order, not as costlier.
+    #[test]
+    fn a_tie_is_reported_as_lost_on_enumeration_order() {
+        let mut candidates = candidates();
+        candidates.truncate(1);
+        let mut twin = candidates[0].clone();
+        twin.id = "P1-twin".into();
+        candidates.push(twin);
+        let selection =
+            select_plan(&candidates, &[None], &data(), PlanningModels::builtin()).unwrap();
+        assert_eq!(selection.selected, "P1");
+        let reason = &selection.rejected[0].reason;
+        assert!(
+            reason.contains("tied with the selected candidate P1")
+                && reason.contains("enumeration order"),
+            "{reason}"
+        );
+    }
+
+    /// At δ = 0.001 a KLL candidate meets the target and is valid.
+    #[test]
+    fn kll_candidate_meets_a_failure_probability_below_one_percent() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let candidates = all_candidates("quantile(0.99, rate(x[5m]))", &target);
+        let selection = select_plan(
+            &candidates,
+            &[Some(target)],
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        let kll = candidates
+            .iter()
+            .find(|c| {
+                c.dag.nodes.iter().any(|n| {
+                    matches!(&n.payload, Payload::ASAP(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _), ..
+                    }) if *kind.algorithm() == SketchAlgorithm::Kll)
+                })
+            })
+            .unwrap();
+        assert!(selection.costs.contains_key(&kll.id), "{selection:?}");
     }
 
     /// `scalar(v)` inherits `v`'s guarantee; arithmetic over it composes
