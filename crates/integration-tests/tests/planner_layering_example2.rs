@@ -14,11 +14,13 @@
 
 mod planner_layering_common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::ir::QueryRoot;
-use asap_types::post_asap::{Field, Schema, SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::post_asap::{
+    Field, ProbabilityExpr, Schema, SketchAlgorithm, SketchParams, SketchStatistic,
+};
 use asap_types::pre_asap::DataType;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -82,6 +84,7 @@ fn data_workload(ingestion_interval: bool) -> DataWorkload {
         input_cardinality: declared(10_000_000),
         distribution: declared(DataDistribution::Zipf),
         stream_norms: Default::default(),
+        max_distinct_per_evaluation: Default::default(),
     }
 }
 
@@ -149,6 +152,26 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 
 fn pipeline() -> Run {
     let workload = standin_workload();
+    run_stages(&workload, lower_promql(&workload))
+}
+
+/// The stand-in with the deployment's bound on distinct items per
+/// evaluation of its one source, when given.
+fn standin_with_distinct_bound(bound: Option<u64>) -> PlanningWorkload {
+    let mut workload = standin_workload();
+    if let Some(bound) = bound {
+        workload
+            .data_workload
+            .as_mut()
+            .expect("data workload")
+            .max_distinct_per_evaluation =
+            declared(BTreeMap::from([("flows_src_ip".into(), bound)]));
+    }
+    workload
+}
+
+fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
+    let workload = standin_with_distinct_bound(bound);
     run_stages(&workload, lower_promql(&workload))
 }
 
@@ -527,6 +550,110 @@ fn stage3_plan_selection_judges_univmon_with_an_accuracy_model() {
             }
         }
     }
+}
+
+/// The physical candidates that answer Q1 with HLL and Q2 and Q3 exactly:
+/// their validity depends only on Q1's HLL estimate.
+fn hll_only_candidates(run: &Run) -> Vec<&str> {
+    let ids: Vec<_> = run
+        .logical
+        .iter()
+        .filter(|c| {
+            !shares_a_summary(c)
+                && (0..3)
+                    .map(|q| query_option(&c.dag, &c.query_roots, q))
+                    .eq(["Hll", "exact", "exact"])
+        })
+        .flat_map(|c| run.physical_of(c).map(|p| p.id.as_str()))
+        .collect();
+    assert!(!ids.is_empty(), "a candidate answers Q1 with HLL alone");
+    ids
+}
+
+/// With the deployment's bound on distinct items per evaluation, plan
+/// selection binds classic HLL's failure probability and accepts Q1's HLL
+/// estimate; without a bound it stays unknown and the target unmet. Pass 1
+/// sizes HLL from ε = 0.02 alone (precision 12), which certifies δ = 0.01
+/// for at most 9 distinct items.
+#[test]
+fn stage3_plan_selection_accepts_hll_given_a_distinct_bound() {
+    let bounded = pipeline_with_distinct_bound(Some(9));
+    for id in hll_only_candidates(&bounded) {
+        assert!(
+            bounded.cost(id).is_some(),
+            "{id}: {:?}",
+            bounded.invalid().get(id)
+        );
+    }
+    let unbounded = pipeline_with_distinct_bound(None);
+    let invalid = unbounded.invalid();
+    for id in hll_only_candidates(&unbounded) {
+        let reason = invalid.get(id).unwrap_or_else(|| panic!("{id} is invalid"));
+        assert!(reason.starts_with("q1:"), "{id}: {reason}");
+        assert!(
+            reason.contains("failure probability None"),
+            "{id}: {reason}"
+        );
+    }
+}
+
+/// A bound too large for the precision Pass 1 chose leaves δ over its
+/// target: one inside classic HLL's certified range gives a failure
+/// probability above 0.01, and one outside it certifies nothing (δ = 1).
+#[test]
+fn stage3_plan_selection_rejects_hll_whose_distinct_bound_is_too_large() {
+    for bound in [10, 100, 10_000_000] {
+        let run = pipeline_with_distinct_bound(Some(bound));
+        let invalid = run.invalid();
+        for id in hll_only_candidates(&run) {
+            let reason = invalid
+                .get(id)
+                .unwrap_or_else(|| panic!("bound {bound}: {id} is invalid"));
+            assert!(reason.starts_with("q1:"), "{id}: {reason}");
+            assert!(
+                !reason.contains("failure probability None"),
+                "{id}: {reason}"
+            );
+        }
+    }
+}
+
+/// Stage 1 does not read the distinct bound: its candidates are the same
+/// with and without one, and Q1's HLL estimate leaves its failure
+/// probability symbolic in the source's bound.
+#[test]
+fn stage1_logical_asap_optimization_leaves_the_hll_failure_probability_symbolic() {
+    let bounded = pipeline_with_distinct_bound(Some(9));
+    let unbounded = pipeline_with_distinct_bound(None);
+    let stage1 = |run: &Run| {
+        run.logical
+            .iter()
+            .map(|c| format!("{} {:?}", c.id, c.roots))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(stage1(&bounded), stage1(&unbounded));
+    let mut seen = 0;
+    for c in unbounded
+        .logical
+        .iter()
+        .filter(|c| !shares_a_summary(c) && query_option(&c.dag, &c.query_roots, 0) == "Hll")
+    {
+        let QueryRoot::Operator(q1) = &c.roots[0] else {
+            panic!("operator root")
+        };
+        let guarantee = q1.guarantee.as_ref().expect("Q1 has a guarantee");
+        assert_eq!(
+            guarantee.failure_probability,
+            ProbabilityExpr::Unknown {
+                statistic: "classic_hll_failure_probability[p=12](max_distinct[flows_src_ip])"
+                    .into()
+            },
+            "{}",
+            c.id
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "a candidate answers Q1 with HLL");
 }
 
 /// One materialized UnivMon for all three costs no more than three separate UnivMons.

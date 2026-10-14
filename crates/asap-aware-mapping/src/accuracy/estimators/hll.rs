@@ -19,13 +19,89 @@ pub(super) fn generic_guarantee(
         params,
         query,
         ErrorMetric::Cardinality,
-        1.04 / 2f64.powi(i32::from(*precision)).sqrt(),
+        relative_standard_error(*precision),
         ProbabilityExpr::Unknown {
             statistic: "hll_estimator_failure_probability".into(),
         },
         "generic_hll_rse_only_no_confidence_v1",
     ))
 }
+/// HLL's relative standard error, `1.04 / √m` for `m = 2^precision` buckets.
+fn relative_standard_error(precision: u8) -> f64 {
+    1.04 / 2f64.powi(i32::from(precision)).sqrt()
+}
+
+/// Names classic HLL's failure probability at `precision` as a function of
+/// `max_distinct[source]`, the deployment's bound on distinct items per
+/// evaluation of `source`, which plan selection binds.
+const CLASSIC_FAILURE_PROBABILITY: &str = "classic_hll_failure_probability";
+const MAX_DISTINCT: &str = "max_distinct";
+
+/// The statistic classic HLL's failure probability at `precision` over
+/// `source` is left as ([`classic_guarantee`]).
+pub(crate) fn classic_failure_statistic(precision: u8, source: &str) -> String {
+    format!("{CLASSIC_FAILURE_PROBABILITY}[p={precision}]({MAX_DISTINCT}[{source}])")
+}
+
+/// The precision and source a [`classic_failure_statistic`] names.
+pub(crate) fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, &str)> {
+    let rest = statistic
+        .strip_prefix(CLASSIC_FAILURE_PROBABILITY)?
+        .strip_prefix("[p=")?;
+    let (precision, rest) = rest.split_once(']')?;
+    let source = rest
+        .strip_prefix('(')?
+        .strip_prefix(MAX_DISTINCT)?
+        .strip_prefix('[')?
+        .strip_suffix("])")?;
+    Some((precision.parse().ok()?, source))
+}
+
+/// Classic HLL's guarantee for a distinct count over `source`'s own rows:
+/// relative error at most its relative standard error, with a failure
+/// probability ([`ClassicHllConfidence`]) left symbolic in the source's
+/// distinct bound ([`classic_failure_statistic`]). `None` for a precision
+/// outside the contract's.
+pub(crate) fn classic_guarantee(precision: u8, source: &str) -> Option<AccuracyGuarantee> {
+    if !(4..=18).contains(&precision) {
+        return None;
+    }
+    let statistic = classic_failure_statistic(precision, source);
+    let relative_error = relative_standard_error(precision);
+    Some(AccuracyGuarantee {
+        metric: ErrorMetric::Cardinality,
+        bound: BoundExpr::Constant {
+            value: relative_error,
+        },
+        failure_probability: ProbabilityExpr::Unknown {
+            statistic: statistic.clone(),
+        },
+        provenance: vec![GuaranteeSource::SketchEvaluation {
+            algorithm: "Hll".into(),
+            contract: CLASSIC_CONTRACT.into(),
+            params: serde_json::json!({"precision": precision,
+                "max_distinct": format!("{MAX_DISTINCT}[{source}]"),
+                "relative_error": relative_error,
+                "hash_assumption": "independent_uniform_buckets",
+                "population_scope": "complete_evaluation_including_merged_panes"}),
+            query: "Cardinality".into(),
+        }],
+    })
+}
+
+/// The failure probability a [`classic_failure_statistic`] names, given the
+/// source's distinct bound: `1` (no certificate) when the bound is outside
+/// the contract's range for this precision.
+pub(crate) fn classic_failure_probability(precision: u8, max_distinct: u64) -> f64 {
+    u32::try_from(max_distinct)
+        .ok()
+        .and_then(|n| ClassicHllConfidence::new(n, relative_standard_error(precision)))
+        .and_then(|model| model.failure_probability(precision))
+        .unwrap_or(1.0)
+}
+
+const CLASSIC_CONTRACT: &str = "classic_hll_linear_counting_collision_bound_v1";
+
 /// A finite-population contract for `m * ln(m / zero_registers)` with the
 /// classic HLL small-range switch. Hashing is assumed independent and uniform.
 /// The deployment must establish the population bound; observations alone do
@@ -58,7 +134,7 @@ impl ClassicHllConfidence {
             failure_probability: ProbabilityExpr::Constant { value: delta },
             provenance: vec![GuaranteeSource::SketchEvaluation {
                 algorithm: "Hll".into(),
-                contract: "classic_hll_linear_counting_collision_bound_v1".into(),
+                contract: CLASSIC_CONTRACT.into(),
                 params: serde_json::json!({"precision": precision,
                     "max_distinct": self.max_distinct, "relative_error": self.relative_error,
                     "hash_assumption": "independent_uniform_buckets",
@@ -116,7 +192,8 @@ impl ClassicHllConfidence {
     }
 }
 
-/// HLL RSE-magnitude inversion. Generic HLL has no modeled confidence target.
+/// HLL RSE-magnitude inversion: sized from ε alone. Its confidence comes
+/// from the source's distinct bound ([`classic_guarantee`]).
 pub(crate) fn hll_precision(eps: f64) -> u8 {
     saturating_ceil((1.04 / eps).powi(2).log2(), 4, 18) as u8
 }
@@ -124,6 +201,48 @@ pub(crate) fn hll_precision(eps: f64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure-probability statistic names its precision and source, any source name.
+    #[test]
+    fn classic_failure_statistics_round_trip() {
+        for source in ["flows_src_ip", "a[b]", "x])(", ""] {
+            let statistic = classic_failure_statistic(12, source);
+            assert_eq!(
+                parse_classic_failure_statistic(&statistic),
+                Some((12, source))
+            );
+        }
+        for other in [
+            "max_distinct[m]",
+            "classic_hll_failure_probability[p=x](max_distinct[m])",
+        ] {
+            assert_eq!(parse_classic_failure_statistic(other), None);
+        }
+    }
+
+    /// The symbolic guarantee binds to the model's probability; an
+    /// out-of-range bound certifies nothing.
+    #[test]
+    fn classic_guarantee_binds_the_distinct_bound() {
+        let guarantee = classic_guarantee(12, "m").unwrap();
+        assert_eq!(guarantee.failure_probability.evaluate(), None);
+        let rse = relative_standard_error(12);
+        let expected = ClassicHllConfidence::new(9, rse)
+            .unwrap()
+            .failure_probability(12)
+            .unwrap();
+        let bound = guarantee.bind(&|statistic| {
+            let (precision, source) = parse_classic_failure_statistic(statistic)?;
+            (source == "m").then(|| classic_failure_probability(precision, 9))
+        });
+        assert_eq!(bound.failure_probability.evaluate(), Some(expected));
+        assert!(expected <= 0.01);
+        assert!(classic_failure_probability(12, 10) > 0.01);
+        for too_large in [4097, u64::MAX] {
+            assert_eq!(classic_failure_probability(12, too_large), 1.0);
+        }
+        assert!(classic_guarantee(3, "m").is_none());
+    }
 
     /// A supported estimator contract supplies a probability, unlike generic HLL RSE.
     #[test]

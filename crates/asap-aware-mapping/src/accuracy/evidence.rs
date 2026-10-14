@@ -2,15 +2,6 @@
 use super::*;
 use asap_types::ir::QueryRoot;
 
-/// A trusted source assertion scoped by `AccuracyEvidenceProvider` to one
-/// complete evaluation. Choosing this variant asserts the estimator and hash
-/// assumptions; it must not be inferred from sampled population statistics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EstimatorContract {
-    /// Classic HLL with independent uniform bucket hashing, including merged panes.
-    ClassicHll { max_distinct_per_evaluation: u32 },
-}
-
 /// An enforced domain for the true values of one operand of an exact
 /// arithmetic operation, in every evaluation: they are finite and lie in
 /// `[lower, upper]`. Plan selection uses it to bound a product or quotient
@@ -95,13 +86,6 @@ pub struct PropagationStats {
 
 /// Supplies typed planning-time evidence required by propagation rules.
 pub trait AccuracyEvidenceProvider {
-    /// Trusted estimator contract for this complete aggregate expression,
-    /// including source, filters, grouping and all panes in each evaluation.
-    /// An observed cardinality is not an enforced population bound.
-    fn estimator_contract(&self, _expression: &OperatorNode) -> Option<EstimatorContract> {
-        None
-    }
-
     /// Enforced upper bound on distinct (partition, item) identities across a
     /// complete TopK evaluation. Used to union-bound score errors for adaptively
     /// selected candidates. Observed cardinality is not sufficient evidence.

@@ -37,6 +37,7 @@ pub fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
         input_cardinality: declared(1_000_000),
         distribution: declared(DataDistribution::Zipf),
         stream_norms: Evidence::default(),
+        max_distinct_per_evaluation: Evidence::default(),
         arrival,
     }
 }
