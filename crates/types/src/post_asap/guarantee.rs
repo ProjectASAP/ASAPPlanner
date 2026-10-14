@@ -330,6 +330,11 @@ pub enum CompositionOperator {
     /// `(a + b) / (1 - b)`, requiring finite operand domains, a nonzero
     /// denominator, and representable true and estimated quotients.
     ExactDivision,
+    /// Exact multiplication of two estimates. For absolute errors `e_x`,
+    /// `e_y` the output bound is `|x|·e_y + |y|·e_x + e_x·e_y`, requiring
+    /// finite operand domains; for relative errors `a`, `b` it is
+    /// `(1 + a)(1 + b) − 1`.
+    ExactProduct,
     /// PromQL `rate`: reset correction plus range-boundary extrapolation.
     CounterRate,
     /// PromQL `irate`: reset-aware slope over the final two samples.

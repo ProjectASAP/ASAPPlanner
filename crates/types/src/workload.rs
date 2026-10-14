@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::types::AccuracyTarget;
 use serde::{Deserialize, Serialize};
 
@@ -540,6 +542,25 @@ pub struct DataWorkload {
     pub ingestion_rate: Evidence<Rate>,
     pub input_cardinality: Evidence<u64>,
     pub distribution: Evidence<DataDistribution>,
+    /// Stream norms per source (PromQL metric or SQL table name): the
+    /// inputs Count-Min and Count Sketch additive error bounds are
+    /// normalized by. Plan selection binds them to turn those bounds into
+    /// absolute errors; a source without a norm leaves that bound unmet.
+    #[serde(default)]
+    pub stream_norms: Evidence<BTreeMap<String, StreamNorms>>,
+}
+
+/// Upper bounds on the norms of the frequency (weight) vector any one
+/// summary evaluation over a source folds. A filter or a shorter window only
+/// lowers them, so a bound for the whole source holds for every summary
+/// over it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamNorms {
+    /// `‖f‖₁`, the total weight: Count-Min's bound is `ε · ‖f‖₁`.
+    pub l1: Option<f64>,
+    /// `‖f‖₂`: Count Sketch's bound is `ε · ‖f‖₂`.
+    pub l2: Option<f64>,
 }
 
 // ── Top-level workload ────────────────────────────────────────────────────────
@@ -600,6 +621,13 @@ impl DataWorkload {
             return Err(WorkloadError::AtRestWithPositiveIngestionRate);
         }
         validate_optional_rate(self.ingestion_rate.value)?;
+        for norms in self.stream_norms.value.iter().flat_map(BTreeMap::values) {
+            for value in [norms.l1, norms.l2].into_iter().flatten() {
+                if !(value.is_finite() && value >= 0.0) {
+                    return Err(WorkloadError::InvalidStreamNorm(value));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -704,11 +732,41 @@ pub enum WorkloadError {
     InvalidLatency(f64),
     #[error("data at rest cannot have a positive ingestion rate")]
     AtRestWithPositiveIngestionRate,
+    #[error("a stream norm must be finite and non-negative, got {0}")]
+    InvalidStreamNorm(f64),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream norm is a finite, non-negative magnitude.
+    #[test]
+    fn stream_norms_must_be_finite_and_non_negative() {
+        let with = |l1: f64| DataWorkload {
+            stream_norms: Evidence {
+                value: Some(BTreeMap::from([(
+                    "m".to_string(),
+                    StreamNorms {
+                        l1: Some(l1),
+                        l2: None,
+                    },
+                )])),
+                ..Evidence::default()
+            },
+            ..DataWorkload::default()
+        };
+        assert!(with(10.0).validate().is_ok());
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                matches!(
+                    with(bad).validate(),
+                    Err(WorkloadError::InvalidStreamNorm(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
 
     fn base_workload() -> QueryWorkload {
         QueryWorkload {

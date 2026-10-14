@@ -81,6 +81,7 @@ fn data_workload(ingestion_interval: bool) -> DataWorkload {
         ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
         input_cardinality: declared(10_000_000),
         distribution: declared(DataDistribution::Zipf),
+        stream_norms: Default::default(),
     }
 }
 
