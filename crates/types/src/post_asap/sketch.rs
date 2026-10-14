@@ -73,6 +73,10 @@ pub enum SketchAlgorithm {
     CountSketchWithHeap,
 }
 
+/// The largest KLL `k` `asap_sketchlib` builds: it silently caps a larger
+/// `k` at this (`MAX_CACHEABLE_K` in its `sketches::kll`).
+pub const KLL_MAX_K: u32 = 26_602;
+
 /// Concrete, catalog-validated parameters for a specific [`SketchAlgorithm`]
 /// instance. The variant must correspond to the associated `SketchAlgorithm`;
 /// mismatches are caught at post-ASAP bind time, before any later,
