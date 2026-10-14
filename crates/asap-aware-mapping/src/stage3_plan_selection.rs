@@ -17,16 +17,37 @@
 //! building every candidate (e.g. a dynamic program over target nesting) is
 //! deferred to #671.
 //!
-//! A node is charged once per computation (#509): a materialized node
-//! (`MatAtIngestion` or `MatAtQuery`) once, since its output is stored and
-//! reused; a `NotMaterialized` node once per consumer that computes it, since
-//! it is recomputed for each use and not stored. Its consumers are the
-//! queries whose sub-DAG reaches it and the materialized nodes above it,
-//! counted without looking through a materialized node: a node below one is
-//! computed when that node is, so the materialized node counts as one
-//! consumer. Stage 2 does not duplicate a shared node; the multiplier is
-//! recorded on its cost ([`NodeCost::multiplier`]). Every node is
-//! `NotMaterialized` until #604, so a shared node is charged once per query.
+//! ## Cost model: cost per second of wall time
+//!
+//! A candidate's cost is what running it costs per second ([`COST_UNIT`]),
+//! so queries with different recurrences add up. Each node's price for one
+//! computation is multiplied by how often it is computed per second
+//! ([`NodeCost::per_second`]):
+//!
+//! * A `NotMaterialized` node is recomputed for each consumer that reads it
+//!   and is not stored: it is charged once per consumer
+//!   ([`NodeCost::multiplier`]) at the sum of their rates. Its consumers are
+//!   the queries whose sub-DAG reaches it and the materialized nodes above
+//!   it, counted without looking through a materialized node: a node below
+//!   one is computed when that node is. Stage 2 does not duplicate a shared
+//!   node, so a shared `NotMaterialized` input costs what reading it
+//!   separately does (#509 Example 4).
+//! * A `MatAtQuery` node is computed once for all the queries that reach
+//!   it, at their combined rate: queries repeating at the same interval are
+//!   evaluated together, so each distinct interval counts once.
+//! * A `MatAtIngestion` node runs as data arrives: it is priced over one
+//!   second of arriving rows, once per second, whatever its readers' rates.
+//! * A query repeating every `I` ms runs `1000 / I` times per second, and an
+//!   estimated rate runs at that rate. One-off, scheduled and unknown
+//!   queries are spread over the calibration's `horizon_s` (default
+//!   3600 s): `invocations / horizon_s` per second.
+//!
+//! State a materialized node keeps between computations is charged
+//! `cost_per_retained_byte_second` per byte per second: its output's bytes
+//! for `MatAtQuery`, and twice them for `MatAtIngestion` (the window being
+//! built and the completed one queries read). Memory a query-time
+//! computation holds only while it runs is not charged per second; the
+//! per-computation memory term below applies to it as to every node.
 //!
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
@@ -42,7 +63,7 @@
 //! A cost error on any candidate aborts selection; it is reachable only from
 //! bad declared rates. Latency bounds and deployment capabilities are not
 //! checked yet.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator_properties::BinaryOpKind;
@@ -54,12 +75,12 @@ use asap_types::ir::{
 };
 use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::{
-    AccuracyGuarantee, CompositionOperator, ErrorMetric, FieldDataType, Materialization,
-    SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
+    AccuracyGuarantee, CompositionOperator, ErrorMetric, ExecutionTiming, FieldDataType,
+    Materialization, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataWorkload, MetricType};
+use asap_types::workload::{DataWorkload, MetricType, QueryRecurrence, RepeatedDemand};
 use thiserror::Error;
 
 use crate::accuracy::composition::{
@@ -80,8 +101,25 @@ use crate::physical_operator_statistics::{
 use crate::stage2_physical_asap_optimization::PhysicalCandidate;
 use crate::PlanningModels;
 
-pub const COST_UNIT: &str = "cpu_ms_per_workload_evaluation";
-pub const COST_SOURCE: &str = "analytical-cost-v1 (illustrative statistics)";
+/// Cost per second of wall time; one unit is one CPU-millisecond under
+/// [`illustrative_calibration`].
+pub const COST_UNIT: &str = "cost_per_second";
+pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
+
+/// The coefficients plan selection prices with until a deployment is
+/// calibrated: 1 ns of CPU per operation, 0.1 ns per scanned or held byte,
+/// 1 GB kept for a second costs 1/8 vCPU (125 CPU-ms), and one-off work is
+/// spread over one hour.
+pub fn illustrative_calibration() -> ResourceCalibration {
+    ResourceCalibration {
+        cost_per_cpu_op: 1e-6,
+        cost_per_scan_byte: 1e-7,
+        cost_per_retained_byte: 1e-7,
+        cost_per_retained_byte_second: 1.25e-7,
+        horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
+        version: "illustrative-v2".into(),
+    }
+}
 
 /// Groups assumed for every `by (...)` reduction, absent group-count evidence.
 const DEFAULT_GROUP_COUNT: u64 = 100;
@@ -90,12 +128,15 @@ const DEFAULT_SERIES: u64 = 1_000;
 const DEFAULT_ROWS_PER_SECOND: f64 = 1_000.0;
 const DEFAULT_LOOKBACK_MS: u64 = 60_000;
 
-/// `cost` is one computation's price times `multiplier`, the times the
-/// node is computed per workload evaluation ([`computations`]).
+/// `cost` is the node's price per second: one computation's price times
+/// `per_second`, the times it is computed per second, plus any kept state's
+/// price ([`computations`], [`price`]). `multiplier` is the number of
+/// consumers it is computed for (1 when materialized).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeCost {
     pub cost: f64,
     pub multiplier: u64,
+    pub per_second: f64,
     pub detail: String,
 }
 
@@ -128,11 +169,15 @@ pub struct Selection {
 
 #[derive(Debug, Error)]
 pub enum SelectionError {
-    #[error("candidate {candidate} has {roots} roots but {targets} accuracy targets were given")]
+    #[error(
+        "candidate {candidate} has {roots} roots but {targets} accuracy targets and \
+         {recurrences} recurrences were given"
+    )]
     TargetCount {
         candidate: String,
         roots: usize,
         targets: usize,
+        recurrences: usize,
     },
     #[error("candidate {candidate}, node {node:?}: {error}")]
     Cost {
@@ -145,12 +190,13 @@ pub enum SelectionError {
 }
 
 /// Stage 3 (plan selection): reject candidates that miss a query's accuracy
-/// target, price the rest and
-/// select the cheapest (the first on ties). `targets[i]` is the requirement
-/// of `candidate.roots[i]`; `None` imposes none.
+/// target, price the rest per second and select the cheapest (the first on
+/// ties). `targets[i]` is the requirement of `candidate.roots[i]` (`None`
+/// imposes none) and `recurrence[i]` how often it is evaluated.
 pub fn select_plan(
     cands: &[PhysicalCandidate],
     targets: &[Option<AccuracyTarget>],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Selection, SelectionError> {
@@ -158,11 +204,12 @@ pub fn select_plan(
     let mut rejected = Vec::new();
     let mut best: Option<(&str, f64)> = None;
     for candidate in cands {
-        if candidate.roots.len() != targets.len() {
+        if candidate.roots.len() != targets.len() || candidate.roots.len() != recurrence.len() {
             return Err(SelectionError::TargetCount {
                 candidate: candidate.id.clone(),
                 roots: candidate.roots.len(),
                 targets: targets.len(),
+                recurrences: recurrence.len(),
             });
         }
         if let Some(reason) = accuracy_violation(candidate, targets, data, &models) {
@@ -173,11 +220,15 @@ pub fn select_plan(
             });
             continue;
         }
-        let cost = price(&candidate.dag, data).map_err(|(node, error)| SelectionError::Cost {
-            candidate: candidate.id.clone(),
-            node,
-            error,
-        })?;
+        let calibration = illustrative_calibration();
+        let cost =
+            price(&candidate.dag, recurrence, data, &calibration).map_err(|(node, error)| {
+                SelectionError::Cost {
+                    candidate: candidate.id.clone(),
+                    node,
+                    error,
+                }
+            })?;
         if best.is_none_or(|(_, total)| cheaper(cost.total, total)) {
             best = Some((&candidate.id, cost.total));
         }
@@ -622,18 +673,87 @@ struct Shape {
     rows_per_ms: f64,
 }
 
-/// How many times each node of `dag` is computed per workload evaluation:
-/// 1 for a materialized node; for a `NotMaterialized` one, the number of
-/// consumers that reach it, where a consumer is a query (operator or scalar
-/// root) or a materialized node, and a walk stops at the first materialized
-/// node it meets. A node read several times within one query's walk counts
-/// once for it.
-fn computations(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, u64> {
-    let materialized: HashSet<_> = dag
+/// Evaluations per second of a node computed once for `queries` together.
+/// Repeating queries with equal intervals are evaluated together, so each
+/// interval counts once; estimated rates add. One-off, scheduled and unknown
+/// queries run as one batch: the most invocations among them, spread over
+/// `horizon_s`.
+fn evaluation_rate<'r>(
+    queries: impl IntoIterator<Item = &'r QueryRecurrence>,
+    horizon_s: f64,
+) -> Result<f64, AnalyticalCostError> {
+    let mut intervals = BTreeSet::new();
+    let mut estimated = 0.0;
+    let mut invocations = 0u64;
+    for recurrence in queries {
+        match recurrence {
+            QueryRecurrence::Repeated(
+                RepeatedDemand::FixedInterval(interval)
+                | RepeatedDemand::FixedIntervalAt { interval, .. },
+            ) => {
+                if interval.0 == 0 {
+                    return Err(AnalyticalCostError::InvalidRecurrence);
+                }
+                intervals.insert(interval.0);
+            }
+            QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
+                let rate = estimate.expected_rate.0;
+                if !rate.is_finite() || rate < 0.0 {
+                    return Err(AnalyticalCostError::InvalidRecurrence);
+                }
+                estimated += rate;
+            }
+            QueryRecurrence::Repeated(RepeatedDemand::Scheduled(times)) => {
+                invocations = invocations.max(times.len() as u64);
+            }
+            QueryRecurrence::OneTime {
+                invocations: count, ..
+            } => invocations = invocations.max(*count),
+            QueryRecurrence::Unknown => invocations = invocations.max(1),
+        }
+    }
+    let repeated: f64 = intervals.into_iter().map(|ms| 1_000.0 / ms as f64).sum();
+    Ok(repeated + estimated + invocations as f64 / horizon_s)
+}
+
+/// The nodes each query reads first, in query order: query `i` is the scalar
+/// root keyed `i` when there is one, else the next operator root.
+fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
+    let mut roots = dag.roots.iter();
+    (0..dag.roots.len() + dag.scalar_roots.len())
+        .map(|query| {
+            match dag
+                .scalar_roots
+                .iter()
+                .find(|(position, _)| *position == query)
+            {
+                Some((_, expr)) => expr.operator_refs().into_iter().copied().collect(),
+                None => roots.next().into_iter().copied().collect(),
+            }
+        })
+        .collect()
+}
+
+/// How often each node of `dag` is computed: `(multiplier, per_second)`
+/// (module doc, "Cost model"). A materialized node is computed once for all
+/// its readers: once per second at ingestion time (`MatAtIngestion`), or at
+/// the combined rate of the queries reaching it (`MatAtQuery`,
+/// [`evaluation_rate`]). A `NotMaterialized` node is computed once per
+/// consumer that reaches it, at that consumer's rate. A consumer is a query
+/// (operator or scalar root), at its own rate, or a materialized node, at
+/// that node's rate; a walk stops at the first materialized node it meets,
+/// and a node read several times within one consumer's walk counts once for
+/// it. Its `multiplier` is that number of consumers.
+fn computations(
+    dag: &PhysicalASAPDAG,
+    recurrence: &[QueryRecurrence],
+    horizon_s: f64,
+) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
+    let materialized: HashMap<_, _> = dag
         .nodes
         .iter()
         .filter(|n| n.materialization != Materialization::NotMaterialized)
-        .map(|n| n.id)
+        .map(|n| (n.id, n.materialization))
         .collect();
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
@@ -641,55 +761,86 @@ fn computations(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, u64> {
             .filter(move |e| e.consumer == id)
             .map(|e| e.producer)
     };
-    // Each consumer's starting nodes: what a query reads, or a materialized
-    // node's inputs.
-    let consumers = dag
-        .roots
-        .iter()
-        .map(|root| vec![*root])
-        .chain(
-            dag.scalar_roots
-                .iter()
-                .map(|(_, expr)| expr.operator_refs().into_iter().copied().collect()),
-        )
-        .chain(
-            dag.nodes
-                .iter()
-                .filter(|n| materialized.contains(&n.id))
-                .map(|n| inputs(n.id).collect()),
-        );
-    let mut count: HashMap<_, u64> = HashMap::new();
-    for start in consumers {
-        let mut seen = HashSet::new();
-        let mut stack: Vec<PhysicalASAPNodeId> = start;
+    let starts = query_starts(dag);
+    // The queries reaching each node, through any node.
+    let mut reached: HashMap<PhysicalASAPNodeId, Vec<usize>> = HashMap::new();
+    for (query, start) in starts.iter().enumerate() {
+        let mut stack = start.clone();
         while let Some(id) = stack.pop() {
-            if materialized.contains(&id) || !seen.insert(id) {
+            let queries = reached.entry(id).or_default();
+            if queries.last() == Some(&query) {
                 continue;
             }
-            *count.entry(id).or_default() += 1;
+            queries.push(query);
             stack.extend(inputs(id));
         }
     }
-    dag.nodes
+    let mut rate_of_materialized = HashMap::new();
+    for (&id, materialization) in &materialized {
+        let rate = match materialization {
+            Materialization::MatAtIngestion(_) => 1.0,
+            _ => evaluation_rate(
+                reached
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|&q| recurrence.get(q)),
+                horizon_s,
+            )?,
+        };
+        rate_of_materialized.insert(id, rate);
+    }
+    // Each consumer's starting nodes and its rate.
+    let mut consumers = Vec::new();
+    for (query, start) in starts.into_iter().enumerate() {
+        let rate = evaluation_rate(recurrence.get(query), horizon_s)?;
+        consumers.push((start, rate));
+    }
+    for (&id, &rate) in &rate_of_materialized {
+        consumers.push((inputs(id).collect(), rate));
+    }
+    let mut count: HashMap<_, (u64, f64)> = HashMap::new();
+    for (start, rate) in consumers {
+        let mut seen = HashSet::new();
+        let mut stack: Vec<PhysicalASAPNodeId> = start;
+        while let Some(id) = stack.pop() {
+            if materialized.contains_key(&id) || !seen.insert(id) {
+                continue;
+            }
+            let entry = count.entry(id).or_default();
+            entry.0 += 1;
+            entry.1 += rate;
+            stack.extend(inputs(id));
+        }
+    }
+    Ok(dag
+        .nodes
         .iter()
         .map(|n| {
-            let times = if materialized.contains(&n.id) {
-                1
-            } else {
-                count.get(&n.id).copied().unwrap_or(0)
+            let times = match rate_of_materialized.get(&n.id) {
+                Some(&rate) => (1, rate),
+                None => count.get(&n.id).copied().unwrap_or((0, 0.0)),
             };
             (n.id, times)
         })
-        .collect()
+        .collect())
 }
 
-/// Price every node of `dag` once per computation ([`computations`]). Nodes
-/// are exported children first, so each node's input statistics are known
-/// when it is reached.
+/// Price every node of `dag` per second of wall time (module doc, "Cost
+/// model"). Nodes are exported children first, so each node's input
+/// statistics are known when it is reached. A query-time node is priced per
+/// computation over the rows its time ranges keep, times how often it is
+/// computed per second ([`computations`]); an ingestion-time node over one
+/// second of arriving rows. A materialized node's kept state is charged per
+/// byte per second.
 fn price(
     dag: &PhysicalASAPDAG,
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
+    calibration: &ResourceCalibration,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
+    let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
+    calibration.validate().map_err(|error| (first, error))?;
     let series = data
         .input_cardinality
         .value
@@ -703,17 +854,13 @@ fn price(
             .map_or(DEFAULT_ROWS_PER_SECOND, |rate| rate.0)
             / 1_000.0,
     };
-    let calibration = ResourceCalibration {
-        cost_per_cpu_op: 1e-6,
-        cost_per_scan_byte: 1e-7,
-        cost_per_retained_byte: 1e-7,
-        version: "illustrative-v1".into(),
-    };
     let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
-    let multipliers = computations(dag);
+    let multipliers =
+        computations(dag, recurrence, calibration.horizon_s).map_err(|error| (first, error))?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     for node in &dag.nodes {
+        let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
         let inputs: Vec<_> = dag
             .edges
             .iter()
@@ -735,17 +882,23 @@ fn price(
             promql: None,
         };
         let groups = |reduction: &Reduction| {
-            match reduction {
+            let groups = match reduction {
                 Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => 1,
                 Reduction::Reduce(keys) if !keys.is_without() => DEFAULT_GROUP_COUNT,
                 _ => shape.series,
+            };
+            // One second of arriving rows does not bound the groups a
+            // maintained state holds.
+            match ingestion {
+                true => groups,
+                false => groups.min(input.rows.max(1)),
             }
-            .min(input.rows.max(1))
         };
         let (out, estimate, detail) = match &node.payload {
             Payload::NonASAP(operator) => match operator {
                 NonASAPOp::Scan { .. } => {
-                    // A scan reads what its time range keeps.
+                    // At ingestion time, one second of arriving rows; at
+                    // query time, what its time range keeps.
                     let lookback = dag
                         .edges
                         .iter()
@@ -758,6 +911,7 @@ fn price(
                         })
                         .max()
                         .unwrap_or(DEFAULT_LOOKBACK_MS);
+                    let lookback = if ingestion { 1_000 } else { lookback };
                     let out = edge(((shape.rows_per_ms * lookback as f64).round() as u64).max(1));
                     let estimate = estimate_operator(
                         PhysicalOperator::Scan,
@@ -911,15 +1065,32 @@ fn price(
             ),
         };
         let cost = estimate
-            .and_then(|estimate| estimate.calibrated_cost(&calibration))
+            .and_then(|estimate| estimate.calibrated_cost(calibration))
             .map_err(|error| (node.id, error))?;
-        let multiplier = multipliers[&node.id];
+        let (multiplier, per_second) = multipliers[&node.id];
+        let mut cost = cost * per_second;
+        let mut detail = format!("{detail}; x {per_second:.4}/s");
+        // State kept between computations: the window being built and the
+        // completed one at ingestion time, the kept output at query time.
+        let kept = match node.materialization {
+            Materialization::NotMaterialized => 0,
+            Materialization::MatAtIngestion(_) => 2 * out.bytes,
+            _ => out.bytes,
+        };
+        if kept > 0 {
+            cost += calibration.cost_per_retained_byte_second * kept as f64;
+            detail += &format!("; keeps {kept} bytes");
+        }
+        if !cost.is_finite() {
+            return Err((node.id, AnalyticalCostError::Overflow));
+        }
         output.insert(node.id, out);
         per_node.insert(
             node.id,
             NodeCost {
-                cost: cost * multiplier as f64,
+                cost,
                 multiplier,
+                per_second,
                 detail,
             },
         );
@@ -1089,6 +1260,18 @@ mod tests {
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::workload::{Evidence, Rate};
 
+    /// `n` queries repeating every 10 s, as Example 1's panels do.
+    fn every_10s(n: usize) -> Vec<QueryRecurrence> {
+        vec![repeating(10_000); n]
+    }
+
+    /// A query repeating every `interval_ms`.
+    fn repeating(interval_ms: u32) -> QueryRecurrence {
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+            asap_types::workload::RepetitionInterval(interval_ms),
+        ))
+    }
+
     fn data() -> DataWorkload {
         DataWorkload {
             ingestion_rate: Evidence {
@@ -1164,6 +1347,7 @@ mod tests {
         let selection = select_plan(
             &candidates,
             &[Some(strict)],
+            &every_10s(1),
             &data(),
             PlanningModels::builtin(),
         )
@@ -1206,6 +1390,7 @@ mod tests {
         let selection = select_plan(
             &candidates(),
             &[Some(target)],
+            &every_10s(1),
             &data(),
             PlanningModels::builtin(),
         )
@@ -1240,6 +1425,7 @@ mod tests {
             let selection = select_plan(
                 &candidates(),
                 &[Some(target.clone())],
+                &every_10s(1),
                 &data,
                 PlanningModels::builtin(),
             )
@@ -1316,8 +1502,14 @@ mod tests {
     /// candidate is admitted and priced.
     #[test]
     fn count_min_is_admitted_without_a_target() {
-        let selection =
-            select_plan(&candidates(), &[None], &data(), PlanningModels::builtin()).unwrap();
+        let selection = select_plan(
+            &candidates(),
+            &[None],
+            &every_10s(1),
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
         assert!(selection.costs.contains_key("P2"));
         assert!(selection.rejected.iter().all(|r| r.valid));
     }
@@ -1336,6 +1528,7 @@ mod tests {
         let selection = select_plan(
             &candidates,
             &[Some(target)],
+            &every_10s(1),
             &data(),
             PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
@@ -1373,7 +1566,12 @@ mod tests {
         let [outer, inner] = candidate.dag.roots[..] else {
             panic!("two roots")
         };
-        let cost = price(&candidate.dag, &data()).unwrap();
+        // Kept state is priced apart; this compares computations only.
+        let calibration = ResourceCalibration {
+            cost_per_retained_byte_second: 0.0,
+            ..illustrative_calibration()
+        };
+        let cost = price(&candidate.dag, &every_10s(2), &data(), &calibration).unwrap();
         let multipliers: BTreeMap<_, _> = cost
             .per_node
             .iter()
@@ -1395,10 +1593,11 @@ mod tests {
             .find(|n| n.id == inner)
             .unwrap();
         node.materialization = Materialization::MatAtQuery(asap_types::ir::Medium::Memory);
-        let stored = price(&candidate.dag, &data()).unwrap();
+        let stored = price(&candidate.dag, &every_10s(2), &data(), &calibration).unwrap();
         for (id, c) in &stored.per_node {
             assert_eq!(c.multiplier, 1, "node {id} is computed once");
-            assert_eq!(c.cost, cost.per_node[id].cost / multipliers[id] as f64);
+            let once = cost.per_node[id].cost / multipliers[id] as f64;
+            assert!((c.cost - once).abs() <= 1e-12 * once, "node {id}");
         }
         assert!(stored.total < cost.total);
     }
@@ -1483,6 +1682,7 @@ mod tests {
         let builtin = select_plan(
             &candidates,
             &[Some(target.clone())],
+            &every_10s(1),
             &data(),
             PlanningModels::builtin(),
         )
@@ -1501,6 +1701,7 @@ mod tests {
         let measured = select_plan(
             &candidates,
             &[Some(target)],
+            &every_10s(1),
             &data(),
             PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
@@ -1528,6 +1729,7 @@ mod tests {
             let selection = select_plan(
                 &candidates,
                 &[Some(target.clone())],
+                &every_10s(1),
                 &data(),
                 PlanningModels::builtin(),
             )
@@ -1550,8 +1752,14 @@ mod tests {
     fn exact_l2_state_is_priced_like_exact_quantile_state() {
         let aggregate_cost = |query: &str| {
             let candidates = all_candidates(query, &AccuracyTarget::Exact);
-            let selection =
-                select_plan(&candidates, &[None], &data(), PlanningModels::builtin()).unwrap();
+            let selection = select_plan(
+                &candidates,
+                &[None],
+                &every_10s(1),
+                &data(),
+                PlanningModels::builtin(),
+            )
+            .unwrap();
             let exact = candidates
                 .iter()
                 .find(|c| !has_summary_estimate(c))
@@ -1713,6 +1921,7 @@ mod tests {
             let selection = select_plan(
                 &candidates,
                 &[Some(target.clone())],
+                &every_10s(1),
                 &data,
                 PlanningModels::builtin(),
             )
@@ -1734,8 +1943,14 @@ mod tests {
         let mut twin = candidates[0].clone();
         twin.id = "P1-twin".into();
         candidates.push(twin);
-        let selection =
-            select_plan(&candidates, &[None], &data(), PlanningModels::builtin()).unwrap();
+        let selection = select_plan(
+            &candidates,
+            &[None],
+            &every_10s(1),
+            &data(),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
         assert_eq!(selection.selected, "P1");
         let reason = &selection.rejected[0].reason;
         assert!(
@@ -1756,6 +1971,7 @@ mod tests {
         let selection = select_plan(
             &candidates,
             &[Some(target)],
+            &every_10s(1),
             &data(),
             PlanningModels::builtin(),
         )
@@ -1847,6 +2063,7 @@ mod tests {
         let run = crate::pass::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
             &[Some(selected.clone())],
+            &[QueryRecurrence::Unknown],
             data,
             models,
         )
@@ -2345,5 +2562,215 @@ mod tests {
         assert!(ddsketch
             .iter()
             .all(|c| !selection.costs.contains_key(&c.id)));
+    }
+
+    /// `quantile_over_time(0.99, m[1m])` with its KLL candidate chosen, its
+    /// state materialized as `materialization`.
+    fn kll_dag(materialization: Materialization) -> PhysicalASAPDAG {
+        use asap_types::ir::{
+            apply_materialization_timings, MaterializationAssignment, TimingMemo,
+        };
+        let root = lower_promql(
+            "quantile_over_time(0.99, m[1m])",
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        );
+        let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+        )
+        .unwrap();
+        let choice: Vec<_> = inventory
+            .targets
+            .iter()
+            .map(|t| {
+                t.choices
+                    .candidates
+                    .iter()
+                    .position(|c| {
+                        *c == crate::per_computation_candidates::ComputationCandidate::Summary(
+                            SketchAlgorithm::Kll,
+                        )
+                    })
+                    .unwrap_or(0)
+            })
+            .collect();
+        let roots =
+            crate::per_computation_candidates::compose_logical_candidate(&inventory, &choice)
+                .unwrap();
+        let QueryRoot::Operator(root) = &roots[0].1 else {
+            panic!("operator root")
+        };
+        let state = OperatorNode::reachable(root)
+            .into_iter()
+            .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            .expect("a KLL state");
+        let mut assignment =
+            MaterializationAssignment::with_default(Materialization::NotMaterialized);
+        assignment.set(&state, materialization);
+        let timed =
+            apply_materialization_timings(root, &assignment, &mut TimingMemo::new()).unwrap();
+        asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(&[
+            QueryRoot::Operator(timed),
+        ])
+        .unwrap()
+        .dag
+    }
+
+    const AT_INGESTION: Materialization =
+        Materialization::MatAtIngestion(asap_types::ir::Medium::Memory);
+    const AT_QUERY: Materialization = Materialization::MatAtQuery(asap_types::ir::Medium::Memory);
+
+    fn node_of(dag: &PhysicalASAPDAG, pick: impl Fn(&Payload) -> bool) -> PhysicalASAPNodeId {
+        dag.nodes.iter().find(|n| pick(&n.payload)).unwrap().id
+    }
+
+    fn is_scan(payload: &Payload) -> bool {
+        matches!(payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+    }
+
+    fn is_build(payload: &Payload) -> bool {
+        matches!(payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
+    }
+
+    fn priced(dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]) -> CandidateCost {
+        price(dag, recurrence, &data(), &illustrative_calibration()).unwrap()
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1e-300)
+    }
+
+    /// An ingestion-time node is priced over one second of arriving rows,
+    /// once per second, whatever its readers' evaluation rate; a query-time
+    /// node scales with that rate.
+    #[test]
+    fn ingestion_time_node_is_priced_per_second_of_arriving_rows() {
+        let dag = kll_dag(AT_INGESTION);
+        let (fast, slow) = (
+            priced(&dag, &[repeating(1_000)]),
+            priced(&dag, &[repeating(10_000)]),
+        );
+        for id in [node_of(&dag, is_scan), node_of(&dag, is_build)] {
+            assert_eq!(fast.per_node[&id].cost, slow.per_node[&id].cost);
+            assert_eq!(fast.per_node[&id].per_second, 1.0);
+        }
+        let estimate = dag.roots[0];
+        assert!(close(
+            fast.per_node[&estimate].cost,
+            10.0 * slow.per_node[&estimate].cost
+        ));
+    }
+
+    /// Kept state is charged per byte per second: twice the state's bytes at
+    /// ingestion time (the window being built and the completed one), once
+    /// at query time; state computed and dropped within a query has none.
+    #[test]
+    fn kept_state_is_charged_per_byte_per_second() {
+        let cost = |dag: &PhysicalASAPDAG, w| {
+            let calibration = ResourceCalibration {
+                cost_per_retained_byte_second: w,
+                ..illustrative_calibration()
+            };
+            price(dag, &every_10s(1), &data(), &calibration).unwrap()
+        };
+        for (materialization, windows) in [(AT_INGESTION, 2.0), (AT_QUERY, 1.0)] {
+            let dag = kll_dag(materialization);
+            let build = node_of(&dag, is_build);
+            let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
+            let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) =
+                &dag.nodes.iter().find(|n| n.id == build).unwrap().payload
+            else {
+                unreachable!()
+            };
+            // One state per series: data() declares 10 000.
+            let kept = windows * 10_000.0 * summary_shape(family).1 as f64;
+            let term = with.per_node[&build].cost - without.per_node[&build].cost;
+            assert!(close(term, 1.25e-7 * kept), "{materialization:?}: {term}");
+            assert!(close(with.total - without.total, term));
+        }
+        let transient = kll_dag(Materialization::NotMaterialized);
+        assert_eq!(cost(&transient, 1.25e-7).total, cost(&transient, 0.0).total);
+    }
+
+    /// A `NotMaterialized` node read by two queries is computed for each, at
+    /// each one's rate; `MatAtQuery`, it is computed once at their combined
+    /// rate, where queries at the same interval run together.
+    #[test]
+    fn rates_follow_per_consumer_charging() {
+        let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::Exact);
+        let one = optimize_physical_asap("L", &[QueryRoot::Operator(root.clone())])
+            .unwrap()
+            .dag;
+        let mut two = optimize_physical_asap(
+            "L",
+            &[QueryRoot::Operator(root.clone()), QueryRoot::Operator(root)],
+        )
+        .unwrap()
+        .dag;
+        let without_memory = ResourceCalibration {
+            cost_per_retained_byte_second: 0.0,
+            ..illustrative_calibration()
+        };
+        let total = |dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]| {
+            price(dag, recurrence, &data(), &without_memory)
+                .unwrap()
+                .total
+        };
+        let single = total(&one, &every_10s(1));
+        let mixed = [repeating(10_000), repeating(20_000)];
+        assert!(close(total(&two, &every_10s(2)), 2.0 * single));
+        assert!(close(total(&two, &mixed), 1.5 * single));
+        assert_eq!(two.roots[0], two.roots[1], "one root node for both queries");
+        for node in &mut two.nodes {
+            node.materialization = AT_QUERY;
+        }
+        assert!(close(total(&two, &every_10s(2)), single));
+        assert!(close(total(&two, &mixed), 1.5 * single));
+    }
+
+    /// One-off and unknown recurrence are spread over the horizon:
+    /// invocations × per-evaluation cost / horizon_s.
+    #[test]
+    fn one_off_recurrence_is_spread_over_the_horizon() {
+        let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::Exact);
+        let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
+            .unwrap()
+            .dag;
+        let horizon = illustrative_calibration().horizon_s;
+        assert_eq!(horizon, 3_600.0);
+        let per_evaluation = priced(&dag, &[repeating(1_000)]).total;
+        let once = priced(
+            &dag,
+            &[QueryRecurrence::OneTime {
+                invocations: 3,
+                execute_at: None,
+            }],
+        )
+        .total;
+        assert!(close(once, 3.0 * per_evaluation / horizon), "{once}");
+        assert!(close(
+            priced(&dag, &[QueryRecurrence::Unknown]).total,
+            per_evaluation / horizon
+        ));
+    }
+
+    /// A calibration outside its domain is an error, not a price.
+    #[test]
+    fn invalid_calibration_is_rejected() {
+        let dag = kll_dag(Materialization::NotMaterialized);
+        for calibration in [
+            ResourceCalibration {
+                cost_per_retained_byte_second: -1.0,
+                ..illustrative_calibration()
+            },
+            ResourceCalibration {
+                horizon_s: 0.0,
+                ..illustrative_calibration()
+            },
+        ] {
+            assert!(price(&dag, &every_10s(1), &data(), &calibration).is_err());
+        }
     }
 }

@@ -19651,203 +19651,203 @@
       "P1": {
         "per_node": {
           "0": {
-            "cost": 23.2000048,
-            "detail": "scan 4000000 samples",
+            "cost": 2.32000048,
+            "detail": "scan 4000000 samples; x 0.1000/s",
             "multiplier": 1
           },
           "1": {
-            "cost": 4.0000048,
-            "detail": "time range 60s: pass 4000000 rows",
+            "cost": 0.40000048000000005,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "10": {
-            "cost": 14.048,
-            "detail": "sort 1000000 rows in 100 partitions",
+            "cost": 1.4048,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000/s",
             "multiplier": 1
           },
           "11": {
-            "cost": 0.0010048,
-            "detail": "limit to 1000 rows",
+            "cost": 0.00010048,
+            "detail": "limit to 1000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "12": {
-            "cost": 0.0010048,
-            "detail": "operator: pass 1000 rows",
+            "cost": 0.00010048,
+            "detail": "operator: pass 1000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "2": {
-            "cost": 4.8,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1",
+            "cost": 0.48,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators",
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "4": {
-            "cost": 1.00008,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1",
+            "cost": 0.10000800000000001,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators",
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "6": {
-            "cost": 23.2000048,
-            "detail": "scan 4000000 samples",
+            "cost": 2.32000048,
+            "detail": "scan 4000000 samples; x 0.1000/s",
             "multiplier": 1
           },
           "7": {
-            "cost": 4.0000048,
-            "detail": "time range 60s: pass 4000000 rows",
+            "cost": 0.40000048000000005,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "8": {
-            "cost": 4.8,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1",
+            "cost": 0.48,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "9": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators",
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000/s",
             "multiplier": 1
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 81.05020880000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics)",
+        "total": 8.10502088,
+        "unit": "cost_per_second"
       },
       "P2": {
         "per_node": {
           "0": {
-            "cost": 46.4000096,
-            "detail": "scan 4000000 samples",
+            "cost": 4.64000096,
+            "detail": "scan 4000000 samples; x 0.2000/s",
             "multiplier": 2
           },
           "1": {
-            "cost": 4.0000048,
-            "detail": "time range 60s: pass 4000000 rows",
+            "cost": 0.40000048000000005,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "10": {
-            "cost": 0.0010048,
-            "detail": "limit to 1000 rows",
+            "cost": 0.00010048,
+            "detail": "limit to 1000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "11": {
-            "cost": 0.0010048,
-            "detail": "operator: pass 1000 rows",
+            "cost": 0.00010048,
+            "detail": "operator: pass 1000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "2": {
-            "cost": 4.8,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1",
+            "cost": 0.48,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators",
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "4": {
-            "cost": 1.00008,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1",
+            "cost": 0.10000800000000001,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators",
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "6": {
-            "cost": 4.0000048,
-            "detail": "time range 60s: pass 4000000 rows",
+            "cost": 0.40000048000000005,
+            "detail": "time range 60s: pass 4000000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "7": {
-            "cost": 4.8,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1",
+            "cost": 0.48,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "8": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators",
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "9": {
-            "cost": 14.048,
-            "detail": "sort 1000000 rows in 100 partitions",
+            "cost": 1.4048,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000/s",
             "multiplier": 1
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 81.05020880000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics)",
+        "total": 8.10502088,
+        "unit": "cost_per_second"
       },
       "P3": {
         "per_node": {
           "0": {
-            "cost": 46.4000096,
-            "detail": "scan 4000000 samples",
+            "cost": 4.64000096,
+            "detail": "scan 4000000 samples; x 0.2000/s",
             "multiplier": 2
           },
           "1": {
-            "cost": 8.0000096,
-            "detail": "time range 60s: pass 4000000 rows",
+            "cost": 0.8000009600000001,
+            "detail": "time range 60s: pass 4000000 rows; x 0.2000/s",
             "multiplier": 2
           },
           "10": {
-            "cost": 0.0010048,
-            "detail": "operator: pass 1000 rows",
+            "cost": 0.00010048,
+            "detail": "operator: pass 1000 rows; x 0.1000/s",
             "multiplier": 1
           },
           "2": {
-            "cost": 4.8,
-            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1",
+            "cost": 0.48,
+            "detail": "build exact Rate accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "3": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators",
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "4": {
-            "cost": 1.00008,
-            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1",
+            "cost": 0.10000800000000001,
+            "detail": "build exact Sum accumulator into 100 states: 1000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "5": {
-            "cost": 0.00009999999999999999,
-            "detail": "finalize 100 accumulators",
+            "cost": 9.999999999999999e-6,
+            "detail": "finalize 100 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "6": {
-            "cost": 4.8,
-            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1",
+            "cost": 0.48,
+            "detail": "build exact Sum accumulator into 1000000 states: 4000000 rows x depth 1; x 0.1000/s",
             "multiplier": 1
           },
           "7": {
-            "cost": 1.0,
-            "detail": "finalize 1000000 accumulators",
+            "cost": 0.1,
+            "detail": "finalize 1000000 accumulators; x 0.1000/s",
             "multiplier": 1
           },
           "8": {
-            "cost": 14.048,
-            "detail": "sort 1000000 rows in 100 partitions",
+            "cost": 1.4048,
+            "detail": "sort 1000000 rows in 100 partitions; x 0.1000/s",
             "multiplier": 1
           },
           "9": {
-            "cost": 0.0010048,
-            "detail": "limit to 1000 rows",
+            "cost": 0.00010048,
+            "detail": "limit to 1000 rows; x 0.1000/s",
             "multiplier": 1
           }
         },
-        "source": "analytical-cost-v1 (illustrative statistics)",
-        "total": 81.05020880000001,
-        "unit": "cpu_ms_per_workload_evaluation"
+        "source": "analytical-cost-v2 (illustrative statistics)",
+        "total": 8.10502088,
+        "unit": "cost_per_second"
       }
     },
     "rejected": [
@@ -19883,12 +19883,12 @@
       },
       {
         "id": "P2",
-        "reason": "tied with the selected candidate P1 at 81.050 cpu_ms_per_workload_evaluation; lost on enumeration order",
+        "reason": "tied with the selected candidate P1 at 8.105 cost_per_second; lost on enumeration order",
         "valid": true
       },
       {
         "id": "P3",
-        "reason": "tied with the selected candidate P1 at 81.050 cpu_ms_per_workload_evaluation; lost on enumeration order",
+        "reason": "tied with the selected candidate P1 at 8.105 cost_per_second; lost on enumeration order",
         "valid": true
       }
     ],

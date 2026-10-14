@@ -31,7 +31,7 @@ use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::post_asap::SketchAlgorithm;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataWorkload, QueryLanguage};
+use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::asap_aware_cse::identical_expression_variants;
@@ -137,6 +137,7 @@ impl<Id> Stage1ToStage3Run<Id> {
 pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
     targets: &[Option<AccuracyTarget>],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
@@ -144,6 +145,7 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     Ok(run_stage1_to_stage3_from_pass1(
         per_computation,
         targets,
+        recurrence,
         data,
         models,
     ))
@@ -157,6 +159,7 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     targets: &[Option<AccuracyTarget>],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
@@ -236,7 +239,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
             break;
         }
     }
-    let selection = select_plan(&physical, targets, data, models);
+    let selection = select_plan(&physical, targets, recurrence, data, models);
     Stage1ToStage3Run {
         stage1_pass1_per_computation: per_computation,
         combinations,
@@ -400,8 +403,13 @@ impl OptimizationPass for Stage1ToStage3Pass {
             .entries()
             .map(|entry| Some(entry.requirements.accuracy.target()))
             .collect();
+        let recurrence: Vec<_> = workload
+            .query_workload()
+            .entries()
+            .map(|entry| entry.recurrence)
+            .collect();
         let data = workload.data_workload().cloned().unwrap_or_default();
-        let run = run_stage1_to_stage3(roots, &targets, &data, input.models)?;
+        let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, input.models)?;
         let Stage1ToStage3Run {
             stage2_physical_asap_optimization: physical,
             stage3_plan_selection: selection,

@@ -11,7 +11,7 @@ use asap_aware_mapping::PlanningModels;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataWorkload, PlanningWorkload};
+use asap_types::workload::{DataWorkload, PlanningWorkload, QueryRecurrence};
 
 #[derive(Debug)]
 pub struct PlanningStagesRun {
@@ -118,15 +118,22 @@ pub fn run_planning_stages(
         .entries()
         .map(|entry| entry.requirements.accuracy.target())
         .collect();
+    let recurrence: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.recurrence)
+        .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    run_planning_stages_over(roots, &targets, &data, max_combinations)
+    run_planning_stages_over(roots, &targets, &recurrence, &data, max_combinations)
 }
 
 /// [`run_planning_stages`] over roots lowered from any mix of query
-/// languages: query `i` is `roots[i]` with accuracy target `targets[i]`.
+/// languages: query `i` is `roots[i]` with accuracy target `targets[i]`,
+/// evaluated as `recurrence[i]` says.
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
     targets: &[AccuracyTarget],
+    recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     max_combinations: Option<usize>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
@@ -142,8 +149,13 @@ pub fn run_planning_stages_over(
             limit,
         });
     }
-    let run =
-        run_stage1_to_stage3_from_pass1(per_computation, &targets, data, PlanningModels::builtin());
+    let run = run_stage1_to_stage3_from_pass1(
+        per_computation,
+        &targets,
+        recurrence,
+        data,
+        PlanningModels::builtin(),
+    );
     for candidate in &run.stage1_logical_asap_optimization {
         if let Ok(roots) = &candidate.roots {
             validate(roots)?;
