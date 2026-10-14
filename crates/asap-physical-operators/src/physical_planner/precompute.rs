@@ -413,11 +413,8 @@ fn fragment(
             filter,
             ..
         }) => {
-            if filter.is_some() {
-                return Err(invalid(
-                    "filtered summary update has no native implementation",
-                ));
-            }
+            crate::capability::validate_ingestion_time_summary(filter.as_ref())
+                .map_err(Error::Invalid)?;
             let [input] = schemas else {
                 return Err(invalid("summary update requires one input"));
             };

@@ -163,6 +163,19 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             precompute::compile(&invalid_grouping, &[0], &[3]).is_err(),
             "numeric values cannot be reinterpreted as population labels"
         );
+        // A filtered summary update runs only at query time.
+        let mut filtered = dag.clone();
+        let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { filter, .. }) =
+            &mut filtered.nodes[3].payload
+        else {
+            unreachable!()
+        };
+        *filter = Some(planner_types::ir::Predicate(
+            planner_types::ir::ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Boolean(
+                true,
+            )),
+        ));
+        assert!(precompute::compile(&filtered, &[0], &[3]).is_err());
         let program = precompute::compile(&dag, &[0], &[3]).unwrap();
         let program =
             serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
