@@ -76,9 +76,11 @@ fn delta_scale(delta: f64) -> Option<f64> {
     } else if delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
         Some(1.0)
     } else {
+        // `z(1 − p) = −z(p)`, computed from the lower tail: `1 − delta/2`
+        // loses `delta` to rounding once it nears f64's epsilon.
         Some(
-            normal_quantile(1.0 - delta / 2.0)
-                / normal_quantile(1.0 - KLL_CALIBRATED_FAILURE_PROBABILITY / 2.0),
+            normal_quantile(delta / 2.0)
+                / normal_quantile(KLL_CALIBRATED_FAILURE_PROBABILITY / 2.0),
         )
     }
 }
@@ -275,6 +277,15 @@ mod tests {
         let ratio = delta_scale(0.001).unwrap();
         assert!((ratio - 1.277_463_039_557_138_7).abs() < 1e-8, "{ratio}");
         assert!((normal_quantile(0.975) - 1.959_963_984_540_054).abs() < 1e-8);
+        // Far in the tail, `1 − δ/2` rounds to 1 (or near it) in f64, so the
+        // scale must be computed from the lower tail, `−z(δ/2)`.
+        for (delta, expected) in [
+            (1e-16, 3.224_121_029_197_093_4),
+            (1e-15, 3.116_223_140_825_122_4),
+        ] {
+            let scale = delta_scale(delta).unwrap();
+            assert!((scale - expected).abs() < 1e-8, "{delta}: {scale}");
+        }
         assert_eq!(
             size_params(0.01, 0.001),
             SketchParams::Kll {
