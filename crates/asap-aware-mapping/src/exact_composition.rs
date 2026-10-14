@@ -71,8 +71,8 @@ use asap_types::ir::timing::{planned_data_state, validate_at_ingestion};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate};
 use asap_types::post_asap::execution_data_state::lift_plain;
 use asap_types::post_asap::{
-    AccuracyError, ExactOperationSchemaError, ExecutionDataState, ExecutionDataStateError,
-    ResultGuarantee, Schema,
+    AccuracyError, AccuracyGuarantee, ExactOperationSchemaError, ExecutionDataState,
+    ExecutionDataStateError, Schema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
@@ -233,7 +233,7 @@ impl ExactComposition {
         let schema = self.op.output_schema(&child.schema)?;
         let guarantee = match &child.guarantee {
             None => None,
-            Some(input) if input.is_exact() => Some(ResultGuarantee::exact(format!(
+            Some(input) if input.is_exact() => Some(AccuracyGuarantee::exact(format!(
                 "exact function {:?} over exact input",
                 self.op
             ))),

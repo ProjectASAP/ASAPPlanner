@@ -105,7 +105,7 @@ struct StatsModel;
 fn custom_accuracy_rule_survives_root_target_and_materialization() {
     use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
     use asap_types::post_asap::{
-        AccuracyError, CompositionOperator, ResultGuarantee, SketchStatistic,
+        AccuracyError, AccuracyGuarantee, CompositionOperator, SketchStatistic,
     };
     struct Model;
     impl AccuracyModel for Model {
@@ -116,20 +116,20 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
             &self,
             family: &FieldDataType,
             query: &SketchStatistic,
-        ) -> Option<ResultGuarantee> {
+        ) -> Option<AccuracyGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
         }
         fn propagate(
             &self,
             _: &CompositionOperator,
-            _: &[ResultGuarantee],
-            _: Option<&ResultGuarantee>,
+            _: &[AccuracyGuarantee],
+            _: Option<&AccuracyGuarantee>,
             _: &PropagationStats,
-        ) -> Result<ResultGuarantee, AccuracyError> {
+        ) -> Result<AccuracyGuarantee, AccuracyError> {
             // Test-only oracle: the marker detects accidental use of the default model.
-            Ok(ResultGuarantee::exact("custom rule oracle"))
+            Ok(AccuracyGuarantee::exact("custom rule oracle"))
         }
-        fn satisfies(&self, g: &ResultGuarantee, t: &AccuracyTarget) -> bool {
+        fn satisfies(&self, g: &AccuracyGuarantee, t: &AccuracyTarget) -> bool {
             DefaultAccuracyModel.satisfies(g, t)
         }
     }

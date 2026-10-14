@@ -24,7 +24,7 @@ use super::timing::{data_state, is_materialization_point};
 use crate::post_asap::execution_data_state::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming, Materialization,
 };
-use crate::post_asap::guarantee::ResultGuarantee;
+use crate::post_asap::guarantee::AccuracyGuarantee;
 use crate::pre_asap::schema::{FieldDataType, Schema};
 
 pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
@@ -74,7 +74,7 @@ pub struct PhysicalASAPDAGNode {
     /// no assignment is `NotMaterialized`.
     pub materialization: Materialization,
     pub output_schema: Schema,
-    pub guarantee: Option<ResultGuarantee>,
+    pub guarantee: Option<AccuracyGuarantee>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

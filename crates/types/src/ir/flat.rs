@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use super::query::QueryRoot;
 use crate::post_asap::execution_data_state::{ExecutionTiming, Materialization};
-use crate::post_asap::guarantee::ResultGuarantee;
+use crate::post_asap::guarantee::AccuracyGuarantee;
 use crate::pre_asap::schema::Schema;
 
 /// Index of a node in [`FlatDag::nodes`].
@@ -28,7 +28,7 @@ pub struct FlatNode {
     pub operator: Operator<NodeId>,
     pub result_kind: OperatorResultKind,
     pub schema: Schema,
-    pub guarantee: Option<ResultGuarantee>,
+    pub guarantee: Option<AccuracyGuarantee>,
     pub timing: Option<ExecutionTiming>,
     pub materialization: Materialization,
 }

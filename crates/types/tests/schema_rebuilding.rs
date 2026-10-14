@@ -1,6 +1,6 @@
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
-    ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, ResultGuarantee, SummaryUpdate,
+    AccuracyGuarantee, ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, SummaryUpdate,
 };
 use asap_types::pre_asap::{
     AggIntent, ColumnRef, DataType, Field, FieldDataType, Reduction, Schema, Source,
@@ -65,7 +65,7 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
         schema.fields[0].name = "alias".into();
         schema.fields[0].table = Some("result".into());
         let renamed = OperatorNode::with_schema(original.operator.clone(), schema)
-            .with_guarantee(Some(ResultGuarantee::exact("fixture")))
+            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")))
             .with_timing(Some(ExecutionTiming::QueryTime));
         let original = Rc::new(renamed);
         original.validate_structure().unwrap();

@@ -4,7 +4,7 @@ use crate::replacement::{
 };
 use asap_types::ir::non_asap::any_measure_filtered;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
-use asap_types::post_asap::{maintained_population::*, ResultGuarantee};
+use asap_types::post_asap::{maintained_population::*, AccuracyGuarantee};
 use asap_types::pre_asap::{AggIntent, CompareOpKind, DataType, Reduction, ScalarValue, Source};
 use std::rc::Rc;
 
@@ -283,7 +283,7 @@ impl MaintainedPopulationStrategy {
             source
                 .as_ref()
                 .clone()
-                .with_guarantee(Some(ResultGuarantee::exact("source samples"))),
+                .with_guarantee(Some(AccuracyGuarantee::exact("source samples"))),
         );
         let maintained = std::rc::Rc::new(
             OperatorNode::with_schema(
@@ -293,7 +293,7 @@ impl MaintainedPopulationStrategy {
                 }),
                 input_schema,
             )
-            .with_guarantee(Some(ResultGuarantee::exact(
+            .with_guarantee(Some(AccuracyGuarantee::exact(
                 "exact members under the declared population semantics",
             ))),
         );
@@ -305,7 +305,7 @@ impl MaintainedPopulationStrategy {
                 }),
                 root.schema.clone(),
             )
-            .with_guarantee(Some(ResultGuarantee::exact(
+            .with_guarantee(Some(AccuracyGuarantee::exact(
                 "exact current-population evaluation",
             ))),
         ))

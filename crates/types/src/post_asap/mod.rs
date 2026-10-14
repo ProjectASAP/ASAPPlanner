@@ -36,8 +36,8 @@ pub use execution_data_state::{
     ExecutionDataStateError, ExecutionTiming, Materialization, Medium,
 };
 pub use guarantee::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
-    ResultGuarantee,
+    AccuracyError, AccuracyGuarantee, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource,
+    ProbabilityExpr,
 };
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
