@@ -1124,3 +1124,34 @@ fn filtered_summary_build_is_rejected_at_ingestion_time() {
     let error = build(keep()).err().expect("filtered ingestion-time build");
     assert!(error.to_string().contains("only at query time"), "{error}");
 }
+
+/// PromQL never emits per-measure filters, and over PromQL series identity a
+/// filtered measure's empty group would be a NULL its non-nullable output
+/// cannot hold, so the filter is rejected there.
+#[test]
+fn measure_filters_are_rejected_over_promql_series_identity() {
+    let mut input = (*schema(&[
+        (
+            planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY,
+            DataType::Utf8,
+            false,
+        ),
+        ("x", DataType::Float64, false),
+        ("keep", DataType::Bool, true),
+    ]))
+    .clone();
+    input.closed = true;
+    let input = Arc::new(input);
+    assert!(input.has_promql_series_identity());
+    let aggregate = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![("m".into(), Reduction::Min(1))],
+    )
+    .unwrap();
+    let error = aggregate
+        .with_measure_filters(vec![Some(Expression::Column(2))])
+        .err()
+        .expect("filtered measure over PromQL series identity");
+    assert!(error.to_string().contains("PromQL"), "{error}");
+}

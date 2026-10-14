@@ -74,6 +74,13 @@ impl Operator {
         if filters.len() != measures.len() {
             return Err(invalid("one filter slot per aggregate measure required"));
         }
+        // PromQL emits no per-measure filters (label matchers are scan
+        // predicates), and its outputs are non-nullable.
+        if self.inputs[0].has_promql_series_identity() {
+            return Err(invalid(
+                "measure filters are not supported over PromQL series identity",
+            ));
+        }
         let mut output = (*self.output).clone();
         for (index, filter) in filters.iter().enumerate() {
             let Some(filter) = filter else { continue };
@@ -83,8 +90,7 @@ impl Operator {
             if matches!(
                 measures[index],
                 Reduction::Sum(_) | Reduction::Avg(_) | Reduction::Min(_) | Reduction::Max(_)
-            ) && !self.inputs[0].has_promql_series_identity()
-            {
+            ) {
                 output.fields[groups.len() + index].nullable = true;
             }
         }
