@@ -174,6 +174,31 @@ class StageWorkloadTests(unittest.TestCase):
         self.assertEqual(len(rows), len(physical["candidates"]) + len(physical["pruned"]))
         self.assertTrue(all(row["display_name"] for row in rows))
 
+    def test_candidates_include_composition_errors_last(self):
+        """A Stage 1 candidate that did not compose is a row with its error,
+        after the Stage 2 pruned ones."""
+        logical = self.document["stage1_logical_asap_optimization"]
+        logical["candidates"].append({"id": "L99", "display_name": "Q1 exact", "error": "cannot substitute"})
+        rows = self.js.call("stageCandidateRows", self.document)
+        self.assertEqual(
+            rows[-1],
+            {"id": "L99", "display_name": "Q1 exact", "total": None, "unit": None, "status": "composition error", "reason": "cannot substitute"},
+        )
+
+    def test_header_counts_candidates_and_shows_a_selection_error(self):
+        self.assertEqual(
+            self.js.call("stageCandidateHeader", self.document),
+            f"Stage 3 plan selection · {self.document['stage1_logical_asap_optimization']['combinations']} candidates",
+        )
+        self.document["stage1_logical_asap_optimization"]["capped"] = True
+        self.document["stage3_plan_selection"] = {"costs": {}, "selected": None, "rejected": [], "error": "no data workload"}
+        shown = len(self.document["stage1_logical_asap_optimization"]["candidates"])
+        self.assertEqual(
+            self.js.call("stageCandidateHeader", self.document),
+            f"Stage 3 plan selection · {self.document['stage1_logical_asap_optimization']['combinations']} candidates"
+            f" (document shows {shown}) · selection failed: no data workload",
+        )
+
     def test_failed_selection_has_no_post_dag(self):
         self.document["stage3_plan_selection"] = {"costs": {}, "selected": None, "rejected": []}
         queries = self.js.call("stageWorkload", self.document)["queries"]

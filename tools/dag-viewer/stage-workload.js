@@ -1,7 +1,7 @@
 // Reads an `asap-stage-pipeline/v1` document (the `stage_pipeline` bin, which
 // server.py runs for the Query planner) as the viewer's workload: one entry
-// per workload query, whose pre-ASAP DAG is its part of Stage 0 (the query
-// language frontends' DAG) and whose post-ASAP DAG is its part of the plan
+// per workload query, whose pre-ASAP DAG is its part of Stage 0 (the
+// query-language frontends' DAG) and whose post-ASAP DAG is its part of the plan
 // Stage 3 selected (a Stage 2 physical DAG), each node labeled with its
 // Stage 3 cost. A node shared by several queries keeps its stage DAG id as
 // `workload_node_id`, so a multi-query selection shows it once. DOM-free, so
@@ -110,7 +110,8 @@ function stageWorkload(doc) {
 
 // Stage 3's view of the candidates the document shows: the selected one,
 // the other valid ones cheapest first ("costlier"), then the rejected and
-// the Stage 2 pruned ones with their reasons.
+// the Stage 2 pruned ones with their reasons, then the Stage 1 ones that
+// did not compose ("composition error") with their errors.
 function stageCandidateRows(doc) {
   const selection = doc.stage3_plan_selection || {};
   const costs = selection.costs || {};
@@ -132,6 +133,20 @@ function stageCandidateRows(doc) {
   (physical.pruned || []).forEach((p) => rows.push({
     id: p.from_logical, display_name: p.display_name, total: null, unit: null, status: 'pruned', reason: p.reason,
   }));
-  const order = { selected: 0, costlier: 1, rejected: 2, pruned: 3 };
+  ((doc.stage1_logical_asap_optimization || {}).candidates || []).filter((c) => 'error' in c).forEach((c) => rows.push({
+    id: c.id, display_name: c.display_name, total: null, unit: null, status: 'composition error', reason: c.error,
+  }));
+  const order = { selected: 0, costlier: 1, rejected: 2, pruned: 3, 'composition error': 4 };
   return rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
+}
+
+// The candidate table's header: how many candidates Stage 1 enumerated,
+// how many the document shows when it caps them, and why plan selection
+// failed when it failed for a reason other than rejecting every candidate.
+function stageCandidateHeader(doc) {
+  const logical = doc.stage1_logical_asap_optimization || {};
+  const selection = doc.stage3_plan_selection || {};
+  const shown = logical.capped ? ` (document shows ${(logical.candidates || []).length})` : '';
+  const error = selection.error ? ` · selection failed: ${selection.error}` : '';
+  return `Stage 3 plan selection · ${logical.combinations ?? 0} candidates${shown}${error}`;
 }

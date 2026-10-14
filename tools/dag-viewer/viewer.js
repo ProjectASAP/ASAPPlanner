@@ -395,7 +395,7 @@ function renderPrePostAsap() {
 
   const elements = selected.length === 1
     ? [
-        ...laneElements('pre-asap', `${selected[0].name} · Stage 0 query language frontends`, selected[0].dag, selected[0], 'pre'),
+        ...laneElements('pre-asap', `${selected[0].name} · Stage 0 query-language frontends`, selected[0].dag, selected[0], 'pre'),
         ...laneElements('post-asap', `${selected[0].name} · Stage 3 selected plan`, selected[0].post_dag, selected[0], 'post'),
       ]
     : [
@@ -450,7 +450,7 @@ function unionStageLaneElements(stage, chosen) {
     // which defaults to false for nodes, and the lane covers most of the
     // canvas once the DAG is zoomed past the viewport. Still not grabbable:
     // cytoscape overrides `grabbable` for a pannable node.
-    { data: { id: laneId, label: `${stage === 'pre' ? 'Stage 0 query language frontends' : 'Stage 3 selected plan'} · workload union`, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
+    { data: { id: laneId, label: `${stage === 'pre' ? 'Stage 0 query-language frontends' : 'Stage 3 selected plan'} · workload union`, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
   ];
 
   chosen.forEach((qIdx) => {
@@ -613,17 +613,15 @@ function showEdgeDetail(edge) {
 function renderScopeSummary(selected) {
   scopePickerEl.classList.add('visible');
   const scope = selected.length === 1 ? 'Single query' : `Batch workload · ${selected.length} queries`;
-  const logical = stageDocument.stage1_logical_asap_optimization || {};
-  const shown = logical.capped ? ` (document shows ${(logical.candidates || []).length})` : '';
   const rows = stageCandidateRows(stageDocument).map((row) => `
-    <tr class="candidate candidate--${row.status}">
+    <tr class="candidate candidate--${row.status.replace(' ', '-')}">
       <td>${escapeHtml(row.id)}</td>
       <td>${escapeHtml(row.display_name || '')}</td>
       <td>${row.total === null ? '' : `${escapeHtml(Number(row.total.toPrecision(4)))} ${escapeHtml(row.unit || '')}`}</td>
       <td>${escapeHtml(row.status)}${row.reason ? `: ${escapeHtml(row.reason)}` : ''}</td>
     </tr>`).join('');
   scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span></div></div>
-    <div class="scopeGroup"><div class="scopeGroupLabel">Stage 3 plan selection · ${escapeHtml(logical.combinations ?? 0)} candidates${escapeHtml(shown)}</div>
+    <div class="scopeGroup"><div class="scopeGroupLabel">${escapeHtml(stageCandidateHeader(stageDocument))}</div>
     <table class="candidateTable"><thead><tr><th>Candidate</th><th>Choices</th><th>Cost</th><th>Outcome</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
