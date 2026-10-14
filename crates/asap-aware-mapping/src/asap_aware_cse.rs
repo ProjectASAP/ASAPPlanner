@@ -92,53 +92,91 @@ fn pair(
 }
 
 /// Every Pass 2 candidate of the identical-expression rule for the
-/// candidate with query roots `roots`: one per non-empty subset of its
-/// [`sharing_groups`] that gives a distinct candidate, in binary-counter
-/// order of the subsets (the first group varying fastest). Empty when
-/// nothing is identical.
-pub fn identical_expression_variants(roots: &[QueryRoot]) -> Vec<IdenticalExpressionVariant> {
-    let groups = sharing_groups(roots);
+/// candidate with query roots `roots` and sharing groups `groups`
+/// ([`sharing_groups`]): one per non-empty subset of the groups that gives a
+/// distinct candidate, in binary-counter order of the subsets (the first
+/// group the lowest bit). Empty when nothing is identical.
+///
+/// Sharing a set of groups also shares every group whose remaining nodes it
+/// leaves as one; that closure maps each subset to the candidate it gives,
+/// and the distinct candidates are the closed sets. They are enumerated
+/// directly (Ganter's Next Closure, one closure per step and group) rather
+/// than by trying all `2^g` subsets, which repeat when groups nest.
+pub fn identical_expression_variants(
+    roots: &[QueryRoot],
+    groups: &[SharingGroup],
+) -> Vec<IdenticalExpressionVariant> {
+    let n = groups.len();
+    let mut variants = Vec::new();
+    // The closed sets in lectic order, from the closure of the empty set
+    // (which shares nothing).
+    let mut closed = vec![false; n];
+    'next: loop {
+        for i in (0..n).rev() {
+            if closed[i] {
+                continue;
+            }
+            let mut candidate: Vec<bool> = (0..n).map(|g| g < i && closed[g]).collect();
+            candidate[i] = true;
+            let (shared_roots, merged) = apply(roots, groups, &candidate);
+            // Lectic successor: adds nothing below `i` that `closed` lacks.
+            if (0..i).all(|g| !merged[g] || closed[g]) {
+                // `merged` is closed: applying it gives the same candidate.
+                variants.push((merged.clone(), shared_roots));
+                closed = merged;
+                continue 'next;
+            }
+        }
+        break;
+    }
+    // Binary-counter order of the subsets: compare from the highest group.
+    variants.sort_by(|(a, _), (b, _)| a.iter().rev().cmp(b.iter().rev()));
+    variants
+        .into_iter()
+        .map(|(subset, roots)| IdenticalExpressionVariant {
+            shared_groups: (0..n).filter(|&g| subset[g]).collect(),
+            roots,
+        })
+        .collect()
+}
+
+/// `roots` with the groups in `subset` shared, and the groups that leaves
+/// shared: those whose every node still read became one node (a node below
+/// a shared node other than the one kept is no longer read).
+fn apply(
+    roots: &[QueryRoot],
+    groups: &[SharingGroup],
+    subset: &[bool],
+) -> (Vec<QueryRoot>, Vec<bool>) {
     let group_of: HashMap<*const OperatorNode, usize> = groups
         .iter()
         .enumerate()
         .flat_map(|(index, group)| group.nodes.iter().map(move |n| (Rc::as_ptr(n), index)))
         .collect();
-    let mut variants = Vec::new();
-    let mut subset = vec![false; groups.len()];
-    while next_subset(&mut subset) {
-        let mut sharing = Sharing {
-            subset: &subset,
-            group_of: &group_of,
-            rebuilt: HashMap::new(),
-            shared: HashMap::new(),
-        };
-        let shared_roots: Vec<QueryRoot> = roots.iter().map(|r| sharing.root(r)).collect();
-        // The groups this candidate actually shares: every node of the group
-        // that is still read became one node. A node below a shared node
-        // other than the one kept is no longer read.
-        let merged: Vec<bool> = groups
-            .iter()
-            .map(|group| {
-                let mut nodes = group.nodes.iter().filter_map(|node| {
-                    let (_, rebuilt) = sharing.rebuilt.get(&Rc::as_ptr(node))?;
-                    Some(Rc::as_ptr(rebuilt))
-                });
-                let first = nodes.next();
-                nodes.all(|node| Some(node) == first)
-            })
-            .collect();
-        if merged == subset {
-            variants.push(IdenticalExpressionVariant {
-                shared_groups: (0..groups.len()).filter(|&g| subset[g]).collect(),
-                roots: shared_roots,
+    let mut sharing = Sharing {
+        subset,
+        group_of: &group_of,
+        rebuilt: HashMap::new(),
+        shared: HashMap::new(),
+    };
+    let shared_roots: Vec<QueryRoot> = roots.iter().map(|r| sharing.root(r)).collect();
+    let merged = groups
+        .iter()
+        .map(|group| {
+            let mut nodes = group.nodes.iter().filter_map(|node| {
+                let (_, rebuilt) = sharing.rebuilt.get(&Rc::as_ptr(node))?;
+                Some(Rc::as_ptr(rebuilt))
             });
-        }
-    }
-    variants
+            let first = nodes.next();
+            nodes.all(|node| Some(node) == first)
+        })
+        .collect();
+    (shared_roots, merged)
 }
 
 /// Binary increment of `subset`, the first entry the lowest bit; `false`
 /// once every subset has been visited.
+#[cfg(test)]
 fn next_subset(subset: &mut [bool]) -> bool {
     for bit in subset.iter_mut() {
         *bit = !*bit;
@@ -284,7 +322,7 @@ mod tests {
             groups.iter().map(kinds).collect::<Vec<_>>(),
             ["Scan", "TimeRange"]
         );
-        let variants = identical_expression_variants(&roots);
+        let variants = identical_expression_variants(&roots, &sharing_groups(&roots));
         assert_eq!(
             variants
                 .iter()
@@ -317,7 +355,7 @@ mod tests {
             sharing_groups(&roots).iter().map(kinds).collect::<Vec<_>>(),
             ["Scan", "TimeRange", "Scan", "TimeRange"]
         );
-        let variants = identical_expression_variants(&roots);
+        let variants = identical_expression_variants(&roots, &sharing_groups(&roots));
         assert_eq!(variants.len(), 8);
         let shares = |v: &IdenticalExpressionVariant| {
             (
@@ -335,9 +373,84 @@ mod tests {
     /// Queries with nothing in common have no Pass 2 candidate.
     #[test]
     fn nothing_identical_gives_no_variant() {
+        assert!({
+            let roots = roots(&["sum(rate(a[1m]))", "sum(rate(b[1m]))"]);
+            identical_expression_variants(&roots, &sharing_groups(&roots))
+        }
+        .is_empty());
+    }
+
+    /// Every non-empty subset of the groups, applied, kept when it gives a
+    /// distinct candidate: the definition the direct enumeration follows.
+    fn brute_force(roots: &[QueryRoot]) -> Vec<Vec<usize>> {
+        let groups = sharing_groups(roots);
+        let mut subset = vec![false; groups.len()];
+        let mut out = Vec::new();
+        while next_subset(&mut subset) {
+            let (_, merged) = apply(roots, &groups, &subset);
+            if merged == subset {
+                out.push((0..groups.len()).filter(|&g| subset[g]).collect());
+            }
+        }
+        out
+    }
+
+    /// The direct enumeration gives exactly the brute force's candidates, in
+    /// the same order, on nested and independent groups.
+    #[test]
+    fn direct_enumeration_matches_the_brute_force() {
+        for queries in [
+            &[
+                "sum by (job) (rate(m[1m]))",
+                "topk by (job) (10, sum_over_time(m[1m]))",
+            ][..],
+            &["sum(a)", "max(a)", "sum(b)", "max(b)"],
+            &["sum(abs(a))", "max(abs(a))", "min(a)", "sum(b)", "max(b)"],
+            &["sum(abs(ceil(a)))", "max(abs(ceil(a)))", "min(ceil(a))"],
+        ] {
+            let roots = roots(queries);
+            let groups = sharing_groups(&roots);
+            let direct: Vec<_> = identical_expression_variants(&roots, &groups)
+                .into_iter()
+                .map(|v| v.shared_groups)
+                .collect();
+            assert_eq!(direct, brute_force(&roots), "{queries:?}");
+        }
+    }
+
+    /// Twenty nested groups (two identical chains of a keyed scan and 19
+    /// filters) have 20 distinct candidates, one per depth shared, not 2^20
+    /// subsets to try.
+    #[test]
+    fn twenty_nested_groups_enumerate_quickly() {
+        use crate::test_support::{filter, metric_scan_with_keys};
+        use asap_types::ir::ScalarExpr;
+        use asap_types::pre_asap::expr_ir::CompareOpKind;
+        let chain = || {
+            let mut node = metric_scan_with_keys(&["job"], vec![vec![0, 2]]);
+            for i in 0..19 {
+                node = filter(
+                    ScalarExpr::Compare {
+                        left: Box::new(ScalarExpr::Column(1)),
+                        op: CompareOpKind::Gt,
+                        right: Box::new(ScalarExpr::literal_f64(i as f64)),
+                        semantics: asap_types::ir::ExprSemantics::Promql,
+                    },
+                    node,
+                );
+            }
+            QueryRoot::Operator(node)
+        };
+        let roots = [chain(), chain()];
+        let groups = sharing_groups(&roots);
+        assert_eq!(groups.len(), 20);
+        let start = std::time::Instant::now();
+        let variants = identical_expression_variants(&roots, &groups);
+        assert_eq!(variants.len(), 20);
         assert!(
-            identical_expression_variants(&roots(&["sum(rate(a[1m]))", "sum(rate(b[1m]))"]))
-                .is_empty()
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
         );
     }
 }
