@@ -7739,7 +7739,7 @@ mod tests {
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll {
-                    k: 65_535,
+                    k: 26_602,
                     failure_probability: None
                 },
             ))
