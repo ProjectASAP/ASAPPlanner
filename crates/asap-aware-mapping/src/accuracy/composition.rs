@@ -7,6 +7,10 @@ use super::*;
 /// Rows an exact aggregation folds (per group): bounded by the data
 /// workload's input cardinality.
 pub(crate) const INPUT_ROW_COUNT: &str = "input_row_count";
+/// Rows one group of a SQL fold over an approximate relation folds: not
+/// bounded by the data workload's input cardinality, so plan selection
+/// leaves it unbound.
+pub(crate) const GROUP_ROW_COUNT: &str = "group_row_count";
 /// Whether every input value is non-negative.
 pub(crate) const VALUES_NON_NEGATIVE: &str = "values_non_negative";
 /// The relative bound of a quantile ratio, given enforced operand domains
@@ -31,12 +35,16 @@ pub(crate) fn source_norm_statistic(norm: &str, source: &str) -> String {
 }
 
 /// The norm and source a [`source_norm_statistic`] names.
-pub(crate) fn parse_source_norm_statistic(statistic: &str) -> Option<(&str, &str)> {
-    let (norm, rest) = statistic.split_once('[')?;
-    let source = rest.strip_suffix(']')?;
+pub(crate) fn parse_source_norm_statistic(statistic: &str) -> Option<(&'static str, &str)> {
     [STREAM_L1_NORM, STREAM_L2_NORM]
-        .contains(&norm)
-        .then_some((norm, source))
+        .into_iter()
+        .find_map(|norm| {
+            let source = statistic
+                .strip_prefix(norm)?
+                .strip_prefix('[')?
+                .strip_suffix(']')?;
+            Some((norm, source))
+        })
 }
 
 impl DefaultAccuracyModel {
@@ -494,17 +502,18 @@ fn all_relative(inputs: &[ResultGuarantee]) -> bool {
             .all(|g| g.metric == ErrorMetric::RelativeValue)
 }
 
-/// `stats.input_row_count` as a bound factor, or an `Unknown` leaf (recorded
-/// in `provenance`) when absent.
+/// `stats.input_row_count` as a bound factor, or an `Unknown` leaf named by
+/// `stats.row_count_statistic` (recorded in `provenance`) when absent.
 fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) -> BoundExpr {
     match stats.input_row_count {
         Some(n) => BoundExpr::Constant { value: n as f64 },
         None => {
+            let statistic = stats.row_count_statistic.unwrap_or(INPUT_ROW_COUNT);
             provenance.push(GuaranteeSource::UnavailableStatistic {
-                statistic: INPUT_ROW_COUNT.into(),
+                statistic: statistic.into(),
             });
             BoundExpr::Unknown {
-                statistic: INPUT_ROW_COUNT.into(),
+                statistic: statistic.into(),
             }
         }
     }
@@ -859,6 +868,29 @@ pub(super) fn propagate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source-norm statistic names its norm and source, whatever
+    /// characters the source holds; any other statistic is not one.
+    #[test]
+    fn source_norm_statistics_round_trip() {
+        for source in ["m", "a[b]", "]x[", "t.c", ""] {
+            for norm in [STREAM_L1_NORM, STREAM_L2_NORM] {
+                let statistic = source_norm_statistic(norm, source);
+                assert_eq!(
+                    parse_source_norm_statistic(&statistic),
+                    Some((norm, source))
+                );
+            }
+        }
+        for other in [
+            INPUT_ROW_COUNT,
+            STREAM_L1_NORM,
+            "stream_l3_norm[m]",
+            "stream_l1_norm[m",
+        ] {
+            assert_eq!(parse_source_norm_statistic(other), None, "{other}");
+        }
+    }
     use asap_types::pre_asap::AggIntent;
     fn abs(bound: f64, delta: f64) -> ResultGuarantee {
         ResultGuarantee {

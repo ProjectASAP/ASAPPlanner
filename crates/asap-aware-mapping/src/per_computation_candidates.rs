@@ -90,7 +90,7 @@ use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
 use crate::accuracy::composition::{
-    additive_as_absolute, DIVISION_OPERAND_DOMAINS, PRODUCT_OPERAND_DOMAINS,
+    additive_as_absolute, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT, PRODUCT_OPERAND_DOMAINS,
     QUOTIENT_OPERAND_DOMAINS,
 };
 use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
@@ -631,7 +631,7 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
                 child: input,
                 reduction,
                 ..
-            }) if exact_filter(child) => {
+            }) if exact_filter(child) && !groups_by_estimate(reduction, input) => {
                 let stats = fold_stats(reduction, input)?;
                 let input = operand_guarantee(input)?;
                 let op = match kind {
@@ -657,12 +657,13 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
                 family,
                 input: update,
                 child: input,
+                reduction,
                 ..
             }) if estimate_has_bound(family, update, query) => {
                 let local = DefaultAccuracyModel.local_guarantee(family, query)?;
                 if exact_inputs(summary_input) {
                     Some(local)
-                } else if exact_filter(summary_input) {
+                } else if exact_filter(summary_input) && !groups_by_estimate(reduction, input) {
                     compose(
                         &CompositionOperator::ApproximateAggregate,
                         vec![input.guarantee.clone()?],
@@ -695,16 +696,22 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
             measures,
             filters,
             having: None,
+            reduction,
             child,
             ..
-        }) if filters.iter().all(Option::is_none) => match measures.as_slice() {
-            [intent] => compose(
-                &function_rules(intent)?.accuracy,
-                vec![operand_guarantee(child)?],
-                None,
-            ),
-            _ => None,
-        },
+        }) if filters.iter().all(Option::is_none) && !groups_by_estimate(reduction, child) => {
+            match measures.as_slice() {
+                [intent] => DefaultAccuracyModel
+                    .propagate(
+                        &function_rules(intent)?.accuracy,
+                        &[operand_guarantee(child)?],
+                        None,
+                        &fold_stats(reduction, child)?,
+                    )
+                    .ok(),
+                _ => None,
+            }
+        }
         Operator::NonASAP(NonASAPOp::BinaryOp {
             operator:
                 BinaryOperator {
@@ -724,14 +731,21 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
     }
 }
 
-/// The rows one group of an exact accumulator over approximate `input`
-/// folds. Across series or groups (`Reduce`) they are the input rows, an
-/// input-row-count statistic left symbolic for plan selection; over time
+/// The rows one group of an exact fold over approximate `input` counts.
+/// Across PromQL series (`Reduce`) they are at most the input series, an
+/// input-row-count statistic left symbolic for plan selection; across SQL
+/// groups they are a group-row-count statistic nothing binds; over time
 /// (`PerEntity`) they are one series' samples in the window: the steps of a
 /// subquery with an explicit resolution, `⌈range / resolution⌉`. `None`
 /// when that count is not in the query.
-fn fold_stats(reduction: &Reduction, input: &OperatorNode) -> Option<PropagationStats> {
+fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<PropagationStats> {
     match reduction {
+        // The input cardinality bounds a PromQL fold's rows (series), not
+        // the rows of a SQL group.
+        Reduction::Reduce(_) if reads_table(input) => Some(PropagationStats {
+            row_count_statistic: Some(GROUP_ROW_COUNT),
+            ..PropagationStats::default()
+        }),
         Reduction::Reduce(_) => Some(PropagationStats::default()),
         Reduction::PerEntity => match input.non_asap() {
             Some(NonASAPOp::PromqlSubquery {
@@ -745,6 +759,53 @@ fn fold_stats(reduction: &Reduction, input: &OperatorNode) -> Option<Propagation
             _ => None,
         },
     }
+}
+
+/// Whether `node` reads a SQL table.
+fn reads_table(node: &Rc<OperatorNode>) -> bool {
+    OperatorNode::reachable(node).iter().any(|node| {
+        matches!(
+            node.non_asap(),
+            Some(NonASAPOp::Scan {
+                source: Source::Table { .. },
+                ..
+            })
+        )
+    })
+}
+
+/// Whether a grouping by `reduction` over an approximate `input` may decide
+/// a row's group by an estimate: a grouping column other than a label (a
+/// string) or the time index. Guarantees are per node, so any such column
+/// may carry the estimate (column-level tracking is #689); a PromQL `by`
+/// or `without` groups by labels only. `false` over exact input.
+fn groups_by_estimate(reduction: &Reduction, input: &OperatorNode) -> bool {
+    let Some(by) = reduction.group_keys() else {
+        return false;
+    };
+    if input
+        .guarantee
+        .as_ref()
+        .is_some_and(ResultGuarantee::is_exact)
+    {
+        return false;
+    }
+    let schema = &input.schema;
+    let columns: Vec<usize> = if by.is_without() {
+        let value = resolve_column_ref(&ColumnRef::SampleValue, schema).ok();
+        (0..schema.fields.len())
+            .filter(|i| !by.keys().contains(i) && Some(*i) != value)
+            .collect()
+    } else {
+        by.keys().to_vec()
+    };
+    columns.into_iter().any(|i| {
+        Some(i) != schema.time_index
+            && !matches!(
+                schema.fields.get(i).map(|f| &f.dtype),
+                Some(FieldDataType::Plain(DataType::Utf8))
+            )
+    })
 }
 
 /// Whether `expr` reads any input column.

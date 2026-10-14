@@ -1433,6 +1433,38 @@ mod tests {
         }
     }
 
+    /// Counting estimates by a label keeps the count exact: the group keys
+    /// are labels, not the estimates (#669).
+    #[test]
+    fn counting_estimates_by_a_label_stays_exact() {
+        let target = AccuracyTarget::Epsilon(0.01);
+        let (candidates, _) = run(
+            "count by (le) (quantile_over_time(0.99, m[1m]))",
+            &target,
+            &data(),
+            PlanningModels::builtin(),
+        );
+        // The inner quantile is a sketch; the count itself is exact.
+        let sketched: Vec<_> = candidates
+            .iter()
+            .filter(|c| {
+                let sketches = sketches(c);
+                !sketches.is_empty()
+                    && sketches
+                        .iter()
+                        .all(|a| matches!(a, SketchAlgorithm::Kll | SketchAlgorithm::DDSketch))
+            })
+            .collect();
+        assert!(!sketched.is_empty());
+        for candidate in sketched {
+            assert!(
+                output_guarantee(candidate).is_some_and(|g| g.is_exact()),
+                "{:?}",
+                sketches(candidate)
+            );
+        }
+    }
+
     /// `avg by (job)` over per-series DDSketch quantiles has a relative bound
     /// that needs the values' sign, a statistic no input supplies: it stays
     /// symbolic and plan selection treats it as unmet.

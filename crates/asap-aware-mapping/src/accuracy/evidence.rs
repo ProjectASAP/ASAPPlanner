@@ -70,6 +70,10 @@ pub struct PropagationStats {
     /// of groups a function folds), for exact aggregate union bounds
     /// bound over per-input failures.
     pub input_row_count: Option<u64>,
+    /// The statistic an unknown row count is named by (default
+    /// `input_row_count`), so a fold whose rows the data workload's input
+    /// cardinality does not bound can leave a statistic nothing binds.
+    pub row_count_statistic: Option<&'static str>,
     /// Fresh key-frequency distribution evidence from the data workload.
     /// Built-in rules preserve it for deployment-specific accuracy models;
     /// they do not assume a favorable distribution when it is absent.

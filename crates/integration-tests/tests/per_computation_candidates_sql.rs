@@ -78,12 +78,15 @@ fn reads_quantile_sketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bo
         })
 }
 
-/// A measure filter that reads an approximate value decides which rows
-/// count by an estimate, so an estimate near its threshold can flip the
-/// result arbitrarily: the output has no guarantee (#669), whether the
-/// measure counts rows or folds the estimate itself.
+/// A measure filter or a grouping key that reads an approximate value
+/// decides which rows count, or which group a row joins, by an estimate, so
+/// an estimate near a threshold or a group boundary can change the result
+/// arbitrarily: the output has no guarantee (#669), whether the measure
+/// counts rows or folds the estimate itself. So does a count of the
+/// estimates' distinct values, of non-null estimates, or a group key
+/// computed from an estimate.
 #[tokio::test]
-async fn a_measure_filter_over_an_estimate_has_no_guarantee() {
+async fn a_filter_or_group_key_over_an_estimate_has_no_guarantee() {
     let catalog = SqlCatalog::new().with_table(
         "flows",
         Schema::new(vec![
@@ -96,6 +99,22 @@ async fn a_measure_filter_over_an_estimate_has_no_guarantee() {
         "SELECT count(*) FILTER (WHERE p > 5) FROM \
          (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
         "SELECT max(p) FILTER (WHERE p < 100) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
+        "SELECT p, count(*) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s \
+         GROUP BY p",
+        "SELECT p, max(p) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s \
+         GROUP BY p",
+        "SELECT p, sum(p) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s \
+         GROUP BY p",
+        "SELECT p > 5, count(*) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s \
+         GROUP BY p > 5",
+        "SELECT count(DISTINCT p) FROM \
+         (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
+        "SELECT count(p) FROM \
          (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
     ] {
         let root = lower_sql(sql, &catalog, accuracy.clone())
@@ -110,5 +129,51 @@ async fn a_measure_filter_over_an_estimate_has_no_guarantee() {
         for candidate in candidates {
             assert_eq!(candidate.guarantee, None, "{sql}");
         }
+    }
+}
+
+/// Whether `node` reads a DDSketch anywhere below it.
+fn reads_ddsketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
+    use asap_types::post_asap::SketchAlgorithm;
+    asap_types::ir::OperatorNode::reachable(node)
+        .iter()
+        .any(|node| {
+            matches!(
+                node.asap(),
+                Some(asap_types::ir::ASAPOp::SummaryAgg {
+                    family: asap_types::post_asap::FieldDataType::Sketch(kind, _),
+                    ..
+                }) if matches!(kind.algorithm(), SketchAlgorithm::DDSketch)
+            )
+        })
+}
+
+/// A SQL fold over the groups of an approximate subquery counts rows the
+/// data workload's input cardinality (a series count) does not bound, so
+/// it leaves its own row-count statistic, which plan selection does not
+/// bind: the target stays unmet.
+#[tokio::test]
+async fn a_sql_fold_over_estimates_leaves_its_row_count_unbound() {
+    let catalog = SqlCatalog::new().with_table(
+        "flows",
+        Schema::new(vec![
+            Field::plain("src", DataType::Utf8, false),
+            Field::plain("bytes", DataType::Float64, false),
+        ]),
+    );
+    let accuracy = AccuracyTarget::Epsilon(0.01);
+    let sql = "SELECT max(p) FROM \
+               (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s";
+    let root = lower_sql(sql, &catalog, accuracy.clone()).await.unwrap();
+    let candidates: Vec<_> = asap_integration_tests::planning::logical_candidates(root, accuracy)
+        .into_iter()
+        .filter(reads_ddsketch)
+        .collect();
+    assert!(!candidates.is_empty());
+    for candidate in candidates {
+        let g = candidate.guarantee.clone().expect("a relative max");
+        let delta = format!("{:?}", g.failure_probability);
+        assert!(delta.contains("group_row_count"), "{delta}");
+        assert!(!delta.contains("input_row_count"), "{delta}");
     }
 }
