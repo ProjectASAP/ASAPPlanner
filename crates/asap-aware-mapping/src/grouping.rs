@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn cardinality_has_no_hydra_candidate_yet() {
-        // summary_candidates(Cardinality) = [Hll, Theta, Kmv] — none have a
+        // summary_candidates(Cardinality) = [Hll, Kmv, UnivMon] — none have a
         // modeled Hydra variant, so no candidate at all (not an error, just
         // an empty result, same conservatism as every other strategy here).
         let q = agg(vec![2], default_cardinality(), metric_scan(&["job"]));

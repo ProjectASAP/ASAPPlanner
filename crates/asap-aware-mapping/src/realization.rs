@@ -27,15 +27,14 @@ pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
         // (`SummaryInputExpr::Tuple`), which the distinct-count sketches take
         // unchanged. UnivMon is dropped there: it estimates frequency moments
         // over a single value stream, and `realize_value_frequency_summary_input`
-        // would feed it one column of the tuple.
-        AggIntent::Cardinality { cols, .. } if cols.len() > 1 => &[
-            SketchAlgorithm::Hll,
-            SketchAlgorithm::Theta,
-            SketchAlgorithm::Kmv,
-        ],
+        // would feed it one column of the tuple. Theta is not offered:
+        // `asap_sketchlib` has no Theta sketch to execute it; add it back
+        // once the library has one.
+        AggIntent::Cardinality { cols, .. } if cols.len() > 1 => {
+            &[SketchAlgorithm::Hll, SketchAlgorithm::Kmv]
+        }
         AggIntent::Cardinality { .. } => &[
             SketchAlgorithm::Hll,
-            SketchAlgorithm::Theta,
             SketchAlgorithm::Kmv,
             SketchAlgorithm::UnivMon,
         ],
