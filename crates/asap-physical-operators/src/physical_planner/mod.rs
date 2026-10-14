@@ -455,7 +455,10 @@ fn compile_internal(
                 }
             }
             if let Payload::ASAP(ASAPOp::SummaryMerge { .. }) = &node.payload {
-                require_sound_merge(&schemas[0]).map_err(|e| invalid(format!("node {id}: {e}")))?;
+                let input = schemas
+                    .first()
+                    .ok_or_else(|| invalid(format!("node {id}: summary merge requires inputs")))?;
+                require_sound_merge(input).map_err(|e| invalid(format!("node {id}: {e}")))?;
                 if output.time_index.is_some() {
                     // Pane timestamps describe their own builds. The merged
                     // state covers this evaluation's window, so merge by

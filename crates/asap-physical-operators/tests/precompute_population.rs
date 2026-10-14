@@ -401,10 +401,10 @@ fn sum_state(value: f64) -> Arc<dyn asap_physical_operators::AggregateCore> {
 // Only an explicit merge may collapse distinct pane updates before finalization.
 #[test]
 fn precompute_merge_requires_a_family_with_a_sound_merge() {
-    // Increase reads the samples at the window edges, so the
-    // family-capability table gives it no merge.
-    let increase = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
-    let error = try_state_dag(increase, None, true).err().expect("rejected");
+    // IRate reads the window's last two samples, so the family-capability
+    // table gives it no merge.
+    let irate = FieldDataType::ExactAggregate(ExactKind::IRate, ExactParams::IRate);
+    let error = try_state_dag(irate, None, true).err().expect("rejected");
     assert!(error.to_string().contains("no sound merge"), "{error}");
     let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     try_state_dag(sum, None, true).unwrap();

@@ -179,3 +179,40 @@ fn post_asap_summary_projection_survives_recovery() {
         assert!(output.next().await.is_none());
     });
 }
+
+// A `SummaryMerge` with no inputs is an invalid DAG, not a panic.
+#[test]
+fn summary_merge_without_inputs_is_rejected() {
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let schema = planner_types::pre_asap::Schema {
+        unique_keys: vec![],
+        closed: false,
+        fields: vec![Field {
+            table: None,
+            name: "state".into(),
+            dtype: family,
+            nullable: false,
+        }],
+        time_index: None,
+    };
+    let dag = PhysicalASAPDAG {
+        nodes: vec![PhysicalASAPDAGNode {
+            id: 0,
+            payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![] }),
+            output_schema: schema,
+            output_state: ExecutionDataState::INGESTION_SUMMARY,
+            materialization: Default::default(),
+            guarantee: None,
+        }],
+        edges: vec![],
+        roots: vec![0],
+        scalar_roots: vec![],
+    };
+    let error = compile(&dag, BTreeMap::new(), &[0])
+        .err()
+        .expect("rejected");
+    assert!(
+        error.to_string().contains("summary merge requires inputs"),
+        "{error}"
+    );
+}

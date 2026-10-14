@@ -21,7 +21,7 @@ use asap_types::ir::{
     apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
     NonASAPOp, Operator, OperatorNode, TimingMemo,
 };
-use asap_types::post_asap::{ExactKind, ExactParams, FieldDataType, Schema};
+use asap_types::post_asap::Schema;
 use asap_types::types::AccuracyTarget;
 
 const EVALUATION_MS: i64 = 300_000;
@@ -45,12 +45,8 @@ fn summary_agg(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 
 /// Rewrite `root` so its summary is built in tumbling panes: pane `i` is
 /// `TimeRange(1m)` over `TimeShift(i·1m)` over the same `Scan`, and a
-/// `SummaryMerge` combines the panes, with `family` in place of the
-/// selected one when given. Returns the root and the panes.
-fn tumbling_panes(
-    root: &Rc<OperatorNode>,
-    family: Option<FieldDataType>,
-) -> (Rc<OperatorNode>, Vec<Rc<OperatorNode>>) {
+/// `SummaryMerge` combines the panes. Returns the root and the panes.
+fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<OperatorNode>>) {
     let agg = summary_agg(root);
     let Some(NonASAPOp::TimeRange { kind, child, .. }) = agg.children()[0].non_asap() else {
         panic!("expected a raw time range under the summary");
@@ -71,13 +67,7 @@ fn tumbling_panes(
                 child: shifted,
             }))
             .unwrap();
-            let mut operator = agg.operator.map_children(|_| range.clone());
-            if let (Some(family), Operator::ASAP(ASAPOp::SummaryAgg { family: f, .. })) =
-                (&family, &mut operator)
-            {
-                *f = family.clone();
-            }
-            OperatorNode::new_shared(operator).unwrap()
+            OperatorNode::new_shared(agg.operator.map_children(|_| range.clone())).unwrap()
         })
         .collect();
     let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -318,7 +308,7 @@ fn values(rows: &[Vec<Value>]) -> Vec<f64> {
 /// Returns the per-series values, which every execution path agrees on.
 fn assert_pane_merge_matches_single_build(query: &str, accuracy: AccuracyTarget) -> Vec<f64> {
     let single = single_build(query, accuracy);
-    let (panes, pane_builds) = tumbling_panes(&single, None);
+    let (panes, pane_builds) = tumbling_panes(&single);
     let expected = execute(&single);
     assert_eq!(expected.len(), 2, "{expected:?}");
     assert!(expected.iter().all(|row| has_timestamp(row, EVALUATION_MS)));
@@ -365,14 +355,11 @@ fn quantile_over_tumbling_panes_matches_single_build() {
     }
 }
 
-/// The executor consults the family-capability table: panes of a family
-/// with no sound merge (here exact Increase, which reads the window edges)
-/// do not compile, although the IR accepts the merge.
+/// Exact counter Increase over 5 merged 1-minute panes equals one 5-minute
+/// build: the merge joins consecutive panes across their boundaries.
 #[test]
-fn panes_of_a_family_without_a_sound_merge_do_not_compile() {
-    let single = single_build("sum_over_time(m[5m])", AccuracyTarget::Exact);
-    let increase = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
-    let (panes, _) = tumbling_panes(&single, Some(increase));
-    let error = compile_at_query_time(&panes).err().expect("rejected");
-    assert!(error.contains("no sound merge"), "{error}");
+fn exact_increase_over_tumbling_panes_matches_single_build() {
+    let increases =
+        assert_pane_merge_matches_single_build("increase(m[5m])", AccuracyTarget::Exact);
+    assert_eq!(increases.len(), 2);
 }

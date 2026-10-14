@@ -646,6 +646,90 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
     }
 }
 
+// KLL panes that each compact merge into a state within the calibrated
+// single-build rank error: 60 panes of 1000 values at k = 200.
+#[test]
+fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
+    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams, SketchStatistic};
+    const PANES: u64 = 60;
+    const PER_PANE: u64 = 1000;
+    const K: u32 = 200;
+    // The planner's empirical 99% KLL rank error, `2.296 / k^0.9723`
+    // (`asap_aware_mapping`'s `kll_rank_error_99`).
+    let bound = 2.296 / f64::from(K).powf(0.9723);
+    let n = (PANES * PER_PANE) as f64;
+    let input = schema(&[("v", DataType::Float64, false)]);
+    let family = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: K,
+                failure_probability: None,
+            },
+        ),
+        Default::default(),
+    );
+    let build = || Operator::summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap();
+    let state = build().schema();
+    let mut dag = PhysicalDAG::default();
+    for pane in 0..PANES {
+        // Pane `p` holds `[p, p + 1) * 1000`, as tumbling panes of a
+        // rising value would, so a lost pane shifts every rank.
+        let rows = (0..PER_PANE)
+            .map(|j| vec![Value::Float64((pane * PER_PANE + j) as f64)])
+            .collect();
+        dag.add(
+            pane,
+            vec![],
+            Operator::source(
+                input.clone(),
+                vec![Batch::try_new(input.clone(), rows).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        dag.add(PANES + pane, vec![pane], build()).unwrap();
+    }
+    let union = 2 * PANES;
+    dag.add(
+        union,
+        (PANES..2 * PANES).collect(),
+        Operator::union(state.clone(), PANES as usize).unwrap(),
+    )
+    .unwrap();
+    dag.add(
+        union + 1,
+        vec![union],
+        Operator::summary_merge(state.clone(), 0, vec![]).unwrap(),
+    )
+    .unwrap();
+    for (i, q) in [0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99]
+        .into_iter()
+        .enumerate()
+    {
+        let id = union + 2 + i as u64;
+        dag.add(
+            id,
+            vec![union + 1],
+            Operator::evaluation(
+                state.clone(),
+                0,
+                asap_physical_operators::operators::SummaryEvaluation::Sketch(
+                    SketchStatistic::Quantile { q },
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let Value::Float64(estimate) = collect(&dag, id)[0][0] else {
+            panic!("quantile must be Float64");
+        };
+        // Value `v` has rank `v / n`.
+        let error = (estimate / n - q).abs();
+        assert!(error <= bound, "q={q}: rank error {error} > {bound}");
+    }
+}
+
 // Retained zero-column rows still own Vec headers and must consume the output budget.
 #[test]
 fn zero_column_output_obeys_memory_limit() {
