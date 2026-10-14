@@ -191,11 +191,17 @@ fn stage1_logical_asap_optimization_q1_is_always_exact() {
     }
 }
 
-/// Every Pass 1 target's exact option is its exact accumulator: Q1's rate and sum and Q2's sum_over_time.
+/// Every Pass 1 target's exact option is its exact accumulator: Q1's rate
+/// and sum and Q2's sum_over_time. Q2's heaps are whole-expression: they
+/// absorb its sum_over_time, which is then not computed.
 #[test]
 fn stage1_logical_asap_optimization_exact_targets_use_accumulators() {
     let run = pipeline();
     for c in &run.logical {
+        let expected = match classify(&c.dag, &c.query_roots).0 {
+            Q2Option::Exact => 3,
+            _ => 2,
+        };
         let accumulators = c
             .dag
             .nodes
@@ -207,7 +213,7 @@ fn stage1_logical_asap_optimization_exact_targets_use_accumulators() {
                 )
             })
             .count();
-        assert_eq!(accumulators, 3, "{}", c.id);
+        assert_eq!(accumulators, expected, "{}", c.id);
     }
 }
 
@@ -443,9 +449,10 @@ fn compile_in_runtime(p: &Physical) -> Result<(), String> {
 /// Runtime capability check (added by the implementer, not part of the
 /// spec): the physical planner compiles every physical candidate.
 #[test]
-#[ignore = "runtime gaps: CMS+heap needs a non-negative weight contract (#593); \
-            CountSketch+heap's SummaryEstimate{TopK} output is not the keyed-evaluation \
-            shape the physical planner builds (#579)"]
+#[ignore = "runtime gaps: a physical candidate's CMS+heap weights are an open requirement \
+            that only the selected plan's confirmation answers; the heaps' \
+            SummaryEstimate{TopK} output is not the keyed-evaluation shape the physical \
+            planner builds (#579)"]
 fn stage2_physical_asap_optimization_every_candidate_compiles_in_the_physical_planner() {
     let run = pipeline();
     let failures: Vec<_> = run
@@ -464,9 +471,10 @@ fn stage3_plan_selection_selects_one_and_explains_the_rest() {
     assert_selects_one_and_explains_the_rest(&pipeline());
 }
 
-/// The exact Q2 is selected. Count-Min + heap is invalid because its weights
-/// are not proven non-negative; CountSketch + heap is invalid because its
-/// top-k output has no guarantee and the deployment has no evidence for it.
+/// The exact Q2 is selected. Both heaps are invalid because a top-k output
+/// has no guarantee and the deployment has no evidence for it. Count-Min's
+/// weights are raw samples of `http_requests_total`, which the workload
+/// declares a counter, so they are non-negative.
 #[test]
 fn stage3_plan_selection_selects_exact_q2_and_rejects_both_heaps() {
     let run = pipeline();
@@ -486,12 +494,32 @@ fn stage3_plan_selection_selects_exact_q2_and_rejects_both_heaps() {
     }
     let cms = &physical_with(&run, Q2Option::CountMinHeapPerJob).id;
     assert!(
-        invalid[cms.as_str()].contains("non-negative"),
+        invalid[cms.as_str()].contains("no guarantee"),
         "{invalid:?}"
     );
     let count_sketch = &physical_with(&run, Q2Option::CountSketchHeapPerJob).id;
     assert!(
         invalid[count_sketch.as_str()].contains("no guarantee"),
+        "{invalid:?}"
+    );
+}
+
+/// Without the counter declaration, Count-Min's weights are not proven
+/// non-negative: plan selection reads no type from the `_total` name.
+#[test]
+fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
+    let mut workload = example1();
+    workload
+        .data_workload
+        .as_mut()
+        .unwrap()
+        .metric_types
+        .clear();
+    let run = run_promql(&workload);
+    let invalid = run.invalid();
+    let cms = &physical_with(&run, Q2Option::CountMinHeapPerJob).id;
+    assert!(
+        invalid[cms.as_str()].contains("non-negative"),
         "{invalid:?}"
     );
 }

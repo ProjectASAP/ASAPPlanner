@@ -13,8 +13,8 @@ use planner_types::ir::ASAPOp;
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 #[test]
-#[ignore = "Pass 1 builds the heap over the grouped Sum's output; a whole-expression heap \
-            that ranks the rates and absorbs the Sum is #589"]
+#[ignore = "the whole-expression heap's SummaryEstimate{TopK} output is not the keyed-evaluation \
+            shape the physical planner builds (#579)"]
 fn planner_weighted_topk_binds_at_either_deployment_phase() {
     assert_weighted_binding(SketchAlgorithm::CmsWithHeap);
     assert_weighted_binding(SketchAlgorithm::CountSketchWithHeap);
@@ -138,23 +138,39 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
             }
             output
         });
-        assert_eq!(output.len(), 4);
-        let mut scores = output
+        // Two items per `job`: the outer `by(job)` partitions the ranking.
+        let schema = &dag
+            .nodes
             .iter()
-            .map(|row| {
-                row.iter()
-                    .find_map(|v| {
-                        if let Value::Float64(v) = v {
-                            Some(*v)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap()
+            .find(|node| node.id == dag.roots[0])
+            .unwrap()
+            .output_schema;
+        let column = |name: &str| schema.fields.iter().position(|f| f.name == name).unwrap();
+        let (job, value) = (column("job"), column("value"));
+        let mut ranked = output
+            .iter()
+            .map(|row| match (&row[job], &row[value]) {
+                (Value::Utf8(job), Value::Float64(score)) => (job.to_string(), *score),
+                other => panic!("unexpected (job, value) {other:?}"),
             })
             .collect::<Vec<_>>();
-        scores.sort_by(f64::total_cmp);
-        assert_eq!(scores, vec![0.3125, 0.375, 80., 100.]);
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let expected = [
+            ("api", 0.3125),
+            ("api", 0.375),
+            ("batch", 80.),
+            ("batch", 100.),
+        ];
+        assert_eq!(
+            ranked,
+            expected.map(|(job, score)| (job.to_string(), score)),
+            "{}",
+            if placed == dag {
+                "query time"
+            } else {
+                "ingestion time"
+            }
+        );
     }
 }
 
