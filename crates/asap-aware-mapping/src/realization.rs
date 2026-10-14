@@ -3,11 +3,16 @@
 //! the intent's accuracy target and `(ε, δ)` budget, default sketch sizing,
 //! and the column/tuple a summary consumes.
 
-use asap_types::ir::SchemaDerivationError;
+use asap_types::ir::{
+    ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr, SchemaDerivationError,
+};
 use asap_types::post_asap::{AccuracyError, ExactOperationSchemaError, ExecutionDataStateError};
 use asap_types::post_asap::{Field, Schema, SketchAlgorithm, SketchParams, SummaryInputExpr};
 use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::pre_asap::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::pre_asap::expr_ir::ColumnRef;
+use asap_types::pre_asap::schema::ColumnId;
+use asap_types::pre_asap::Reduction;
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
@@ -123,6 +128,61 @@ pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> Co
         Some(c) => column_ref(c),
         None => ColumnRef::SampleValue,
     }
+}
+
+/// The column a top-k ranks `child` by. Over a one-measure grouped
+/// aggregate (the SQL heavy-hitter shape and PromQL `topk(k, sum by ..)`) it
+/// is that measure, the last column after the group keys, whichever Stage 1
+/// candidate realizes it: the aggregate itself, or a `SummaryAgg` read by
+/// `FinalizeExactAccumulator` or `SummaryEstimate`, under the `Project`
+/// restoring its names (a renaming) and a value `HAVING`'s `Filter`. Over
+/// per-series rows (PromQL `topk by (..) (k, rows)`) it is the sample value.
+pub(crate) fn ranked_column(child: &OperatorNode) -> Result<ColumnId, ResolveError> {
+    let mut node = child;
+    let reduction = loop {
+        match &node.operator {
+            // Only a renaming keeps the measure last.
+            Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
+                if cols.len() == child.schema.fields.len()
+                    && cols
+                        .iter()
+                        .enumerate()
+                        .all(|(i, item)| item.expr == ScalarExpr::Column(i)) =>
+            {
+                node = child
+            }
+            Operator::NonASAP(NonASAPOp::Filter { child, .. })
+            | Operator::ASAP(
+                ASAPOp::FinalizeExactAccumulator { child }
+                | ASAPOp::SummaryEstimate {
+                    summary_input: child,
+                    ..
+                },
+            ) => node = child,
+            Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => break Some(reduction),
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction,
+                measures,
+                ..
+            }) if measures.len() == 1 => break Some(reduction),
+            _ => break None,
+        }
+    };
+    match reduction {
+        Some(Reduction::Reduce(_)) => Ok(child.schema.fields.len() - 1),
+        _ => resolve_column_ref(&ColumnRef::SampleValue, &child.schema),
+    }
+}
+
+/// [`ranked_column`] as a reference: the sample value when it is that
+/// column, else the column by name.
+pub(crate) fn ranked_value(child: &OperatorNode) -> Result<(ColumnId, ColumnRef), ResolveError> {
+    let ranked = ranked_column(child)?;
+    let column = match resolve_column_ref(&ColumnRef::SampleValue, &child.schema) {
+        Ok(value) if value == ranked => ColumnRef::SampleValue,
+        _ => column_ref(&child.schema.fields[ranked]),
+    };
+    Ok((ranked, column))
 }
 
 pub(crate) fn column_ref(column: &Field) -> ColumnRef {
