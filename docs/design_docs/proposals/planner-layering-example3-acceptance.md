@@ -8,9 +8,10 @@ windows" and the Pass 2 section. Tests:
 `tests/planner_layering_common/`; the Example 3/4 workloads and the stage
 pipeline in `asap_devtools::{planner_layering_examples, planning_stages}`).
 Devtool: `stage_pipeline --example planner-layering-3a` and
-`planner-layering-3b`. Both run every candidate (243 for 3a) through plan
+`planner-layering-3b`. Both run every candidate (972 for 3a: 243 from
+Pass 1, each with 3 Pass 2 shared-input candidates) through plan
 selection; `--max-displayed` (default 64) limits only how many the document
-shows, so 3a selects P109: KLL for q1 and q2, exact for q3–q5.
+shows, so 3a selects P485: KLL for all five queries.
 
 This spec was written by a test designer who does not implement the stages.
 Tests run the stages through `planner_layering_common::run_stages`, which
@@ -41,9 +42,9 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 |---|---|---|
 | Query-language frontends | A: five scan → range → quantile chains. B: one. | Same; q3–q5 also have a `time_shift`. |
 | Logical ASAP-aware optimization, Pass 1 | A: exact or KLL over its own interval per query, 2⁵ = 32. B: exact, KLL. | A: exact, KLL (k = 547), DDSketch per query, 3⁵ = **243**. B: exact, KLL (k = 269), DDSketch, **3**. |
-| Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Not implemented: no shared input, no window summaries. |
+| Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Identical-expression rule only: each Pass 1 candidate also gets its shared-input candidates (A: 3 per Pass 1 candidate; B: none). No window summaries. |
 | Physical ASAP-aware optimization | See Example 4. | One physical candidate per logical candidate, every sub-DAG `NotMaterialized`. |
-| Plan selection | Not stated for Example 3. | Every candidate is valid. A: KLL for q1 and q2, exact for q3–q5, whose rows are underestimated (#632); DDSketch costs slightly more than KLL. B: exact, since each window holds 20 samples per series; DDSketch and then KLL cost more. |
+| Plan selection | Not stated for Example 3. | Every candidate is valid. A: KLL for all five queries (P485); DDSketch in place of KLL ties, and the tie goes to enumeration order. B: KLL (P2, 2.100 per second), tied with DDSketch and selected on enumeration order; exact costs more (2.400). |
 
 ## Invariants and tests
 
