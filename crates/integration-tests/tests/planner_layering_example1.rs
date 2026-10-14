@@ -530,6 +530,40 @@ fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
     );
 }
 
+/// A shared NotMaterialized input is charged once per consumer, so the
+/// shared-input candidates cost what the independent one does; their totals
+/// differ from it only by floating-point rounding (the same charges summed
+/// in another grouping), which plan selection treats as a tie, so the
+/// independent candidate, enumerated first, is selected.
+#[test]
+fn stage3_plan_selection_shared_input_ties_up_to_rounding() {
+    let run = pipeline();
+    let independent = physical_with(&run, Q2Option::Exact);
+    let base = run.cost(&independent.id).unwrap();
+    let shared: Vec<_> = run
+        .physical
+        .iter()
+        .filter(|p| classify(p.dag(), &p.query_roots) == (Q2Option::Exact, true))
+        .map(|p| (p.id.clone(), run.cost(&p.id).unwrap()))
+        .collect();
+    assert!(!shared.is_empty());
+    assert!(
+        shared
+            .iter()
+            .any(|(_, total)| total.to_bits() != base.to_bits()),
+        "the rounding difference the tie tolerance absorbs: {base} vs {shared:?}"
+    );
+    for (id, total) in &shared {
+        assert!(
+            (total - base).abs() <= 1e-9 * base,
+            "{id}: {total} vs {base}"
+        );
+        let rejection = run.selection.rejected.iter().find(|r| &r.id == id).unwrap();
+        assert!(rejection.reason.contains("tied"), "{}", rejection.reason);
+    }
+    assert_eq!(run.selection.selected, independent.id);
+}
+
 /// The selected plan is the cheapest valid candidate for the whole workload.
 #[test]
 fn stage3_plan_selection_selects_cheapest_valid() {
