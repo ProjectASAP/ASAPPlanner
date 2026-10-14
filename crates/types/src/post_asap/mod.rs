@@ -19,11 +19,13 @@
 //! `asap_aware_mapping::grouping`). It rides on `ASAPOp::SummaryAgg` and on
 //! sketch-valued edge types.
 //!
-//! The rest: accuracy guarantees ([`guarantee`]), maintained populations,
+//! The rest: what each family can do ([`family_capability`]), accuracy
+//! guarantees ([`guarantee`]), maintained populations,
 //! summary-window panes, and the execution timing /
 //! data-state vocabulary ([`execution_data_state`]).
 
 pub mod execution_data_state;
+pub mod family_capability;
 pub mod guarantee;
 pub mod maintained_population;
 pub mod query_time;
@@ -35,6 +37,7 @@ pub use execution_data_state::{
     lift_plain, DataPrimitive, ExactOperationSchemaError, ExecutionDataState,
     ExecutionDataStateError, ExecutionTiming, Materialization, Medium,
 };
+pub use family_capability::{FamilyCapability, MergeCapability, MergedError, SelectionRelation};
 pub use guarantee::{
     AccuracyError, AccuracyGuarantee, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource,
     ProbabilityExpr,
