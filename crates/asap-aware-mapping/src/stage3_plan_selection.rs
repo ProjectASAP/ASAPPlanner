@@ -3,7 +3,9 @@
 //! Each CandidatePhysicalASAPDAG from Stage 2 is checked against every
 //! query's accuracy target: the query's output meets it when its root
 //! guarantee does (theoretical: Stage 1 composes it with the built-in
-//! accuracy model), or when the deployment's empirical evidence shows this
+//! accuracy model, and this stage binds the statistics it left symbolic
+//! from the data workload and the deployment's operand-domain contracts),
+//! or when the deployment's empirical evidence shows this
 //! candidate's output does (`AccuracyEvidenceProvider::output_guarantee`,
 //! read only here). For a query with a target, Count-Min is admitted only
 //! over weights proven non-negative; a query without one constrains nothing.
@@ -40,19 +42,22 @@ use std::rc::Rc;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::post_asap::{
-    FieldDataType, Materialization, ResultGuarantee, SketchAlgorithm, SketchParams,
-    SketchStatistic, WeightDomain,
+    BoundExpr, CompositionOperator, FieldDataType, Materialization, ResultGuarantee,
+    SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{DataType, Reduction, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::DataWorkload;
 use thiserror::Error;
 
+use crate::accuracy::composition::{DIVISION_OPERAND_DOMAINS, INPUT_ROW_COUNT};
+use crate::accuracy::PropagationStats;
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
+use crate::per_computation_candidates::scalar_guarantee;
 use crate::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
@@ -144,7 +149,7 @@ pub fn select_plan(
                 targets: targets.len(),
             });
         }
-        if let Some(reason) = accuracy_violation(candidate, targets, &models) {
+        if let Some(reason) = accuracy_violation(candidate, targets, data, &models) {
             rejected.push(Rejection {
                 id: candidate.id.clone(),
                 valid: false,
@@ -190,11 +195,14 @@ pub fn select_plan(
 /// deployment's empirical evidence shows that this candidate's output does
 /// ([`crate::accuracy::AccuracyEvidenceProvider::output_guarantee`]). A
 /// certified estimate inside the plan is not enough on its own: a difference
-/// or ratio of certified estimates can be unbounded. Count-Min is admitted
-/// only over update weights proven non-negative, which its bound assumes.
+/// or ratio of certified estimates can be unbounded. The root guarantee's
+/// symbolic statistics are bound first ([`bound_root_guarantee`]); one still
+/// unknown leaves the target unmet. Count-Min is admitted only over update
+/// weights proven non-negative, which its bound assumes.
 fn accuracy_violation(
     candidate: &PhysicalCandidate,
     targets: &[Option<AccuracyTarget>],
+    data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Option<String> {
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
@@ -218,7 +226,7 @@ fn accuracy_violation(
                 ));
             }
         }
-        let guarantee = root_guarantee(root);
+        let guarantee = bound_root_guarantee(root, data, models);
         let meets = |g: &ResultGuarantee| models.accuracy.satisfies(g, target);
         if guarantee.as_ref().is_some_and(meets)
             || models
@@ -253,23 +261,68 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     }
 }
 
-/// The theoretical guarantee of a query's output: the root node's own;
-/// `scalar(v)` alone inherits `v`'s; any other scalar root is exact when
-/// every operator it reads is, and has none otherwise (#669).
+/// The theoretical guarantee of a query's output, as Stage 1 composed it:
+/// the root node's own, or a scalar root's composed over the operators it
+/// reads ([`scalar_guarantee`]).
 fn root_guarantee(root: &QueryRoot) -> Option<ResultGuarantee> {
     match root {
         QueryRoot::Operator(node) => node.guarantee.clone(),
-        QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node)) => node.guarantee.clone(),
-        QueryRoot::Scalar(expr) => expr
-            .operator_refs()
-            .into_iter()
-            .all(|node| {
-                node.guarantee
-                    .as_ref()
-                    .is_some_and(ResultGuarantee::is_exact)
-            })
-            .then(|| ResultGuarantee::exact("scalar over exact inputs")),
+        QueryRoot::Scalar(expr) => scalar_guarantee(expr, &|_| None),
     }
+}
+
+/// [`root_guarantee`] with the statistics Stage 1 left symbolic bound: the
+/// input row count from the data workload's input cardinality (an upper
+/// bound on the rows any group folds), and a quantile ratio's bound from the
+/// deployment's enforced operand domains ([`ratio_bound`]). Any other
+/// statistic stays unknown.
+fn bound_root_guarantee(
+    root: &QueryRoot,
+    data: &DataWorkload,
+    models: &PlanningModels<'_>,
+) -> Option<ResultGuarantee> {
+    let value = |statistic: &str| match statistic {
+        INPUT_ROW_COUNT => data.input_cardinality.value.map(|rows| rows as f64),
+        DIVISION_OPERAND_DOMAINS => ratio_bound(root, models),
+        _ => None,
+    };
+    Some(root_guarantee(root)?.bind(&value))
+}
+
+/// The largest relative bound among `root`'s divisions whose bound Stage 1
+/// left symbolic, each derived by the accuracy model's division rule from
+/// the deployment's `QuantileInputDomain` contracts for both operands;
+/// `None` when any lacks one or the rule rejects it.
+fn ratio_bound(root: &QueryRoot, models: &PlanningModels<'_>) -> Option<f64> {
+    let symbolic = BoundExpr::Unknown {
+        statistic: DIVISION_OPERAND_DOMAINS.into(),
+    };
+    let mut worst = 0.0_f64;
+    for node in root_operators(root)
+        .iter()
+        .flat_map(|node| OperatorNode::reachable(node))
+    {
+        let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = node.non_asap() else {
+            continue;
+        };
+        if node.guarantee.as_ref().map(|g| &g.bound) != Some(&symbolic) {
+            continue;
+        }
+        let stats = PropagationStats {
+            division_operand_domains: Some([
+                models.evidence.quantile_input_domain(lhs)?,
+                models.evidence.quantile_input_domain(rhs)?,
+            ]),
+            ..PropagationStats::default()
+        };
+        let operands = [lhs.guarantee.clone()?, rhs.guarantee.clone()?];
+        let ratio = models
+            .accuracy
+            .propagate(&CompositionOperator::ExactDivision, &operands, None, &stats)
+            .ok()?;
+        worst = worst.max(ratio.bound.evaluate()?);
+    }
+    Some(worst)
 }
 
 fn family_name(family: &FieldDataType) -> String {
@@ -649,7 +702,7 @@ mod tests {
     use crate::accuracy::AccuracyEvidenceProvider;
     use crate::stage2_physical_asap_optimization::optimize_physical_asap;
     use crate::test_support::lower_promql;
-    use asap_types::ir::ExprSemantics;
+    use asap_types::ir::{ExprSemantics, ScalarExpr};
     use asap_types::post_asap::{BoundExpr, ErrorMetric, ProbabilityExpr};
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::workload::{Evidence, Rate};
@@ -964,11 +1017,12 @@ mod tests {
         }
     }
 
-    /// `scalar(v)` alone inherits `v`'s guarantee; any other scalar
-    /// expression over an approximate operand has none until #669; one over
-    /// exact operands only is exact.
+    /// `scalar(v)` inherits `v`'s guarantee; arithmetic over it composes
+    /// (`c · x` scales an absolute bound, `x − y` adds them); a rank error
+    /// does not compose (a rank interval counts as none); one over exact
+    /// operands only is exact.
     #[test]
-    fn scalar_of_one_vector_inherits_its_guarantee_and_nothing_else_does() {
+    fn scalar_root_guarantees_compose_through_arithmetic() {
         let node = lower_promql("sum(m)", AccuracyTarget::Exact);
         let approximate = ResultGuarantee {
             metric: ErrorMetric::AbsoluteValue,
@@ -991,10 +1045,247 @@ mod tests {
             root_guarantee(&QueryRoot::Scalar(with(Some(approximate.clone())))),
             Some(approximate.clone())
         );
-        assert_eq!(root_guarantee(&doubled(with(Some(approximate)))), None);
+        let scaled = root_guarantee(&doubled(with(Some(approximate.clone())))).unwrap();
+        assert_eq!(scaled.metric, ErrorMetric::AbsoluteValue);
+        assert!((scaled.bound.evaluate().unwrap() - 0.02).abs() < 1e-12);
+        assert_eq!(scaled.failure_probability.evaluate(), Some(0.001));
+        let difference = QueryRoot::Scalar(ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Sub,
+            left: Box::new(with(Some(approximate.clone()))),
+            right: Box::new(with(Some(approximate.clone()))),
+            semantics: ExprSemantics::Promql,
+        });
+        let sum = root_guarantee(&difference).unwrap();
+        assert!((sum.bound.evaluate().unwrap() - 0.02).abs() < 1e-12);
+        let rank = ResultGuarantee {
+            metric: ErrorMetric::Rank,
+            ..approximate
+        };
+        assert_eq!(root_guarantee(&doubled(with(Some(rank)))), None);
         assert!(
             root_guarantee(&doubled(with(Some(ResultGuarantee::exact("exact")))))
                 .is_some_and(|g| g.is_exact())
         );
+    }
+
+    /// Every candidate of the Stage 1 to Stage 3 run of one query.
+    fn run(
+        query: &str,
+        target: &AccuracyTarget,
+        data: &DataWorkload,
+        models: PlanningModels<'_>,
+    ) -> (Vec<PhysicalCandidate>, Selection) {
+        run_selecting(query, target, target, data, models)
+    }
+
+    /// As [`run`], with summaries sized for `planned` and outputs checked
+    /// against `selected`.
+    fn run_selecting(
+        query: &str,
+        planned: &AccuracyTarget,
+        selected: &AccuracyTarget,
+        data: &DataWorkload,
+        models: PlanningModels<'_>,
+    ) -> (Vec<PhysicalCandidate>, Selection) {
+        let root = lower_promql(query, planned.clone());
+        let run = crate::pass::run_stage1_to_stage3(
+            vec![(0, QueryRoot::Operator(root))],
+            &[Some(selected.clone())],
+            data,
+            models,
+        )
+        .unwrap();
+        (
+            run.stage2_physical_asap_optimization,
+            run.stage3_plan_selection.unwrap(),
+        )
+    }
+
+    fn sketches(candidate: &PhysicalCandidate) -> Vec<SketchAlgorithm> {
+        candidate
+            .dag
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.payload {
+                Payload::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) => Some(kind.algorithm().clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reads_only(candidate: &PhysicalCandidate, algorithm: SketchAlgorithm) -> bool {
+        let sketches = sketches(candidate);
+        !sketches.is_empty() && sketches.iter().all(|a| *a == algorithm)
+    }
+
+    fn output_guarantee(candidate: &PhysicalCandidate) -> Option<ResultGuarantee> {
+        root_guarantee(&candidate.roots[0])
+    }
+
+    /// `max by (job)` over per-series DDSketch quantiles keeps their relative
+    /// bound, and `2 · x` keeps it too (scaling preserves a relative error);
+    /// so those candidates meet the target. Over KLL (a rank error) the
+    /// result is a rank interval: no guarantee in the MVP.
+    #[test]
+    fn extremum_and_scaling_over_per_series_estimates_compose() {
+        let target = AccuracyTarget::Epsilon(0.01);
+        for query in [
+            "max by (job) (quantile_over_time(0.99, m[1m]))",
+            "2 * max by (job) (quantile_over_time(0.99, m[1m]))",
+        ] {
+            let (candidates, selection) = run(query, &target, &data(), PlanningModels::builtin());
+            let ddsketch: Vec<_> = candidates
+                .iter()
+                .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
+                .collect();
+            assert!(!ddsketch.is_empty(), "{query}");
+            for candidate in ddsketch {
+                let g = output_guarantee(candidate).expect(query);
+                assert_eq!(g.metric, ErrorMetric::RelativeValue, "{query}");
+                assert!(g.bound.evaluate().unwrap() <= 0.01, "{query}");
+                assert!(selection.costs.contains_key(&candidate.id), "{query}");
+            }
+            for candidate in candidates
+                .iter()
+                .filter(|c| reads_only(c, SketchAlgorithm::Kll))
+            {
+                assert_eq!(output_guarantee(candidate), None, "{query}");
+            }
+        }
+    }
+
+    /// Negation, `abs` and `clamp` keep a DDSketch quantile's relative bound,
+    /// so those candidates are selectable; a shift by a constant, a
+    /// comparison (filter or `bool`) over the estimate compose to no
+    /// guarantee in the MVP, so those are not.
+    #[test]
+    fn lipschitz_functions_keep_and_shifts_and_comparisons_drop_a_relative_bound() {
+        let target = AccuracyTarget::Epsilon(0.01);
+        let q = "quantile_over_time(0.99, m[1m])";
+        for (query, kept) in [
+            (format!("-{q}"), true),
+            (format!("abs({q})"), true),
+            (format!("clamp({q}, 1, 100)"), true),
+            (format!("clamp_max({q}, 100)"), true),
+            (format!("{q} + 1"), false),
+            (format!("{q} > 5"), false),
+            (format!("{q} > bool 5"), false),
+        ] {
+            let (candidates, selection) = run(&query, &target, &data(), PlanningModels::builtin());
+            let ddsketch: Vec<_> = candidates
+                .iter()
+                .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
+                .collect();
+            assert!(!ddsketch.is_empty(), "{query}");
+            for candidate in ddsketch {
+                let g = output_guarantee(candidate);
+                if kept {
+                    let g = g.expect(&query);
+                    assert_eq!(g.metric, ErrorMetric::RelativeValue, "{query}");
+                    assert!(g.bound.evaluate().unwrap() <= 0.01, "{query}");
+                    assert!(selection.costs.contains_key(&candidate.id), "{query}");
+                } else {
+                    assert_eq!(g, None, "{query}");
+                    assert!(!selection.costs.contains_key(&candidate.id), "{query}");
+                }
+            }
+        }
+    }
+
+    /// `avg by (job)` over per-series DDSketch quantiles has a relative bound
+    /// that needs the values' sign, a statistic no input supplies: it stays
+    /// symbolic and plan selection treats it as unmet.
+    #[test]
+    fn average_over_relative_estimates_needs_the_sign() {
+        let target = AccuracyTarget::Epsilon(0.01);
+        let (candidates, selection) = run(
+            "avg by (job) (quantile_over_time(0.99, m[1m]))",
+            &target,
+            &data(),
+            PlanningModels::builtin(),
+        );
+        let ddsketch: Vec<_> = candidates
+            .iter()
+            .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
+            .collect();
+        assert!(!ddsketch.is_empty());
+        for candidate in ddsketch {
+            let g = output_guarantee(candidate).expect("a symbolic bound");
+            assert!(g.bound.has_unknown(), "{g:?}");
+            assert!(!selection.costs.contains_key(&candidate.id));
+        }
+    }
+
+    /// `max` folds one value per series, so its failure probability is
+    /// scaled by the symbolic input row count. Stage 3 binds it from the data
+    /// workload's input cardinality; without one, the target is unmet.
+    #[test]
+    fn stage3_binds_the_input_row_count_from_the_data_workload() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
+        let ddsketch = |candidates: &[PhysicalCandidate]| -> Vec<String> {
+            candidates
+                .iter()
+                .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        let (candidates, with) = run(query, &target, &data(), PlanningModels::builtin());
+        let ids = ddsketch(&candidates);
+        assert!(!ids.is_empty());
+        assert!(ids.iter().all(|id| with.costs.contains_key(id)));
+        let unknown = DataWorkload {
+            input_cardinality: Evidence::default(),
+            ..data()
+        };
+        let (_, without) = run(query, &target, &unknown, PlanningModels::builtin());
+        assert!(ids.iter().all(|id| !without.costs.contains_key(id)));
+    }
+
+    /// Deployment contract: every quantile operand lies in `[1, 1000]`.
+    struct BoundedQuantiles;
+
+    impl AccuracyEvidenceProvider for BoundedQuantiles {
+        fn quantile_input_domain(
+            &self,
+            _operand: &OperatorNode,
+        ) -> Option<crate::accuracy::QuantileInputDomain> {
+            Some(crate::accuracy::QuantileInputDomain {
+                lower: 1.0,
+                upper: 1_000.0,
+                max_samples: 1_000_000,
+                contract: "test source enforces [1, 1000]".into(),
+            })
+        }
+    }
+
+    /// A ratio of two DDSketch quantiles has a relative bound only with an
+    /// enforced operand domain: Stage 3 binds it from the deployment's
+    /// `QuantileInputDomain` contract; without one the target is unmet. (A
+    /// DDSketch quantile over an exact one keeps its relative bound.) Each
+    /// operand is sized for the entry's target, so the ratio's bound, about
+    /// twice that, is checked against a looser one.
+    #[test]
+    fn ddsketch_ratio_meets_its_target_only_with_operand_domains() {
+        let planned = AccuracyTarget::Epsilon(0.01);
+        let target = AccuracyTarget::Epsilon(0.05);
+        let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
+        let run = |models| run_selecting(query, &planned, &target, &data(), models);
+        let (candidates, without) = run(PlanningModels::builtin());
+        let ids: Vec<_> = candidates
+            .iter()
+            .filter(|c| sketches(c) == [SketchAlgorithm::DDSketch, SketchAlgorithm::DDSketch])
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.iter().all(|id| !without.costs.contains_key(id)));
+        let (_, with) = run(PlanningModels::builtin().with_evidence(&BoundedQuantiles));
+        assert!(ids.iter().all(|id| with.costs.contains_key(id)), "{with:?}");
     }
 }

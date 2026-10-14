@@ -56,14 +56,16 @@
 //! requirement among its consumers; Pass 2 sharing is not implemented yet, so
 //! this is that post-Pass-2 sizing step with no sharing.
 //!
-//! Every node of the candidate gets a theoretical guarantee: exact over
-//! exact inputs; a `SummaryEstimate` over exact input the sized family's
-//! bound where that bound answers the estimate (not for Top-K, where a heap
-//! sketch bounds item frequencies, not membership; not for a Count-Min
-//! family over weights not proven non-negative); and `None` otherwise and for
-//! anything computed from an approximate value. Composing guarantees through
-//! operators is #669; plan selection's accuracy model decides a candidate without
-//! one.
+//! Every node of the candidate gets a theoretical guarantee, composed with
+//! the built-in accuracy model through operators (#669): exact over exact
+//! inputs; a `SummaryEstimate` the sized family's bound where that bound
+//! answers the estimate (not for Top-K, where a heap sketch bounds item
+//! frequencies, not membership; not for a Count-Min family over weights not
+//! proven non-negative); aggregation and arithmetic over approximate values
+//! by their composition rules, with statistics left symbolic for plan
+//! selection to bind; and `None` where no rule applies (comparisons and
+//! value predicates, rank errors). Plan selection's accuracy model decides
+//! a candidate without one.
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -72,7 +74,9 @@ use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
     Predicate, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
 };
-use asap_types::post_asap::guarantee::ResultGuarantee;
+use asap_types::post_asap::guarantee::{
+    BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
+};
 use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Materialization,
     NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchStatistic, SummaryInputExpr,
@@ -85,7 +89,9 @@ use asap_types::pre_asap::{
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
-use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
+use crate::accuracy::composition::{additive_as_absolute, DIVISION_OPERAND_DOMAINS};
+use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
+use crate::function_rules::function_rules;
 use crate::realization::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates,
 };
@@ -571,14 +577,19 @@ fn with_guarantees(
     Ok(rebuilt)
 }
 
-/// The theoretical guarantee of a composed node, given its children's: exact
-/// over exact inputs; a summary estimate over exact input has its sized
-/// family's bound when [`estimate_has_bound`]. Anything computed from an
-/// approximate value (arithmetic, a comparison, a value `HAVING` or any other
-/// predicate, at any depth) gets `None`: composition through operators is
-/// not defined yet (#669), and plan selection's accuracy model decides. A
-/// projection of columns only keeps its child's guarantee. A summary state
-/// carries none itself.
+/// The theoretical guarantee of a composed node, given its children's,
+/// composed with the built-in accuracy model ([`DefaultAccuracyModel`]);
+/// Stage 1 reads no data statistics or deployment evidence. Exact over exact
+/// inputs; a summary estimate has its sized family's bound when
+/// [`estimate_has_bound`], composed with its input's when that is
+/// approximate; an exact aggregation or accumulator over approximate values
+/// uses its function's rule ([`function_rules`]); arithmetic composes as
+/// [`arithmetic_guarantee`]. A rule that needs a statistic leaves it
+/// symbolic (`BoundExpr::Unknown`), and plan selection (Stage 3) binds it.
+/// `None` where no rule applies: a comparison, a value `HAVING` or any other
+/// predicate over an approximate value, a rank error through any operator (a
+/// rank interval counts as none in the MVP). A projection of columns only
+/// keeps its child's guarantee. A summary state carries none itself.
 fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
     let exact = |node: &OperatorNode| {
         node.guarantee
@@ -587,6 +598,9 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
     };
     // A summary state's input rows and any subquery in its filter.
     let exact_inputs = |state: &OperatorNode| state.children().into_iter().all(|c| exact(c));
+    // Over approximate input rows, a filter's subqueries must still be exact.
+    let exact_filter =
+        |state: &OperatorNode| state.children().into_iter().skip(1).all(|c| exact(c));
     match &node.operator {
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap() {
             Some(ASAPOp::SummaryAgg {
@@ -594,6 +608,23 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
                 ..
             }) if exact_inputs(child) => {
                 Some(ResultGuarantee::exact("exact accumulator over exact input"))
+            }
+            Some(ASAPOp::SummaryAgg {
+                family: FieldDataType::ExactAggregate(kind, _),
+                child: input,
+                ..
+            }) if exact_filter(child) => {
+                let input = input.guarantee.clone()?;
+                let op = match kind {
+                    // Counts rows, not values.
+                    ExactKind::Count => return Some(ResultGuarantee::exact("count of rows")),
+                    ExactKind::Sum => CompositionOperator::ExactSum,
+                    ExactKind::Min | ExactKind::Max => CompositionOperator::ExactExtremum,
+                    ExactKind::Rate => CompositionOperator::CounterRate,
+                    ExactKind::IRate => CompositionOperator::InstantCounterRate,
+                    ExactKind::Increase => CompositionOperator::CounterIncrease,
+                };
+                compose(&op, vec![input], None)
             }
             _ => None,
         },
@@ -604,9 +635,21 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
             Some(ASAPOp::SummaryAgg {
                 family,
                 input: update,
+                child: input,
                 ..
-            }) if exact_inputs(summary_input) && estimate_has_bound(family, update, query) => {
-                DefaultAccuracyModel.local_guarantee(family, query)
+            }) if estimate_has_bound(family, update, query) => {
+                let local = DefaultAccuracyModel.local_guarantee(family, query)?;
+                if exact_inputs(summary_input) {
+                    Some(local)
+                } else if exact_filter(summary_input) {
+                    compose(
+                        &CompositionOperator::ApproximateAggregate,
+                        vec![input.guarantee.clone()?],
+                        Some(&local),
+                    )
+                } else {
+                    None
+                }
             }
             _ => None,
         },
@@ -619,12 +662,320 @@ fn composed_guarantee(node: &OperatorNode) -> Option<ResultGuarantee> {
         {
             child.guarantee.clone()
         }
-        Operator::NonASAP(_) => node
-            .children()
-            .into_iter()
-            .all(|child| exact(child))
-            .then(|| ResultGuarantee::exact("exact over exact inputs")),
+        Operator::NonASAP(_) if node.children().into_iter().all(|child| exact(child)) => {
+            Some(ResultGuarantee::exact("exact over exact inputs"))
+        }
+        Operator::NonASAP(NonASAPOp::Project { cols, child, .. }) => project_guarantee(cols, child),
+        // A measure filter or `HAVING` over approximate values changes
+        // which rows or groups count: no rule.
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            measures,
+            filters,
+            having: None,
+            child,
+            ..
+        }) if filters.iter().all(Option::is_none) => match measures.as_slice() {
+            [intent] => compose(
+                &function_rules(intent)?.accuracy,
+                vec![child.guarantee.clone()?],
+                None,
+            ),
+            _ => None,
+        },
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator:
+                BinaryOperator {
+                    kind: BinaryOpKind::Arithmetic(op),
+                    ..
+                },
+            lhs,
+            rhs,
+            ..
+        }) => arithmetic_guarantee(
+            op.clone(),
+            (lhs.guarantee.clone(), None),
+            (rhs.guarantee.clone(), None),
+            true,
+            Rc::ptr_eq(lhs, rhs),
+        ),
+        Operator::NonASAP(_) => None,
     }
+}
+
+/// The built-in rule for `op`, with every statistic unknown (Stage 1 reads
+/// none); `None` when no rule applies.
+fn compose(
+    op: &CompositionOperator,
+    inputs: Vec<ResultGuarantee>,
+    local: Option<&ResultGuarantee>,
+) -> Option<ResultGuarantee> {
+    DefaultAccuracyModel
+        .propagate(op, &inputs, local, &PropagationStats::default())
+        .ok()
+}
+
+/// A projection that computes over its child's sample value: the guarantee
+/// of the one item that reads it. Other columns (labels, timestamps) are
+/// exact. `None` when no single item reads the value.
+fn project_guarantee(cols: &[ProjectItem], child: &OperatorNode) -> Option<ResultGuarantee> {
+    let value = resolve_column_ref(&ColumnRef::SampleValue, &child.schema).ok()?;
+    let reads_value = |expr: &ScalarExpr| {
+        let mut reads = false;
+        expr.map_columns(&mut |column| {
+            reads |= column == value;
+            column
+        });
+        reads
+    };
+    let [item] = <[_; 1]>::try_from(
+        cols.iter()
+            .filter(|item| reads_value(&item.expr))
+            .collect::<Vec<_>>(),
+    )
+    .ok()?;
+    let column = |column| {
+        if column == value {
+            child.guarantee.clone()
+        } else {
+            Some(ResultGuarantee::exact("column other than the sample value"))
+        }
+    };
+    scalar_guarantee(&item.expr, &column)
+}
+
+/// The guarantee of a scalar expression, given each column's: `scalar(v)`
+/// and a SQL scalar subquery have their relation's, a literal or the
+/// evaluation time is exact, arithmetic composes as
+/// [`arithmetic_guarantee`], and `clamp`/`clamp_min`/`clamp_max`/`abs` as
+/// [`lipschitz_guarantee`]. Any other expression (a comparison, a rounding,
+/// a non-linear function) is exact over exact operands and has none
+/// otherwise.
+pub(crate) fn scalar_guarantee(
+    expr: &ScalarExpr,
+    column: &dyn Fn(usize) -> Option<ResultGuarantee>,
+) -> Option<ResultGuarantee> {
+    let literal = |expr: &ScalarExpr| match expr {
+        ScalarExpr::Literal(ScalarValue::Float64(value)) => Some(*value),
+        ScalarExpr::Literal(ScalarValue::Int64(value)) => Some(*value as f64),
+        _ => None,
+    };
+    let operand = |expr: &ScalarExpr| (scalar_guarantee(expr, column), literal(expr));
+    match expr {
+        ScalarExpr::Column(id) => column(*id),
+        ScalarExpr::PromqlScalarFromVector(node) | ScalarExpr::ScalarSubquery(node) => {
+            node.guarantee.clone()
+        }
+        ScalarExpr::Literal(_) | ScalarExpr::CurrentTimestamp | ScalarExpr::EvalTimestamp => {
+            Some(ResultGuarantee::exact("constant"))
+        }
+        ScalarExpr::Negative { expr, .. } => {
+            lipschitz_guarantee(vec![scalar_guarantee(expr, column)?])
+        }
+        ScalarExpr::Arithmetic {
+            op, left, right, ..
+        } => arithmetic_guarantee(
+            op.clone(),
+            operand(left),
+            operand(right),
+            false,
+            same_value(left, right),
+        ),
+        ScalarExpr::FunctionCall { name, args } if is_monotone_lipschitz(name) => {
+            lipschitz_guarantee(
+                args.iter()
+                    .map(|arg| scalar_guarantee(arg, column))
+                    .collect::<Option<_>>()?,
+            )
+        }
+        _ => {
+            let mut columns = Vec::new();
+            expr.map_columns(&mut |id| {
+                columns.push(id);
+                id
+            });
+            let exact = |g: Option<ResultGuarantee>| g.is_some_and(|g| g.is_exact());
+            (columns.into_iter().all(|id| exact(column(id)))
+                && expr
+                    .operator_refs()
+                    .into_iter()
+                    .all(|node| exact(node.guarantee.clone())))
+            .then(|| ResultGuarantee::exact("exact over exact operands"))
+        }
+    }
+}
+
+/// Whether two scalar operands are one value: the same column, or the same
+/// planned operator read twice.
+fn same_value(left: &ScalarExpr, right: &ScalarExpr) -> bool {
+    match (left, right) {
+        (ScalarExpr::Column(a), ScalarExpr::Column(b)) => a == b,
+        (
+            ScalarExpr::PromqlScalarFromVector(a) | ScalarExpr::ScalarSubquery(a),
+            ScalarExpr::PromqlScalarFromVector(b) | ScalarExpr::ScalarSubquery(b),
+        ) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+/// Functions that are 1-Lipschitz and, for the relative-error rule,
+/// monotone in each argument with `|f(x)|` scaling with `|x|`: `clamp`
+/// (`min(max(x, lo), hi)`), `clamp_min`, `clamp_max` and `abs`.
+fn is_monotone_lipschitz(name: &str) -> bool {
+    matches!(
+        name,
+        "promql_clamp" | "promql_clamp_min" | "promql_clamp_max" | "promql_abs" | "abs"
+    )
+}
+
+/// The guarantee of a 1-Lipschitz function of `args` (negation, `abs`,
+/// `clamp`): its value is within the largest of its arguments' absolute
+/// errors, by the union bound over them; likewise for relative errors, as
+/// for an exact `max`/`min` (`ExactExtremum`, one value per argument).
+/// Count-Min and Count Sketch bounds count as absolute errors. `None` for a
+/// rank error or a mix of absolute and relative ones.
+fn lipschitz_guarantee(args: Vec<ResultGuarantee>) -> Option<ResultGuarantee> {
+    let approximate: Vec<_> = args
+        .into_iter()
+        .filter(|g| !g.is_exact())
+        .map(additive_as_absolute)
+        .collect();
+    if approximate.is_empty() {
+        return Some(ResultGuarantee::exact(
+            "Lipschitz function of exact operands",
+        ));
+    }
+    DefaultAccuracyModel
+        .propagate(
+            &CompositionOperator::ExactExtremum,
+            &approximate,
+            None,
+            &PropagationStats {
+                input_row_count: Some(1),
+                ..PropagationStats::default()
+            },
+        )
+        .ok()
+}
+
+/// An arithmetic operand: its guarantee, and its value when it is a literal.
+type Operand = (Option<ResultGuarantee>, Option<f64>);
+
+/// The guarantee of `left op right` (#669, MVP). Count-Min and Count Sketch
+/// bounds count as absolute errors (normalized bound times stream norm).
+/// - `x ± y`: absolute errors add (union bound on the failure
+///   probabilities); `x ± c` (`c` exact) keeps an absolute error.
+/// - `c · x`, `x / c` (`c` a nonzero literal): an absolute error scales by
+///   `|c|` (or `1/|c|`); a relative error is kept, as it is by `x · y` or
+///   `x / y` with `y` exact.
+/// - `x / y` with `x` or `y` approximate (`ratio`, a vector division): a
+///   relative error whose bound needs enforced operand domains, left
+///   symbolic ([`DIVISION_OPERAND_DOMAINS`]) for plan selection to bind.
+/// - Everything else (a product or scalar quotient of two estimates, a
+///   relative error shifted by a constant or added to another, a rank
+///   error, `%`, `^`, `atan2`) has none.
+///
+/// `same_operand`: both sides are one estimate (the same planned operator),
+/// which fails or holds as one event, so its failure probability counts
+/// once. Two estimates count once each, even over one shared summary: the
+/// built-in guarantees hold per estimate, not simultaneously.
+pub(crate) fn arithmetic_guarantee(
+    op: ArithmeticOpKind,
+    left: Operand,
+    right: Operand,
+    ratio: bool,
+    same_operand: bool,
+) -> Option<ResultGuarantee> {
+    let (l, r) = (
+        additive_as_absolute(left.0?),
+        additive_as_absolute(right.0?),
+    );
+    let once = same_operand.then(|| l.failure_probability.clone());
+    let composed = match (op, l.is_exact(), r.is_exact()) {
+        (_, true, true) => return Some(ResultGuarantee::exact("arithmetic over exact operands")),
+        (ArithmeticOpKind::Add | ArithmeticOpKind::Sub, true, false) => shifted(r),
+        (ArithmeticOpKind::Add | ArithmeticOpKind::Sub, false, true) => shifted(l),
+        (ArithmeticOpKind::Add | ArithmeticOpKind::Sub, false, false) => compose(
+            &CompositionOperator::Lipschitz { constant: 1.0 },
+            vec![l],
+            Some(&r),
+        ),
+        (ArithmeticOpKind::Mul, true, false) => scaled(r, left.1.map(f64::abs)),
+        (ArithmeticOpKind::Mul, false, true) => scaled(l, right.1.map(f64::abs)),
+        (ArithmeticOpKind::Div, false, true) => match right.1 {
+            Some(0.0) => None,
+            c => scaled(l, c.map(|c| 1.0 / c.abs())),
+        },
+        (ArithmeticOpKind::Div, _, _) if ratio => symbolic_ratio(l, r),
+        _ => None,
+    }?;
+    Some(match once {
+        Some(failure_probability) => ResultGuarantee {
+            failure_probability,
+            ..composed
+        },
+        None => composed,
+    })
+}
+
+/// `x` times an exact factor (`Some(|c|)` when it is a literal): a
+/// relative error is kept; an absolute error scales by `|c|`.
+fn scaled(input: ResultGuarantee, factor: Option<f64>) -> Option<ResultGuarantee> {
+    match (input.metric, factor) {
+        (ErrorMetric::RelativeValue, _) => Some(input),
+        (_, Some(constant)) => compose(
+            &CompositionOperator::Lipschitz { constant },
+            vec![input],
+            None,
+        ),
+        _ => None,
+    }
+}
+
+/// `x` plus an exact value: an absolute error is kept.
+fn shifted(input: ResultGuarantee) -> Option<ResultGuarantee> {
+    compose(
+        &CompositionOperator::Lipschitz { constant: 1.0 },
+        vec![input],
+        None,
+    )
+}
+
+/// A ratio of relative-error (or exact) operands: its relative bound is
+/// `(a + b) / (1 − b)` only under enforced operand domains, which Stage 1
+/// does not read, so the bound is the symbolic [`DIVISION_OPERAND_DOMAINS`].
+fn symbolic_ratio(l: ResultGuarantee, r: ResultGuarantee) -> Option<ResultGuarantee> {
+    let relative = |g: &ResultGuarantee| g.is_exact() || g.metric == ErrorMetric::RelativeValue;
+    if !(relative(&l) && relative(&r)) {
+        return None;
+    }
+    let failure_probability = ProbabilityExpr::UnionBound {
+        terms: vec![l.failure_probability.clone(), r.failure_probability.clone()],
+    };
+    let provenance = [l, r]
+        .into_iter()
+        .enumerate()
+        .map(|(input_index, g)| GuaranteeSource::ChildGuarantee {
+            input_index,
+            guarantee: Box::new(g),
+        })
+        .chain([
+            GuaranteeSource::UnavailableStatistic {
+                statistic: DIVISION_OPERAND_DOMAINS.into(),
+            },
+            GuaranteeSource::CompositionStep {
+                operator: CompositionOperator::ExactDivision,
+                rule: "relative_division_needs_operand_domains".into(),
+            },
+        ])
+        .collect();
+    Some(ResultGuarantee {
+        metric: ErrorMetric::RelativeValue,
+        bound: BoundExpr::Unknown {
+            statistic: DIVISION_OPERAND_DOMAINS.into(),
+        },
+        failure_probability,
+        provenance,
+    })
 }
 
 /// Whether the default accuracy model's bound for `family` answers `query`
@@ -1258,5 +1609,283 @@ mod tests {
             }
         );
         assert!(choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::UnivMon)));
+    }
+
+    /// Guarantee composition through scalar and vector arithmetic (#669).
+    mod guarantee_composition {
+        use super::*;
+        use crate::test_support::lower_promql;
+
+        fn with_bound(metric: ErrorMetric, bound: f64, delta: f64) -> ResultGuarantee {
+            ResultGuarantee {
+                metric,
+                bound: BoundExpr::Constant { value: bound },
+                failure_probability: ProbabilityExpr::Constant { value: delta },
+                provenance: vec![],
+            }
+        }
+        fn abs(bound: f64, delta: f64) -> ResultGuarantee {
+            with_bound(ErrorMetric::AbsoluteValue, bound, delta)
+        }
+        fn rel(bound: f64) -> ResultGuarantee {
+            with_bound(ErrorMetric::RelativeValue, bound, 0.0)
+        }
+        /// `sum(m)` carrying `guarantee`.
+        fn node(guarantee: ResultGuarantee) -> Rc<OperatorNode> {
+            let node = lower_promql("sum(m)", AccuracyTarget::Exact);
+            Rc::new((*node).clone().with_guarantee(Some(guarantee)))
+        }
+        fn scalar(guarantee: ResultGuarantee) -> ScalarExpr {
+            ScalarExpr::PromqlScalarFromVector(node(guarantee))
+        }
+        fn lit(value: f64) -> ScalarExpr {
+            ScalarExpr::literal_f64(value)
+        }
+        fn arith(op: ArithmeticOpKind, left: ScalarExpr, right: ScalarExpr) -> ScalarExpr {
+            ScalarExpr::Arithmetic {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                semantics: ExprSemantics::Promql,
+            }
+        }
+        fn call(name: &str, args: Vec<ScalarExpr>) -> ScalarExpr {
+            ScalarExpr::FunctionCall {
+                name: name.into(),
+                args,
+            }
+        }
+        fn of(expr: &ScalarExpr) -> Option<ResultGuarantee> {
+            scalar_guarantee(expr, &|_| None)
+        }
+        fn bound(g: &ResultGuarantee) -> f64 {
+            g.bound.evaluate().expect("a resolved bound")
+        }
+        fn delta(g: &ResultGuarantee) -> f64 {
+            g.failure_probability
+                .evaluate()
+                .expect("a resolved probability")
+        }
+        fn close(a: f64, b: f64) -> bool {
+            (a - b).abs() < 1e-12
+        }
+
+        /// Absolute errors add through `x ± y`, with the union bound on the
+        /// failure probability; `−x` and `x ± c` keep the error, `c · x` and
+        /// `x / c` scale it by `|c|` and `1/|c|`, division by a literal zero
+        /// has none, and so does a product or quotient of two estimates.
+        #[test]
+        fn absolute_errors_compose_through_arithmetic() {
+            use ArithmeticOpKind::*;
+            let (x, y) = (scalar(abs(0.01, 0.001)), scalar(abs(0.02, 0.002)));
+            for op in [Add, Sub] {
+                let g = of(&arith(op.clone(), x.clone(), y.clone())).unwrap();
+                assert_eq!(g.metric, ErrorMetric::AbsoluteValue, "{op:?}");
+                assert!(close(bound(&g), 0.03) && close(delta(&g), 0.003), "{op:?}");
+                for shifted in [
+                    arith(op.clone(), x.clone(), lit(5.0)),
+                    arith(op.clone(), lit(5.0), x.clone()),
+                    arith(op.clone(), x.clone(), ScalarExpr::EvalTimestamp),
+                ] {
+                    let g = of(&shifted).unwrap();
+                    assert!(close(bound(&g), 0.01) && close(delta(&g), 0.001), "{op:?}");
+                }
+            }
+            let negated = ScalarExpr::Negative {
+                expr: Box::new(x.clone()),
+                semantics: ExprSemantics::Promql,
+            };
+            assert!(close(bound(&of(&negated).unwrap()), 0.01));
+            for (expr, expected) in [
+                (arith(Mul, lit(-3.0), x.clone()), 0.03),
+                (arith(Mul, x.clone(), lit(3.0)), 0.03),
+                (arith(Div, x.clone(), lit(-4.0)), 0.0025),
+            ] {
+                let g = of(&expr).unwrap();
+                assert!(
+                    close(bound(&g), expected) && close(delta(&g), 0.001),
+                    "{expr:?}"
+                );
+            }
+            for none in [
+                arith(Div, x.clone(), lit(0.0)),
+                arith(Mul, x.clone(), ScalarExpr::EvalTimestamp),
+                arith(Mul, x.clone(), y.clone()),
+                arith(Div, x.clone(), y.clone()),
+                arith(Div, lit(1.0), x.clone()),
+                arith(Pow, x.clone(), lit(2.0)),
+            ] {
+                assert_eq!(of(&none), None, "{none:?}");
+            }
+        }
+
+        /// Count-Min and Count Sketch errors are additive: through
+        /// arithmetic they compose as absolute errors, each normalized bound
+        /// times its (symbolic) stream norm, for plan selection to bind.
+        #[test]
+        fn normalized_additive_errors_compose_as_absolute_errors() {
+            let cms = with_bound(ErrorMetric::Frequency, 0.01, 0.001);
+            let count_sketch = with_bound(ErrorMetric::L2Frequency, 0.02, 0.002);
+            let g = of(&arith(
+                ArithmeticOpKind::Sub,
+                scalar(cms.clone()),
+                scalar(count_sketch),
+            ))
+            .unwrap();
+            assert_eq!(g.metric, ErrorMetric::AbsoluteValue);
+            assert!(close(delta(&g), 0.003));
+            let norms = |statistic: &str| match statistic {
+                "stream_l1_norm" => Some(100.0),
+                "stream_l2_norm" => Some(10.0),
+                _ => None,
+            };
+            assert!(g.bound.has_unknown());
+            assert!(close(g.bind(&norms).bound.evaluate().unwrap(), 1.2));
+            let doubled = of(&arith(ArithmeticOpKind::Mul, lit(2.0), scalar(cms))).unwrap();
+            assert!(close(doubled.bind(&norms).bound.evaluate().unwrap(), 2.0));
+        }
+
+        /// A relative error survives negation and scaling by an exact value,
+        /// but not a shift (`x + c`) or a sum or difference of estimates
+        /// (cancellation); a rank error composes to no guarantee (a rank
+        /// interval counts as none in the MVP).
+        #[test]
+        fn relative_and_rank_errors_compose_only_where_sound() {
+            use ArithmeticOpKind::*;
+            let x = scalar(rel(0.01));
+            for kept in [
+                ScalarExpr::Negative {
+                    expr: Box::new(x.clone()),
+                    semantics: ExprSemantics::Promql,
+                },
+                arith(Mul, x.clone(), lit(-2.0)),
+                arith(Div, x.clone(), ScalarExpr::EvalTimestamp),
+            ] {
+                let g = of(&kept).unwrap();
+                assert_eq!(g.metric, ErrorMetric::RelativeValue, "{kept:?}");
+                assert!(close(bound(&g), 0.01), "{kept:?}");
+            }
+            for none in [
+                arith(Add, x.clone(), lit(1.0)),
+                arith(Sub, x.clone(), scalar(rel(0.01))),
+            ] {
+                assert_eq!(of(&none), None, "{none:?}");
+            }
+            let rank = scalar(with_bound(ErrorMetric::Rank, 0.01, 0.001));
+            for none in [
+                arith(Sub, rank.clone(), rank.clone()),
+                arith(Mul, rank.clone(), lit(2.0)),
+                call("promql_clamp_max", vec![rank, lit(1.0)]),
+            ] {
+                assert_eq!(of(&none), None, "{none:?}");
+            }
+        }
+
+        /// `clamp`, `clamp_min`, `clamp_max` and `abs` are 1-Lipschitz and
+        /// monotone in each argument: the result keeps the largest absolute
+        /// (or relative) error of its arguments, with the union bound on the
+        /// failure probability.
+        #[test]
+        fn clamp_and_abs_keep_the_largest_argument_error() {
+            let x = scalar(abs(0.01, 0.001));
+            for expr in [
+                call("promql_clamp", vec![x.clone(), lit(0.0), lit(10.0)]),
+                call("promql_clamp_min", vec![x.clone(), lit(0.0)]),
+                call("promql_clamp_max", vec![x.clone(), lit(10.0)]),
+                call("promql_abs", vec![x.clone()]),
+                call("abs", vec![x.clone()]),
+            ] {
+                let g = of(&expr).unwrap();
+                assert_eq!(g.metric, ErrorMetric::AbsoluteValue, "{expr:?}");
+                assert!(
+                    close(bound(&g), 0.01) && close(delta(&g), 0.001),
+                    "{expr:?}"
+                );
+            }
+            let bounded = of(&call(
+                "promql_clamp",
+                vec![x.clone(), scalar(abs(0.03, 0.002)), lit(10.0)],
+            ))
+            .unwrap();
+            assert!(close(bound(&bounded), 0.03) && close(delta(&bounded), 0.003));
+            let relative = of(&call(
+                "promql_clamp",
+                vec![scalar(rel(0.01)), scalar(rel(0.02)), lit(10.0)],
+            ))
+            .unwrap();
+            assert_eq!(relative.metric, ErrorMetric::RelativeValue);
+            assert!(close(bound(&relative), 0.02));
+            let mixed = call("promql_clamp_min", vec![x, scalar(rel(0.02))]);
+            assert_eq!(of(&mixed), None);
+            assert_eq!(of(&call("promql_floor", vec![scalar(rel(0.01))])), None);
+        }
+
+        /// A comparison over an estimate has no guarantee on its output (a
+        /// band guarantee is later work); over exact operands it is exact.
+        #[test]
+        fn comparisons_over_estimates_have_no_guarantee() {
+            let compare = |left: ScalarExpr| ScalarExpr::Compare {
+                left: Box::new(left),
+                op: CompareOpKind::Gt,
+                right: Box::new(lit(5.0)),
+                semantics: ExprSemantics::Promql,
+            };
+            assert_eq!(of(&compare(scalar(abs(0.01, 0.001)))), None);
+            assert!(
+                of(&compare(scalar(ResultGuarantee::exact("exact")))).is_some_and(|g| g.is_exact())
+            );
+        }
+
+        /// A SQL scalar subquery inherits its relation's guarantee, as
+        /// PromQL `scalar(v)` does.
+        #[test]
+        fn a_scalar_subquery_inherits_its_guarantee() {
+            let g = abs(0.01, 0.001);
+            let expr = arith(
+                ArithmeticOpKind::Add,
+                ScalarExpr::ScalarSubquery(node(g.clone())),
+                lit(1.0),
+            );
+            assert!(close(bound(&of(&expr).unwrap()), 0.01));
+        }
+
+        /// Two estimates count their failure probabilities once each (union
+        /// bound), even when they read one shared summary: the built-in
+        /// guarantees hold per estimate, not simultaneously. The same
+        /// planned estimate read twice fails or holds as one event, so its
+        /// failure probability counts once.
+        #[test]
+        fn failure_probability_counts_once_per_distinct_estimate() {
+            let shared = node(abs(0.01, 0.001));
+            // Equal to `shared`, but planned separately.
+            let other = node(abs(0.01, 0.001));
+            let same = ScalarExpr::PromqlScalarFromVector(shared.clone());
+            let twice = of(&arith(ArithmeticOpKind::Add, same.clone(), same.clone())).unwrap();
+            assert!(close(bound(&twice), 0.02) && close(delta(&twice), 0.001));
+            let distinct = of(&arith(
+                ArithmeticOpKind::Add,
+                same,
+                ScalarExpr::PromqlScalarFromVector(other.clone()),
+            ))
+            .unwrap();
+            assert!(close(bound(&distinct), 0.02) && close(delta(&distinct), 0.002));
+            let vector = |lhs: &Rc<OperatorNode>, rhs: &Rc<OperatorNode>| {
+                let node = OperatorNode::new(Operator::NonASAP(NonASAPOp::BinaryOp {
+                    operator: BinaryOperator {
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
+                        vector_match: None,
+                    },
+                    return_bool: false,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                }))
+                .unwrap();
+                composed_guarantee(&node).unwrap()
+            };
+            assert!(close(delta(&vector(&shared, &shared)), 0.001));
+            assert!(close(delta(&vector(&shared, &other)), 0.002));
+        }
     }
 }
