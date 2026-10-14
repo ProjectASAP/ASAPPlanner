@@ -224,6 +224,7 @@ fn footprint(params: &SketchParams) -> u64 {
         sketch_rows,
         sketch_cols,
         layers,
+        ..
     } = params
     else {
         panic!("UnivMon params: {params:?}");
@@ -440,7 +441,6 @@ fn stage1_logical_asap_optimization_shared_univmon_is_sized_for_the_strictest_co
 
 /// Pass 1 sizes UnivMon for its query's target: ε = 0.01 (Q3) needs a larger state than ε = 0.05 (Q2).
 #[test]
-#[ignore = "needs UnivMon sizing for an accuracy target (#621); its shape is fixed"]
 fn stage1_logical_asap_optimization_univmon_is_sized_per_accuracy_target() {
     let run = pipeline();
     assert!(footprint(&own_univmon(&run, 2)) > footprint(&own_univmon(&run, 1)));
@@ -534,7 +534,7 @@ fn stage3_plan_selection_has_no_theta_candidate() {
 
 /// A UnivMon estimate has a guarantee, so plan selection judges it against its target instead of rejecting it for having none.
 #[test]
-#[ignore = "needs a UnivMon accuracy model: L2 in #621; distinct count and entropy have none yet"]
+#[ignore = "needs a UnivMon entropy accuracy model; L2 and the distinct count have one"]
 fn stage3_plan_selection_judges_univmon_with_an_accuracy_model() {
     let run = pipeline();
     let invalid = run.invalid();
@@ -655,6 +655,90 @@ fn stage1_logical_asap_optimization_leaves_the_hll_failure_probability_symbolic(
         seen += 1;
     }
     assert!(seen > 0, "a candidate answers Q1 with HLL");
+}
+
+/// The physical candidates that answer Q`query` with UnivMon and the other
+/// two exactly: their validity depends only on that UnivMon estimate.
+fn univmon_only_candidates(run: &Run, query: usize) -> Vec<&str> {
+    let ids: Vec<_> = run
+        .logical
+        .iter()
+        .filter(|c| {
+            !shares_a_summary(c)
+                && (0..3).all(|q| {
+                    query_option(&c.dag, &c.query_roots, q)
+                        == if q == query { "UnivMon" } else { "exact" }
+                })
+        })
+        .flat_map(|c| run.physical_of(c).map(|p| p.id.as_str()))
+        .collect();
+    assert!(
+        !ids.is_empty(),
+        "a candidate answers Q{} with UnivMon alone",
+        query + 1
+    );
+    ids
+}
+
+/// Q1's UnivMon is sized for (0.02, 0.01): a 337,500-key heap on 19
+/// layers. Its distinct count is certified once the deployment bounds the
+/// source's distinct items, both at 9 (the top layer is always complete)
+/// and at 10M (7 layers suffice, where classic HLL certifies nothing);
+/// without a bound its failure probability stays unknown.
+#[test]
+fn stage3_plan_selection_accepts_univmon_distinct_given_a_distinct_bound() {
+    for bound in [9, 10_000_000] {
+        let run = pipeline_with_distinct_bound(Some(bound));
+        for id in univmon_only_candidates(&run, 0) {
+            assert!(
+                run.cost(id).is_some(),
+                "{bound} {id}: {:?}",
+                run.invalid().get(id)
+            );
+        }
+    }
+    let unbounded = pipeline_with_distinct_bound(None);
+    let invalid = unbounded.invalid();
+    for id in univmon_only_candidates(&unbounded, 0) {
+        let reason = invalid.get(id).unwrap_or_else(|| panic!("{id} is invalid"));
+        assert!(reason.starts_with("q1:"), "{id}: {reason}");
+        assert!(
+            reason.contains("failure probability None"),
+            "{id}: {reason}"
+        );
+    }
+}
+
+/// A distinct bound past what 19 layers cover for Q1's heap
+/// (337,500 · 2^17) certifies nothing.
+#[test]
+fn stage3_plan_selection_rejects_univmon_distinct_past_its_layers() {
+    let run = pipeline_with_distinct_bound(Some(337_500 << 17 | 1));
+    let invalid = run.invalid();
+    for id in univmon_only_candidates(&run, 0) {
+        let reason = invalid.get(id).unwrap_or_else(|| panic!("{id} is invalid"));
+        assert!(reason.starts_with("q1:"), "{id}: {reason}");
+    }
+}
+
+/// Q3's L2 at (0.01, 0.01) is certified from layer 0 alone: a 5 × 56,817
+/// Count Sketch on one layer, with no data-workload statistic.
+#[test]
+fn stage3_plan_selection_accepts_univmon_l2() {
+    let run = pipeline();
+    assert_eq!(
+        own_univmon(&run, 2),
+        SketchParams::UnivMon {
+            heap_size: 1,
+            sketch_rows: 5,
+            sketch_cols: 56_817,
+            layers: 1,
+            distinct_failure_probability: None,
+        }
+    );
+    for id in univmon_only_candidates(&run, 2) {
+        assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
+    }
 }
 
 /// One materialized UnivMon for all three costs no more than three separate UnivMons.

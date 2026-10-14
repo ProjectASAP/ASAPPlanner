@@ -4,7 +4,9 @@ use asap_aware_mapping::accuracy::{AccuracyModel, DefaultAccuracyModel};
 mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
+use asap_types::post_asap::{
+    ErrorMetric, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
+};
 use asap_types::types::AccuracyTarget;
 use support::{logical_candidates, lower_promql, post_asap_dag, run_stage1_to_stage3};
 
@@ -29,9 +31,11 @@ fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 }
 
 #[test]
-fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees() {
-    // Equal data, grouping and window produce one state independently of
-    // evaluation. Pass 1 offers UnivMon for an approximate count only.
+fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees() {
+    // Pass 1 sizes UnivMon per readout: the distinct count and L2 get their
+    // own shapes, while the total and entropy keep the baseline shape and so
+    // share one state. Sharing across readouts is the summary-capability
+    // rule's job.
     let accuracy = AccuracyTarget::Epsilon(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
@@ -44,7 +48,21 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
     .map(|(id, (query, accuracy))| (id, candidate(query, accuracy)))
     .collect();
     let roots = share_common_sub_dags(roots);
-    let mut first_state = None;
+    let state = |index: usize| {
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
+            &roots[index].1.operator
+        else {
+            panic!()
+        };
+        Rc::clone(summary_input)
+    };
+    assert!(Rc::ptr_eq(&state(1), &state(3)), "total and entropy share");
+    for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+        assert!(
+            !Rc::ptr_eq(&state(a), &state(b)),
+            "{a} and {b} are sized apart"
+        );
+    }
     for (index, root) in &roots {
         let Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
@@ -53,37 +71,45 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
         else {
             panic!()
         };
-        if let Some(first) = &first_state {
-            assert!(
-                Rc::ptr_eq(first, summary_input),
-                "state must be shared across evaluations"
-            );
-        } else {
-            first_state = Some(Rc::clone(summary_input));
-        }
-        let Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) = &summary_input.operator else {
+        let Operator::ASAP(ASAPOp::SummaryAgg { input, family, .. }) = &summary_input.operator
+        else {
             panic!()
         };
         assert!(matches!(input.item, Some(SummaryInputExpr::Column(_))));
         assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
-        if *index == 1 {
-            assert!(matches!(
-                query,
-                SketchStatistic::PointCount { value: None, .. }
-            ));
-            assert!(root.guarantee.as_ref().is_some_and(|g| g.is_exact()));
-        } else {
-            // No calibrated bound, so composition certifies nothing.
-            assert!(root.guarantee.is_none());
-            let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
-                panic!()
-            };
-            assert!(
-                DefaultAccuracyModel
+        let guarantee = root.guarantee.as_ref();
+        match index {
+            // The distinct count's failure probability waits for the
+            // source's distinct bound, which Stage 1 does not read.
+            0 => {
+                let guarantee = guarantee.expect("a distinct-count guarantee");
+                assert_eq!(guarantee.metric, ErrorMetric::Cardinality);
+                assert_eq!(guarantee.bound.evaluate().map(|e| e <= 0.02), Some(true));
+                assert_eq!(guarantee.failure_probability.evaluate(), None);
+                assert!(DefaultAccuracyModel
                     .local_guarantee(family, query)
-                    .is_none(),
-                "production has no calibrated error bound"
-            );
+                    .is_none());
+            }
+            1 => {
+                assert!(matches!(
+                    query,
+                    SketchStatistic::PointCount { value: None, .. }
+                ));
+                assert!(guarantee.is_some_and(|g| g.is_exact()));
+            }
+            2 => {
+                let guarantee = guarantee.expect("an L2 guarantee");
+                assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
+                assert!(DefaultAccuracyModel.satisfies(guarantee, &AccuracyTarget::Epsilon(0.02)));
+                assert!(guarantee.failure_probability.evaluate().unwrap() <= 0.01);
+            }
+            // Entropy has no certified bound, so composition certifies nothing.
+            _ => {
+                assert!(guarantee.is_none());
+                assert!(DefaultAccuracyModel
+                    .local_guarantee(family, query)
+                    .is_none());
+            }
         }
         post_asap_dag(root);
     }
@@ -93,7 +119,8 @@ fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees()
 fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // An unmeasured heuristic remains inspectable but is never certified or
     // automatically selected for a caller-visible bounded-error result.
-    for query in ["entropy_over_time(m[5m])", "l2_over_time(m[5m])"] {
+    // L2 is certified; entropy is not.
+    for query in ["entropy_over_time(m[5m])"] {
         for target in [
             AccuracyTarget::Exact,
             AccuracyTarget::Epsilon(0.02),

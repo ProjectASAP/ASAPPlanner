@@ -611,6 +611,7 @@ pub fn create_planner_accumulator(
                 sketch_rows,
                 sketch_cols,
                 layers,
+                ..
             },
         ) => Box::new(UnivMonUpdater {
             acc: UnivMonAccumulator::new(

@@ -95,7 +95,7 @@ use crate::accuracy::composition::{
     additive_as_absolute, StreamNorm, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
-use crate::accuracy::estimators::hll;
+use crate::accuracy::estimators::{hll, univmon};
 use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use crate::function_rules::function_rules;
 use crate::realization::{
@@ -921,7 +921,7 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
             {
                 let local = match estimate_bound_over_samples(family, update, query) {
                     Some(gated) => gated,
-                    None => classic_hll_guarantee(family, query, input)
+                    None => source_distinct_guarantee(family, query, input)
                         .or_else(|| DefaultAccuracyModel.local_guarantee(family, query))?,
                 };
                 if exact_inputs(summary_input) {
@@ -994,12 +994,15 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     }
 }
 
-/// Classic HLL's guarantee for a distinct count of one instance per group
-/// over a source's own rows ([`hll::classic_guarantee`]): its failure
-/// probability is left symbolic in the source's distinct bound, which
-/// Stage 1 does not read. `None` for any other summary, or an HLL over
-/// computed rows, whose distinct items the source's bound does not bound.
-fn classic_hll_guarantee(
+/// The guarantee of a distinct count of one instance per group over a
+/// source's own rows, whose failure probability is left symbolic in the
+/// source's distinct bound, which Stage 1 does not read:
+/// - classic HLL's ([`hll::classic_guarantee`]);
+/// - UnivMon's, sized for a distinct count ([`univmon::distinct_guarantee`]).
+///
+/// `None` for any other summary, or one over computed rows, whose distinct
+/// items the source's bound does not bound.
+fn source_distinct_guarantee(
     family: &FieldDataType,
     query: &SketchStatistic,
     input: &Rc<OperatorNode>,
@@ -1007,12 +1010,17 @@ fn classic_hll_guarantee(
     let FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) = family else {
         return None;
     };
-    let (SketchParams::Hll { precision }, SketchStatistic::Cardinality) = (kind.params(), query)
-    else {
+    if *query != SketchStatistic::Cardinality {
         return None;
-    };
+    }
     source_scan(input)?;
-    hll::classic_guarantee(*precision, &source(input)?)
+    match kind.params() {
+        SketchParams::Hll { precision } => hll::classic_guarantee(*precision, &source(input)?),
+        params @ SketchParams::UnivMon { .. } => {
+            univmon::distinct_guarantee(params, &source(input)?)
+        }
+        _ => None,
+    }
 }
 
 /// The rows one group of an exact fold over approximate `input` counts.
