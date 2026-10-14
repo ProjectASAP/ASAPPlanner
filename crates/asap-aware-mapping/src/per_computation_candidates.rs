@@ -90,8 +90,8 @@ use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
 use crate::accuracy::composition::{
-    additive_as_absolute, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT, PRODUCT_OPERAND_DOMAINS,
-    QUOTIENT_OPERAND_DOMAINS,
+    additive_as_absolute, StreamNorm, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT,
+    PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
 use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use crate::function_rules::function_rules;
@@ -947,10 +947,84 @@ pub(crate) fn operand_of(
 
 /// `node`'s guarantee as an input to a computation over its values: a
 /// Count-Min or Count Sketch bound restated as an absolute error over the
-/// stream norm of the one source `node` reads ([`additive_as_absolute`]).
+/// stream norm its summary's update weight allows ([`stream_norm`],
+/// [`additive_as_absolute`]).
 pub(crate) fn operand_guarantee(node: &Rc<OperatorNode>) -> Option<ResultGuarantee> {
     let guarantee = node.guarantee.clone()?;
-    Some(additive_as_absolute(guarantee, source(node).as_deref()))
+    Some(additive_as_absolute(guarantee, stream_norm(node).as_ref()))
+}
+
+/// The stream norm that bounds the one Count-Min or Count Sketch summary
+/// below `node`, by its update weight: the source's own norm when the
+/// weight is the source's raw value column (the summary's input is the
+/// source's scan, at most windowed or filtered); `|c|` times the source's
+/// row count for a constant weight `c`. `None` for any other weight (a
+/// computed value such as `m * 1000` or `rate(…)`), several summaries or
+/// sources, or none.
+fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
+    let summaries: Vec<_> = OperatorNode::reachable(node)
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.asap(),
+                Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) if matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::Cms
+                        | SketchAlgorithm::CmsWithHeap
+                        | SketchAlgorithm::CountSketch
+                        | SketchAlgorithm::CountSketchWithHeap
+                )
+            )
+        })
+        .collect();
+    let [summary] = summaries.as_slice() else {
+        return None;
+    };
+    let Some(ASAPOp::SummaryAgg {
+        input: update,
+        child,
+        ..
+    }) = summary.asap()
+    else {
+        return None;
+    };
+    let source = source(child)?;
+    match &update.weight {
+        SummaryInputExpr::Constant(weight) => Some(StreamNorm::ConstantWeight {
+            weight: *weight,
+            source,
+        }),
+        SummaryInputExpr::Column(column) if raw_value_column(child, column) => {
+            Some(StreamNorm::Source(source))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `column` of `node` is its source's raw sample value: `node` is
+/// the source's scan, at most behind filters and windows that keep its
+/// schema, and `column` resolves to the scan's sample value.
+fn raw_value_column(node: &Rc<OperatorNode>, column: &ColumnRef) -> bool {
+    let mut current = node;
+    loop {
+        if current.schema != node.schema {
+            return false;
+        }
+        match current.non_asap() {
+            Some(NonASAPOp::Filter { child, .. } | NonASAPOp::TimeRange { child, .. }) => {
+                current = child
+            }
+            Some(NonASAPOp::Scan { schema, .. }) => {
+                let resolved = resolve_column_ref(column, schema).ok();
+                return resolved.is_some()
+                    && resolved == resolve_column_ref(&ColumnRef::SampleValue, schema).ok();
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// The one source (PromQL metric or SQL table) `node` reads; `None` when it
@@ -2002,16 +2076,26 @@ mod tests {
 
         /// Count-Min and Count Sketch errors are additive: through
         /// arithmetic they compose as absolute errors, each normalized bound
-        /// times its source's (symbolic) stream norm, for plan selection to
-        /// bind.
+        /// times the (symbolic) stream norm of its summary's source, here
+        /// over each source's raw value column, for plan selection to bind.
         #[test]
         fn normalized_additive_errors_compose_as_absolute_errors() {
             let cms = with_bound(ErrorMetric::Frequency, 0.01, 0.001);
             let count_sketch = with_bound(ErrorMetric::L2Frequency, 0.02, 0.002);
+            // Summaries of each source's raw value column.
+            let raw = |query: &str, guarantee: ResultGuarantee| {
+                ScalarExpr::PromqlScalarFromVector(crate::test_support::estimate_over(
+                    crate::test_support::weighted(
+                        crate::test_support::cms_summary(query),
+                        SummaryInputExpr::Column(ColumnRef::SampleValue),
+                    ),
+                    guarantee,
+                ))
+            };
             let g = of(&arith(
                 ArithmeticOpKind::Sub,
-                scalar(cms.clone()),
-                ScalarExpr::PromqlScalarFromVector(node_over("sum(n)", count_sketch)),
+                raw("count by (job) (m)", cms.clone()),
+                raw("count by (job) (n)", count_sketch),
             ))
             .unwrap();
             assert_eq!(g.metric, ErrorMetric::AbsoluteValue);
@@ -2023,7 +2107,12 @@ mod tests {
             };
             assert!(g.bound.has_unknown());
             assert!(close(g.bind(&norms).bound.evaluate().unwrap(), 1.2));
-            let doubled = of(&arith(ArithmeticOpKind::Mul, lit(2.0), scalar(cms))).unwrap();
+            let doubled = of(&arith(
+                ArithmeticOpKind::Mul,
+                lit(2.0),
+                raw("count by (job) (m)", cms),
+            ))
+            .unwrap();
             assert!(close(doubled.bind(&norms).bound.evaluate().unwrap(), 2.0));
         }
 
@@ -2207,6 +2296,85 @@ mod tests {
             };
             assert!(close(delta(&vector(&shared, &shared)), 0.001));
             assert!(close(delta(&vector(&shared, &other)), 0.002));
+        }
+    }
+
+    /// Which stream norm bounds a Count-Min or Count Sketch estimate (#669).
+    mod stream_norms {
+        use super::*;
+        use crate::accuracy::composition::{
+            source_norm_statistic, STREAM_L1_NORM, STREAM_ROW_COUNT,
+        };
+        use crate::test_support::{cms_summary, weighted};
+
+        /// A count (constant weight) is bounded by its weight times the
+        /// source's row count; a sum of the source's raw value column by
+        /// the source's norm; a sum of a computed value (`m * 1000`,
+        /// `rate(…)`) by nothing that can be bound.
+        #[test]
+        fn a_norm_follows_the_update_weight() {
+            let count = Rc::new(cms_summary("count by (job) (m)"));
+            assert_eq!(
+                stream_norm(&count),
+                Some(StreamNorm::ConstantWeight {
+                    weight: 1.0,
+                    source: "m".into()
+                })
+            );
+            let raw = weighted(
+                cms_summary("count by (job) (m)"),
+                SummaryInputExpr::Column(ColumnRef::SampleValue),
+            );
+            assert_eq!(stream_norm(&raw), Some(StreamNorm::Source("m".into())));
+            for computed in ["count by (job) (m * 1000)", "count by (job) (rate(m[1m]))"] {
+                let summary = weighted(
+                    cms_summary(computed),
+                    SummaryInputExpr::Column(ColumnRef::SampleValue),
+                );
+                assert_eq!(stream_norm(&summary), None, "{computed}");
+            }
+        }
+
+        /// The absolute form of a Count-Min bound names the statistic its
+        /// update weight allows: the source's norm for its raw value
+        /// column, the weight times the source's row count for a count.
+        #[test]
+        fn the_absolute_bound_names_the_weighted_norm() {
+            let frequency = ResultGuarantee {
+                metric: ErrorMetric::Frequency,
+                bound: BoundExpr::Constant { value: 0.01 },
+                failure_probability: ProbabilityExpr::Constant { value: 0.001 },
+                provenance: vec![],
+            };
+            let estimate = |summary: Rc<OperatorNode>| {
+                operand_guarantee(&crate::test_support::estimate_over(
+                    summary,
+                    frequency.clone(),
+                ))
+                .unwrap()
+            };
+            let raw = estimate(weighted(
+                cms_summary("count by (job) (m)"),
+                SummaryInputExpr::Column(ColumnRef::SampleValue),
+            ));
+            let l1 = source_norm_statistic(STREAM_L1_NORM, "m");
+            assert_eq!(
+                raw.bind(&|s| (s == l1).then_some(100.0)).bound.evaluate(),
+                Some(1.0)
+            );
+            let count = estimate(Rc::new(cms_summary("count by (job) (m)")));
+            assert!(count
+                .bind(&|s| (s == l1).then_some(100.0))
+                .bound
+                .has_unknown());
+            let rows = source_norm_statistic(STREAM_ROW_COUNT, "m");
+            assert_eq!(
+                count
+                    .bind(&|s| (s == rows).then_some(100.0))
+                    .bound
+                    .evaluate(),
+                Some(1.0)
+            );
         }
     }
 }

@@ -1606,16 +1606,35 @@ mod tests {
         }
     }
 
-    /// A difference of two Count-Min estimates over different metrics is
-    /// bound by each metric's own stream norm from the data workload
+    /// A difference of two Count-Min estimates of the raw values of
+    /// different metrics is bound by each metric's own stream norm from the
+    /// data workload
     /// (`0.01 · 100 + 0.02 · 1000`); a metric without a norm leaves the
     /// bound unmet.
     #[test]
     fn stage3_binds_each_metric_stream_norm() {
+        // Count-Min summaries of each metric's raw value column.
+        let raw = |query: &str, g: ResultGuarantee| {
+            ScalarExpr::PromqlScalarFromVector(crate::test_support::estimate_over(
+                crate::test_support::weighted(
+                    crate::test_support::cms_summary(query),
+                    asap_types::post_asap::SummaryInputExpr::Column(
+                        asap_types::pre_asap::ColumnRef::SampleValue,
+                    ),
+                ),
+                g,
+            ))
+        };
         let root = scalar_root(
             ArithmeticOpKind::Sub,
-            scalar_of("sum(a)", guarantee(ErrorMetric::Frequency, 0.01, 0.001)),
-            scalar_of("sum(b)", guarantee(ErrorMetric::Frequency, 0.02, 0.001)),
+            raw(
+                "count by (job) (a)",
+                guarantee(ErrorMetric::Frequency, 0.01, 0.001),
+            ),
+            raw(
+                "count by (job) (b)",
+                guarantee(ErrorMetric::Frequency, 0.02, 0.001),
+            ),
         );
         let models = PlanningModels::builtin();
         let both =
@@ -1626,6 +1645,48 @@ mod tests {
         );
         let one = bound_root_guarantee(&root, &norms(&[("a", 100.0)]), &models).unwrap();
         assert!(one.bound.has_unknown());
+    }
+
+    /// A stream norm is bound only for a summary of the source's raw value
+    /// column: a count over the same source (constant weight) needs the
+    /// source's row count, which nothing binds, and a summary of a computed
+    /// value (`m * 1000`) needs a norm nothing binds; both stay unmet.
+    #[test]
+    fn stage3_binds_a_stream_norm_only_for_the_raw_value_column() {
+        use asap_types::post_asap::SummaryInputExpr;
+        use asap_types::pre_asap::ColumnRef;
+        let frequency = guarantee(ErrorMetric::Frequency, 0.01, 0.001);
+        let doubled = |summary: Rc<OperatorNode>| {
+            scalar_root(
+                ArithmeticOpKind::Mul,
+                ScalarExpr::literal_f64(2.0),
+                ScalarExpr::PromqlScalarFromVector(crate::test_support::estimate_over(
+                    summary,
+                    frequency.clone(),
+                )),
+            )
+        };
+        let models = PlanningModels::builtin();
+        let data = norms(&[("m", 100.0)]);
+        let column = || SummaryInputExpr::Column(ColumnRef::SampleValue);
+        let raw = doubled(crate::test_support::weighted(
+            crate::test_support::cms_summary("count by (job) (m)"),
+            column(),
+        ));
+        let g = bound_root_guarantee(&raw, &data, &models).unwrap();
+        assert!((g.bound.evaluate().unwrap() - 2.0).abs() < 1e-12, "{g:?}");
+        for unbound in [
+            doubled(Rc::new(crate::test_support::cms_summary(
+                "count by (job) (m)",
+            ))),
+            doubled(crate::test_support::weighted(
+                crate::test_support::cms_summary("count by (job) (m * 1000)"),
+                column(),
+            )),
+        ] {
+            let g = bound_root_guarantee(&unbound, &data, &models).unwrap();
+            assert!(g.bound.has_unknown(), "{g:?}");
+        }
     }
 
     /// A product and a quotient of two estimates are bound from the

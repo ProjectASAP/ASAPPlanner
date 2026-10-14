@@ -27,6 +27,20 @@ pub(crate) const QUOTIENT_OPERAND_DOMAINS: &str = "quotient_operand_domains";
 pub(crate) const STREAM_L1_NORM: &str = "stream_l1_norm";
 /// `‖f‖₂` of the stream a Count Sketch bound is normalized by.
 pub(crate) const STREAM_L2_NORM: &str = "stream_l2_norm";
+/// Rows of one source's stream a summary folds: with a constant update
+/// weight `c`, `‖f‖₁ = |c| · rows` and `‖f‖₂ ≤ ‖f‖₁`.
+pub(crate) const STREAM_ROW_COUNT: &str = "stream_row_count";
+
+/// Which stream norm bounds a Count-Min or Count Sketch estimate, given its
+/// summary's update weight.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StreamNorm {
+    /// The weight is the source's raw value column: the source's norm
+    /// ([`source_norm_statistic`]).
+    Source(String),
+    /// A constant weight (a count): `|weight|` times the source's row count.
+    ConstantWeight { weight: f64, source: String },
+}
 
 /// The statistic for `norm` ([`STREAM_L1_NORM`] or [`STREAM_L2_NORM`]) of
 /// one source's stream, e.g. `stream_l1_norm[m]`.
@@ -522,12 +536,13 @@ fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) ->
 /// `input` with a Count-Min ([`ErrorMetric::Frequency`]) or Count Sketch
 /// ([`ErrorMetric::L2Frequency`]) bound restated as an additive absolute
 /// error: the normalized bound times its stream norm, a symbolic statistic
-/// until bound. The norm is `source`'s ([`source_norm_statistic`]), which
-/// plan selection can bind; without a source it is a statistic nothing
-/// binds. Any other guarantee is returned unchanged.
+/// until bound. The norm is the one `norm` names ([`StreamNorm`]), which
+/// plan selection can bind; without one (a weight computed from the
+/// values) it is a statistic nothing binds. Any other guarantee is
+/// returned unchanged.
 pub(crate) fn additive_as_absolute(
     input: ResultGuarantee,
-    source: Option<&str>,
+    norm: Option<&StreamNorm>,
 ) -> ResultGuarantee {
     if !matches!(
         input.metric,
@@ -537,27 +552,54 @@ pub(crate) fn additive_as_absolute(
         return input;
     }
     let mut bound = absolute_bound(&input).expect("additive metrics convert to absolute errors");
-    if let (Some(source), BoundExpr::Product { factors }) = (source, &mut bound) {
+    if let (Some(norm), BoundExpr::Product { factors }) = (norm, &mut bound) {
         for factor in factors {
             if let BoundExpr::Unknown { statistic } = factor {
-                *statistic = source_norm_statistic(statistic, source);
+                *factor = match norm {
+                    StreamNorm::Source(source) => BoundExpr::Unknown {
+                        statistic: source_norm_statistic(statistic, source),
+                    },
+                    StreamNorm::ConstantWeight { weight, source } => BoundExpr::Product {
+                        factors: vec![
+                            BoundExpr::Constant {
+                                value: weight.abs(),
+                            },
+                            BoundExpr::Unknown {
+                                statistic: source_norm_statistic(STREAM_ROW_COUNT, source),
+                            },
+                        ],
+                    },
+                };
             }
         }
     }
     let mut provenance = input.provenance;
-    if let BoundExpr::Product { factors } = &bound {
-        provenance.extend(factors.iter().filter_map(|factor| match factor {
-            BoundExpr::Unknown { statistic } => Some(GuaranteeSource::UnavailableStatistic {
-                statistic: statistic.clone(),
-            }),
-            _ => None,
-        }));
-    }
+    unknown_statistics(&bound, &mut |statistic| {
+        provenance.push(GuaranteeSource::UnavailableStatistic {
+            statistic: statistic.into(),
+        })
+    });
     ResultGuarantee {
         metric: ErrorMetric::AbsoluteValue,
         bound,
         provenance,
         ..input
+    }
+}
+
+/// Every `Unknown` statistic in `bound`.
+fn unknown_statistics(bound: &BoundExpr, found: &mut dyn FnMut(&str)) {
+    match bound {
+        BoundExpr::Unknown { statistic } => found(statistic),
+        BoundExpr::Sum { terms }
+        | BoundExpr::Product { factors: terms }
+        | BoundExpr::Max { terms } => {
+            for term in terms {
+                unknown_statistics(term, found);
+            }
+        }
+        BoundExpr::Scaled { inner, .. } => unknown_statistics(inner, found),
+        _ => {}
     }
 }
 
