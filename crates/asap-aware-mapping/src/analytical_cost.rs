@@ -151,12 +151,28 @@ pub fn cache_hit_ratios(
 /// Conversion from physical dimensions to one deployment-specific objective.
 /// Memory's coefficient means cost units per retained byte over this model's
 /// explicit comparison scope; it is not mixed with a rate implicitly.
+///
+/// Plan selection prices per second of wall time and also reads
+/// `cost_per_retained_byte_second`, the price of state kept across
+/// evaluations per byte per second, and `horizon_s`, the seconds over which
+/// it spreads one-off, scheduled and unknown queries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceCalibration {
     pub cost_per_cpu_op: f64,
     pub cost_per_scan_byte: f64,
     pub cost_per_retained_byte: f64,
+    #[serde(default)]
+    pub cost_per_retained_byte_second: f64,
+    #[serde(default = "default_horizon_s")]
+    pub horizon_s: f64,
     pub version: String,
+}
+
+/// One hour.
+pub const DEFAULT_HORIZON_S: f64 = 3_600.0;
+
+fn default_horizon_s() -> f64 {
+    DEFAULT_HORIZON_S
 }
 
 impl ResourceCalibration {
@@ -165,10 +181,20 @@ impl ResourceCalibration {
             ("cost_per_cpu_op", self.cost_per_cpu_op),
             ("cost_per_scan_byte", self.cost_per_scan_byte),
             ("cost_per_retained_byte", self.cost_per_retained_byte),
+            (
+                "cost_per_retained_byte_second",
+                self.cost_per_retained_byte_second,
+            ),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(AnalyticalCostError::InvalidCalibration(name, value));
             }
+        }
+        if !self.horizon_s.is_finite() || self.horizon_s <= 0.0 {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "horizon_s",
+                self.horizon_s,
+            ));
         }
         if self.cost_per_cpu_op == 0.0
             && self.cost_per_scan_byte == 0.0

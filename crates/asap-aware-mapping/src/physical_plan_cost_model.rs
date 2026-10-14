@@ -602,6 +602,8 @@ mod tests {
             cost_per_cpu_op: 1.0,
             cost_per_scan_byte: 1.0,
             cost_per_retained_byte: 1.0,
+            cost_per_retained_byte_second: 0.0,
+            horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
             version: "test-v1".into(),
         }
     }
@@ -688,6 +690,8 @@ mod tests {
             cost_per_cpu_op: 0.0,
             cost_per_scan_byte: 0.0,
             cost_per_retained_byte: 0.0,
+            cost_per_retained_byte_second: 0.0,
+            horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
             version: "unused-base-v1".into(),
         };
         let candidates =
@@ -815,6 +819,8 @@ mod tests {
             cost_per_cpu_op: 0.0,
             cost_per_scan_byte: 0.0,
             cost_per_retained_byte: 0.0,
+            cost_per_retained_byte_second: 0.0,
+            horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
             version: "handoff-only-v1".into(),
         };
         let space = crate::replacement::search_workload_with(
@@ -937,6 +943,8 @@ mod tests {
                 cost_per_cpu_op: 0.0,
                 cost_per_scan_byte: 1.0,
                 cost_per_retained_byte: 0.0,
+                cost_per_retained_byte_second: 0.0,
+                horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
                 version: "disk-only-v1".into(),
             },
         )

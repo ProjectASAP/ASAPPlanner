@@ -41,6 +41,11 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
     run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
         &[Some(target)],
+        &workload
+            .query_workload
+            .entries()
+            .map(|entry| entry.recurrence)
+            .collect::<Vec<_>>(),
         &workload.data_workload.unwrap(),
         PlanningModels::builtin(),
     )

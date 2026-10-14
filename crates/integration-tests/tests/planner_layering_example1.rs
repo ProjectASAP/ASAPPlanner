@@ -107,6 +107,12 @@ fn physical_with(run: &Run, option: Q2Option) -> &Physical {
     p
 }
 
+/// Example 1's panels repeat every 10 s.
+fn every_10s() -> asap_types::workload::QueryRecurrence {
+    use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
+    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000)))
+}
+
 // ── Workload ─────────────────────────────────────────────────────────────
 
 /// The encoded workload is valid and normalizes to Q1 then Q2.
@@ -560,6 +566,7 @@ fn materialized_case() -> Run {
     let selection = select_plan(
         std::slice::from_ref(&p.candidate),
         &[Some(AccuracyTarget::Exact), Some(AccuracyTarget::Exact)],
+        &[every_10s(), every_10s()],
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
     )
