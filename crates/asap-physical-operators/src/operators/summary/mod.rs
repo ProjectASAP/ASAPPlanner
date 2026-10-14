@@ -583,6 +583,7 @@ async fn merge_summary(
     groups: &[usize],
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
+    use crate::summary_kernels::{HydraCms, HydraCmsGroup};
     // Counter states join consecutive windows pairwise, which is exact only
     // in time order: order the inputs by their window start.
     if let Some(Value::Summary { family, .. }) = rows.first().map(|row| &row[state_column]) {
@@ -603,15 +604,63 @@ async fn merge_summary(
     let mut work = Cooperative::new(context);
     let mut memory = context.reserve(0)?;
     let mut retained = 0usize;
+    // States shared by several groups (Hydra grids) are reserved once each.
+    let mut shared = BTreeMap::<usize, usize>::new();
+    // Each distinct pair of Hydra grids merges once, and every group of the
+    // pair reads the one merged grid. The inputs are kept so their addresses
+    // stay unique while they key the memo.
+    type GridPair = (Arc<HydraCms>, Arc<HydraCms>, Arc<HydraCms>);
+    let mut grids = BTreeMap::<(usize, usize), GridPair>::new();
     for row in rows {
         work.checkpoint().await?;
         let Value::Summary { family, state } = &row[state_column] else {
             return Err(invalid("summary state required"));
         };
+        if let Some((id, bytes)) = state.shared_state() {
+            if shared.insert(id, bytes).is_none() {
+                retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
+                memory.resize(retained)?;
+            }
+        }
         let key = group_key(&row, groups)?;
         if let Some((_, expected, existing)) = states.get_mut(&key) {
             if expected != family {
                 return Err(invalid("incompatible summary family"));
+            }
+            if let (Some(left), Some(right)) = (
+                existing.as_any().downcast_ref::<HydraCmsGroup>(),
+                state.as_any().downcast_ref::<HydraCmsGroup>(),
+            ) {
+                if left.group != right.group {
+                    return Err(invalid("HydraCms merge requires the same group"));
+                }
+                let pair = (
+                    Arc::as_ptr(&left.grid) as usize,
+                    Arc::as_ptr(&right.grid) as usize,
+                );
+                let grid = match grids.entry(pair) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.get().2.clone(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let merged = Arc::new(
+                            left.grid
+                                .merge(&right.grid)
+                                .map_err(|e| Error::Operator(e.to_string()))?,
+                        );
+                        let bytes = merged.approx_memory_bytes();
+                        shared.insert(Arc::as_ptr(&merged) as usize, bytes);
+                        retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
+                        memory.resize(retained)?;
+                        entry
+                            .insert((left.grid.clone(), right.grid.clone(), merged))
+                            .2
+                            .clone()
+                    }
+                };
+                *existing = Arc::new(HydraCmsGroup {
+                    grid,
+                    group: left.group.clone(),
+                });
+                continue;
             }
             let old_bytes = existing.approx_memory_bytes();
             // Reserve an estimate for the replacement while both input states remain live.

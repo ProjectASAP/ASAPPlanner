@@ -34,8 +34,17 @@ pub trait AggregateCore: Send + Sync {
     }
 
     /// Approximate in-memory footprint, used for execution memory reservations.
+    /// A state shared with other rows (see [`Self::shared_state`]) is not
+    /// included.
     fn approx_memory_bytes(&self) -> usize {
         4096
+    }
+
+    /// The identity and footprint of a state this row shares with other
+    /// rows (one Hydra grid read by every group of a build). Reservations
+    /// count it once per identity, not once per row.
+    fn shared_state(&self) -> Option<(usize, usize)> {
+        None
     }
 }
 
