@@ -48,6 +48,23 @@ pub(crate) fn source_norm_statistic(norm: &str, source: &str) -> String {
     format!("{norm}[{source}]")
 }
 
+/// Whether every value folded is non-negative, for values that are raw
+/// samples of `metric` or plain sums of them, e.g.
+/// `values_non_negative[m]`: an indicator, 1 when proven. Plan selection
+/// binds it to 1 when the data workload declares `metric` a counter, and
+/// leaves it unbound otherwise.
+pub(crate) fn samples_sign_statistic(metric: &str) -> String {
+    format!("{VALUES_NON_NEGATIVE}[{metric}]")
+}
+
+/// The metric a [`samples_sign_statistic`] names.
+pub(crate) fn parse_samples_sign_statistic(statistic: &str) -> Option<&str> {
+    statistic
+        .strip_prefix(VALUES_NON_NEGATIVE)?
+        .strip_prefix('[')?
+        .strip_suffix(']')
+}
+
 /// The norm and source a [`source_norm_statistic`] names.
 pub(crate) fn parse_source_norm_statistic(statistic: &str) -> Option<(&'static str, &str)> {
     [STREAM_L1_NORM, STREAM_L2_NORM]
@@ -352,11 +369,31 @@ impl DefaultAccuracyModel {
         let mut provenance = Vec::new();
         let count = row_count(stats, &mut provenance);
         let bound = if needs_sign && stats.values_non_negative.is_none() {
-            provenance.push(GuaranteeSource::UnavailableStatistic {
-                statistic: VALUES_NON_NEGATIVE.into(),
-            });
-            BoundExpr::Unknown {
-                statistic: VALUES_NON_NEGATIVE.into(),
+            match &stats.sign_statistic {
+                // The sign of one metric's samples: the bound, gated on it.
+                Some(statistic) => {
+                    provenance.push(GuaranteeSource::UnavailableStatistic {
+                        statistic: statistic.clone(),
+                    });
+                    BoundExpr::Product {
+                        factors: vec![
+                            BoundExpr::Max {
+                                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+                            },
+                            BoundExpr::Unknown {
+                                statistic: statistic.clone(),
+                            },
+                        ],
+                    }
+                }
+                None => {
+                    provenance.push(GuaranteeSource::UnavailableStatistic {
+                        statistic: VALUES_NON_NEGATIVE.into(),
+                    });
+                    BoundExpr::Unknown {
+                        statistic: VALUES_NON_NEGATIVE.into(),
+                    }
+                }
             }
         } else {
             BoundExpr::Max {
@@ -1292,6 +1329,39 @@ mod tests {
             assert!(with(Some(false)).is_err(), "{op:?}");
         }
     }
+    /// Over the samples of one metric, an unknown sign is named by that
+    /// metric ([`samples_sign_statistic`]) and gates the bound: binding it
+    /// to 1 (proven) gives the relative bound, and left unbound it stays
+    /// unknown.
+    #[test]
+    fn a_sign_over_one_metrics_samples_gates_the_relative_bound() {
+        let statistic = samples_sign_statistic("m");
+        assert_eq!(parse_samples_sign_statistic(&statistic), Some("m"));
+        assert_eq!(parse_samples_sign_statistic(VALUES_NON_NEGATIVE), None);
+        for op in [
+            CompositionOperator::ExactSum,
+            CompositionOperator::ExactAverage,
+        ] {
+            let out = DefaultAccuracyModel
+                .propagate(
+                    &op,
+                    &[rel(0.01)],
+                    None,
+                    &PropagationStats {
+                        sign_statistic: Some(statistic.clone()),
+                        input_row_count: Some(3),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(out.bound.evaluate(), None, "{op:?}");
+            let proven = out.bind(&|s| (s == statistic).then_some(1.0));
+            assert_eq!(proven.bound.evaluate(), Some(0.01), "{op:?}");
+            let other = out.bind(&|s| (s == samples_sign_statistic("n")).then_some(1.0));
+            assert_eq!(other.bound.evaluate(), None, "{op:?}");
+        }
+    }
+
     #[test]
     fn exact_average_has_its_own_absolute_error_rule() {
         let out = DefaultAccuracyModel

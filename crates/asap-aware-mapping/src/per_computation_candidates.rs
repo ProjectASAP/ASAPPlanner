@@ -90,6 +90,7 @@ use asap_types::pre_asap::{
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
+use crate::accuracy::composition::samples_sign_statistic;
 use crate::accuracy::composition::{
     additive_as_absolute, StreamNorm, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
@@ -994,7 +995,8 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
 /// subquery with an explicit resolution, `⌈range / resolution⌉`. `None`
 /// when that count is not in the query.
 fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<PropagationStats> {
-    match reduction {
+    let sign_statistic = estimates_samples_of(input).map(|metric| samples_sign_statistic(&metric));
+    let stats = match reduction {
         // The input cardinality bounds a PromQL fold's rows (series), not
         // the rows of a SQL group.
         Reduction::Reduce(_) if reads_table(input) => Some(PropagationStats {
@@ -1013,6 +1015,54 @@ fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Propaga
             }),
             _ => None,
         },
+    }?;
+    Some(PropagationStats {
+        sign_statistic,
+        ..stats
+    })
+}
+
+/// The metric whose raw samples, or plain sums of them, a composed node's
+/// values are or estimate, or `None`: [`samples_of_metric`]'s strict rule
+/// over a composed candidate. An exact sum accumulator, a renaming and a
+/// heap estimate whose update weights carry the
+/// [`WeightDomain::SamplesOfMetric`] requirement keep it; anything else
+/// (rate, arithmetic, other functions) ends it.
+fn estimates_samples_of(node: &OperatorNode) -> Option<String> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap()? {
+            ASAPOp::SummaryAgg {
+                family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
+                child,
+                filter: None,
+                ..
+            } => estimates_samples_of(child),
+            _ => None,
+        },
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
+            match summary_input.asap()? {
+                ASAPOp::SummaryAgg {
+                    input:
+                        SummaryUpdate {
+                            weight_domain: WeightDomain::SamplesOfMetric { metric },
+                            ..
+                        },
+                    filter: None,
+                    ..
+                } => Some(metric.clone()),
+                _ => None,
+            }
+        }
+        Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
+            if cols.len() == child.schema.fields.len()
+                && cols
+                    .iter()
+                    .enumerate()
+                    .all(|(i, item)| item.expr == ScalarExpr::Column(i)) =>
+        {
+            estimates_samples_of(child)
+        }
+        _ => samples_of_metric(node),
     }
 }
 
@@ -2940,5 +2990,61 @@ mod tests {
         assert!(whole > 0 && m > 1, "{n} {whole} {m}");
         assert_eq!(inventory.combinations(), (n - whole) * m + whole);
         assert_eq!(inventory.combinations(), enumerated);
+    }
+
+    /// The metric whose raw samples, or plain sums of them, a composed node's
+    /// values estimate: a whole-expression heap's estimates and an exact
+    /// sum over the samples are; a rate or any other function is not. A
+    /// fold over them names its unknown sign by that metric.
+    #[test]
+    fn values_estimating_samples_name_their_sign_by_the_metric() {
+        let inventory = inventory("topk by (job) (10, sum_over_time(m[1m]))");
+        let topk = topk_target(&inventory);
+        for (candidate, root) in composed_with(&inventory, topk) {
+            let estimate = OperatorNode::reachable(&root)
+                .into_iter()
+                .find(|n| {
+                    matches!(
+                        n.asap(),
+                        Some(
+                            ASAPOp::SummaryEstimate { .. }
+                                | ASAPOp::FinalizeExactAccumulator { .. }
+                        )
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                estimates_samples_of(&estimate).as_deref(),
+                Some("m"),
+                "{candidate:?}"
+            );
+            let stats = fold_stats(&Reduction::by(vec![]), &estimate).unwrap();
+            assert_eq!(
+                stats.sign_statistic,
+                Some(crate::accuracy::composition::samples_sign_statistic("m"))
+            );
+        }
+        let rate = inventory_root("sum by (job) (rate(m[1m]))");
+        let finalized = OperatorNode::reachable(&rate)
+            .into_iter()
+            .filter(|n| matches!(n.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. })))
+            .collect::<Vec<_>>();
+        assert!(!finalized.is_empty());
+        for node in finalized {
+            assert_eq!(estimates_samples_of(&node), None);
+        }
+        let stats = fold_stats(&Reduction::by(vec![]), &rate).unwrap();
+        assert_eq!(stats.sign_statistic, None);
+    }
+
+    /// The first composed candidate of `query`.
+    fn inventory_root(query: &str) -> Rc<OperatorNode> {
+        let inventory = inventory(query);
+        let composed =
+            compose_logical_candidate(&inventory, &vec![0; inventory.targets.len()]).unwrap();
+        let QueryRoot::Operator(root) = &composed[0].1 else {
+            panic!("operator root")
+        };
+        root.clone()
     }
 }

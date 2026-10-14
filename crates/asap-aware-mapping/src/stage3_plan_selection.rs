@@ -85,8 +85,8 @@ use asap_types::workload::{DataWorkload, MetricType, QueryRecurrence, RepeatedDe
 use thiserror::Error;
 
 use crate::accuracy::composition::{
-    parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS, INPUT_ROW_COUNT,
-    PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
+    parse_samples_sign_statistic, parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS,
+    INPUT_ROW_COUNT, PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
 use crate::accuracy::{OperandDomain, PropagationStats};
 use crate::analytical_cost::{
@@ -446,11 +446,17 @@ fn bound_root_guarantee(
     }))
 }
 
-/// A data-workload statistic Stage 1 left symbolic: the input row count or
-/// one source's stream norm, from evidence that holds at any planning time.
+/// A data-workload statistic Stage 1 left symbolic: the input row count,
+/// one source's stream norm, from evidence that holds at any planning time,
+/// or the sign of one metric's samples, from its declared type.
 fn workload_statistic(statistic: &str, data: &DataWorkload) -> Option<f64> {
     // Without a planning time, only evidence that cannot expire is fresh.
     const ANY_TIME: u64 = u64::MAX;
+    // The sign of one metric's samples: proven (1) when the metric is
+    // declared a counter; no type is inferred from its name.
+    if let Some(metric) = parse_samples_sign_statistic(statistic) {
+        return (data.metric_types.get(metric) == Some(&MetricType::Counter)).then_some(1.0);
+    }
     if statistic == INPUT_ROW_COUNT {
         return data
             .input_cardinality
@@ -1459,6 +1465,48 @@ mod tests {
                     p2.reason
                 );
             }
+        }
+    }
+
+    /// A relative bound gated on the sign of one metric's samples is bound
+    /// when the data workload declares that metric a counter, and stays
+    /// unknown for a gauge, an undeclared metric or a counter by another
+    /// name.
+    #[test]
+    fn sign_of_counter_samples_is_bound_from_the_declared_type() {
+        use crate::accuracy::composition::samples_sign_statistic;
+        let gated = AccuracyGuarantee {
+            metric: ErrorMetric::RelativeValue,
+            bound: BoundExpr::Product {
+                factors: vec![
+                    BoundExpr::Constant { value: 0.01 },
+                    BoundExpr::Unknown {
+                        statistic: samples_sign_statistic("m"),
+                    },
+                ],
+            },
+            failure_probability: ProbabilityExpr::Constant { value: 0.001 },
+            provenance: vec![],
+        };
+        let node = lower_promql("sum(m)", AccuracyTarget::Exact);
+        let root = QueryRoot::Operator(Rc::new((*node).clone().with_guarantee(Some(gated))));
+        let with = |types: &[(&str, MetricType)]| DataWorkload {
+            metric_types: types.iter().map(|(m, t)| (m.to_string(), *t)).collect(),
+            ..data()
+        };
+        let bound = |data: &DataWorkload| {
+            bound_root_guarantee(&root, data, &PlanningModels::builtin())
+                .unwrap()
+                .bound
+                .evaluate()
+        };
+        assert_eq!(bound(&with(&[("m", MetricType::Counter)])), Some(0.01));
+        for types in [
+            vec![("m", MetricType::Gauge)],
+            vec![("m_total", MetricType::Counter)],
+            vec![],
+        ] {
+            assert_eq!(bound(&with(&types)), None, "{types:?}");
         }
     }
 

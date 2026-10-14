@@ -66,6 +66,13 @@ pub struct PropagationStats {
     /// the multiplicative relative-error rule, which is unsound across a
     /// sign change.
     pub values_non_negative: Option<bool>,
+    /// The statistic an unknown sign is named by when the folded values are
+    /// one metric's raw samples or plain sums of them
+    /// ([`samples_sign_statistic`](crate::accuracy::composition::samples_sign_statistic)):
+    /// the relative bound is then gated on it, and plan selection binds it
+    /// to 1 when the metric is declared a counter. `None`: the bare
+    /// `values_non_negative`, which nothing binds.
+    pub sign_statistic: Option<String>,
     /// Number of input rows an exact aggregation consumes (e.g. the number
     /// of groups a function folds), for exact aggregate union bounds
     /// bound over per-input failures.
