@@ -40,10 +40,10 @@ with Q1–Q3's targets and a 15-s ingestion interval (PromQL needs one).
 | Stage | Doc | Today (stand-in) |
 |---|---|---|
 | Query-language frontends | One summary-free DAG: `Distinct`, `Entropy`, `L2` over `flows.src_ip`, last 1 m | Same for the stand-in. SQL: Q1 is `aggregate:cardinality`; Q2 and Q3 are `count` per `src_ip` → window function / projection → `sum` (not recognized). |
-| Logical ASAP-aware optimization, Pass 1 | Each computation: exact, a specialized summary, UnivMon. 3 × 3 × 3 = **27** | Q1: exact, HLL, Theta, KMV, UnivMon. Q2, Q3: exact, UnivMon (no specialized entropy or norm summary). 5 × 2 × 2 = **20** |
+| Logical ASAP-aware optimization, Pass 1 | Each computation: exact, a specialized summary, UnivMon. 3 × 3 × 3 = **27** | Q1: exact, HLL, KMV, UnivMon (no Theta: `asap_sketchlib` has no Theta sketch). Q2, Q3: exact, UnivMon (no specialized entropy or norm summary). 4 × 2 × 2 = **16** |
 | Logical ASAP-aware optimization, Pass 2 | Summary-capability rule: + 1 (one UnivMon for all three, sized for ε = 0.01) + 9 (3 pairs share a UnivMon × 3 options of the third). Independent kept. **37**. Window composition left out. | Not implemented: **20**, no candidate shares a node. |
 | Physical ASAP-aware optimization | Same options as Example 1: no window form → rebuilt from raw samples each refresh. | One physical candidate per logical candidate, every sub-DAG `NotMaterialized`: **20**. |
-| Plan selection | One UnivMon sized for ε = 0.01 vs three separate summaries; the shared one usually wins (one update per flow record instead of three). | HLL is invalid (its bound has no failure probability for the (ε, δ) target) and so is every UnivMon (its estimates have no guarantee). Q1 on Theta or KMV with Q2, Q3 exact is valid but costlier. The all-exact plan is selected. |
+| Plan selection | One UnivMon sized for ε = 0.01 vs three separate summaries; the shared one usually wins (one update per flow record instead of three). | HLL is invalid (its bound has no failure probability for the (ε, δ) target) and so is every UnivMon (its estimates have no guarantee). Q1 on KMV with Q2, Q3 exact is valid but costlier. The all-exact plan is selected. |
 
 ## Invariants and tests
 
@@ -63,7 +63,7 @@ with Q1–Q3's targets and a 15-s ingestion interval (PromQL needs one).
 |---|---|---|
 | Once recognized, the SQL workload has the stand-in's Pass 1 options | `stage1_logical_asap_optimization_sql_has_the_standin_options` | ignored: #598 (ambiguity 9) |
 | Each statistic has an exact and a UnivMon option | `stage1_logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic` | passes |
-| Q1 has a specialized distinct-count summary (HLL, Theta or KMV) | `stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary` | passes |
+| Q1 has a specialized distinct-count summary (HLL or KMV) | `stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary` | passes |
 | Q2 and Q3 have a specialized entropy and norm summary | `stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | ignored: no PR yet |
 | Every combination of the queries' own options is kept, with no shared summary | `stage1_logical_asap_optimization_keeps_every_independent_combination` | passes |
 | A candidate has one UnivMon build read by all three queries, feeding a distinct-count, an entropy and an L2 estimate | `stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three` | ignored: #595, #596 |
