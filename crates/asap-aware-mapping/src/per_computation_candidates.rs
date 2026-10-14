@@ -1787,6 +1787,14 @@ fn measure_input(
         AggIntent::Count { .. } if input.result_kind == OperatorResultKind::Relation => {
             SummaryInputExpr::Column(counted_column(schema, filter)?)
         }
+        // A top-k ranks its child's aggregate output, not a column of its own.
+        AggIntent::TopK { .. } => SummaryInputExpr::Column(
+            crate::realization::ranked_value(input)
+                .map_err(|_| {
+                    PerComputationCandidateError::Unsupported("Top-K has no ranked column")
+                })?
+                .1,
+        ),
         _ => crate::realization::summarised_input(intent, schema).map_err(|_| {
             PerComputationCandidateError::Unsupported("input column outside child schema")
         })?,
@@ -1877,14 +1885,17 @@ fn summary_update(
                     asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
                 ))
             } else if child.closed {
-                // A closed PromQL child (an aggregate's output, say) lists
-                // every label: the item is its labels outside the partition,
-                // as the legacy current-series and counter rules rank them.
-                // SQL rows carry no sample value to rank by.
-                let value = resolve_column_ref(&ColumnRef::SampleValue, child).map_err(|_| {
-                    PerComputationCandidateError::Unsupported(
-                        "Top-K item identity for closed schemas without a sample value",
-                    )
+                // A closed child (an aggregate's output, say) lists every
+                // column: the item is its columns outside the partition and
+                // the ranked value, as the legacy current-series and counter
+                // rules rank them.
+                let SummaryInputExpr::Column(ranked) = &weight else {
+                    return Err(PerComputationCandidateError::Unsupported(
+                        "Top-K ranked value is not a column",
+                    ));
+                };
+                let value = resolve_column_ref(ranked, child).map_err(|_| {
+                    PerComputationCandidateError::Unsupported("Top-K ranked value does not resolve")
                 })?;
                 let items: Vec<_> = child
                     .fields
@@ -1911,7 +1922,8 @@ fn summary_update(
             };
             SummaryUpdate {
                 item: Some(item),
-                weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                // The ranked value ([`measure_input`]).
+                weight,
                 // Not proven non-negative; selection decides whether CMS is admissible.
                 weight_domain: WeightDomain::UnknownOrSigned,
             }
