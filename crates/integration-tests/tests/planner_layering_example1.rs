@@ -5,10 +5,12 @@
 //! the real stages. Tests whose expectation needs a feature not in the stack
 //! yet are `#[ignore]`d with the PR or issue that delivers it.
 //!
-//! Scope: logical ASAP-aware optimization = Pass 1 only (no Pass 2);
-//! physical ASAP-aware optimization = operator implementation with every
-//! sub-DAG `NotMaterialized`. Counts are 1 → 3 → 3 → 1, a subset of the
-//! doc's 1 → 54 → 156 → 1.
+//! Scope: logical ASAP-aware optimization = Pass 1 and Pass 2's
+//! identical-expression rule (no window composition); physical ASAP-aware
+//! optimization = operator implementation with every sub-DAG
+//! `NotMaterialized`. Pass 1 gives 3 candidates; Pass 2 adds, for each, one
+//! sharing the scan and one sharing the scan and the range selector: 9 → 9 →
+//! 1, a subset of the doc's 1 → 54 → 156 → 1.
 
 mod planner_layering_common;
 
@@ -93,8 +95,8 @@ fn classify(dag: &impl ExportedDag, query_roots: &[NodeId]) -> (Q2Option, bool) 
     (option, !c1.is_disjoint(&c2))
 }
 
-/// The candidate with Q2 `option` whose queries share no node (#588 adds a
-/// shared-input variant of each).
+/// The candidate with Q2 `option` whose queries share no node (Pass 2 adds
+/// shared-input variants of each).
 fn physical_with(run: &Run, option: Q2Option) -> &Physical {
     let mut found = run
         .physical
@@ -156,8 +158,8 @@ fn stage0_query_language_frontends_queries_do_not_share_nodes() {
 // ── Logical ASAP-aware optimization ──────────────────────────────────────
 
 /// Pass 1 gives 1 × 3 = 3 candidates without a shared input: Q2's top-k is
-/// exact, Count-Min + heap or CountSketch + heap. (#588 adds a shared-input
-/// variant of each.)
+/// exact, Count-Min + heap or CountSketch + heap. (Pass 2 adds shared-input
+/// variants of each.)
 #[test]
 fn stage1_logical_asap_optimization_has_three_pass1_candidates() {
     let run = pipeline();
@@ -243,7 +245,6 @@ fn stage1_logical_asap_optimization_q2_offers_hydra() {
 
 /// Pass 2's identical-expression rule adds a shared-input variant of every Q2 option and keeps the independent one.
 #[test]
-#[ignore = "needs the Pass 2 identical-expression rule (#588)"]
 fn stage1_logical_asap_optimization_keeps_independent_and_shared_variants() {
     let run = pipeline();
     let found: Vec<_> = run
@@ -603,7 +604,6 @@ fn stage3_plan_selection_selected_plan_compiles_in_the_physical_planner() {
 
 /// Sharing the input never costs more than reading it separately.
 #[test]
-#[ignore = "needs the Pass 2 identical-expression rule (#588): there are no shared-input variants to compare"]
 fn stage3_plan_selection_shared_input_is_not_costlier() {
     let run = pipeline();
     let by_combo: BTreeMap<_, _> = run

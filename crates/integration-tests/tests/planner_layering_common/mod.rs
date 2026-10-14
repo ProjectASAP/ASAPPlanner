@@ -444,7 +444,9 @@ pub fn assert_selects_cheapest_valid(run: &Run) {
         .iter()
         .filter(|p| !invalid.contains_key(p.id.as_str()))
     {
-        assert!(best <= run.cost(&p.id).unwrap(), "{} is cheaper", p.id);
+        // Totals within rounding of each other tie (plan selection's rule).
+        let cost = run.cost(&p.id).unwrap();
+        assert!(best <= cost + cost.abs() * 1e-9, "{} is cheaper", p.id);
     }
 }
 
