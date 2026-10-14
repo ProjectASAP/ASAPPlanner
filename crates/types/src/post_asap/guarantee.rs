@@ -14,7 +14,7 @@
 //!
 //! ## What a guarantee says
 //!
-//! [`ResultGuarantee`] is attached to a finalized, caller-visible value —
+//! [`AccuracyGuarantee`] is attached to a finalized, caller-visible value —
 //! [`crate::ir::OperatorNode::guarantee`] on a `SummaryEstimate` evaluation, an
 //! exact accumulator, or a kept pre-ASAP sub-DAG — never to raw summary
 //! state (a `SummaryAgg` sketch node carries `None`; its evaluation carries the
@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::AccuracyTarget;
 
-/// Which error quantity a [`ResultGuarantee`] bounds. `#[non_exhaustive]`:
+/// Which error quantity a [`AccuracyGuarantee`] bounds. `#[non_exhaustive]`:
 /// a deployment's own `AccuracyModel` may need a metric this crate does not
 /// enumerate yet, and downstream matches must not assume the list is closed.
 #[non_exhaustive]
@@ -129,7 +129,7 @@ impl BoundExpr {
         }
     }
 
-    /// See [`ResultGuarantee::bind`].
+    /// See [`AccuracyGuarantee::bind`].
     pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
         let all = |terms: &[BoundExpr]| terms.iter().map(|t| t.bind(value)).collect();
         match self {
@@ -268,7 +268,7 @@ impl ProbabilityExpr {
         raw.is_finite().then(|| raw.clamp(0.0, 1.0))
     }
 
-    /// See [`ResultGuarantee::bind`].
+    /// See [`AccuracyGuarantee::bind`].
     pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
         match self {
             ProbabilityExpr::Zero | ProbabilityExpr::Constant { .. } => self.clone(),
@@ -345,7 +345,7 @@ pub enum CompositionOperator {
     TopKSelection,
 }
 
-/// One entry in a [`ResultGuarantee`]'s provenance trail — enough for a
+/// One entry in a [`AccuracyGuarantee`]'s provenance trail — enough for a
 /// reader to reconstruct *why* the bound is what it is without re-running
 /// the planner. `#[non_exhaustive]` so runtime evidence (issue #239) and
 /// deployment-specific sources can be appended later.
@@ -384,7 +384,7 @@ pub enum GuaranteeSource {
     /// composition (0-based, in the parent's child order).
     ChildGuarantee {
         input_index: usize,
-        guarantee: Box<ResultGuarantee>,
+        guarantee: Box<AccuracyGuarantee>,
     },
     /// The propagation rule that produced this guarantee from its inputs.
     CompositionStep {
@@ -416,14 +416,14 @@ pub enum GuaranteeSource {
 /// The machine-readable accuracy statement attached to a finalized
 /// post-ASAP value — see the module docs for its semantics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ResultGuarantee {
+pub struct AccuracyGuarantee {
     pub metric: ErrorMetric,
     pub bound: BoundExpr,
     pub failure_probability: ProbabilityExpr,
     pub provenance: Vec<GuaranteeSource>,
 }
 
-impl ResultGuarantee {
+impl AccuracyGuarantee {
     /// This guarantee with every [`BoundExpr::Unknown`] (and
     /// [`ProbabilityExpr::Unknown`]) leaf whose statistic `value` supplies
     /// replaced by that value. Plan selection binds statistics this way;
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn optimistic_floor_preserves_known_contributions_without_certifying() {
-        let guarantee = ResultGuarantee {
+        let guarantee = AccuracyGuarantee {
             metric: ErrorMetric::Frequency,
             bound: BoundExpr::Sum {
                 terms: vec![
@@ -623,14 +623,14 @@ mod tests {
 
     #[test]
     fn exact_guarantee_is_zero_layers() {
-        let g = ResultGuarantee::exact("test");
+        let g = AccuracyGuarantee::exact("test");
         assert!(g.is_exact());
         assert_eq!(g.approximate_layer_count(), 0);
     }
 
     #[test]
     fn guarantee_round_trips_through_json() {
-        let g = ResultGuarantee {
+        let g = AccuracyGuarantee {
             metric: ErrorMetric::Frequency,
             bound: BoundExpr::Sum {
                 terms: vec![
@@ -652,7 +652,7 @@ mod tests {
         let json = serde_json::to_value(&g).unwrap();
         assert_eq!(json["metric"], "frequency");
         assert_eq!(json["bound"]["op"], "sum");
-        let back: ResultGuarantee = serde_json::from_value(json).unwrap();
+        let back: AccuracyGuarantee = serde_json::from_value(json).unwrap();
         assert_eq!(back, g);
     }
 
@@ -663,7 +663,7 @@ mod tests {
         let rows = || BoundExpr::Unknown {
             statistic: "input_row_count".into(),
         };
-        let g = ResultGuarantee {
+        let g = AccuracyGuarantee {
             metric: ErrorMetric::AbsoluteValue,
             bound: BoundExpr::Product {
                 factors: vec![BoundExpr::Constant { value: 0.01 }, rows()],

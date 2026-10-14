@@ -263,7 +263,7 @@ pub(crate) fn weighted(
 /// A point-count estimate over `summary` carrying `guarantee`.
 pub(crate) fn estimate_over(
     summary: Rc<OperatorNode>,
-    guarantee: asap_types::post_asap::ResultGuarantee,
+    guarantee: asap_types::post_asap::AccuracyGuarantee,
 ) -> Rc<OperatorNode> {
     use asap_types::ir::{ASAPOp, Operator};
     use asap_types::post_asap::SketchStatistic;

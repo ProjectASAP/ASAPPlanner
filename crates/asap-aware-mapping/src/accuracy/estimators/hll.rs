@@ -10,7 +10,7 @@ pub(super) fn generic_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
-) -> Option<ResultGuarantee> {
+) -> Option<AccuracyGuarantee> {
     let SketchParams::Hll { precision } = params else {
         return None;
     };
@@ -48,9 +48,9 @@ impl ClassicHllConfidence {
         })
     }
 
-    pub fn guarantee(&self, precision: u8) -> Option<ResultGuarantee> {
+    pub fn guarantee(&self, precision: u8) -> Option<AccuracyGuarantee> {
         let delta = self.failure_probability(precision)?;
-        Some(ResultGuarantee {
+        Some(AccuracyGuarantee {
             metric: ErrorMetric::Cardinality,
             bound: BoundExpr::Constant {
                 value: self.relative_error,

@@ -74,9 +74,9 @@ use std::rc::Rc;
 use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
-    default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
-    FieldDataType, GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchParams,
+    default_hydra_params, hydra_kind_for, AccuracyError, AccuracyGuarantee, BoundExpr,
+    CompositionOperator, FieldDataType, GroupingStrategy, GuaranteeSource, HydraKind,
+    ProbabilityExpr, SketchAlgorithm, SketchParams,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 
@@ -445,7 +445,7 @@ fn with_grouping(
 /// grid. The paper's collision term depends on deployment/data statistics;
 /// keeping those leaves symbolic makes the formula explicit while ensuring
 /// target satisfaction fails closed until a caller supplies them.
-fn hydra_guarantee(inner: &ResultGuarantee, stats: &PropagationStats) -> ResultGuarantee {
+fn hydra_guarantee(inner: &AccuracyGuarantee, stats: &PropagationStats) -> AccuracyGuarantee {
     let mut provenance = inner.provenance.clone();
     provenance.extend(stats.evidence_provenance.clone());
     provenance.push(GuaranteeSource::ChildGuarantee {
@@ -466,7 +466,7 @@ fn hydra_guarantee(inner: &ResultGuarantee, stats: &PropagationStats) -> ResultG
         operator: CompositionOperator::ApproximateAggregate,
         rule: "hydra_shared_grid_union_bound".into(),
     });
-    ResultGuarantee {
+    AccuracyGuarantee {
         metric: inner.metric,
         bound: BoundExpr::Sum {
             terms: vec![
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn hydra_composes_inner_and_shared_grid_error_symbolically() {
-        let inner = ResultGuarantee {
+        let inner = AccuracyGuarantee {
             metric: ErrorMetric::Frequency,
             bound: BoundExpr::Constant { value: 0.01 },
             failure_probability: ProbabilityExpr::Constant { value: 0.02 },

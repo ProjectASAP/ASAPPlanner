@@ -355,7 +355,9 @@ use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
     SortKey,
 };
-use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
+use asap_types::post_asap::{
+    AccuracyError, AccuracyGuarantee, CompositionOperator, GuaranteeSource,
+};
 use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactParams, ExecutionDataStateError, ExecutionTiming, Field,
     FieldDataType, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams, Schema,
@@ -1450,7 +1452,7 @@ impl<'a> ASAPStrategies<'a> {
                     .guarantee
                     .as_ref()
                     .filter(|g| !g.is_exact())
-                    .map(ResultGuarantee::approximate_layer_count)
+                    .map(AccuracyGuarantee::approximate_layer_count)
             });
 
         // `realizations_for_intent` is already exhaustive and ranked — no
@@ -1831,7 +1833,7 @@ fn exact_topk_over_temporal_values(
         || !values
             .guarantee
             .as_ref()
-            .is_some_and(ResultGuarantee::is_exact)
+            .is_some_and(AccuracyGuarantee::is_exact)
     {
         return Ok(None);
     }
@@ -2009,7 +2011,7 @@ fn realize_binary(
                         .or_else(|| {
                             node.guarantee
                                 .as_ref()
-                                .is_some_and(ResultGuarantee::is_exact)
+                                .is_some_and(AccuracyGuarantee::is_exact)
                                 .then_some(alpha)
                         })
                         .is_some_and(|alpha| domain.supports_ddsketch(alpha))
@@ -2074,7 +2076,7 @@ fn realize_binary(
             !node
                 .guarantee
                 .as_ref()
-                .is_some_and(ResultGuarantee::is_exact)
+                .is_some_and(AccuracyGuarantee::is_exact)
         })
     {
         return Ok(None);
@@ -2098,7 +2100,7 @@ fn realize_binary(
                 || node
                     .guarantee
                     .as_ref()
-                    .is_some_and(ResultGuarantee::is_exact)
+                    .is_some_and(AccuracyGuarantee::is_exact)
         }) {
         [lhs_node.guarantee.clone(), rhs_node.guarantee.clone()]
             .into_iter()
@@ -2120,8 +2122,8 @@ fn realize_binary(
     } else {
         [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
             .into_iter()
-            .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
-            .then(|| ResultGuarantee::exact("BinaryOp over exact operands"))
+            .all(|guarantee| guarantee.is_some_and(AccuracyGuarantee::is_exact))
+            .then(|| AccuracyGuarantee::exact("BinaryOp over exact operands"))
     };
 
     if direct_ddsketch_ratio && has_ratio_domains && guarantee.is_none() {
@@ -2338,7 +2340,7 @@ fn ddsketch_quantile_alpha(node: &OperatorNode) -> Option<f64> {
 fn has_missing_accuracy_evidence(node: &OperatorNode) -> bool {
     node.guarantee
         .as_ref()
-        .is_none_or(ResultGuarantee::has_unknown)
+        .is_none_or(AccuracyGuarantee::has_unknown)
 }
 
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
@@ -2430,7 +2432,7 @@ fn retain_exact_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Realizati
             .clone()
             // A kept pre-ASAP sub-DAG is executed exactly by the runtime
             // (`Realization::PassThrough`'s contract) — zero error.
-            .with_guarantee(Some(ResultGuarantee::exact("RetainedExact"))),
+            .with_guarantee(Some(AccuracyGuarantee::exact("RetainedExact"))),
     );
     KEPT.with(|memo| {
         let mut memo = memo.borrow_mut();
@@ -2804,7 +2806,7 @@ fn maintenance_exact_values(node: Rc<OperatorNode>) -> Option<Rc<OperatorNode>> 
             && node
                 .guarantee
                 .as_ref()
-                .is_some_and(ResultGuarantee::is_exact) =>
+                .is_some_and(AccuracyGuarantee::is_exact) =>
         {
             Operator::NonASAP(NonASAPOp::BinaryOp {
                 lhs: maintenance_exact_values(lhs.clone())?,
@@ -3604,14 +3606,14 @@ fn compose_guarantee(
     accuracy: &dyn AccuracyModel,
     evidence: &dyn AccuracyEvidenceProvider,
     allocation: Option<GuaranteeSource>,
-) -> Result<Option<ResultGuarantee>, AccuracyError> {
+) -> Result<Option<AccuracyGuarantee>, AccuracyError> {
     let (op, local) = match (family, query) {
         (FieldDataType::ExactAggregate(kind, _), _) => {
             let op = match kind {
                 // A row count does not depend on the rows' values: exact
                 // regardless of the child's own error.
                 ExactKind::Count => {
-                    return Ok(Some(ResultGuarantee::exact(
+                    return Ok(Some(AccuracyGuarantee::exact(
                         "ExactAggregate(Count): row count is independent of input values",
                     )))
                 }
@@ -3626,7 +3628,9 @@ fn compose_guarantee(
             };
             (
                 op,
-                Some(ResultGuarantee::exact(format!("ExactAggregate({kind:?})"))),
+                Some(AccuracyGuarantee::exact(format!(
+                    "ExactAggregate({kind:?})"
+                ))),
             )
         }
         (_, Some(query)) => (
@@ -5172,7 +5176,7 @@ impl<'a> GlobalSelection<'a> {
             !child
                 .guarantee
                 .as_ref()
-                .is_some_and(ResultGuarantee::is_exact)
+                .is_some_and(AccuracyGuarantee::is_exact)
         });
         if computes_values && approximate_input {
             return retain_exact(target);
@@ -5184,10 +5188,10 @@ impl<'a> GlobalSelection<'a> {
                     child
                         .guarantee
                         .as_ref()
-                        .is_some_and(ResultGuarantee::is_exact)
+                        .is_some_and(AccuracyGuarantee::is_exact)
                 }) =>
             {
-                Some(ResultGuarantee::exact(format!(
+                Some(AccuracyGuarantee::exact(format!(
                     "{} over exact inputs",
                     target.operator.kind_name()
                 )))
@@ -7301,7 +7305,7 @@ mod tests {
         let is_exact = |node: &OperatorNode| {
             node.guarantee
                 .as_ref()
-                .is_some_and(ResultGuarantee::is_exact)
+                .is_some_and(AccuracyGuarantee::is_exact)
         };
         for (root, both_exact_expected) in [
             (
@@ -10703,22 +10707,22 @@ mod tests {
             &self,
             family: &FieldDataType,
             query: &PostAsapSketchStatistic,
-        ) -> Option<ResultGuarantee> {
+        ) -> Option<AccuracyGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
         }
 
         fn propagate(
             &self,
             op: &CompositionOperator,
-            inputs: &[ResultGuarantee],
-            local: Option<&ResultGuarantee>,
+            inputs: &[AccuracyGuarantee],
+            local: Option<&AccuracyGuarantee>,
             stats: &PropagationStats,
-        ) -> Result<ResultGuarantee, AccuracyError> {
-            let rank = |g: &ResultGuarantee| g.is_exact() || g.metric == ErrorMetric::Rank;
+        ) -> Result<AccuracyGuarantee, AccuracyError> {
+            let rank = |g: &AccuracyGuarantee| g.is_exact() || g.metric == ErrorMetric::Rank;
             if let (CompositionOperator::ApproximateAggregate, true, Some(local)) =
                 (op, inputs.iter().all(rank), local)
             {
-                let relabel = |g: &ResultGuarantee| ResultGuarantee {
+                let relabel = |g: &AccuracyGuarantee| AccuracyGuarantee {
                     metric: ErrorMetric::AbsoluteValue,
                     ..g.clone()
                 };
@@ -10731,7 +10735,7 @@ mod tests {
             DefaultAccuracyModel.propagate(op, inputs, local, stats)
         }
 
-        fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
+        fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
             DefaultAccuracyModel.satisfies(guarantee, target)
         }
     }
@@ -10788,7 +10792,7 @@ mod tests {
         assert!(realized
             .guarantee
             .as_ref()
-            .is_some_and(ResultGuarantee::is_exact));
+            .is_some_and(AccuracyGuarantee::is_exact));
 
         // Cross-metric: a quantile over a cardinality estimate.
         let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
@@ -10836,7 +10840,7 @@ mod tests {
         assert!(summary_child(&root)
             .guarantee
             .as_ref()
-            .is_some_and(ResultGuarantee::is_exact));
+            .is_some_and(AccuracyGuarantee::is_exact));
     }
 
     #[test]
@@ -10869,7 +10873,7 @@ mod tests {
         assert!(root
             .guarantee
             .as_ref()
-            .is_some_and(ResultGuarantee::is_exact));
+            .is_some_and(AccuracyGuarantee::is_exact));
     }
 
     #[test]
@@ -10996,7 +11000,7 @@ mod tests {
             Replacement::SubDAG(node) if node.contains_asap() => node
                 .guarantee
                 .as_ref()
-                .is_some_and(ResultGuarantee::is_exact),
+                .is_some_and(AccuracyGuarantee::is_exact),
             Replacement::SubDAG(_) => true,
             Replacement::ExactComposition(_) => false,
         }));
@@ -11029,7 +11033,7 @@ mod tests {
 
         assert!(group.candidates.iter().any(|candidate| matches!(
             &candidate.replacement,
-            Replacement::SubDAG(node) if node.guarantee.as_ref().is_some_and(ResultGuarantee::has_unknown)
+            Replacement::SubDAG(node) if node.guarantee.as_ref().is_some_and(AccuracyGuarantee::has_unknown)
         )));
         let candidate = group
             .candidates
@@ -11042,7 +11046,7 @@ mod tests {
         assert!(node
             .guarantee
             .as_ref()
-            .is_some_and(ResultGuarantee::has_unknown));
+            .is_some_and(AccuracyGuarantee::has_unknown));
         let selected = space.global_selection(&DefaultCostModel);
         assert!(!selected
             .for_target(&space.roots[0].1)

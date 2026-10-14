@@ -13,7 +13,7 @@ use super::non_asap::NonASAPOp;
 use super::summary_coverage::SummaryCoverage;
 use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::{ExecutionTiming, Materialization};
-use crate::post_asap::guarantee::ResultGuarantee;
+use crate::post_asap::guarantee::AccuracyGuarantee;
 use crate::pre_asap::schema::Schema;
 
 /// The output category of an operator, derived from the operation and its
@@ -100,7 +100,7 @@ pub struct OperatorNode {
     pub operator: Operator,
     pub result_kind: OperatorResultKind,
     pub schema: Schema,
-    pub guarantee: Option<ResultGuarantee>,
+    pub guarantee: Option<AccuracyGuarantee>,
     pub timing: Option<ExecutionTiming>,
     pub materialization: Materialization,
 }
@@ -138,7 +138,7 @@ impl OperatorNode {
         Self::new(operator).map(Rc::new)
     }
 
-    pub fn with_guarantee(mut self, guarantee: Option<ResultGuarantee>) -> Self {
+    pub fn with_guarantee(mut self, guarantee: Option<AccuracyGuarantee>) -> Self {
         self.guarantee = guarantee;
         self
     }

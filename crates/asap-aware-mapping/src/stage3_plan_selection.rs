@@ -54,7 +54,7 @@ use asap_types::ir::{
 };
 use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::{
-    CompositionOperator, ErrorMetric, FieldDataType, Materialization, ResultGuarantee,
+    AccuracyGuarantee, CompositionOperator, ErrorMetric, FieldDataType, Materialization,
     SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
@@ -249,7 +249,7 @@ fn accuracy_violation(
             }
         }
         let guarantee = bound_root_guarantee(root, data, models);
-        let meets = |g: &ResultGuarantee| models.accuracy.satisfies(g, target);
+        let meets = |g: &AccuracyGuarantee| models.accuracy.satisfies(g, target);
         if guarantee.as_ref().is_some_and(meets)
             || models
                 .evidence
@@ -286,7 +286,7 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 /// The theoretical guarantee of a query's output, as Stage 1 composed it:
 /// the root node's own, or a scalar root's composed over the operators it
 /// reads ([`scalar_guarantee`]).
-fn root_guarantee(root: &QueryRoot) -> Option<ResultGuarantee> {
+fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
     match root {
         QueryRoot::Operator(node) => node.guarantee.clone(),
         QueryRoot::Scalar(expr) => scalar_guarantee(expr, &|_| None),
@@ -309,7 +309,7 @@ fn bound_root_guarantee(
     root: &QueryRoot,
     data: &DataWorkload,
     models: &PlanningModels<'_>,
-) -> Option<ResultGuarantee> {
+) -> Option<AccuracyGuarantee> {
     let guarantee = root_guarantee(root)?;
     let domains = operand_domain_bounds(root, data, models);
     Some(guarantee.bind(&|statistic| {
@@ -376,7 +376,7 @@ impl<'a> DomainOperand<'a> {
 /// domains ([`operand_domain_statistic`]).
 struct DomainOperation<'a> {
     statistic: &'static str,
-    operands: [(DomainOperand<'a>, ResultGuarantee); 2],
+    operands: [(DomainOperand<'a>, AccuracyGuarantee); 2],
 }
 
 /// Each operand-domain statistic in `root`, bound to the largest bound
@@ -444,7 +444,7 @@ fn operand_domain_bounds(
 /// left symbolic on operand domains.
 fn scalar_domain_operations<'a>(
     expr: &'a ScalarExpr,
-    column: &dyn Fn(usize) -> Option<ResultGuarantee>,
+    column: &dyn Fn(usize) -> Option<AccuracyGuarantee>,
     operations: &mut Vec<DomainOperation<'a>>,
 ) {
     if let ScalarExpr::Arithmetic {
@@ -483,7 +483,7 @@ fn domain_bound(
 ) -> Option<f64> {
     let [(x, gx), (y, gy)] = &operation.operands;
     let (dx, dy) = (x.domain(models)?, y.domain(models)?);
-    let bind = |g: &ResultGuarantee| g.bind(&|statistic| workload_statistic(statistic, data));
+    let bind = |g: &AccuracyGuarantee| g.bind(&|statistic| workload_statistic(statistic, data));
     let (gx, gy) = (bind(gx), bind(gy));
     if operation.statistic == DIVISION_OPERAND_DOMAINS {
         let stats = PropagationStats {
@@ -504,7 +504,7 @@ fn domain_bound(
     }
     let magnitude = |d: &OperandDomain| d.lower.abs().max(d.upper.abs());
     let (mx, my) = (magnitude(&dx), magnitude(&dy));
-    let error = |g: &ResultGuarantee, m: f64| {
+    let error = |g: &AccuracyGuarantee, m: f64| {
         let bound = g.bound.evaluate()?;
         match g.metric {
             _ if g.is_exact() => Some(0.0),
@@ -1267,8 +1267,8 @@ mod tests {
     struct EveryOutputMeasuredExact;
 
     impl AccuracyEvidenceProvider for EveryOutputMeasuredExact {
-        fn output_guarantee(&self, _output: &QueryRoot) -> Option<ResultGuarantee> {
-            Some(ResultGuarantee::exact("measured"))
+        fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
+            Some(AccuracyGuarantee::exact("measured"))
         }
     }
 
@@ -1593,13 +1593,13 @@ mod tests {
     #[test]
     fn scalar_root_guarantees_compose_through_arithmetic() {
         let node = lower_promql("sum(m)", AccuracyTarget::Exact);
-        let approximate = ResultGuarantee {
+        let approximate = AccuracyGuarantee {
             metric: ErrorMetric::AbsoluteValue,
             bound: BoundExpr::Constant { value: 0.01 },
             failure_probability: ProbabilityExpr::Constant { value: 0.001 },
             provenance: vec![],
         };
-        let with = |guarantee: Option<ResultGuarantee>| {
+        let with = |guarantee: Option<AccuracyGuarantee>| {
             ScalarExpr::PromqlScalarFromVector(Rc::new((*node).clone().with_guarantee(guarantee)))
         };
         let doubled = |operand: ScalarExpr| {
@@ -1626,13 +1626,13 @@ mod tests {
         });
         let sum = root_guarantee(&difference).unwrap();
         assert!((sum.bound.evaluate().unwrap() - 0.02).abs() < 1e-12);
-        let rank = ResultGuarantee {
+        let rank = AccuracyGuarantee {
             metric: ErrorMetric::Rank,
             ..approximate
         };
         assert_eq!(root_guarantee(&doubled(with(Some(rank)))), None);
         assert!(
-            root_guarantee(&doubled(with(Some(ResultGuarantee::exact("exact")))))
+            root_guarantee(&doubled(with(Some(AccuracyGuarantee::exact("exact")))))
                 .is_some_and(|g| g.is_exact())
         );
     }
@@ -1690,7 +1690,7 @@ mod tests {
         !sketches.is_empty() && sketches.iter().all(|a| *a == algorithm)
     }
 
-    fn output_guarantee(candidate: &PhysicalCandidate) -> Option<ResultGuarantee> {
+    fn output_guarantee(candidate: &PhysicalCandidate) -> Option<AccuracyGuarantee> {
         root_guarantee(&candidate.roots[0])
     }
 
@@ -1935,13 +1935,13 @@ mod tests {
     }
 
     /// `query` carrying `guarantee`, as a `scalar(…)` operand.
-    fn scalar_of(query: &str, guarantee: ResultGuarantee) -> ScalarExpr {
+    fn scalar_of(query: &str, guarantee: AccuracyGuarantee) -> ScalarExpr {
         let node = lower_promql(query, AccuracyTarget::Exact);
         ScalarExpr::PromqlScalarFromVector(Rc::new((*node).clone().with_guarantee(Some(guarantee))))
     }
 
-    fn guarantee(metric: ErrorMetric, bound: f64, delta: f64) -> ResultGuarantee {
-        ResultGuarantee {
+    fn guarantee(metric: ErrorMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
+        AccuracyGuarantee {
             metric,
             bound: BoundExpr::Constant { value: bound },
             failure_probability: ProbabilityExpr::Constant { value: delta },
@@ -1989,7 +1989,7 @@ mod tests {
     #[test]
     fn stage3_binds_each_metric_stream_norm() {
         // Count-Min summaries of each metric's raw value column.
-        let raw = |query: &str, g: ResultGuarantee| {
+        let raw = |query: &str, g: AccuracyGuarantee| {
             ScalarExpr::PromqlScalarFromVector(crate::test_support::estimate_over(
                 crate::test_support::weighted(
                     crate::test_support::cms_summary(query),
