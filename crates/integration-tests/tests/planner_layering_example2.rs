@@ -85,6 +85,7 @@ fn data_workload(ingestion_interval: bool) -> DataWorkload {
         distribution: declared(DataDistribution::Zipf),
         stream_norms: Default::default(),
         max_distinct_per_evaluation: Default::default(),
+        metric_types: Default::default(),
     }
 }
 

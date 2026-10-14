@@ -59,7 +59,7 @@ use asap_types::post_asap::{
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::DataWorkload;
+use asap_types::workload::{DataWorkload, MetricType};
 use thiserror::Error;
 
 use crate::accuracy::composition::{
@@ -228,7 +228,9 @@ fn cheaper(cost: f64, best: f64) -> bool {
 /// or ratio of certified estimates can be unbounded. The root guarantee's
 /// symbolic statistics are bound first ([`bound_root_guarantee`]); one still
 /// unknown leaves the target unmet. Count-Min is admitted only over update
-/// weights proven non-negative, which its bound assumes.
+/// weights proven non-negative, which its bound assumes: an open
+/// [`WeightDomain::SamplesOfMetric`] requirement is met when `data` declares
+/// the metric a counter ([`confirmed_weights`]), and unmet otherwise.
 fn accuracy_violation(
     candidate: &PhysicalCandidate,
     targets: &[Option<AccuracyTarget>],
@@ -247,11 +249,20 @@ fn accuracy_violation(
             };
             if matches!(family, FieldDataType::Sketch(kind, _)
                     if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
-                && !matches!(input.weight_domain, WeightDomain::NonNegative { .. })
+                && !matches!(
+                    confirmed_weights(&input.weight_domain, data),
+                    WeightDomain::NonNegative { .. }
+                )
             {
+                let unconfirmed = match &input.weight_domain {
+                    WeightDomain::SamplesOfMetric { metric } => {
+                        format!(" (samples of `{metric}`, which is not declared a counter)")
+                    }
+                    _ => String::new(),
+                };
                 return Some(format!(
                     "q{query}: {} needs non-negative update weights, and these are not proven \
-                     non-negative",
+                     non-negative{unconfirmed}",
                     family_name(family)
                 ));
             }
@@ -281,6 +292,64 @@ fn accuracy_violation(
         });
     }
     None
+}
+
+/// `domain` with an open [`WeightDomain::SamplesOfMetric`] requirement
+/// answered from `data`'s declared metric types: proven when the metric is
+/// declared a counter, unknown otherwise. No type is inferred from a name.
+pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDomain {
+    domain.confirmed(|metric| data.metric_types.get(metric) == Some(&MetricType::Counter))
+}
+
+/// `roots` with every open [`WeightDomain::SamplesOfMetric`] requirement
+/// replaced by its answer from `data` ([`confirmed_weights`]): the form of a
+/// selected plan the executor runs, which reads no data workload. The same
+/// `Rc` where nothing changes.
+pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<QueryRoot> {
+    fn confirm(
+        node: &Rc<OperatorNode>,
+        data: &DataWorkload,
+        memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    ) -> Rc<OperatorNode> {
+        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+            return Rc::clone(done);
+        }
+        let mut changed = false;
+        let mut operator = node.operator.map_children(|child| {
+            let rebuilt = confirm(child, data, memo);
+            changed |= !Rc::ptr_eq(&rebuilt, child);
+            rebuilt
+        });
+        if let Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) = &mut operator {
+            let confirmed = confirmed_weights(&input.weight_domain, data);
+            if confirmed != input.weight_domain {
+                input.weight_domain = confirmed;
+                changed = true;
+            }
+        }
+        let rebuilt = if changed {
+            Rc::new(
+                OperatorNode::with_schema(operator, node.schema.clone())
+                    .with_guarantee(node.guarantee.clone())
+                    .with_timing(node.timing)
+                    .with_materialization(node.materialization),
+            )
+        } else {
+            Rc::clone(node)
+        };
+        memo.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
+        rebuilt
+    }
+    let mut memo = HashMap::new();
+    roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, &mut memo)),
+            QueryRoot::Scalar(expr) => {
+                QueryRoot::Scalar(expr.map_operator_refs(&mut |n| confirm(n, data, &mut memo)))
+            }
+        })
+        .collect()
 }
 
 /// The operator nodes a query root reads.
@@ -1045,7 +1114,7 @@ mod tests {
         }
     }
 
-    /// Exact (P1), CMS+heap (P2) and CountSketch+heap (P3) realizations of
+    /// Exact (P1), whole-expression CMS+heap (P2) and CountSketch+heap (P3) realizations of
     /// one approximate top-k query, in Pass 1 catalog order.
     fn candidates() -> Vec<PhysicalCandidate> {
         let root = lower_promql(
@@ -1155,6 +1224,103 @@ mod tests {
         let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
         assert!(!p2.valid);
         assert!(p2.reason.contains("non-negative"), "{}", p2.reason);
+    }
+
+    /// Count-Min over raw samples of `m` is admitted only when the data
+    /// workload declares `m` a counter: a gauge, an undeclared metric or a
+    /// counter under another name leaves the requirement unmet. Admitted,
+    /// the top-k still needs evidence about its output.
+    #[test]
+    fn count_min_over_samples_needs_a_declared_counter() {
+        use asap_types::workload::MetricType;
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let with_types = |types: &[(&str, MetricType)]| DataWorkload {
+            metric_types: types.iter().map(|(m, t)| (m.to_string(), *t)).collect(),
+            ..data()
+        };
+        for (types, admitted) in [
+            (vec![("m", MetricType::Counter)], true),
+            (vec![("m", MetricType::Gauge)], false),
+            (vec![("m_total", MetricType::Counter)], false),
+            (vec![], false),
+        ] {
+            let data = with_types(&types);
+            let selection = select_plan(
+                &candidates(),
+                &[Some(target.clone())],
+                &data,
+                PlanningModels::builtin(),
+            )
+            .unwrap();
+            let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
+            assert!(!p2.valid);
+            assert_eq!(
+                !p2.reason.contains("non-negative"),
+                admitted,
+                "{types:?}: {}",
+                p2.reason
+            );
+            if admitted {
+                assert!(p2.reason.contains("no guarantee"), "{}", p2.reason);
+            } else {
+                assert!(
+                    p2.reason.contains("not declared a counter"),
+                    "{}",
+                    p2.reason
+                );
+            }
+        }
+    }
+
+    /// The selected plan's open requirement becomes a proof when confirmed
+    /// and stays unproven otherwise; the executor reads no data workload.
+    #[test]
+    fn confirmed_weights_rewrite_only_the_summary_update() {
+        use asap_types::post_asap::NonNegativeWeightProof;
+        use asap_types::workload::MetricType;
+        let p2 = &candidates()[1];
+        let domains = |roots: &[QueryRoot]| -> Vec<WeightDomain> {
+            roots
+                .iter()
+                .flat_map(root_operators)
+                .flat_map(OperatorNode::reachable)
+                .filter_map(|n| match n.asap() {
+                    Some(ASAPOp::SummaryAgg { input, .. }) => Some(input.weight_domain.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            domains(&p2.roots),
+            [WeightDomain::SamplesOfMetric { metric: "m".into() }]
+        );
+        let counter = DataWorkload {
+            metric_types: [("m".to_string(), MetricType::Counter)].into(),
+            ..data()
+        };
+        let confirmed = with_confirmed_weights(&p2.roots, &counter);
+        assert_eq!(
+            domains(&confirmed),
+            [WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::CounterSamples
+            }]
+        );
+        assert_eq!(
+            domains(&with_confirmed_weights(&p2.roots, &data())),
+            [WeightDomain::UnknownOrSigned]
+        );
+        // Nothing open: the same roots.
+        let exact = &candidates()[0];
+        let QueryRoot::Operator(before) = &exact.roots[0] else {
+            panic!()
+        };
+        let QueryRoot::Operator(after) = &with_confirmed_weights(&exact.roots, &counter)[0] else {
+            panic!()
+        };
+        assert!(Rc::ptr_eq(before, after));
     }
 
     /// A query without a target constrains nothing: the Count-Min

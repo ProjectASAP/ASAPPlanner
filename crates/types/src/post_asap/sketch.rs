@@ -663,6 +663,34 @@ pub enum WeightDomain {
     NonNegative {
         proof: NonNegativeWeightProof,
     },
+    /// An open requirement, not a proof: the weights are raw samples of
+    /// `metric`, or plain sums of them (no rate, no other arithmetic), so they
+    /// are non-negative exactly when `metric` is a counter. Logical
+    /// optimization records it without reading the data workload; plan
+    /// selection confirms it from the declared metric types
+    /// ([`DataWorkload::metric_types`](crate::workload::DataWorkload::metric_types)).
+    /// Unconfirmed, it counts as not proven.
+    SamplesOfMetric {
+        metric: String,
+    },
+}
+
+impl WeightDomain {
+    /// The domain once `is_counter` has answered an open
+    /// [`SamplesOfMetric`](Self::SamplesOfMetric) requirement: proven
+    /// ([`NonNegativeWeightProof::CounterSamples`]) when the metric is a
+    /// counter, else unknown. Any other domain is returned unchanged.
+    pub fn confirmed(&self, is_counter: impl Fn(&str) -> bool) -> WeightDomain {
+        match self {
+            WeightDomain::SamplesOfMetric { metric } if is_counter(metric) => {
+                WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::CounterSamples,
+                }
+            }
+            WeightDomain::SamplesOfMetric { .. } => WeightDomain::UnknownOrSigned,
+            other => other.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,6 +700,12 @@ pub enum NonNegativeWeightProof {
     /// PromQL counter reset correction produces a non-negative increase; rate
     /// divides that increase by a positive duration.
     ResetAwareCounterDerivative,
+    /// Raw samples of a metric declared a counter
+    /// ([`MetricType::Counter`](crate::workload::MetricType::Counter)), or
+    /// plain sums of them: a counter sample is never negative. Plan selection
+    /// gives it on confirming a
+    /// [`WeightDomain::SamplesOfMetric`] requirement.
+    CounterSamples,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

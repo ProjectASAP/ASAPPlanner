@@ -197,6 +197,12 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     };
     let mut choice = vec![0; per_computation.targets.len()];
     loop {
+        if per_computation.absorbed_choice_varies(&choice) {
+            if next_choice(&per_computation, &mut choice) {
+                continue;
+            }
+            break;
+        }
         let display_name = display_name(&per_computation, &query_of_target, &choice);
         let roots = compose_logical_candidate(&per_computation, &choice)
             .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
@@ -226,18 +232,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
                 shared,
             });
         }
-        // Mixed-radix increment: the last target varies fastest; a carry
-        // out of the first target ends the enumeration.
-        let mut carry = true;
-        for (digit, target) in choice.iter_mut().zip(&per_computation.targets).rev() {
-            *digit += 1;
-            if *digit < target.choices.candidates.len() {
-                carry = false;
-                break;
-            }
-            *digit = 0;
-        }
-        if carry {
+        if !next_choice(&per_computation, &mut choice) {
             break;
         }
     }
@@ -251,6 +246,19 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
         stage2_pruned: pruned,
         stage3_plan_selection: selection,
     }
+}
+
+/// Mixed-radix increment of `choice`: the last target varies fastest.
+/// `false` when a carry out of the first target ends the enumeration.
+fn next_choice<Id>(inventory: &PerComputationCandidates<Id>, choice: &mut [usize]) -> bool {
+    for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
+        *digit += 1;
+        if *digit < target.choices.candidates.len() {
+            return true;
+        }
+        *digit = 0;
+    }
+    false
 }
 
 /// `query_of_target[t]`: the index of the query root that first reads target
@@ -291,16 +299,30 @@ fn display_name<Id>(
     query_of_target: &[usize],
     choice: &[usize],
 ) -> String {
+    // Targets a chosen whole-expression candidate absorbs are not computed.
+    let absorbed: Vec<usize> = inventory
+        .targets
+        .iter()
+        .zip(choice)
+        .filter(|(target, &index)| {
+            matches!(
+                target.choices.candidates[index],
+                ComputationCandidate::WholeExpression(_)
+            )
+        })
+        .filter_map(|(target, _)| target.absorbs)
+        .collect();
     (0..inventory.roots.len())
         .map(|query| {
             let mut sketches = Vec::new();
             let mut accumulators = Vec::new();
-            for (target, (&target_query, &index)) in inventory
+            for (t, (target, (&target_query, &index))) in inventory
                 .targets
                 .iter()
                 .zip(query_of_target.iter().zip(choice))
+                .enumerate()
             {
-                if target_query != query {
+                if target_query != query || absorbed.contains(&t) {
                     continue;
                 }
                 match &target.choices.candidates[index] {
@@ -311,11 +333,14 @@ fn display_name<Id>(
                     ComputationCandidate::AvgAsSumCount => {
                         accumulators.push("Sum/Count acc".into())
                     }
-                    ComputationCandidate::Summary(algorithm) => sketches.push(match algorithm {
-                        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-                        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-                        other => format!("{other:?}"),
-                    }),
+                    ComputationCandidate::Summary(algorithm)
+                    | ComputationCandidate::WholeExpression(algorithm) => {
+                        sketches.push(match algorithm {
+                            SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
+                            SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
+                            other => format!("{other:?}"),
+                        })
+                    }
                 }
             }
             let mut text = format!("Q{} ", query + 1);
@@ -338,7 +363,8 @@ fn display_name<Id>(
 /// identity as a column (the row representation per-series state needs at
 /// runtime; a root with no such representation is planned over its labels
 /// alone), through [`run_stage1_to_stage3`] with every entry's accuracy target. The
-/// output is the selected physical candidate's roots.
+/// output is the selected physical candidate's roots, with the open weight
+/// requirements plan selection confirmed made proofs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stage1ToStage3Pass;
 
@@ -386,8 +412,11 @@ impl OptimizationPass for Stage1ToStage3Pass {
             .into_iter()
             .find(|p| p.id == selection.selected)
             .expect("the selected candidate is a physical candidate");
+        // The executor reads no data workload: answer every open weight
+        // requirement plan selection confirmed.
+        let roots = crate::stage3_plan_selection::with_confirmed_weights(&selected.roots, &data);
         let mut output = PlanOutput::new(Vec::new());
-        for (entry_index, root) in selected.roots.iter().enumerate() {
+        for (entry_index, root) in roots.iter().enumerate() {
             match root {
                 QueryRoot::Operator(node) => output.plans.push(QueryPlan {
                     entry_index,

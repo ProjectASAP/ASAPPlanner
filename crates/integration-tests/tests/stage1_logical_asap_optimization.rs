@@ -231,8 +231,8 @@ fn topk_estimates_carry_no_frequency_bound() {
     assert!(cms.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
 }
 
-/// Top-K over a closed PromQL child without series identity ranks the
-/// child's labels outside the partition.
+/// Top-K over a grouped sum is a whole-expression heap: it absorbs the
+/// sum and ranks its group keys, read from the rows the sum reads.
 #[test]
 fn topk_over_an_aggregate_ranks_its_labels() {
     let estimates = composed_estimates(promql("topk(3, sum by (job) (rate(m[5m])))"));
@@ -240,9 +240,7 @@ fn topk_over_an_aggregate_ranks_its_labels() {
     for estimate in &estimates {
         assert_eq!(
             update_of(estimate).1.item,
-            Some(SummaryInputExpr::Tuple(vec![SummaryInputExpr::Column(
-                ColumnRef::Named("job".into())
-            )]))
+            Some(SummaryInputExpr::Column(ColumnRef::Named("job".into())))
         );
     }
 }
