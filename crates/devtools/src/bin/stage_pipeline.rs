@@ -32,6 +32,12 @@
 //     query. When selection fails, `selected` is null, with the rejections,
 //     or with `error` for any other failure.
 //
+// A workload with more than `--max-combinations` (default 10^4)
+// whole-workload candidates is refused before Stage 1 enumerates any: the
+// run exits with status 3, the count and the limit, and writes no document.
+// Planning never caps or truncates the candidates it ranks; only the display
+// does (`--max-displayed`).
+//
 // `--promql` and `--sql` may repeat and mix, in workload order; `--name`
 // names the query before it (default `q<n>`). `--epsilon`/
 // `--delta` apply to every query; without them the queries are exact.
@@ -48,8 +54,8 @@ use asap_devtools::planner_layering_examples::{
     declared, example1, pattern_a, pattern_b, PatternARecurrence,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_planning_stages, run_planning_stages_over,
-    PlanningStagesRun,
+    combinations, lower_promql_roots, lower_sql_roots, run_planning_stages,
+    run_planning_stages_over, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -66,22 +72,74 @@ use serde_json::{json, Value};
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | ((--promql | --sql) <query> \
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64>] [--interval-ms <u64>])) \
-[--max-displayed <n>] --out <file>";
+[--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
-fn main() {
-    if let Err(message) = run(std::env::args().skip(1).collect()) {
-        eprintln!("stage_pipeline: {message}\n{USAGE}");
-        std::process::exit(2);
+/// The default `--max-combinations`: the most whole-workload candidates a
+/// run enumerates.
+const MAX_COMBINATIONS: usize = 10_000;
+
+/// Why a run wrote no document.
+enum Failure {
+    /// Bad arguments or a query that does not plan (exit status 2).
+    Usage(String),
+    /// More candidate combinations than `--max-combinations` (exit status 3).
+    TooManyCombinations { combinations: usize, limit: usize },
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Usage(message)
     }
 }
 
-fn run(args: Vec<String>) -> Result<(), String> {
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        Failure::Usage(message.into())
+    }
+}
+
+fn main() {
+    match run(std::env::args().skip(1).collect()) {
+        Ok(()) => {}
+        Err(Failure::Usage(message)) => {
+            eprintln!("stage_pipeline: {message}\n{USAGE}");
+            std::process::exit(2);
+        }
+        Err(Failure::TooManyCombinations {
+            combinations,
+            limit,
+        }) => {
+            eprintln!(
+                "stage_pipeline: workload has {combinations} candidate combinations \
+(limit {limit}); planning it needs early pruning (#673)"
+            );
+            std::process::exit(3);
+        }
+    }
+}
+
+/// Refuses `roots` when Stage 1 would enumerate more than `limit`
+/// whole-workload candidates. Planning itself never caps; only this tool
+/// refuses, before enumerating anything.
+fn check_combinations(roots: &[QueryRoot], limit: usize) -> Result<(), Failure> {
+    let combinations = combinations(roots)?;
+    if combinations > limit {
+        return Err(Failure::TooManyCombinations {
+            combinations,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut example = None;
     // (language, text, name) in workload order.
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
     let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
     let mut max_displayed = 64usize;
+    let mut max_combinations = MAX_COMBINATIONS;
     let mut out = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -107,8 +165,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "--delta" => delta = Some(number(value()?)?),
             "--interval-ms" => interval_ms = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
+            "--max-combinations" => {
+                max_combinations = value()?.parse().map_err(|e| format!("{e}"))?
+            }
             "--out" => out = Some(value()?),
-            other => return Err(format!("unknown argument {other}")),
+            other => return Err(format!("unknown argument {other}").into()),
         }
     }
     let has_sql = queries
@@ -126,9 +187,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
                     pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed)
                 }
                 "planner-layering-3b" => pattern_b(),
-                other => return Err(format!("unknown example {other}")),
+                other => return Err(format!("unknown example {other}").into()),
             };
-            let run = run_planning_stages(&workload, lower_promql_roots(&workload)?)?;
+            let roots = lower_promql_roots(&workload)?;
+            check_combinations(&roots, max_combinations)?;
+            let run = run_planning_stages(&workload, roots)?;
             stage_pipeline(workload_queries(&workload), &run, max_displayed)
         }
         (None, false) => {
@@ -142,9 +205,20 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let mut names = HashSet::new();
             let (mut described, mut roots) = (Vec::new(), Vec::new());
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
-                let name = name.unwrap_or_else(|| format!("q{}", index + 1));
+                let (name, defaulted) = match name {
+                    Some(name) => (name, false),
+                    None => (format!("q{}", index + 1), true),
+                };
                 if !names.insert(name.clone()) {
-                    return Err(format!("duplicate query name {name}"));
+                    return Err(if defaulted {
+                        format!(
+                            "duplicate query name {name} (the default name of query {})",
+                            index + 1
+                        )
+                    } else {
+                        format!("duplicate query name {name}")
+                    }
+                    .into());
                 }
                 // Each query lowers in its own language; planning sees one workload.
                 let one = query_batch(language.clone(), &[text], accuracy.clone(), interval_ms);
@@ -161,13 +235,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 data_ingestion_interval: declared(DurationMs(interval_ms)),
                 ..Default::default()
             };
+            check_combinations(&roots, max_combinations)?;
             let run = run_planning_stages_over(roots, &targets, &data)?;
             stage_pipeline(described, &run, max_displayed)
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
     };
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
-    std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))
+    std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
 }
 
 /// The document for `run`, whose workload queries are `queries`.
@@ -335,11 +410,15 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
 /// The tables `--table` declares.
 fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
     let mut catalog = SqlCatalog::new();
+    let mut names = HashSet::new();
     for raw in tables {
         let table: Value = serde_json::from_str(raw).map_err(|e| format!("--table: {e}"))?;
         let name = table["name"]
             .as_str()
             .ok_or("--table: name must be a string")?;
+        if !names.insert(name.to_owned()) {
+            return Err(format!("--table: table {name} is declared twice"));
+        }
         let columns = table["columns"]
             .as_array()
             .ok_or("--table: columns must be an array")?

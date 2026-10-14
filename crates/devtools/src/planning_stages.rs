@@ -4,6 +4,7 @@
 
 use asap_aware_mapping::pass::run_stage1_to_stage3;
 pub use asap_aware_mapping::pass::{LogicalCandidate, PrunedCandidate};
+use asap_aware_mapping::per_computation_candidates::generate_per_computation_candidates;
 use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
 use asap_aware_mapping::stage3_plan_selection::{Selection, SelectionError};
 use asap_aware_mapping::PlanningModels;
@@ -79,6 +80,22 @@ pub fn run_planning_stages(
         .collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     run_planning_stages_over(roots, &targets, &data)
+}
+
+/// The number of whole-workload candidates Stage 1 would enumerate over
+/// `roots`: the product of the targets' Pass 1 candidate counts, saturating
+/// at `usize::MAX`. Runs Pass 1 only, so a caller can refuse a workload too
+/// large to enumerate before planning it.
+pub fn combinations(roots: &[QueryRoot]) -> Result<usize, String> {
+    validate(roots)?;
+    let per_computation =
+        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
+            .map_err(|e| format!("Pass 1: {e}"))?;
+    Ok(per_computation
+        .targets
+        .iter()
+        .map(|target| target.choices.candidates.len())
+        .fold(1usize, usize::saturating_mul))
 }
 
 /// [`run_planning_stages`] over roots lowered from any mix of query

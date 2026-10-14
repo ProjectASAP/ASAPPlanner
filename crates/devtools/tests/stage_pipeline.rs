@@ -272,3 +272,95 @@ fn mixed_sql_and_promql_queries_are_planned_with_their_names() {
     validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
     assert!(document["stage3_plan_selection"]["selected"].is_string());
 }
+
+/// Runs `stage_pipeline` with `args` (and a throwaway `--out`), expecting it
+/// to fail: its exit status and stderr.
+fn failure(args: &[&str]) -> (Option<i32>, String) {
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_failure.json",
+        std::process::id()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(args)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!out.exists(), "a rejected run writes no document");
+    (
+        output.status.code(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+/// Above `--max-combinations`, the run is rejected before enumeration with
+/// the count and the limit, rather than truncated.
+#[test]
+fn workload_above_the_combination_limit_is_rejected() {
+    let (status, stderr) = failure(&["--example", "planner-layering-1", "--max-combinations", "2"]);
+    assert_eq!(status, Some(3));
+    assert!(
+        stderr.contains(
+            "workload has 3 candidate combinations (limit 2); planning it needs early pruning (#673)"
+        ),
+        "{stderr}"
+    );
+    // At the limit, it plans.
+    let document = generate(&["--max-combinations", "3"]);
+    assert_eq!(
+        document["stage1_logical_asap_optimization"]["combinations"],
+        3
+    );
+}
+
+/// The default limit is 10^4: nine approximate Top-K queries (3^9 = 19683
+/// combinations) are rejected without being enumerated.
+#[test]
+fn default_combination_limit_is_ten_thousand() {
+    let queries: Vec<String> = (1..=9)
+        .map(|i| format!("topk(5, rate(m{i}[5m]))"))
+        .collect();
+    let mut args = Vec::new();
+    for query in &queries {
+        args.extend(["--promql", query.as_str()]);
+    }
+    args.extend(["--epsilon", "0.01", "--delta", "0.001"]);
+    let (status, stderr) = failure(&args);
+    assert_eq!(status, Some(3));
+    assert!(
+        stderr.contains("workload has 19683 candidate combinations (limit 10000)"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn table_declared_twice_is_rejected() {
+    let table =
+        r#"{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}], "time_index": 0}"#;
+    let (status, stderr) = failure(&[
+        "--table",
+        table,
+        "--table",
+        table,
+        "--sql",
+        "SELECT COUNT(*) FROM metrics",
+    ]);
+    assert_eq!(status, Some(2));
+    assert!(
+        stderr.contains("--table: table metrics is declared twice"),
+        "{stderr}"
+    );
+}
+
+/// A defaulted name that collides says it is the default.
+#[test]
+fn duplicate_default_name_says_it_is_the_default() {
+    let (_, stderr) = failure(&["--promql", "sum(a)", "--name", "q2", "--promql", "sum(b)"]);
+    assert!(
+        stderr.contains("duplicate query name q2 (the default name of query 2)"),
+        "{stderr}"
+    );
+    let (_, stderr) = failure(&["--promql", "sum(a)", "--promql", "sum(b)", "--name", "q1"]);
+    assert!(stderr.contains("duplicate query name q1\n"), "{stderr}");
+}
