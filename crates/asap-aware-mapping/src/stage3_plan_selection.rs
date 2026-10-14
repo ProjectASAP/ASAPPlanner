@@ -42,17 +42,18 @@
 //!   queries are spread over the calibration's `horizon_s` (default
 //!   3600 s): `invocations / horizon_s` per second.
 //!
-//! State a materialized node keeps between computations is charged
-//! `cost_per_retained_byte_second` per byte per second: its output's bytes
-//! for `MatAtQuery`, and twice them for `MatAtIngestion` (the window being
-//! built and the completed one queries read). Memory a query-time
-//! computation holds only while it runs is not charged per second; the
-//! per-computation memory term below applies to it as to every node.
+//! Memory is charged only as state kept between computations: a
+//! materialized node's state, `cost_per_retained_byte_second` per byte per
+//! second, once for `MatAtQuery` and twice for `MatAtIngestion` (the window
+//! being built and the completed one queries read). Memory a computation
+//! holds only while it runs is not charged, and `cost_per_retained_byte` is
+//! ignored: peak capacity belongs to cost model 2 (#683). A computation is
+//! charged for its CPU operations and scanned bytes only.
 //!
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
-//! groups × k. State is priced by its bytes: a sketch by its parameters, a
+//! groups × k. Kept state is sized by its bytes: a sketch by its parameters, a
 //! fixed-size exact accumulator (sum, count, min, max, rate, ...) as one
 //! value per group, and exact state that grows with the data (quantile,
 //! top-k, distinct count, L2, entropy keep every value or item) as one value
@@ -108,14 +109,15 @@ pub const COST_UNIT: &str = "cost_per_second";
 pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
 
 /// The coefficients plan selection prices with until a deployment is
-/// calibrated: 1 ns of CPU per operation, 0.1 ns per scanned or held byte,
+/// calibrated: 1 ns of CPU per operation, 0.1 ns per scanned byte,
 /// 1 GB kept for a second costs 1/8 vCPU (125 CPU-ms), and one-off work is
 /// spread over one hour.
 pub fn illustrative_calibration() -> ResourceCalibration {
     ResourceCalibration {
         cost_per_cpu_op: 1e-6,
         cost_per_scan_byte: 1e-7,
-        cost_per_retained_byte: 1e-7,
+        // Plan selection charges no memory per computation.
+        cost_per_retained_byte: 0.0,
         cost_per_retained_byte_second: 1.25e-7,
         horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
         version: "illustrative-v2".into(),
@@ -852,6 +854,10 @@ fn price(
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     calibration.validate().map_err(|error| (first, error))?;
+    let per_computation = ResourceCalibration {
+        cost_per_retained_byte: 0.0,
+        ..calibration.clone()
+    };
     let series = data
         .input_cardinality
         .value
@@ -1075,18 +1081,24 @@ fn price(
                 format!("{} rows", input.rows),
             ),
         };
+        let estimate = estimate.map_err(|error| (node.id, error))?;
+        // A computation is charged for its CPU work and scanned bytes; memory
+        // only as kept state, below.
         let cost = estimate
-            .and_then(|estimate| estimate.calibrated_cost(calibration))
+            .calibrated_cost(&per_computation)
             .map_err(|error| (node.id, error))?;
         let (multiplier, per_second) = multipliers[&node.id];
         let mut cost = cost * per_second;
         let mut detail = format!("{detail}; x {per_second:.4}/s");
         // State kept between computations: the window being built and the
         // completed one at ingestion time, the kept output at query time.
+        // The state is what the node holds: its output, or the values an
+        // exact aggregate keeps per group when that is more.
+        let state = out.bytes.max(estimate.peak_memory_bytes());
         let kept = match node.materialization {
             Materialization::NotMaterialized => 0,
-            Materialization::MatAtIngestion(_) => 2 * out.bytes,
-            _ => out.bytes,
+            Materialization::MatAtIngestion(_) => 2 * state,
+            _ => state,
         };
         if kept > 0 {
             cost += calibration.cost_per_retained_byte_second * kept as f64;
@@ -1722,10 +1734,29 @@ mod tests {
         }
     }
 
-    /// Exact quantile state keeps every value of its group: over one group of
-    /// 10 000 values it costs more than a quantile sketch sized for
+    /// `candidates` with every state node (a summary build or an exact
+    /// aggregate) kept at query time, so selection charges its kept bytes.
+    fn keeping_state(mut candidates: Vec<PhysicalCandidate>) -> Vec<PhysicalCandidate> {
+        for candidate in &mut candidates {
+            for node in &mut candidate.dag.nodes {
+                if matches!(
+                    node.payload,
+                    Payload::ASAP(ASAPOp::SummaryAgg { .. })
+                        | Payload::NonASAP(NonASAPOp::Aggregate { .. })
+                ) {
+                    node.materialization =
+                        Materialization::MatAtQuery(asap_types::ir::Medium::Memory);
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Kept exact quantile state keeps every value of its group: over one
+    /// group of 10 000 values it costs more than a quantile sketch sized for
     /// ε = 0.01, δ = 0.01, which is selected; over 100 groups of 100 values it
-    /// is smaller than the sketch and is selected.
+    /// is smaller than the sketch and is selected. (State held only while a
+    /// query runs is not charged.)
     #[test]
     fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
         let target = AccuracyTarget::EpsilonDelta {
@@ -1736,7 +1767,7 @@ mod tests {
             ("quantile(0.99, rate(x[5m]))", true),
             ("quantile by (job) (0.99, rate(x[5m]))", false),
         ] {
-            let candidates = all_candidates(query, &target);
+            let candidates = keeping_state(all_candidates(query, &target));
             let selection = select_plan(
                 &candidates,
                 &[Some(target.clone())],
@@ -1911,9 +1942,10 @@ mod tests {
         assert_eq!(ops(16), (2.0 - 2f64.powi(-15)) * 6.0);
     }
 
-    /// Exact distinct-count state keeps every item of its group: over 10 000
-    /// groups of 300 rows it is smaller than a distinct-count sketch sized for
-    /// ε = 0.01 and is selected; over one group of 3 000 000 rows a sketch is.
+    /// Kept exact distinct-count state keeps every item of its group: over
+    /// 10 000 groups of 300 rows it is smaller than a distinct-count sketch
+    /// sized for ε = 0.01 and is selected; over one group of 3 000 000 rows a
+    /// sketch is.
     #[test]
     fn exact_distinct_count_beats_a_sketch_over_small_groups() {
         let target = AccuracyTarget::EpsilonDelta {
@@ -1928,7 +1960,7 @@ mod tests {
             ..data()
         };
         for (data, sketch_wins) in [(data(), false), (one_series, true)] {
-            let candidates = all_candidates("distinct_over_time(x[5m])", &target);
+            let candidates = keeping_state(all_candidates("distinct_over_time(x[5m])", &target));
             let selection = select_plan(
                 &candidates,
                 &[Some(target.clone())],
@@ -2703,6 +2735,83 @@ mod tests {
         }
         let transient = kll_dag(Materialization::NotMaterialized);
         assert_eq!(cost(&transient, 1.25e-7).total, cost(&transient, 0.0).total);
+    }
+
+    /// Memory is charged only as kept bytes per second: the memory a
+    /// computation holds while it runs (a sketch being built, an exact
+    /// quantile's values) adds nothing, whatever the per-computation memory
+    /// coefficient.
+    #[test]
+    fn memory_held_only_while_a_query_runs_is_not_charged() {
+        for query in [
+            "quantile_over_time(0.99, m[1m])",
+            "quantile by (job) (0.99, m)",
+        ] {
+            let target = AccuracyTarget::Exact;
+            let root = lower_promql(query, target);
+            let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
+                .unwrap()
+                .dag;
+            let total = |per_computation_memory| {
+                let calibration = ResourceCalibration {
+                    cost_per_retained_byte: per_computation_memory,
+                    ..illustrative_calibration()
+                };
+                price(&dag, &every_10s(1), &data(), &calibration)
+                    .unwrap()
+                    .total
+            };
+            assert_eq!(total(0.0), total(1.0), "{query}");
+        }
+        for materialization in [AT_INGESTION, AT_QUERY, Materialization::NotMaterialized] {
+            let dag = kll_dag(materialization);
+            let total = |per_computation_memory| {
+                let calibration = ResourceCalibration {
+                    cost_per_retained_byte: per_computation_memory,
+                    ..illustrative_calibration()
+                };
+                price(&dag, &every_10s(1), &data(), &calibration)
+                    .unwrap()
+                    .total
+            };
+            assert_eq!(total(0.0), total(1.0), "{materialization:?}");
+        }
+    }
+
+    /// Kept exact state that grows with the data is charged by the values it
+    /// keeps: a materialized exact quantile keeps every value of its group,
+    /// a sum one value per group.
+    #[test]
+    fn kept_exact_state_is_charged_by_the_values_it_keeps() {
+        let kept = |query: &str| {
+            let root = lower_promql(query, AccuracyTarget::Exact);
+            let mut dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
+                .unwrap()
+                .dag;
+            let aggregate = dag
+                .nodes
+                .iter_mut()
+                .find(|n| matches!(n.payload, Payload::NonASAP(NonASAPOp::Aggregate { .. })))
+                .unwrap();
+            aggregate.materialization = AT_QUERY;
+            let id = aggregate.id;
+            let cost = |w| {
+                let calibration = ResourceCalibration {
+                    cost_per_retained_byte_second: w,
+                    ..illustrative_calibration()
+                };
+                price(&dag, &every_10s(1), &data(), &calibration)
+                    .unwrap()
+                    .per_node[&id]
+                    .cost
+            };
+            (cost(1.0) - cost(0.0)).round() as u64
+        };
+        let (quantile, sum) = (
+            kept("quantile by (job) (0.99, m)"),
+            kept("sum by (job) (m)"),
+        );
+        assert!(quantile > 10 * sum, "{quantile} vs {sum}");
     }
 
     /// A `NotMaterialized` node read by two queries is computed for each, at
