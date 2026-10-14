@@ -7681,7 +7681,6 @@ mod tests {
             summary_candidates(&default_cardinality()),
             &[
                 SketchAlgorithm::Hll,
-                SketchAlgorithm::Theta,
                 SketchAlgorithm::Kmv,
                 SketchAlgorithm::UnivMon
             ]
@@ -7999,7 +7998,6 @@ mod tests {
             kinds,
             vec![
                 SketchAlgorithm::Hll,
-                SketchAlgorithm::Theta,
                 SketchAlgorithm::Kmv,
                 SketchAlgorithm::UnivMon,
             ]
@@ -8030,7 +8028,6 @@ mod tests {
             kinds,
             vec![
                 SketchAlgorithm::Hll,
-                SketchAlgorithm::Theta,
                 SketchAlgorithm::Kmv,
                 SketchAlgorithm::UnivMon,
             ]
@@ -8388,14 +8385,14 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_group_keeps_all_four_candidates() {
+    fn cardinality_group_keeps_all_three_candidates() {
         let root = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]).unwrap();
         let agg_group = space
             .target_subdag_candidates()
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 4);
+        assert_eq!(agg_group.candidates.len(), 3);
         assert!(agg_group.candidates.iter().any(|candidate| matches!(
             &candidate.replacement,
             Replacement::SubDAG(node) if node.guarantee.is_none()

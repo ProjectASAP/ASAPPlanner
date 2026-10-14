@@ -903,9 +903,8 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 /// - DDSketch: one 8-byte count per bin it touches over an assumed nine
 ///   decades of values ([`ddsketch_bins`]);
 /// - HLL: one 1-byte register per bucket, `2^precision`;
-/// - KMV: its `k` smallest 64-bit hashes;
-/// - Theta: an Apache DataSketches update table of `2k` 64-bit hashes
-///   (`asap_sketchlib` has no Theta sketch);
+/// - KMV: its `k` smallest 64-bit hashes (Theta, which candidate generation
+///   does not offer because `asap_sketchlib` has no Theta sketch, likewise);
 /// - UnivMon: per layer, a `rows × cols` Count-Sketch of 8-byte counters and
 ///   a heap of `heap_size` 24-byte entries.
 ///
@@ -933,8 +932,7 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
             SketchParams::Kll { k, .. } => (1, 8 * 3 * u64::from(*k)),
             SketchParams::DDSketch { alpha } => (1, ddsketch_bins(*alpha).saturating_mul(8)),
             SketchParams::Hll { precision } => (1, 1u64 << (*precision).min(63)),
-            SketchParams::Kmv { k } => (1, 8 * u64::from(*k)),
-            SketchParams::Theta { k } => (1, 16 * u64::from(*k)),
+            SketchParams::Kmv { k } | SketchParams::Theta { k } => (1, 8 * u64::from(*k)),
             SketchParams::UnivMon {
                 heap_size,
                 sketch_rows,
@@ -1399,8 +1397,7 @@ mod tests {
     }
 
     /// Every sketch family's state is sized from its parameters, as
-    /// `asap_sketchlib` allocates it (Theta as an Apache DataSketches update
-    /// table).
+    /// `asap_sketchlib` allocates it.
     #[test]
     fn summary_state_is_sized_from_sketch_params() {
         let bytes = |algorithm, params| {
@@ -1417,10 +1414,6 @@ mod tests {
         assert_eq!(
             bytes(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1_000 }),
             8 * 1_000
-        );
-        assert_eq!(
-            bytes(SketchAlgorithm::Theta, SketchParams::Theta { k: 1_000 }),
-            16 * 1_000
         );
         assert_eq!(
             bytes(
