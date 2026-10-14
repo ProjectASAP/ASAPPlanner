@@ -557,7 +557,6 @@ pub struct DataWorkload {
     /// without a bound leaves that probability unknown.
     #[serde(default)]
     pub max_distinct_per_evaluation: Evidence<BTreeMap<String, u64>>,
-
     /// Declared type of each metric, by metric name (Prometheus `# TYPE`
     /// metadata). The planner never infers a type from a name such as
     /// `_total`; an undeclared metric's samples may take any value.
