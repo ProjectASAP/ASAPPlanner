@@ -94,10 +94,11 @@ document.getElementById('plannerRun').addEventListener('click', async () => {
     schemas: Array.from(row.querySelectorAll('.plannerSchemas input:checked')).map((input) => input.value),
     text: row.querySelector('.plannerText').value,
   }));
-  plannerStatus.textContent = 'Running stage_pipeline (Stage 0 query language frontends → Stage 3 plan selection)…';
+  plannerStatus.textContent = 'Running stage_pipeline (Stage 0 query-language frontends → Stage 3 plan selection)…';
   document.getElementById('plannerRun').disabled = true;
+  let response = null;
   try {
-    const response = await fetch('/api/plan', {
+    response = await fetch('/api/plan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -117,7 +118,10 @@ document.getElementById('plannerRun').addEventListener('click', async () => {
       ? `Stage 3 selected ${selection.selected} (cost ${cost.total} ${cost.unit}) of ${result.stage1_logical_asap_optimization.combinations} candidates. Select one or several tabs above.`
       : `Stage 3 selected no plan: ${selection.error || selection.rejected.map((r) => `${r.id}: ${r.reason}`).join('; ')}`;
   } catch (error) {
-    plannerStatus.textContent = `Planning failed: ${error.message}. Start this page with server.py.`;
+    // Without a response the page is not served by server.py.
+    plannerStatus.textContent = response
+      ? `Planning failed: ${error.message}`
+      : `Planning failed: ${error.message}. Start this page with server.py.`;
   } finally {
     document.getElementById('plannerRun').disabled = false;
   }

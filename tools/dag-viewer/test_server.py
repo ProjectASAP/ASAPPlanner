@@ -9,10 +9,14 @@ stage_pipeline`; CARGO_TARGET_DIR is honored).
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
 
 import server
 
@@ -53,6 +57,91 @@ class PlanArgsTests(unittest.TestCase):
             args[3:11],
             ["--promql", "m", "--name", "rate", "--sql", "SELECT 1 FROM metrics", "--name", "count"],
         )
+
+    def test_request_must_be_an_object(self):
+        for payload in ([], "q", None):
+            with self.assertRaisesRegex(ValueError, "request must be a JSON object"):
+                server.plan_args(payload, "out.json")
+
+    def test_field_types_are_checked(self):
+        table = {"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}]}
+        cases = [
+            ({"queries": [{"language": ["sql"], "text": "m"}]}, "query #1: language must be sql or promql"),
+            ({"queries": [{"language": "promql", "name": 7, "text": "m"}]}, "query #1: name must be a string"),
+            ({"queries": [{"language": "promql", "text": 7}]}, "query #1: text must contain"),
+            (
+                {"schemas": [table], "queries": [{"language": "sql", "text": "SELECT 1", "schemas": [["metrics"]]}]},
+                "query #1: selected schemas must be names of declared tables",
+            ),
+            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": True}, "epsilon must be a number"),
+            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": "0.1"}, "epsilon must be a number"),
+            ({"queries": [{"language": "promql", "text": "m"}], "interval_ms": True}, "interval_ms must be a positive integer"),
+            ({"schemas": [{"name": 3, "columns": [{}]}], "queries": [{"language": "sql", "text": "SELECT 1"}]}, "schema #1: name must be a non-empty string"),
+        ]
+        for payload, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    server.plan_args(payload, "out.json")
+
+    def test_duplicate_table_names_are_rejected(self):
+        table = {"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}]}
+        with self.assertRaisesRegex(ValueError, "schema #2: table metrics is declared twice"):
+            server.plan_args(
+                {"schemas": [table, table], "queries": [{"language": "sql", "text": "SELECT 1 FROM metrics"}]},
+                "out.json",
+            )
+
+    def test_duplicate_query_names_say_which_query_has_the_name(self):
+        with self.assertRaisesRegex(ValueError, r"^query #2: name a is already used by query #1$"):
+            server.plan_args(
+                {"queries": [{"name": "a", "language": "promql", "text": "m"}, {"name": "a", "language": "promql", "text": "n"}]},
+                "out.json",
+            )
+        with self.assertRaisesRegex(ValueError, r"^query #2: name q2 \(its default name\) is already used by query #1$"):
+            server.plan_args(
+                {"queries": [{"name": "q2", "language": "promql", "text": "m"}, {"language": "promql", "text": "n"}]},
+                "out.json",
+            )
+
+
+class PlanTests(unittest.TestCase):
+    def test_planning_requests_run_one_at_a_time(self):
+        """Concurrent /api/plan requests never run stage_pipeline at once."""
+        running, peak, guard = 0, 0, threading.Lock()
+
+        def fake_run(args, **kwargs):
+            nonlocal running, peak
+            with guard:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.05)
+            out = args[args.index("--out") + 1]
+            Path(out).write_text(json.dumps({"stage3_plan_selection": {"selected": "P1"}}))
+            with guard:
+                running -= 1
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        payload = {"queries": [{"language": "promql", "text": "m"}]}
+        with mock.patch.object(server.subprocess, "run", fake_run):
+            threads = [threading.Thread(target=server.plan, args=(payload,)) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(peak, 1)
+
+    def test_too_many_combinations_is_a_rejected_request(self):
+        """stage_pipeline's exit status 3 (too many candidate combinations)
+        reaches the editor as a rejected request with its message."""
+        message = "stage_pipeline: workload has 19683 candidate combinations (limit 10000)"
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 3, "", message + "\n")
+
+        with mock.patch.object(server.subprocess, "run", fake_run):
+            with self.assertRaises(server.PlanRejected) as raised:
+                server.plan({"queries": [{"language": "promql", "text": "m"}]})
+        self.assertEqual(str(raised.exception), message)
 
 
 @unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
