@@ -446,9 +446,9 @@ fn pass1_failure_still_writes_stage0_and_the_error() {
     assert!(document["stage3_plan_selection"]["selected"].is_null());
 }
 
-/// The scalar-queries viewer fixture: standalone scalar queries first, in
-/// the middle and last, which the physical DAG keeps in `scalar_roots`.
-const SCALAR_QUERIES: &str = "../../tools/dag-viewer/examples/scalar-queries.json";
+/// Standalone scalar queries first, in the middle and last, which the
+/// physical DAG keeps in `scalar_roots` by query position (the viewer's
+/// test_viewer.py draws this workload).
 const SCALAR_QUERIES_ARGS: &[&str] = &[
     "--promql",
     "scalar(sum(m))",
@@ -463,14 +463,8 @@ const SCALAR_QUERIES_ARGS: &[&str] = &[
 ];
 
 #[test]
-fn scalar_queries_fixture_is_current() {
+fn scalar_queries_keep_their_positions_in_scalar_roots() {
     let document = document_of(SCALAR_QUERIES_ARGS);
-    let committed: Value = serde_json::from_str(
-        &std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCALAR_QUERIES))
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(document, committed, "regenerate the committed fixture");
     let selected = document["stage3_plan_selection"]["selected"]
         .as_str()
         .unwrap();

@@ -1,5 +1,6 @@
 """Tests for server.py: the editor's request becomes `stage_pipeline`
-arguments, and /api/plan answers with the stage_pipeline document.
+arguments, /api/plan answers with the stage_pipeline document, and the
+example documents are written on demand.
 
 Run from tools/dag-viewer: `python3 -m unittest test_server`. The endpoint
 test needs a built stage_pipeline (`cargo build -p asap-devtools --bin
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -162,6 +164,45 @@ class PlanTests(unittest.TestCase):
             with self.assertRaises(server.PlanRejected) as raised:
                 server.plan({"queries": [{"language": "promql", "text": "m"}]})
         self.assertEqual(str(raised.exception), message)
+
+
+class WriteExamplesTests(unittest.TestCase):
+    """The examples.json documents are written into out/ when missing, and
+    all of them again with --regenerate."""
+
+    def run_write(self, root: Path, force: bool) -> list[list[str]]:
+        manifest = root / "examples.json"
+        manifest.write_text(json.dumps([
+            {"id": "a", "example": "planner-layering-1", "file": "out/a.json"},
+            {"id": "b", "example": "planner-layering-3b", "file": "out/b.json"},
+        ]))
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            Path(args[args.index("--out") + 1]).write_text("{}")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with mock.patch.object(server, "HERE", root), mock.patch.object(server, "EXAMPLES", manifest), \
+                mock.patch.object(server.subprocess, "run", fake_run):
+            server.write_examples(force)
+        return calls
+
+    def test_missing_documents_are_written_and_existing_ones_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "out").mkdir()
+            (root / "out" / "a.json").write_text("kept")
+            calls = self.run_write(root, force=False)
+            self.assertEqual(calls, [[str(server.BINARY), "--example", "planner-layering-3b", "--out", str(root / "out" / "b.json")]])
+            self.assertEqual((root / "out" / "a.json").read_text(), "kept")
+
+    def test_regenerate_rewrites_every_document(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls = self.run_write(root, force=True)
+            self.assertEqual([call[2] for call in calls], ["planner-layering-1", "planner-layering-3b"])
+            self.assertTrue((root / "out" / "a.json").exists())
 
 
 @unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
