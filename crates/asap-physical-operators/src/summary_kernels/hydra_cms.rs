@@ -2,7 +2,7 @@
 //!
 //! One `shared_rows × shared_columns` grid of Count-Min cells serves every
 //! group: a group hashes to one cell per row, and that cell's Count-Min
-//! counts the group's items. Colliding groups share a cell, so a point count
+//! adds up the group's item weights (1 per row for a count). Colliding groups share a cell, so a point count
 //! only overestimates.
 //!
 //! The kernel answers a group's item frequency (Hydra's median estimator).
@@ -23,7 +23,7 @@ pub struct HydraCms {
     inner: Hydra,
     width: usize,
     depth: usize,
-    /// Rows counted. Every counter is at most this, so keeping it within
+    /// Total weight added. Every counter is at most this, so keeping it within
     /// `i32` keeps sketchlib's `i32` counters from overflowing.
     total: i64,
 }
@@ -59,13 +59,19 @@ impl HydraCms {
         )
     }
 
-    /// Count one occurrence of `item` in `group`.
-    pub fn count(&mut self, group: &str, item: &str) -> Result<(), KernelError> {
-        let total = self.total + 1;
+    /// Add `weight` occurrences of `item` in `group` (1 for a row count).
+    /// sketchlib's Hydra adds `i32` weights, so weights are non-negative
+    /// integers and their total stays within `i32`.
+    pub fn count(&mut self, group: &str, item: &str, weight: i32) -> Result<(), KernelError> {
+        if weight < 0 {
+            return Err("HydraCms weights must be non-negative".into());
+        }
+        let total = self.total + i64::from(weight);
         if total > i64::from(i32::MAX) {
             return Err("HydraCms count exceeds its i32 counters".into());
         }
-        self.inner.update(&[group], &DataInput::Str(item), None)?;
+        self.inner
+            .update(&[group], &DataInput::Str(item), Some(weight))?;
         self.total = total;
         Ok(())
     }
@@ -176,7 +182,7 @@ mod tests {
     fn build(rows: &[(&str, &str)], shared_columns: usize) -> HydraCms {
         let mut grid = HydraCms::new(3, shared_columns, 64, 3).unwrap();
         for (group, item) in rows {
-            grid.count(group, item).unwrap();
+            grid.count(group, item, 1).unwrap();
         }
         grid
     }
@@ -254,7 +260,7 @@ mod tests {
     fn rejects_overflowing_counts() {
         let mut grid = HydraCms::new(1, 1, 1, 1).unwrap();
         grid.total = i64::from(i32::MAX);
-        assert!(grid.count("g", "x").is_err());
+        assert!(grid.count("g", "x", 1).is_err());
         assert!(grid.merge(&HydraCms::new(1, 1, 1, 1).unwrap()).is_ok());
         assert!(grid.merge(&grid).is_err());
     }

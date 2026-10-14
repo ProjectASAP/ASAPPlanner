@@ -116,9 +116,10 @@ pub fn validate_summary_kernel(
     Ok(())
 }
 
-/// The only shared grouping with a kernel: Hydra over Count-Min, counting
-/// rows. Each update adds one occurrence of one item column's value to its
-/// group.
+/// The only shared grouping with a kernel: Hydra over Count-Min. Each update
+/// adds one item column's value to its group, with weight 1 (a row count) or
+/// a weight column proven non-negative (a Count-Min point count only
+/// overestimates when no weight is negative).
 fn validate_hydra_cms(
     family: &SummaryFamilyType,
     input: &SummaryUpdate,
@@ -132,17 +133,14 @@ fn validate_hydra_cms(
     if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
         return Err("HydraCms requires one item column".into());
     }
-    if !matches!(input.weight, SummaryInputExpr::Constant(1.0))
-        || !matches!(
-            input.weight_domain,
-            WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::UnitCount
-            }
-        )
-    {
-        return Err("HydraCms counts rows; its update weight must be the unit count".into());
+    let WeightDomain::NonNegative { proof } = &input.weight_domain else {
+        return Err("HydraCms weights must be non-negative; the weight's sign is unknown".into());
+    };
+    match (&input.weight, proof) {
+        (SummaryInputExpr::Constant(w), NonNegativeWeightProof::UnitCount) if *w == 1.0 => Ok(()),
+        (SummaryInputExpr::Column(_), _) => Ok(()),
+        _ => Err("HydraCms weight must be the unit count or a non-negative weight column".into()),
     }
-    Ok(())
 }
 
 /// `(shared_rows, shared_columns, width, depth)` of a HydraCms family. The
@@ -309,7 +307,14 @@ pub fn validate_sketch_evaluation(
                 if matches!(family, SummaryFamilyType::Sketch(_, grouping)
                     if grouping != &GroupingStrategy::PerSubpopulationInstance) =>
             {
-                value.is_some()
+                if value.is_none() {
+                    return Err(Error::Invalid(
+                        "HydraCms does not answer a group total: asap_sketchlib's Hydra has no \
+                         group-mass query; only an item's point count within a group is answered"
+                            .into(),
+                    ));
+                }
+                true
             }
             // Only count intents read a Count-Min bare count, and their
             // updates have unit weight; the evaluation is typed Int64 on that basis.

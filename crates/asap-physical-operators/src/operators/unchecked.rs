@@ -169,10 +169,11 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::SharedSummaryBuild {
                 family,
                 item,
+                weight,
                 groups,
                 filter,
             } => with_filter(
-                Operator::shared_summary_build(input(0)?, family, item, groups)?,
+                Operator::shared_summary_build(input(0)?, family, item, weight, groups)?,
                 filter,
             )?,
             Kind::KeyedEvaluation { state, k } => {

@@ -153,10 +153,13 @@ enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<Expression>>,
     },
-    /// One HydraCms state shared by all groups, counting each row's item.
+    /// One HydraCms state shared by all groups, adding each row's item weight.
     SharedSummaryBuild {
         family: SummaryFamilyType,
         item: usize,
+        /// The weight column; each row adds 1 without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weight: Option<usize>,
         groups: Vec<usize>,
         /// Rows for which this is not true update no state; their group is kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
