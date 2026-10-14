@@ -1,19 +1,35 @@
 //! One frequency state shared by count, distinct, L2 and entropy evaluations.
 
 use crate::AggregateCore;
+use asap_sketchlib::sketch_framework::univmon::MAX_LAYER_SIZE;
 use asap_sketchlib::{DataInput, UnivMon};
 use planner_types::{post_asap::SketchStatistic, pre_asap::ColumnRef};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-fn check_dimensions(
+/// Rows beyond the executor's own limit, and shapes `asap_sketchlib`
+/// rejects because their hashes would not be independent: more than
+/// [`MAX_LAYER_SIZE`] (19) layers, or a layer whose rows read more than
+/// one 128-bit hash holds. Each row reads `⌈log2 cols⌉` column bits and one
+/// sign bit, so `rows · (⌈log2 cols⌉ + 1) ≤ 128`.
+pub(crate) fn check_dimensions(
     heap_size: usize,
     rows: usize,
     cols: usize,
     layers: usize,
 ) -> Result<(), Error> {
-    if heap_size == 0 || cols == 0 || !(1..=20).contains(&rows) || !(1..=64).contains(&layers) {
+    if heap_size == 0
+        || cols == 0
+        || !(1..=20).contains(&rows)
+        || !(1..=MAX_LAYER_SIZE).contains(&layers)
+    {
         return Err("invalid UnivMon dimensions".into());
+    }
+    let column_bits = cols
+        .checked_next_power_of_two()
+        .map_or(usize::BITS, usize::trailing_zeros) as usize;
+    if rows * (column_bits + 1) > 128 {
+        return Err("UnivMon rows and columns exceed one 128-bit hash".into());
     }
     rows.checked_mul(cols)
         .and_then(|n| n.checked_mul(layers))
@@ -217,5 +233,19 @@ mod tests {
         terminal.free();
         assert!(UnivMonAccumulator::from_sketch(terminal).is_ok());
         assert!(UnivMonAccumulator::from_sketch(UnivMon::init_univmon(4, 21, 16, 2)).is_err());
+    }
+
+    // Shapes whose hashes are not independent are errors, not library
+    // panics: more than 19 layers, or rows · (⌈log2 cols⌉ + 1) > 128.
+    #[test]
+    fn rejects_shapes_past_the_hash_budget() {
+        assert!(UnivMonAccumulator::new(4, 1, 16, 19).is_ok());
+        assert!(UnivMonAccumulator::new(4, 1, 16, 20).is_err());
+        // 8 · (⌈log2 65536⌉ + 1) = 136; 7 · 17 = 119.
+        assert!(UnivMonAccumulator::new(4, 8, 1 << 16, 1).is_err());
+        assert!(UnivMonAccumulator::new(4, 7, 1 << 16, 1).is_ok());
+        // A non-power-of-two width rounds its bits up: 11 · (11 + 1) = 132.
+        assert!(UnivMonAccumulator::new(4, 11, 2047, 1).is_err());
+        assert!(UnivMonAccumulator::new(4, 10, 2047, 1).is_ok());
     }
 }
