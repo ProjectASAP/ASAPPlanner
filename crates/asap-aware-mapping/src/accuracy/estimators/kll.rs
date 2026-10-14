@@ -1,6 +1,6 @@
 //! KLL normalized rank error at the registered empirical 99% calibration
-//! and, below a 0.01 failure probability, that calibration scaled by the KLL
-//! bound's dependence on the failure probability.
+//! and, below a 0.01 failure probability, that calibration scaled by the
+//! Gaussian quantile ratio `z(1 − δ/2) / z(1 − 0.01/2)`.
 use super::*;
 use asap_types::post_asap::sketch::KLL_MAX_K;
 
@@ -38,9 +38,9 @@ pub(super) fn guarantee(
 }
 /// The empirical 99% calibration of the pinned Apache DataSketches KLL.
 const KLL_EMPIRICAL_99_CONTRACT: &str = "apache_datasketches_kll_empirical_99_a9b42755072b";
-/// That calibration scaled to a failure probability below 0.01 by the KLL
-/// bound's dependence on it ([`delta_scale`]): a model, not a measurement,
-/// so it is named apart from the calibration.
+/// That calibration scaled to a failure probability below 0.01 by the
+/// Gaussian quantile ratio ([`delta_scale`]): a model, not a measurement, so
+/// it is named apart from the calibration.
 const KLL_DELTA_SCALED_CONTRACT: &str =
     "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b";
 pub(crate) const KLL_RANK_ERROR_COEFFICIENT_99: f64 = 2.296;
@@ -65,17 +65,70 @@ pub(crate) fn kll_k(eps: f64) -> u32 {
 }
 
 /// How much the rank error at failure probability `delta` exceeds the error
-/// at the calibrated 0.01: Karnin, Lang & Liberty (FOCS 2016) bound the
-/// error at `delta` by `O(sqrt(ln(1/delta)) / k)`, so the factor is
-/// `sqrt(ln(1/delta) / ln(1/0.01))`, with the constant taken from the 99%
-/// calibration. 1 for `delta >= 0.01`; `None` unless `0 < delta < 1`.
+/// at the calibrated 0.01, modelling the error as Gaussian: the ratio of the
+/// two-sided standard normal quantiles, `z(1 − delta/2) / z(1 − 0.01/2)`.
+/// It grows faster as `delta` shrinks than the KLL bound's
+/// `sqrt(ln(1/delta))` (1.277 vs 1.225 at `delta` = 0.001), so it is the
+/// conservative choice. 1 for `delta >= 0.01`; `None` unless `0 < delta < 1`.
 fn delta_scale(delta: f64) -> Option<f64> {
     if !(delta > 0.0 && delta < 1.0) {
         None
     } else if delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
         Some(1.0)
     } else {
-        Some((delta.ln() / KLL_CALIBRATED_FAILURE_PROBABILITY.ln()).sqrt())
+        Some(
+            normal_quantile(1.0 - delta / 2.0)
+                / normal_quantile(1.0 - KLL_CALIBRATED_FAILURE_PROBABILITY / 2.0),
+        )
+    }
+}
+
+/// The standard normal quantile `z(p)` for `0 < p < 1`, by Acklam's rational
+/// approximation (relative error below 1.2e-9).
+fn normal_quantile(p: f64) -> f64 {
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+    let tail = |q: f64| {
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    };
+    const P_LOW: f64 = 0.024_25;
+    if p < P_LOW {
+        tail((-2.0 * p.ln()).sqrt())
+    } else if p > 1.0 - P_LOW {
+        -tail((-2.0 * (1.0 - p).ln()).sqrt())
+    } else {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
     }
 }
 
@@ -211,6 +264,24 @@ mod tests {
         };
         assert!(g(KLL_MAX_K).is_some());
         assert!(g(KLL_MAX_K + 1).is_none());
+    }
+
+    /// Below δ = 0.01 the error scales by the Gaussian quantile ratio
+    /// `z(1 − δ/2) / z(1 − 0.01/2)`.
+    #[test]
+    fn delta_scale_is_the_gaussian_quantile_ratio() {
+        assert_eq!(delta_scale(0.01), Some(1.0));
+        assert_eq!(delta_scale(0.5), Some(1.0));
+        let ratio = delta_scale(0.001).unwrap();
+        assert!((ratio - 1.277_463_039_557_138_7).abs() < 1e-8, "{ratio}");
+        assert!((normal_quantile(0.975) - 1.959_963_984_540_054).abs() < 1e-8);
+        assert_eq!(
+            size_params(0.01, 0.001),
+            SketchParams::Kll {
+                k: kll_k(0.01 / ratio),
+                failure_probability: Some(0.001),
+            }
+        );
     }
 
     /// A hand-built failure probability outside (0, 1) gives no guarantee
