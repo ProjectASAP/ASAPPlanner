@@ -1,5 +1,17 @@
 //! Registered propagation rules for computations over uncertain inputs.
+//! Stage 1 composes each candidate's guarantees with them
+//! (`per_computation_candidates`); a rule that needs a statistic leaves an
+//! `Unknown` leaf named by one of the constants below, which Stage 3 binds.
 use super::*;
+
+/// Rows an exact aggregation folds (per group): bounded by the data
+/// workload's input cardinality.
+pub(crate) const INPUT_ROW_COUNT: &str = "input_row_count";
+/// Whether every input value is non-negative.
+pub(crate) const VALUES_NON_NEGATIVE: &str = "values_non_negative";
+/// The relative bound of a quantile ratio, given enforced operand domains
+/// (`QuantileInputDomain`).
+pub(crate) const DIVISION_OPERAND_DOMAINS: &str = "division_operand_domains";
 
 impl DefaultAccuracyModel {
     fn additive(
@@ -115,6 +127,9 @@ impl DefaultAccuracyModel {
         inputs: &[ResultGuarantee],
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
+        if all_relative(inputs) {
+            return Self::relative_fold(op, inputs, stats, true, "exact_sum_relative");
+        }
         let mut terms = Vec::with_capacity(inputs.len());
         let mut deltas = Vec::with_capacity(inputs.len());
         let mut provenance = Vec::new();
@@ -172,6 +187,9 @@ impl DefaultAccuracyModel {
         inputs: &[ResultGuarantee],
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
+        if all_relative(inputs) {
+            return Self::relative_fold(op, inputs, stats, true, "exact_average_relative");
+        }
         if inputs
             .iter()
             .any(|input| input.metric != ErrorMetric::AbsoluteValue)
@@ -220,6 +238,9 @@ impl DefaultAccuracyModel {
         inputs: &[ResultGuarantee],
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
+        if all_relative(inputs) {
+            return Self::relative_fold(op, inputs, stats, false, "exact_extremum_relative");
+        }
         let metric = inputs[0].metric;
         if inputs
             .iter()
@@ -246,6 +267,63 @@ impl DefaultAccuracyModel {
             bound: BoundExpr::Max {
                 terms: inputs.iter().map(|g| g.bound.clone()).collect(),
             },
+            failure_probability: ProbabilityExpr::Scaled {
+                count,
+                inner: Box::new(ProbabilityExpr::UnionBound {
+                    terms: inputs
+                        .iter()
+                        .map(|g| g.failure_probability.clone())
+                        .collect(),
+                }),
+            },
+            provenance,
+        })
+    }
+
+    /// An exact sum, mean, max or min of values each within relative `α_i`
+    /// is within relative `max α_i`. A max or min holds whatever the signs;
+    /// a sum or mean only over non-negative values (no cancellation), so
+    /// with `needs_sign` and the sign unknown the bound is the symbolic
+    /// [`VALUES_NON_NEGATIVE`]. The failure probability is the union bound
+    /// over every input row.
+    fn relative_fold(
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        stats: &PropagationStats,
+        needs_sign: bool,
+        rule: &str,
+    ) -> Result<ResultGuarantee, AccuracyError> {
+        if needs_sign && stats.values_non_negative == Some(false) {
+            return Err(AccuracyError::UnsupportedComposition {
+                operator: op.clone(),
+                input_metrics: inputs.iter().map(|g| g.metric).collect(),
+                local_metric: None,
+                reason: "relative error of a sum over signed values is unbounded".into(),
+            });
+        }
+        let mut provenance = Vec::new();
+        let count = row_count(stats, &mut provenance);
+        let bound = if needs_sign && stats.values_non_negative.is_none() {
+            provenance.push(GuaranteeSource::UnavailableStatistic {
+                statistic: VALUES_NON_NEGATIVE.into(),
+            });
+            BoundExpr::Unknown {
+                statistic: VALUES_NON_NEGATIVE.into(),
+            }
+        } else {
+            BoundExpr::Max {
+                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+            }
+        };
+        provenance.extend(composed_provenance(
+            op,
+            inputs,
+            &ResultGuarantee::exact("exact aggregation"),
+            rule,
+        ));
+        Ok(ResultGuarantee {
+            metric: ErrorMetric::RelativeValue,
+            bound,
             failure_probability: ProbabilityExpr::Scaled {
                 count,
                 inner: Box::new(ProbabilityExpr::UnionBound {
@@ -382,6 +460,14 @@ impl DefaultAccuracyModel {
     }
 }
 
+/// Every input carries a relative-value guarantee.
+fn all_relative(inputs: &[ResultGuarantee]) -> bool {
+    !inputs.is_empty()
+        && inputs
+            .iter()
+            .all(|g| g.metric == ErrorMetric::RelativeValue)
+}
+
 /// `stats.input_row_count` as a bound factor, or an `Unknown` leaf (recorded
 /// in `provenance`) when absent.
 fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) -> BoundExpr {
@@ -389,10 +475,10 @@ fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) ->
         Some(n) => BoundExpr::Constant { value: n as f64 },
         None => {
             provenance.push(GuaranteeSource::UnavailableStatistic {
-                statistic: "input_row_count".into(),
+                statistic: INPUT_ROW_COUNT.into(),
             });
             BoundExpr::Unknown {
-                statistic: "input_row_count".into(),
+                statistic: INPUT_ROW_COUNT.into(),
             }
         }
     }
@@ -401,6 +487,36 @@ fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) ->
 /// `input`'s bound converted to absolute value units, multiplying a
 /// normalized metric by the (unknown) statistic it is normalized by. `None`
 /// for a metric with no such conversion (`Rank`, `TopKMembership`).
+/// `input` with a Count-Min ([`ErrorMetric::Frequency`]) or Count Sketch
+/// ([`ErrorMetric::L2Frequency`]) bound restated as an additive absolute
+/// error: the normalized bound times its stream norm, a symbolic statistic
+/// until bound. Any other guarantee is returned unchanged.
+pub(crate) fn additive_as_absolute(input: ResultGuarantee) -> ResultGuarantee {
+    if !matches!(
+        input.metric,
+        ErrorMetric::Frequency | ErrorMetric::L2Frequency
+    ) || input.is_exact()
+    {
+        return input;
+    }
+    let bound = absolute_bound(&input).expect("additive metrics convert to absolute errors");
+    let mut provenance = input.provenance;
+    if let BoundExpr::Product { factors } = &bound {
+        provenance.extend(factors.iter().filter_map(|factor| match factor {
+            BoundExpr::Unknown { statistic } => Some(GuaranteeSource::UnavailableStatistic {
+                statistic: statistic.clone(),
+            }),
+            _ => None,
+        }));
+    }
+    ResultGuarantee {
+        metric: ErrorMetric::AbsoluteValue,
+        bound,
+        provenance,
+        ..input
+    }
+}
+
 fn absolute_bound(input: &ResultGuarantee) -> Option<BoundExpr> {
     let normalizer = match input.metric {
         ErrorMetric::AbsoluteValue => return Some(input.bound.clone()),
@@ -575,15 +691,15 @@ pub(super) fn propagate(
                         );
                         provenance.extend(stats.evidence_provenance.clone());
                         provenance.push(GuaranteeSource::UnavailableStatistic {
-                            statistic: "values_non_negative".into(),
+                            statistic: VALUES_NON_NEGATIVE.into(),
                         });
                         return Ok(ResultGuarantee {
                             metric: ErrorMetric::RelativeValue,
                             bound: BoundExpr::Unknown {
-                                statistic: "values_non_negative".into(),
+                                statistic: VALUES_NON_NEGATIVE.into(),
                             },
                             failure_probability: ProbabilityExpr::Unknown {
-                                statistic: "values_non_negative".into(),
+                                statistic: VALUES_NON_NEGATIVE.into(),
                             },
                             provenance,
                         });
@@ -1009,6 +1125,60 @@ mod tests {
             .unwrap();
         assert!((out.bound.evaluate().unwrap() - 0.3).abs() < 1e-12);
         assert!((out.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
+    }
+    /// `max`/`min` of values each within relative `α_i` is within relative
+    /// `max α_i` of the true extremum, whatever the signs.
+    #[test]
+    fn exact_extremum_keeps_a_relative_value_bound() {
+        let out = DefaultAccuracyModel
+            .propagate(
+                &CompositionOperator::ExactExtremum,
+                &[rel(0.01), rel(0.02)],
+                None,
+                &PropagationStats {
+                    input_row_count: Some(3),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(out.metric, ErrorMetric::RelativeValue);
+        assert_eq!(out.bound.evaluate(), Some(0.02));
+        assert_eq!(out.failure_probability.evaluate(), Some(0.0));
+    }
+    /// A sum or mean of relative-error values keeps the relative bound only
+    /// over values known non-negative (cancellation otherwise); with the sign
+    /// unknown, the bound stays symbolic, and a known sign change rejects.
+    #[test]
+    fn exact_sum_and_average_keep_a_relative_bound_only_without_a_sign_change() {
+        for op in [
+            CompositionOperator::ExactSum,
+            CompositionOperator::ExactAverage,
+        ] {
+            let with = |values_non_negative| {
+                DefaultAccuracyModel.propagate(
+                    &op,
+                    &[rel(0.01)],
+                    None,
+                    &PropagationStats {
+                        values_non_negative,
+                        input_row_count: Some(3),
+                        ..Default::default()
+                    },
+                )
+            };
+            let known = with(Some(true)).unwrap();
+            assert_eq!(known.metric, ErrorMetric::RelativeValue);
+            assert_eq!(known.bound.evaluate(), Some(0.01), "{op:?}");
+            let unknown = with(None).unwrap();
+            assert_eq!(unknown.metric, ErrorMetric::RelativeValue);
+            assert_eq!(
+                unknown.bound,
+                BoundExpr::Unknown {
+                    statistic: VALUES_NON_NEGATIVE.into()
+                }
+            );
+            assert!(with(Some(false)).is_err(), "{op:?}");
+        }
     }
     #[test]
     fn exact_average_has_its_own_absolute_error_rule() {
