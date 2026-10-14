@@ -66,6 +66,7 @@ use crate::accuracy::composition::{
     parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS, INPUT_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
+use crate::accuracy::estimators::hll;
 use crate::accuracy::{OperandDomain, PropagationStats};
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
@@ -297,6 +298,8 @@ fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
 /// - the input row count, from the data workload's input cardinality;
 /// - each source's stream norm ([`source_norm_statistic`]), from the data
 ///   workload's per-source `stream_norms`;
+/// - classic HLL's failure probability, from the data workload's per-source
+///   `max_distinct_per_evaluation`;
 /// - a product's or quotient's bound, from the deployment's enforced
 ///   operand domains ([`operand_domain_bounds`]).
 ///
@@ -317,8 +320,9 @@ fn bound_root_guarantee(
     }))
 }
 
-/// A data-workload statistic Stage 1 left symbolic: the input row count or
-/// one source's stream norm, from evidence that holds at any planning time.
+/// A data-workload statistic Stage 1 left symbolic: the input row count,
+/// one source's stream norm, or classic HLL's failure probability given one
+/// source's distinct bound, from evidence that holds at any planning time.
 fn workload_statistic(statistic: &str, data: &DataWorkload) -> Option<f64> {
     // Without a planning time, only evidence that cannot expire is fresh.
     const ANY_TIME: u64 = u64::MAX;
@@ -327,6 +331,13 @@ fn workload_statistic(statistic: &str, data: &DataWorkload) -> Option<f64> {
             .input_cardinality
             .value_at(ANY_TIME)
             .map(|rows| *rows as f64);
+    }
+    if let Some((precision, source)) = hll::parse_classic_failure_statistic(statistic) {
+        let bound = data.max_distinct_per_evaluation.value_at(ANY_TIME)?;
+        return Some(hll::classic_failure_probability(
+            precision,
+            *bound.get(source)?,
+        ));
     }
     let (norm, source) = parse_source_norm_statistic(statistic)?;
     let norms = data.stream_norms.value_at(ANY_TIME)?.get(source)?;

@@ -80,8 +80,8 @@ use asap_types::post_asap::guarantee::{
 };
 use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Materialization,
-    NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchStatistic, SummaryInputExpr,
-    SummaryUpdate, WeightDomain,
+    NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
+    SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
 use asap_types::pre_asap::{
@@ -94,6 +94,7 @@ use crate::accuracy::composition::{
     additive_as_absolute, StreamNorm, DIVISION_OPERAND_DOMAINS, GROUP_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
+use crate::accuracy::estimators::hll;
 use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use crate::function_rules::function_rules;
 use crate::realization::{
@@ -672,7 +673,8 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                 reduction,
                 ..
             }) if estimate_has_bound(family, update, query) => {
-                let local = DefaultAccuracyModel.local_guarantee(family, query)?;
+                let local = classic_hll_guarantee(family, query, input)
+                    .or_else(|| DefaultAccuracyModel.local_guarantee(family, query))?;
                 if exact_inputs(summary_input) {
                     Some(local)
                 } else if exact_filter(summary_input) && !groups_by_estimate(reduction, input) {
@@ -741,6 +743,27 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
         ),
         Operator::NonASAP(_) => None,
     }
+}
+
+/// Classic HLL's guarantee for a distinct count of one instance per group
+/// over a source's own rows ([`hll::classic_guarantee`]): its failure
+/// probability is left symbolic in the source's distinct bound, which
+/// Stage 1 does not read. `None` for any other summary, or an HLL over
+/// computed rows, whose distinct items the source's bound does not bound.
+fn classic_hll_guarantee(
+    family: &FieldDataType,
+    query: &SketchStatistic,
+    input: &Rc<OperatorNode>,
+) -> Option<AccuracyGuarantee> {
+    let FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) = family else {
+        return None;
+    };
+    let (SketchParams::Hll { precision }, SketchStatistic::Cardinality) = (kind.params(), query)
+    else {
+        return None;
+    };
+    source_scan(input)?;
+    hll::classic_guarantee(*precision, &source(input)?)
 }
 
 /// The rows one group of an exact fold over approximate `input` counts.
@@ -1022,21 +1045,27 @@ fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
 /// the source's scan, at most behind filters and windows that keep its
 /// schema, and `column` resolves to the scan's sample value.
 fn raw_value_column(node: &Rc<OperatorNode>, column: &ColumnRef) -> bool {
+    let Some(schema) = source_scan(node) else {
+        return false;
+    };
+    let resolved = resolve_column_ref(column, schema).ok();
+    resolved.is_some() && resolved == resolve_column_ref(&ColumnRef::SampleValue, schema).ok()
+}
+
+/// The scan's schema when `node` is a source's scan, at most behind filters
+/// and windows that keep its schema: its rows are the source's own.
+fn source_scan(node: &Rc<OperatorNode>) -> Option<&Schema> {
     let mut current = node;
     loop {
         if current.schema != node.schema {
-            return false;
+            return None;
         }
         match current.non_asap() {
             Some(NonASAPOp::Filter { child, .. } | NonASAPOp::TimeRange { child, .. }) => {
                 current = child
             }
-            Some(NonASAPOp::Scan { schema, .. }) => {
-                let resolved = resolve_column_ref(column, schema).ok();
-                return resolved.is_some()
-                    && resolved == resolve_column_ref(&ColumnRef::SampleValue, schema).ok();
-            }
-            _ => return false,
+            Some(NonASAPOp::Scan { schema, .. }) => return Some(schema),
+            _ => return None,
         }
     }
 }
