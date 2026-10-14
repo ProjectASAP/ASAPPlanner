@@ -37,7 +37,9 @@ pub use execution_data_state::{
     lift_plain, DataPrimitive, ExactOperationSchemaError, ExecutionDataState,
     ExecutionDataStateError, ExecutionTiming, Materialization, Medium,
 };
-pub use family_capability::{FamilyCapability, MergeCapability, MergedError, SelectionRelation};
+pub use family_capability::{
+    FamilyCapability, MergeCapability, MergedError, Readout, SelectionRelation,
+};
 pub use guarantee::{
     AccuracyError, AccuracyGuarantee, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource,
     ProbabilityExpr,
