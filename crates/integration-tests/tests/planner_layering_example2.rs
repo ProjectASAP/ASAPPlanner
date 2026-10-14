@@ -82,6 +82,7 @@ fn data_workload(ingestion_interval: bool) -> DataWorkload {
         input_cardinality: declared(10_000_000),
         distribution: declared(DataDistribution::Zipf),
         stream_norms: Default::default(),
+        metric_types: Default::default(),
     }
 }
 

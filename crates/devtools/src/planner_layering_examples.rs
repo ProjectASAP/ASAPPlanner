@@ -5,8 +5,8 @@
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
-    Evidence, EvidenceSource, LatencyRequirement, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
+    Evidence, EvidenceSource, LatencyRequirement, MetricType, PlanningWorkload, Predictability,
+    Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
     RepeatingEntry, RepetitionInterval, TimeSelection, TimestampMs,
 };
 
@@ -38,6 +38,7 @@ pub fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
         distribution: declared(DataDistribution::Zipf),
         stream_norms: Evidence::default(),
         arrival,
+        metric_types: Default::default(),
     }
 }
 
@@ -45,6 +46,8 @@ pub const EXAMPLE1_Q1: &str = "sum by (job) (rate(http_requests_total[1m]))";
 pub const EXAMPLE1_Q2: &str = "topk by (job) (10, sum_over_time(http_requests_total[1m]))";
 
 /// Example 1: two dashboard panels, every 10 s over the last minute.
+/// `http_requests_total` is declared a counter: its samples are never
+/// negative.
 pub fn example1() -> PlanningWorkload {
     let panel = |query: &str, accuracy, response_latency| RepeatingEntry {
         query: Query(query.into()),
@@ -80,7 +83,10 @@ pub fn example1() -> PlanningWorkload {
                 ),
             ]),
         },
-        data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+        data_workload: Some(DataWorkload {
+            metric_types: [("http_requests_total".to_string(), MetricType::Counter)].into(),
+            ..shared_data_workload(DataArrival::ContinuouslyIngesting)
+        }),
     }
 }
 
