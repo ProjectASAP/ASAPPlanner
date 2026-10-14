@@ -453,4 +453,44 @@ mod tests {
             start.elapsed()
         );
     }
+
+    /// Each candidate's label (the groups it shares) and its roots agree:
+    /// applying the label gives the same roots, sharing exactly the
+    /// labelled groups.
+    #[test]
+    fn labels_and_roots_agree() {
+        for queries in [
+            &[
+                "sum by (job) (rate(m[1m]))",
+                "topk by (job) (10, sum_over_time(m[1m]))",
+            ][..],
+            &["sum(a)", "max(a)", "sum(b)", "max(b)"],
+            &["sum(abs(a))", "max(abs(a))", "min(a)", "sum(b)", "max(b)"],
+        ] {
+            let roots = roots(queries);
+            let groups = sharing_groups(&roots);
+            for variant in identical_expression_variants(&roots, &groups) {
+                let label: Vec<bool> = (0..groups.len())
+                    .map(|g| variant.shared_groups.contains(&g))
+                    .collect();
+                let (applied, merged) = apply(&roots, &groups, &label);
+                assert_eq!(merged, label, "{queries:?}");
+                assert_eq!(applied, variant.roots, "{queries:?}");
+                assert_eq!(
+                    distinct_nodes(&applied),
+                    distinct_nodes(&variant.roots),
+                    "{queries:?} {:?}",
+                    variant.shared_groups
+                );
+                for (a, b) in [(0, 1), (2, 3)] {
+                    if b < roots.len() {
+                        assert_eq!(
+                            common_nodes(&applied[a], &applied[b]).len(),
+                            common_nodes(&variant.roots[a], &variant.roots[b]).len()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
