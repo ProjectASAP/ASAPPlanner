@@ -14,10 +14,9 @@ pub mod reconciliation;
 pub use allocation::{
     AccuracyAllocation, AccuracyBudgetAllocator, CompositionShape, EqualSplitAllocator,
 };
-pub(crate) use estimators::EstimatorAccuracy;
 pub use evidence::{
-    AccuracyEvidenceProvider, EstimatorContract, NoAccuracyEvidence, OperandDomain,
-    PropagationStats, WorkloadAccuracyEvidence,
+    AccuracyEvidenceProvider, NoAccuracyEvidence, OperandDomain, PropagationStats,
+    WorkloadAccuracyEvidence,
 };
 
 use asap_types::ir::OperatorNode;
