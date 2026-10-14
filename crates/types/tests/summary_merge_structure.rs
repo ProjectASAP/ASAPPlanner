@@ -6,7 +6,7 @@ use asap_types::{
     post_asap::{
         ExactKind, ExactParams, ExecutionTiming, FamilyCapability, GroupingStrategy, HydraKind,
         HydraParams, Materialization, Medium, MergedError, SelectionRelation, SketchAlgorithm,
-        SketchKind, SketchParams, SummaryUpdate,
+        SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
     },
     pre_asap::expr_ir::{CompareOpKind, ScalarValue},
     pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema},
@@ -205,6 +205,18 @@ fn family_capability_table() {
             Some((Disjoint, SameAsUnionBuild)),
             false,
         ),
+        // KMV keeps the k smallest hashes under one shared seed: the merge
+        // is the k smallest of the union and ignores repeated hashes.
+        (
+            sketch(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1024 }),
+            Some((OverlapAllowed, SameAsUnionBuild)),
+            false,
+        ),
+        (
+            sketch(SketchAlgorithm::Theta, SketchParams::Theta { k: 1024 }),
+            None,
+            false,
+        ),
         (cms_with_heap(), None, false),
         (
             sketch(
@@ -276,6 +288,49 @@ fn family_capability_table() {
         );
         assert_eq!(capability.subtractable, subtractable, "{family:?}");
     }
+}
+
+/// A merged UnivMon keeps the guarantee of readouts from its additive
+/// layer-0 counters (L2, point counts); readouts from its per-layer heaps
+/// (distinct count, entropy, top-k) are uncertified after a merge. Other
+/// families' readouts share the family's merged error.
+#[test]
+fn merged_error_depends_on_the_readout() {
+    use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
+    let univmon = FamilyCapability::of(&sketch(
+        SketchAlgorithm::UnivMon,
+        SketchParams::UnivMon {
+            heap_size: 10,
+            sketch_rows: 4,
+            sketch_cols: 64,
+            layers: 8,
+        },
+    ));
+    let point = SketchStatistic::PointCount {
+        key: ColumnRef::Named("k".into()),
+        value: None,
+    };
+    for (readout, error) in [
+        (FrequencyL2, MergedError::SameAsUnionBuild),
+        (point, MergedError::SameAsUnionBuild),
+        (Cardinality, MergedError::Uncertified),
+        (FrequencyEntropy, MergedError::Uncertified),
+        (TopK { k: 5 }, MergedError::Uncertified),
+    ] {
+        assert_eq!(univmon.merged_error(&readout), Some(error), "{readout:?}");
+    }
+    assert_eq!(
+        FamilyCapability::of(&hll()).merged_error(&Cardinality),
+        Some(MergedError::SameAsUnionBuild)
+    );
+    assert_eq!(
+        FamilyCapability::of(&kll()).merged_error(&SketchStatistic::Quantile { q: 0.99 }),
+        Some(MergedError::SameAsUnionBuild)
+    );
+    assert_eq!(
+        FamilyCapability::of(&cms_with_heap()).merged_error(&TopK { k: 5 }),
+        None
+    );
 }
 
 /// The IR does not reject a merge by family: a heap state has no sound

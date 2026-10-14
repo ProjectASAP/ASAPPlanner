@@ -7,7 +7,7 @@
 //! the mergeability facts; the summary-capability facts (which statistics
 //! a family answers) are added as further fields of [`FamilyCapability`].
 
-use super::sketch::{ExactKind, GroupingStrategy, HydraKind, SketchAlgorithm};
+use super::sketch::{ExactKind, GroupingStrategy, HydraKind, SketchAlgorithm, SketchStatistic};
 use crate::pre_asap::schema::FieldDataType;
 
 /// What one summary family can do.
@@ -29,6 +29,10 @@ pub struct MergeCapability {
     pub inputs: SelectionRelation,
     /// How the merged state's error relates to its parts' errors.
     pub error: MergedError,
+    /// The merged error of readouts that read the family's heavy-hitter
+    /// heaps (distinct count, entropy, top-k), when it differs from
+    /// `error`: each part's heaps keep only that part's heavy items.
+    pub heap_readouts: Option<MergedError>,
 }
 
 /// How the selections of a merge's inputs must relate for the result to
@@ -51,6 +55,8 @@ pub enum MergedError {
     /// not grow with the number of parts, so a state sized for the whole
     /// window may be built in parts.
     SameAsUnionBuild,
+    /// The merged state's readout has no guarantee; it is evidence only.
+    Uncertified,
 }
 
 impl FamilyCapability {
@@ -59,7 +65,13 @@ impl FamilyCapability {
     pub fn of(family: &FieldDataType) -> Self {
         use ExactKind as E;
         use SketchAlgorithm as S;
-        let merge = |inputs, error| Some(MergeCapability { inputs, error });
+        let merge = |inputs, error| {
+            Some(MergeCapability {
+                inputs,
+                error,
+                heap_readouts: None,
+            })
+        };
         let (merge, subtractable) = match family {
             // Rate/Increase/IRate read the samples at the window edges, so
             // their parts do not compose into the window's value.
@@ -90,8 +102,29 @@ impl FamilyCapability {
                         merge(SelectionRelation::Disjoint, MergedError::SameAsUnionBuild),
                         true,
                     ),
-                    S::Kll | S::DDSketch | S::UnivMon => (
+                    S::Kll | S::DDSketch => (
                         merge(SelectionRelation::Disjoint, MergedError::SameAsUnionBuild),
+                        false,
+                    ),
+                    // Layer-0 counters add exactly, so L2 and point counts
+                    // keep their guarantee; the per-layer heaps do not.
+                    S::UnivMon => (
+                        Some(MergeCapability {
+                            inputs: SelectionRelation::Disjoint,
+                            error: MergedError::SameAsUnionBuild,
+                            heap_readouts: Some(MergedError::Uncertified),
+                        }),
+                        false,
+                    ),
+                    // `asap_sketchlib`'s KMV hashes every item with one
+                    // shared seed (`CANONICAL_HASH_SEED`), and `KMV::merge`
+                    // keeps the k smallest distinct hashes: the state of
+                    // the union.
+                    S::Kmv => (
+                        merge(
+                            SelectionRelation::OverlapAllowed,
+                            MergedError::SameAsUnionBuild,
+                        ),
                         false,
                     ),
                     S::Hll => (
@@ -101,9 +134,9 @@ impl FamilyCapability {
                         ),
                         false,
                     ),
-                    // Merged heap top-k states have no accuracy model; KMV and
-                    // Theta are not offered.
-                    S::CmsWithHeap | S::CountSketchWithHeap | S::Kmv | S::Theta => (None, false),
+                    // Merged heap top-k states have no accuracy model;
+                    // Theta is not offered.
+                    S::CmsWithHeap | S::CountSketchWithHeap | S::Theta => (None, false),
                 }
             }
             FieldDataType::Plain(_)
@@ -115,5 +148,20 @@ impl FamilyCapability {
             merge,
             subtractable,
         }
+    }
+
+    /// The merged error of `readout` from a merged state of this family;
+    /// `None` when the family has no sound merge.
+    pub fn merged_error(&self, readout: &SketchStatistic) -> Option<MergedError> {
+        let merge = self.merge?;
+        Some(match (merge.heap_readouts, readout) {
+            (
+                Some(heap),
+                SketchStatistic::Cardinality
+                | SketchStatistic::FrequencyEntropy
+                | SketchStatistic::TopK { .. },
+            ) => heap,
+            _ => merge.error,
+        })
     }
 }
