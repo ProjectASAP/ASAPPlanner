@@ -22,7 +22,7 @@ pub fn validate_summary_kernel(
     grouping: &GroupingStrategy,
 ) -> Result<(), String> {
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
-        return Err("shared summary grouping has no registered kernel".into());
+        return validate_hydra_cms(family, input, grouping);
     }
     let keyed = match family {
         SummaryFamilyType::ExactAggregate(kind, params) => {
@@ -116,6 +116,93 @@ pub fn validate_summary_kernel(
     Ok(())
 }
 
+/// The only shared grouping with a kernel: Hydra over Count-Min, counting
+/// rows. Each update adds one occurrence of one item column's value to its
+/// group.
+fn validate_hydra_cms(
+    family: &SummaryFamilyType,
+    input: &SummaryUpdate,
+    grouping: &GroupingStrategy,
+) -> Result<(), String> {
+    use planner_types::post_asap::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
+    if !matches!(family, SummaryFamilyType::Sketch(_, layout) if layout == grouping) {
+        return Err("Planner family and operator grouping disagree".into());
+    }
+    hydra_cms_shape(family)?;
+    if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
+        return Err("HydraCms requires one item column".into());
+    }
+    if !matches!(input.weight, SummaryInputExpr::Constant(1.0))
+        || !matches!(
+            input.weight_domain,
+            WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount
+            }
+        )
+    {
+        return Err("HydraCms counts rows; its update weight must be the unit count".into());
+    }
+    Ok(())
+}
+
+/// `(shared_rows, shared_columns, width, depth)` of a HydraCms family. The
+/// family is the per-group Count-Min it emulates, with the Hydra's own width
+/// and depth.
+pub(crate) fn hydra_cms_shape(
+    family: &SummaryFamilyType,
+) -> Result<(usize, usize, usize, usize), String> {
+    use planner_types::post_asap::{HydraKind, HydraParams};
+    let SummaryFamilyType::Sketch(
+        kind,
+        GroupingStrategy::SharedMultiSubpopulation {
+            kind: HydraKind::HydraCms,
+            params:
+                HydraParams::HydraCms {
+                    width,
+                    depth,
+                    shared_rows,
+                    shared_columns,
+                },
+        },
+    ) = family
+    else {
+        return Err("shared summary grouping has no registered kernel".into());
+    };
+    if kind.algorithm() != &SketchAlgorithm::Cms
+        || kind.params()
+            != &(SketchParams::Cms {
+                width: *width,
+                depth: *depth,
+            })
+    {
+        return Err("HydraCms family must be Count-Min with the Hydra width and depth".into());
+    }
+    if !valid_matrix(*width, *depth) || !valid_matrix(*shared_columns, *shared_rows) {
+        return Err("invalid HydraCms dimensions".into());
+    }
+    Ok((
+        *shared_rows as usize,
+        *shared_columns as usize,
+        *width as usize,
+        *depth as usize,
+    ))
+}
+
+/// A filtered `SummaryAgg` never runs at ingestion time. An ingestion-time
+/// build reads raw samples (`$population`, `$timestamp`, `value`), which carry
+/// none of the query's columns for the filter predicate to read, so only a
+/// query-time build can apply it. Ingestion-time eligibility relies on this
+/// check; the ingestion-time compiler and the binding of any
+/// ingestion-timed `SummaryAgg` apply it.
+pub fn validate_ingestion_time_summary<C>(
+    filter: Option<&planner_types::ir::Predicate<C>>,
+) -> Result<(), String> {
+    match filter {
+        Some(_) => Err("a filtered summary update runs only at query time".into()),
+        None => Ok(()),
+    }
+}
+
 fn valid_matrix(width: u32, depth: u32) -> bool {
     // Construction uses the kernel's native row hashing, so no encoded-size
     // limit applies here.
@@ -147,9 +234,13 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::post_asap::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
-        // its bare count, but the DAG does not build it from rows.
+        // its bare count, but the DAG does not build it from rows. HydraCms
+        // is built by the shared summary operator.
         if let (A::Cms, SketchParams::Cms { width, depth }) = (kind.algorithm(), kind.params()) {
-            return if valid_matrix(*width, *depth) && grouping == &Default::default() {
+            if grouping != &GroupingStrategy::PerSubpopulationInstance {
+                return hydra_cms_shape(family).map(|_| ()).map_err(Error::Invalid);
+            }
+            return if valid_matrix(*width, *depth) {
                 Ok(())
             } else {
                 Err(Error::Invalid(
@@ -212,6 +303,14 @@ pub fn validate_sketch_evaluation(
             (A::DDSketch, _) => bare_count,
             (A::Hll, SketchStatistic::Cardinality) => true,
             (A::Hll, _) => bare_count,
+            // HydraCms answers a group's item frequency. A group's total
+            // needs a group-mass query asap_sketchlib's Hydra lacks.
+            (A::Cms, SketchStatistic::PointCount { value, .. })
+                if matches!(family, SummaryFamilyType::Sketch(_, grouping)
+                    if grouping != &GroupingStrategy::PerSubpopulationInstance) =>
+            {
+                value.is_some()
+            }
             // Only count intents read a Count-Min bare count, and their
             // updates have unit weight; the evaluation is typed Int64 on that basis.
             (A::Cms, _) => bare_count,
@@ -258,4 +357,19 @@ pub fn validate_exact_evaluation(
         return Err(Error::Invalid("invalid exact counter lookback".into()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Only a query-time build applies a summary filter.
+    #[test]
+    fn filtered_summary_runs_only_at_query_time() {
+        let filter = planner_types::ir::Predicate::<usize>(planner_types::ir::ScalarExpr::Literal(
+            planner_types::pre_asap::ScalarValue::Boolean(true),
+        ));
+        assert!(validate_ingestion_time_summary(Some(&filter)).is_err());
+        assert!(validate_ingestion_time_summary::<usize>(None).is_ok());
+    }
 }
