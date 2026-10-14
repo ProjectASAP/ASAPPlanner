@@ -16,16 +16,29 @@ pub(super) fn guarantee(
         return None;
     };
     let delta = failure_probability.unwrap_or(KLL_CALIBRATED_FAILURE_PROBABILITY);
+    let scale = delta_scale(delta)?;
+    let contract = if delta < KLL_CALIBRATED_FAILURE_PROBABILITY {
+        KLL_DELTA_SCALED_CONTRACT
+    } else {
+        KLL_EMPIRICAL_99_CONTRACT
+    };
     Some(super::bounded_guarantee(
         algorithm,
         params,
         query,
         ErrorMetric::Rank,
-        kll_rank_error_99(*k) * delta_scale(delta)?,
+        kll_rank_error_99(*k) * scale,
         ProbabilityExpr::Constant { value: delta },
-        "apache_datasketches_kll_empirical_99_a9b42755072b",
+        contract,
     ))
 }
+/// The empirical 99% calibration of the pinned Apache DataSketches KLL.
+const KLL_EMPIRICAL_99_CONTRACT: &str = "apache_datasketches_kll_empirical_99_a9b42755072b";
+/// That calibration scaled to a failure probability below 0.01 by the KLL
+/// bound's dependence on it ([`delta_scale`]): a model, not a measurement,
+/// so it is named apart from the calibration.
+const KLL_DELTA_SCALED_CONTRACT: &str =
+    "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b";
 pub(crate) const KLL_RANK_ERROR_COEFFICIENT_99: f64 = 2.296;
 pub(crate) const KLL_RANK_ERROR_EXPONENT_99: f64 = 0.9723;
 /// The failure probability of the empirical 99% calibration.
@@ -141,6 +154,32 @@ mod tests {
             }
         ));
         assert_eq!(g.failure_probability.evaluate(), Some(0.001));
+    }
+
+    /// A KLL sized below δ = 0.01 names its own contract, not the empirical
+    /// 99% calibration's.
+    #[test]
+    fn sizing_below_one_percent_names_a_distinct_contract() {
+        let contract = |delta| {
+            let g = guarantee(
+                &SketchAlgorithm::Kll,
+                &size_params(0.01, delta),
+                &SketchStatistic::Quantile { q: 0.99 },
+            )
+            .unwrap();
+            match &g.provenance[..] {
+                [GuaranteeSource::SketchEvaluation { contract, .. }] => contract.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            contract(0.01),
+            "apache_datasketches_kll_empirical_99_a9b42755072b"
+        );
+        assert_eq!(
+            contract(0.001),
+            "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b"
+        );
     }
 
     /// A hand-built failure probability outside (0, 1) gives no guarantee
