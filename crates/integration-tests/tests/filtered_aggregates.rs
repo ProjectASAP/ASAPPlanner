@@ -290,3 +290,44 @@ async fn hand_filtered_kll_compiles_and_executes() {
         assert_eq!(execute(&root), ["a 1.0", "b 0.0", "c 5.0"]);
     }
 }
+
+/// The KLL candidates of `sql`, unchanged.
+async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.01,
+        delta: 0.01,
+    };
+    let roots: Vec<_> = logical_candidates(lower(sql, target.clone()).await, target)
+        .into_iter()
+        .filter(|root| {
+            OperatorNode::reachable(root).iter().any(|n| {
+                matches!(n.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+                    if kind.algorithm() == &SketchAlgorithm::Kll)
+            })
+        })
+        .collect();
+    assert!(!roots.is_empty(), "no KLL candidate for {sql}");
+    roots
+}
+
+/// A KLL quantile of a nullable column is NULL for a group whose values are
+/// all NULL (`b`), as SQL's quantile over no value is, instead of failing
+/// the query.
+#[tokio::test]
+async fn kll_quantile_of_all_null_group_is_null() {
+    for root in
+        kll_candidates("SELECT g, approx_percentile_cont(y, 0.5) AS q FROM events GROUP BY g").await
+    {
+        assert_eq!(execute(&root), ["a 1.0", "b NULL", "c 7.0"]);
+    }
+}
+
+/// An ungrouped KLL quantile over no row is one NULL row.
+#[tokio::test]
+async fn global_kll_quantile_over_no_row_is_null() {
+    for root in
+        kll_candidates("SELECT approx_percentile_cont(x, 0.5) AS q FROM events WHERE x > 100").await
+    {
+        assert_eq!(execute(&root), ["NULL"]);
+    }
+}
