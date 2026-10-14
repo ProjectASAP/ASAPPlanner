@@ -709,9 +709,6 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 having: None,
                 ..
             } => {
-                if filters.iter().any(Option::is_some) {
-                    return Err(invalid("filtered aggregate has no native implementation"));
-                }
                 if measures.len() != output_names.len() {
                     return Err(invalid("aggregate output names differ from measures"));
                 }
@@ -743,7 +740,13 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                         Ok((name.clone(), m))
                     })
                     .collect::<Result<_, Error>>()?;
-                Operator::aggregate(input.clone(), groups(input, keys)?, measures)
+                Operator::aggregate(input.clone(), groups(input, keys)?, measures)?
+                    .with_measure_filters(
+                        filters
+                            .iter()
+                            .map(|f| f.as_ref().map(|f| expression(&f.0, input)).transpose())
+                            .collect::<Result<_, Error>>()?,
+                    )
             }
             _ => Err(invalid("value operation has no native implementation")),
         },
@@ -755,75 +758,16 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             filter,
             ..
         }) => {
-            if filter.is_some() {
-                return Err(invalid(
-                    "filtered summary update has no native implementation",
-                ));
+            if node.output_state.timing == planner_types::post_asap::ExecutionTiming::IngestionTime
+            {
+                crate::capability::validate_ingestion_time_summary(filter.as_ref())
+                    .map_err(Error::Invalid)?;
             }
-            if let Some(item) = &update.item {
-                let PlannerReduction::Reduce(keys) = reduction else {
-                    return Err(invalid("keyed summary requires explicit partitions"));
-                };
-                let SummaryInputExpr::Column(weight) = &update.weight else {
-                    return Err(invalid(
-                        "keyed summary weight must be a finalized value column",
-                    ));
-                };
-                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
-                    && !matches!(
-                        update.weight_domain,
-                        planner_types::post_asap::WeightDomain::NonNegative { .. }
-                    )
-                {
-                    return Err(invalid("CMS requires a nonnegative weight contract"));
-                }
-                fn columns(
-                    expr: &SummaryInputExpr,
-                    input: &SchemaRef,
-                    result: &mut Vec<usize>,
-                ) -> Result<(), Error> {
-                    match expr {
-                        SummaryInputExpr::Column(column) => {
-                            result.push(named_column(input, column)?)
-                        }
-                        SummaryInputExpr::Tuple(items) => {
-                            for item in items {
-                                columns(item, input, result)?;
-                            }
-                        }
-                        _ => return Err(invalid("keyed summary needs explicit item columns")),
-                    }
-                    Ok(())
-                }
-                let mut items = Vec::new();
-                columns(item, input, &mut items)?;
-                return Operator::keyed_summary_build(
-                    input.clone(),
-                    family.clone(),
-                    named_column(input, weight)?,
-                    items,
-                    groups(input, keys)?,
-                );
+            let build = summary_build(input, family, update, reduction, grouping)?;
+            match filter {
+                Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
+                None => Ok(build),
             }
-            crate::capability::validate_summary_kernel(family, update, grouping)
-                .map_err(Error::Invalid)?;
-            let SummaryInputExpr::Column(column) = &update.weight else {
-                return Err(invalid(
-                    "summary update expression must be projected to a column",
-                ));
-            };
-            let PlannerReduction::Reduce(keys) = reduction else {
-                return Err(invalid(
-                    "summary construction requires explicit grouping columns",
-                ));
-            };
-            Operator::summary_build(
-                input.clone(),
-                family.clone(),
-                named_column(input, column)?,
-                input.time_index,
-                groups(input, keys)?,
-            )
         }
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
             let state = summary_column(input)?;
@@ -854,6 +798,93 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             "physical operation has no native binding; the deployment runtime must execute it",
         )),
     }
+}
+/// The build for a `SummaryAgg` before its row filter: shared (Hydra),
+/// keyed, or one value column per row.
+fn summary_build(
+    input: &SchemaRef,
+    family: &FieldDataType,
+    update: &planner_types::post_asap::SummaryUpdate,
+    reduction: &PlannerReduction,
+    grouping: &planner_types::post_asap::GroupingStrategy,
+) -> Result<Operator, Error> {
+    if grouping != &planner_types::post_asap::GroupingStrategy::PerSubpopulationInstance {
+        crate::capability::validate_summary_kernel(family, update, grouping)
+            .map_err(Error::Invalid)?;
+        let PlannerReduction::Reduce(keys) = reduction else {
+            return Err(invalid("shared summary requires explicit groups"));
+        };
+        let Some(SummaryInputExpr::Column(item)) = &update.item else {
+            unreachable!("validated HydraCms item column")
+        };
+        return Operator::shared_summary_build(
+            input.clone(),
+            family.clone(),
+            named_column(input, item)?,
+            groups(input, keys)?,
+        );
+    }
+    if let Some(item) = &update.item {
+        let PlannerReduction::Reduce(keys) = reduction else {
+            return Err(invalid("keyed summary requires explicit partitions"));
+        };
+        let SummaryInputExpr::Column(weight) = &update.weight else {
+            return Err(invalid(
+                "keyed summary weight must be a finalized value column",
+            ));
+        };
+        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+            && !matches!(
+                update.weight_domain,
+                planner_types::post_asap::WeightDomain::NonNegative { .. }
+            )
+        {
+            return Err(invalid("CMS requires a nonnegative weight contract"));
+        }
+        fn columns(
+            expr: &SummaryInputExpr,
+            input: &SchemaRef,
+            result: &mut Vec<usize>,
+        ) -> Result<(), Error> {
+            match expr {
+                SummaryInputExpr::Column(column) => result.push(named_column(input, column)?),
+                SummaryInputExpr::Tuple(items) => {
+                    for item in items {
+                        columns(item, input, result)?;
+                    }
+                }
+                _ => return Err(invalid("keyed summary needs explicit item columns")),
+            }
+            Ok(())
+        }
+        let mut items = Vec::new();
+        columns(item, input, &mut items)?;
+        return Operator::keyed_summary_build(
+            input.clone(),
+            family.clone(),
+            named_column(input, weight)?,
+            items,
+            groups(input, keys)?,
+        );
+    }
+    crate::capability::validate_summary_kernel(family, update, grouping).map_err(Error::Invalid)?;
+    let SummaryInputExpr::Column(column) = &update.weight else {
+        return Err(invalid(
+            "summary update expression must be projected to a column",
+        ));
+    };
+    let PlannerReduction::Reduce(keys) = reduction else {
+        return Err(invalid(
+            "summary construction requires explicit grouping columns",
+        ));
+    };
+    Operator::summary_build(
+        input.clone(),
+        family.clone(),
+        named_column(input, column)?,
+        input.time_index,
+        groups(input, keys)?,
+    )
 }
 fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
     let columns = input

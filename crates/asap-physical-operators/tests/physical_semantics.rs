@@ -720,3 +720,263 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         assert!(matches!(rows[0][0], Value::Null));
     }
 }
+
+/// Rows of `g`, `x` and a nullable Boolean `keep`; `b` has no kept row,
+/// and a NULL `keep` drops its row as SQL FILTER does.
+fn filtered_input() -> (SchemaRef, Vec<Vec<Value>>) {
+    let input = schema(&[
+        ("g", DataType::Utf8, false),
+        ("x", DataType::Float64, false),
+        ("keep", DataType::Bool, true),
+    ]);
+    let rows = [
+        ("a", 1.0, Some(true)),
+        ("a", 2.0, None),
+        ("b", 3.0, Some(false)),
+        ("c", 4.0, Some(true)),
+    ]
+    .into_iter()
+    .map(|(g, x, keep)| {
+        vec![
+            Value::Utf8(g.into()),
+            Value::Float64(x),
+            keep.map_or(Value::Null, Value::Bool),
+        ]
+    })
+    .collect();
+    (input, rows)
+}
+
+fn printed(rows: &[Vec<Value>]) -> Vec<String> {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|v| match v {
+                    Value::Utf8(s) => s.to_string(),
+                    Value::Int64(n) => n.to_string(),
+                    Value::Float64(x) => format!("{x:?}"),
+                    Value::Null => "NULL".into(),
+                    other => panic!("unexpected value {other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn keep() -> Option<Predicate<usize>> {
+    Some(Predicate(ScalarExpr::Column(2)))
+}
+
+fn planner_node(
+    payload: PhysicalASAPOperatorPayload,
+    fields: &[(&str, FieldDataType, bool)],
+) -> PhysicalASAPDAGNode {
+    PhysicalASAPDAGNode {
+        id: 1,
+        payload,
+        output_state: planner_types::post_asap::ExecutionDataState::QUERY_ROWS,
+        materialization: Default::default(),
+        output_schema: planner_types::pre_asap::Schema::new(
+            fields
+                .iter()
+                .map(|(name, dtype, nullable)| Field {
+                    table: None,
+                    name: (*name).into(),
+                    dtype: dtype.clone(),
+                    nullable: *nullable,
+                })
+                .collect(),
+        ),
+        guarantee: None,
+    }
+}
+
+fn round_trip(operator: Operator) -> Operator {
+    serde_json::from_slice(&serde_json::to_vec(&operator).unwrap()).unwrap()
+}
+
+/// Per-measure filters keep every group: a filtered COUNT reads 0 and a
+/// filtered SUM reads NULL for a group with no kept row, and an unfiltered
+/// measure beside them still sees every row. The filters survive
+/// serialization.
+#[test]
+fn measure_filters_keep_groups_without_matching_rows() {
+    use asap_physical_operators::physical_planner::compile_node;
+    use planner_types::pre_asap::{AggIntent, GroupKeys, Reduction as Plan};
+    use planner_types::types::AccuracyTarget;
+    let (input, rows) = filtered_input();
+    let plain = |t: DataType| FieldDataType::Plain(t);
+    let node = planner_node(
+        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
+            reduction: Plan::Reduce(GroupKeys::by(vec![0])),
+            measures: vec![
+                AggIntent::Count {
+                    accuracy: AccuracyTarget::Exact,
+                },
+                AggIntent::Sum { col: Some(1) },
+                AggIntent::Count {
+                    accuracy: AccuracyTarget::Exact,
+                },
+            ],
+            output_names: vec!["c".into(), "s".into(), "all".into()],
+            filters: vec![keep(), keep(), None],
+            having: None,
+            child: 0,
+        }),
+        &[
+            ("g", plain(DataType::Utf8), false),
+            ("c", plain(DataType::Int64), false),
+            ("s", plain(DataType::Float64), true),
+            ("all", plain(DataType::Int64), false),
+        ],
+    );
+    let operator = round_trip(compile_node(&node, std::slice::from_ref(&input)).unwrap());
+    assert_eq!(
+        printed(&unary(input, vec![rows], operator)),
+        ["a 1 1.0 2", "b 0 NULL 1", "c 1 4.0 1"]
+    );
+}
+
+/// A filtered SUM is NULL for a group without a kept row, so a plan that
+/// declares it non-null does not bind.
+#[test]
+fn filtered_sum_declared_non_null_is_rejected() {
+    use asap_physical_operators::physical_planner::compile_node;
+    use planner_types::pre_asap::{AggIntent, GroupKeys, Reduction as Plan};
+    let (input, _) = filtered_input();
+    let node = planner_node(
+        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
+            reduction: Plan::Reduce(GroupKeys::by(vec![0])),
+            measures: vec![AggIntent::Sum { col: Some(1) }],
+            output_names: vec!["s".into()],
+            filters: vec![keep()],
+            having: None,
+            child: 0,
+        }),
+        &[
+            ("g", FieldDataType::Plain(DataType::Utf8), false),
+            ("s", FieldDataType::Plain(DataType::Float64), false),
+        ],
+    );
+    assert!(compile_node(&node, &[input]).is_err());
+}
+
+/// A filtered `SummaryAgg` updates its state only from kept rows but keeps
+/// a state for every group: an exact count reads 0 and a KLL quantile,
+/// declared nullable, reads NULL for the group with no kept row. The
+/// filter survives serialization.
+#[test]
+fn filtered_summary_build_keeps_empty_groups() {
+    use asap_physical_operators::physical_planner::compile_node;
+    use planner_types::ir::ASAPOp;
+    use planner_types::post_asap::{
+        ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
+        SummaryUpdate,
+    };
+    use planner_types::pre_asap::{ColumnRef, GroupKeys, Reduction as Plan};
+    let (input, rows) = filtered_input();
+    let kll = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+        ),
+        Default::default(),
+    );
+    let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
+    let cases = [
+        (
+            kll,
+            ASAPOp::SummaryEstimate {
+                summary_input: 0,
+                query: SketchStatistic::Quantile { q: 0.5 },
+            },
+            (DataType::Float64, true),
+            ["a 1.0", "b NULL", "c 4.0"],
+        ),
+        (
+            count,
+            ASAPOp::FinalizeExactAccumulator { child: 0 },
+            (DataType::Int64, false),
+            ["a 1", "b 0", "c 1"],
+        ),
+    ];
+    for (family, read, (result, nullable), expected) in cases {
+        let build = planner_node(
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                family: family.clone(),
+                input: SummaryUpdate::column(ColumnRef::Named("x".into())),
+                reduction: Plan::Reduce(GroupKeys::by(vec![0])),
+                grouping: Default::default(),
+                filter: keep(),
+            }),
+            &[
+                ("g", FieldDataType::Plain(DataType::Utf8), false),
+                ("state", family, false),
+            ],
+        );
+        let build = round_trip(compile_node(&build, std::slice::from_ref(&input)).unwrap());
+        let read = planner_node(
+            PhysicalASAPOperatorPayload::ASAP(read),
+            &[
+                ("g", FieldDataType::Plain(DataType::Utf8), false),
+                ("value", FieldDataType::Plain(result), nullable),
+            ],
+        );
+        let read = compile_node(&read, &[build.schema()]).unwrap();
+        let mut dag = PhysicalDAG::default();
+        dag.add(
+            0,
+            vec![],
+            Operator::source(
+                input.clone(),
+                vec![Batch::try_new(input.clone(), rows.clone()).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        dag.add(1, vec![0], build).unwrap();
+        dag.add(2, vec![1], read).unwrap();
+        assert_eq!(printed(&collect(&dag, 2)), expected);
+    }
+}
+
+/// A filtered `SummaryAgg` timed at ingestion does not bind: only a
+/// query-time build applies its filter. The same build unfiltered binds.
+#[test]
+fn filtered_summary_build_is_rejected_at_ingestion_time() {
+    use asap_physical_operators::physical_planner::compile_node;
+    use planner_types::ir::ASAPOp;
+    use planner_types::post_asap::{ExactKind, ExactParams, ExecutionDataState, SummaryUpdate};
+    use planner_types::pre_asap::{ColumnRef, GroupKeys, Reduction as Plan};
+    let (input, _) = filtered_input();
+    let family = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
+    let build = |filter| {
+        let mut node = planner_node(
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                family: family.clone(),
+                input: SummaryUpdate::column(ColumnRef::Named("x".into())),
+                reduction: Plan::Reduce(GroupKeys::by(vec![0])),
+                grouping: Default::default(),
+                filter,
+            }),
+            &[
+                ("g", FieldDataType::Plain(DataType::Utf8), false),
+                ("state", family.clone(), false),
+            ],
+        );
+        node.output_state = ExecutionDataState::INGESTION_SUMMARY;
+        compile_node(&node, std::slice::from_ref(&input))
+    };
+    assert!(build(None).is_ok());
+    let error = build(keep()).err().expect("filtered ingestion-time build");
+    assert!(error.to_string().contains("only at query time"), "{error}");
+}
