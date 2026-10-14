@@ -63,6 +63,21 @@ def plan_args(payload: object, out: str) -> list[str]:
         schema_names.add(name)
         if not isinstance(columns, list) or not columns or len(columns) > 500:
             raise ValueError(f"schema #{index}: columns must contain 1–500 entries")
+        for number, column in enumerate(columns, 1):
+            where = f"schema #{index}: column #{number}"
+            if not isinstance(column, dict):
+                raise ValueError(f"{where} must be an object")
+            if not isinstance(column.get("name"), str) or not column["name"].strip():
+                raise ValueError(f"{where}: name must be a non-empty string")
+            if not isinstance(column.get("type"), str):
+                raise ValueError(f"{where}: type must be a string")
+            if not isinstance(column.get("nullable", True), bool):
+                raise ValueError(f"{where}: nullable must be a boolean")
+        time_index = schema.get("time_index")
+        if time_index is not None and (
+            isinstance(time_index, bool) or not isinstance(time_index, int) or not 0 <= time_index < len(columns)
+        ):
+            raise ValueError(f"schema #{index}: time_index must be the index of one of its {len(columns)} columns")
         if has_sql:
             args.extend(["--table", json.dumps(schema, separators=(",", ":"))])
     first_use: dict[str, int] = {}

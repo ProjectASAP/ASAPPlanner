@@ -20,6 +20,9 @@ from render import _json_script, load_document, render
 
 HERE = Path(__file__).resolve().parent
 STAGE_DOCUMENT = HERE / "examples" / "planner-layering-example1.json"
+# Standalone scalar queries at positions 0, 2 and 4 (first, middle, last):
+# scalar(sum(m)), sum(n), time(), sum by (job) (k), 1 + 2.
+SCALAR_DOCUMENT = HERE / "examples" / "scalar-queries.json"
 
 try:
     from py_mini_racer import py_mini_racer
@@ -204,6 +207,81 @@ class StageWorkloadTests(unittest.TestCase):
         queries = self.js.call("stageWorkload", self.document)["queries"]
         self.assertTrue(all("post_dag" not in q for q in queries))
 
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class ScalarQueryTests(unittest.TestCase):
+    """A standalone scalar query is no operator root: the physical DAG keeps
+    it in `scalar_roots`, so query i is not `roots[i]`. Each view shows the
+    scalar expression as the query's root, over the nodes it reads."""
+
+    def setUp(self):
+        self.js = py_mini_racer.MiniRacer()
+        self.js.eval((HERE / "stage-workload.js").read_text())
+        self.document = json.loads(SCALAR_DOCUMENT.read_text())
+        self.queries = self.js.call("stageWorkload", self.document)["queries"]
+        selection = self.document["stage3_plan_selection"]
+        self.selected = next(
+            c for c in self.document["stage2_physical_asap_optimization"]["candidates"] if c["id"] == selection["selected"]
+        )
+
+    def root_node(self, dag):
+        return next(node for node in dag["nodes"] if node["id"] == dag["root"])
+
+    def test_operator_queries_map_to_their_operator_roots(self):
+        """sum(n) and sum by (job) (k), queries 2 and 4, are operator roots 0 and 1."""
+        self.assertEqual([q["name"] for q in self.queries], ["q1", "q2", "q3", "q4", "q5"])
+        for query, root in ((self.queries[1], self.selected["dag"]["roots"][0]), (self.queries[3], self.selected["dag"]["roots"][1])):
+            self.assertEqual(query["post_dag"]["root"], root)
+            self.assertNotEqual(self.root_node(query["post_dag"])["kind"], "Scalar")
+            self.assertEqual(self.root_node(query["dag"])["kind"], "Aggregate")
+
+    def test_scalar_queries_first_middle_and_last_show_their_expression(self):
+        expected = {0: "scalar(#{})", 2: "time()", 4: "3"}
+        for index, text in expected.items():
+            query = self.queries[index]
+            for key in ("dag", "post_dag"):
+                root = self.root_node(query[key])
+                self.assertEqual(root["kind"], "Scalar")
+                ids = {node["id"] for node in query[key]["nodes"]}
+                self.assertTrue(set(root["children"]) <= ids)
+                child = root["children"][0] if root["children"] else None
+                self.assertEqual(root["label"], "Scalar\n" + text.format(child))
+
+    def test_scalar_of_a_vector_reads_its_operator(self):
+        """scalar(sum(m)) reads the sum: Stage 0 node 2, physical node 3."""
+        self.assertEqual(self.root_node(self.queries[0]["dag"])["children"], [2])
+        self.assertEqual(self.root_node(self.queries[0]["post_dag"])["children"], [3])
+        self.assertGreater(len(self.queries[0]["post_dag"]["nodes"]), 1)
+        self.assertEqual([len(self.queries[i]["dag"]["nodes"]) for i in (2, 4)], [1, 1])
+
+    def test_scalar_roots_are_not_shared_between_queries(self):
+        roots = [self.root_node(self.queries[i]["dag"])["workload_node_id"] for i in (0, 2, 4)]
+        self.assertEqual(len(set(roots)), 3)
+
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class PlanningFailureTests(unittest.TestCase):
+    """A document whose Pass 1 failed still shows Stage 0 and the error."""
+
+    def setUp(self):
+        self.js = py_mini_racer.MiniRacer()
+        self.js.eval((HERE / "stage-workload.js").read_text())
+        self.document = document()
+        self.document["stage1_logical_asap_optimization"] = {
+            "combinations": 0, "capped": False, "candidates": [], "error": "Pass 1: bad accuracy",
+        }
+        self.document["stage2_physical_asap_optimization"] = {"candidates": [], "pruned": []}
+        self.document["stage3_plan_selection"] = {"costs": {}, "selected": None, "rejected": []}
+
+    def test_stage0_dags_without_post_dags(self):
+        queries = self.js.call("stageWorkload", self.document)["queries"]
+        self.assertTrue(all(q["dag"]["nodes"] and "post_dag" not in q for q in queries))
+
+    def test_header_shows_the_stage1_error(self):
+        self.assertEqual(
+            self.js.call("stageCandidateHeader", self.document),
+            "Stage 3 plan selection · 0 candidates · Stage 1 failed: Pass 1: bad accuracy",
+        )
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
 class ViewerSelectionTests(unittest.TestCase):

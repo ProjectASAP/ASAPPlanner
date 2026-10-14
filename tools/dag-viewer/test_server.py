@@ -83,6 +83,26 @@ class PlanArgsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     server.plan_args(payload, "out.json")
 
+    def test_columns_and_time_index_are_type_checked(self):
+        """Malformed tables are a 400, not a stage_pipeline failure."""
+        sql = [{"language": "sql", "text": "SELECT 1 FROM metrics"}]
+        ts = {"name": "ts", "type": "timestamp"}
+        cases = [
+            ({"name": "metrics", "columns": ["ts"]}, "schema #1: column #1 must be an object"),
+            ({"name": "metrics", "columns": [{"type": "timestamp"}]}, "schema #1: column #1: name must be a non-empty string"),
+            ({"name": "metrics", "columns": [{"name": "ts", "type": 3}]}, "schema #1: column #1: type must be a string"),
+            ({"name": "metrics", "columns": [{"name": "ts", "type": "timestamp", "nullable": "no"}]}, "schema #1: column #1: nullable must be a boolean"),
+            ({"name": "metrics", "columns": [ts], "time_index": "0"}, "schema #1: time_index must be the index of one of its 1 columns"),
+            ({"name": "metrics", "columns": [ts], "time_index": -1}, "schema #1: time_index must be the index of one of its 1 columns"),
+            ({"name": "metrics", "columns": [ts], "time_index": 1}, "schema #1: time_index must be the index of one of its 1 columns"),
+            ({"name": "metrics", "columns": [ts], "time_index": True}, "schema #1: time_index must be the index of one of its 1 columns"),
+        ]
+        for table, message in cases:
+            with self.subTest(message=message, table=table):
+                with self.assertRaisesRegex(ValueError, message):
+                    server.plan_args({"schemas": [table], "queries": sql}, "out.json")
+        server.plan_args({"schemas": [{"name": "metrics", "columns": [ts], "time_index": 0}], "queries": sql}, "out.json")
+
     def test_duplicate_table_names_are_rejected(self):
         table = {"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}]}
         with self.assertRaisesRegex(ValueError, "schema #2: table metrics is declared twice"):

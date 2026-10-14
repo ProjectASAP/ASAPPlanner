@@ -382,25 +382,22 @@ function renderPrePostAsap() {
     showModeHint('Select one query for a complete pre/post DAG, or several queries for a batch workload view.');
     return;
   }
-  const missing = selected.filter((q) => !q.post_dag);
-  if (missing.length > 0) {
-    viewTitleEl.textContent = selected.length === 1 ? `Pre/Post-ASAP: ${selected[0].name}` : `Pre/Post-ASAP workload: ${selected.length} queries`;
-    showModeHint(`No post-ASAP DAG for: ${missing.map((q) => q.name).join(', ')}. Stage 3 plan selection selected no plan; see the candidate table.`);
-    return;
-  }
+  // Without a selected plan (planning failed), Stage 0 is still shown.
+  const planned = selected.every((q) => q.post_dag);
   hideModeHint();
-  viewTitleEl.textContent = selected.length === 1
+  viewTitleEl.textContent = (selected.length === 1
     ? `Pre/Post-ASAP: ${selected[0].name}`
-    : `Pre/Post-ASAP workload union: ${selected.length} queries`;
+    : `Pre/Post-ASAP workload union: ${selected.length} queries`)
+    + (planned ? '' : ' · no plan selected; see the candidate table');
 
   const elements = selected.length === 1
     ? [
         ...laneElements('pre-asap', `${selected[0].name} · Stage 0 query-language frontends`, selected[0].dag, selected[0], 'pre'),
-        ...laneElements('post-asap', `${selected[0].name} · Stage 3 selected plan`, selected[0].post_dag, selected[0], 'post'),
+        ...(planned ? laneElements('post-asap', `${selected[0].name} · Stage 3 selected plan`, selected[0].post_dag, selected[0], 'post') : []),
       ]
     : [
         ...unionStageLaneElements('pre', chosen),
-        ...unionStageLaneElements('post', chosen),
+        ...(planned ? unionStageLaneElements('post', chosen) : []),
       ];
 
   buildCy(elements);
