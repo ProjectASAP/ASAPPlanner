@@ -609,6 +609,6 @@ The stage pipeline does not call them.
 - #686: the viewer plans through `stage_pipeline`.
 - #687: guarantee composition through arithmetic over approximate values (#669, part a).
 - #604: Stage 2 materialization options.
-- G4, Pass 2 identical-expression rule (earlier #588).
+- Pass 2 identical-expression rule (in progress; supersedes #588).
 - #572: crate and module layout by stages and the unified IR.
 - #677: doc updates after the consolidation.
