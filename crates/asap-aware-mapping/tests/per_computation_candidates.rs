@@ -90,7 +90,6 @@ fn cardinality_keeps_exact_specialized_and_universal_candidates() {
         algorithms(&choices),
         vec![
             SketchAlgorithm::Hll,
-            SketchAlgorithm::Theta,
             SketchAlgorithm::Kmv,
             SketchAlgorithm::UnivMon
         ]
