@@ -705,12 +705,16 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
 }
 
 /// Ratio of the largest to the smallest positive value a DDSketch is assumed
-/// to see: nine decades, e.g. latencies from 1 ns to 1 s.
+/// to see: nine decades, e.g. latencies from 1 ns to 1 s. An assumption, not
+/// workload evidence: the data workload declares no value range.
 const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
 
-/// Bins a DDSketch with relative accuracy `alpha` touches over
-/// [`DDSKETCH_ASSUMED_VALUE_RANGE`]: its bins grow geometrically by
-/// `gamma = (1 + alpha) / (1 - alpha)`, so `ceil(ln(range) / ln(gamma))`.
+/// Bins a DDSketch with relative accuracy `alpha` touches, assuming its
+/// values span nine decades ([`DDSKETCH_ASSUMED_VALUE_RANGE`] = 1e9): its
+/// bins grow geometrically by `gamma = (1 + alpha) / (1 - alpha)`, so
+/// `ceil(ln(1e9) / ln(gamma))`, e.g. 1,037 bins at α = 0.01. The count is
+/// proportional to the decades spanned, so values over three decades would
+/// need a third of these bins and over twelve decades four thirds.
 /// `asap_sketchlib`'s store has no bin limit; the cap is the bins spanning
 /// every value it can index.
 fn ddsketch_bins(alpha: f64) -> u64 {
@@ -1102,6 +1106,24 @@ mod tests {
         assert_eq!(
             aggregate_cost("l2_over_time(x[5m])"),
             aggregate_cost("quantile_over_time(0.99, x[5m])")
+        );
+    }
+
+    /// A DDSketch is sized for values over nine decades: 1,037 bins at
+    /// α = 0.01, 8 bytes each.
+    #[test]
+    fn ddsketch_bins_span_nine_decades() {
+        assert_eq!(ddsketch_bins(0.01), 1_037);
+        assert_eq!(
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::DDSketch,
+                    SketchParams::DDSketch { alpha: 0.01 }
+                ),
+                GroupingStrategy::default(),
+            ))
+            .1,
+            8 * 1_037
         );
     }
 
