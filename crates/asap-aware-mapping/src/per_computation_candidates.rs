@@ -916,9 +916,14 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                 child: input,
                 reduction,
                 ..
-            }) if estimate_has_bound(family, update, query) => {
-                let local = classic_hll_guarantee(family, query, input)
-                    .or_else(|| DefaultAccuracyModel.local_guarantee(family, query))?;
+            }) if estimate_has_bound(family, update, query)
+                || estimate_bound_over_samples(family, update, query).is_some() =>
+            {
+                let local = match estimate_bound_over_samples(family, update, query) {
+                    Some(gated) => gated,
+                    None => classic_hll_guarantee(family, query, input)
+                        .or_else(|| DefaultAccuracyModel.local_guarantee(family, query))?,
+                };
                 if exact_inputs(summary_input) {
                     Some(local)
                 } else if exact_filter(summary_input) && !groups_by_estimate(reduction, input) {
@@ -1682,7 +1687,43 @@ fn estimate_has_bound(
             if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap)
     );
     !matches!(query, SketchStatistic::TopK { .. })
-        && !(count_min && update.weight_domain == WeightDomain::UnknownOrSigned)
+        && !(count_min && !matches!(update.weight_domain, WeightDomain::NonNegative { .. }))
+}
+
+/// A Count-Min estimate whose weights carry the open requirement that they
+/// are samples of one metric ([`WeightDomain::SamplesOfMetric`]): its local
+/// guarantee with the bound gated on that metric's sign
+/// ([`samples_sign_statistic`]), which plan selection binds to 1 when the
+/// metric is declared a counter. `None` for any other estimate.
+fn estimate_bound_over_samples(
+    family: &FieldDataType,
+    update: &SummaryUpdate,
+    query: &SketchStatistic,
+) -> Option<AccuracyGuarantee> {
+    let WeightDomain::SamplesOfMetric { metric } = &update.weight_domain else {
+        return None;
+    };
+    let proven = SummaryUpdate {
+        weight_domain: WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::CounterSamples,
+        },
+        ..update.clone()
+    };
+    if !estimate_has_bound(family, &proven, query) {
+        return None;
+    }
+    let local = DefaultAccuracyModel.local_guarantee(family, query)?;
+    Some(AccuracyGuarantee {
+        bound: asap_types::post_asap::BoundExpr::Product {
+            factors: vec![
+                local.bound,
+                asap_types::post_asap::BoundExpr::Unknown {
+                    statistic: samples_sign_statistic(metric),
+                },
+            ],
+        },
+        ..local
+    })
 }
 
 /// Replace an aggregate whose measures are `targets`' (or exact, for a
@@ -3075,5 +3116,86 @@ mod tests {
             panic!("operator root")
         };
         root.clone()
+    }
+
+    /// A Count-Min estimate has a bound only over weights proven
+    /// non-negative: an open requirement (`SamplesOfMetric`) is not a proof.
+    #[test]
+    fn count_min_estimate_has_no_bound_over_an_open_requirement() {
+        let family = FieldDataType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::Cms,
+                asap_types::post_asap::SketchParams::Cms { width: 8, depth: 2 },
+            ),
+            GroupingStrategy::default(),
+        );
+        let query = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        let with = |weight_domain| SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(ColumnRef::SampleValue)),
+            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            weight_domain,
+        };
+        assert!(!estimate_has_bound(
+            &family,
+            &with(WeightDomain::SamplesOfMetric { metric: "m".into() }),
+            &query
+        ));
+        assert!(!estimate_has_bound(
+            &family,
+            &with(WeightDomain::UnknownOrSigned),
+            &query
+        ));
+        assert!(estimate_has_bound(
+            &family,
+            &with(WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::CounterSamples
+            }),
+            &query
+        ));
+    }
+
+    /// A Count-Min estimate over samples of `m` gets its bound gated on
+    /// `m`'s sign: unknown until plan selection binds it, the local bound
+    /// once bound to 1.
+    #[test]
+    fn count_min_estimate_over_samples_is_gated_on_the_metric() {
+        let family = FieldDataType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::Cms,
+                asap_types::post_asap::SketchParams::Cms {
+                    width: 272,
+                    depth: 5,
+                },
+            ),
+            GroupingStrategy::default(),
+        );
+        let query = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        let update = SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(ColumnRef::SampleValue)),
+            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            weight_domain: WeightDomain::SamplesOfMetric { metric: "m".into() },
+        };
+        let gated = estimate_bound_over_samples(&family, &update, &query).expect("gated");
+        assert_eq!(gated.bound.evaluate(), None);
+        let local = DefaultAccuracyModel
+            .local_guarantee(&family, &query)
+            .unwrap();
+        let statistic = samples_sign_statistic("m");
+        // Every other statistic (a stream norm) bound alike.
+        let others = |s: &str| Some(if s == statistic { 1.0 } else { 1_000.0 });
+        let bound = gated.bind(&others).bound.evaluate();
+        assert!(bound.is_some());
+        assert_eq!(bound, local.bind(&others).bound.evaluate());
+        let unconfirmed = gated
+            .bind(&|s| (s != statistic).then_some(1_000.0))
+            .bound
+            .evaluate();
+        assert_eq!(unconfirmed, None);
     }
 }
