@@ -3,9 +3,10 @@
 //!
 //! The IR stays permissive: a `SummaryMerge` over any state family is
 //! structurally valid. The planner rules and the executor consult this
-//! table to decide whether a composition is sound. Today the table holds
-//! the mergeability facts; the summary-capability facts (which statistics
-//! a family answers) are added as further fields of [`FamilyCapability`].
+//! table to decide whether a composition is sound. It holds the
+//! mergeability facts and the summary-capability facts: which readouts
+//! ([`Readout`]) one state of the family answers, so one state can serve
+//! every consumer whose statistic it answers.
 
 use super::sketch::{ExactKind, GroupingStrategy, HydraKind, SketchAlgorithm, SketchStatistic};
 use crate::pre_asap::schema::FieldDataType;
@@ -20,6 +21,44 @@ pub struct FamilyCapability {
     /// (`SummarySubtract`, reserved): the subtrahend's selection must lie
     /// inside the minuend's, and the result is the state of the difference.
     pub subtractable: bool,
+    /// The readouts one state of the family answers, whatever its
+    /// parameters; none for a family read only as a finalized value (exact
+    /// accumulators) or one not listed.
+    pub readouts: &'static [Readout],
+}
+
+/// One kind of readout (`SummaryEstimate` statistic) of a summary state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readout {
+    /// The total of the updates: a bare `PointCount` (no item value).
+    Total,
+    /// One item's frequency: a `PointCount` with an item value.
+    ItemFrequency,
+    /// The value at any quantile rank.
+    Quantile,
+    /// The number of distinct items.
+    Distinct,
+    /// The L2 norm of the item frequencies.
+    FrequencyL2,
+    /// The entropy of the item frequencies.
+    FrequencyEntropy,
+    /// The heaviest items, any `k` up to the state's heap.
+    TopK,
+}
+
+impl Readout {
+    /// The kind of readout `statistic` is.
+    pub fn of(statistic: &SketchStatistic) -> Self {
+        match statistic {
+            SketchStatistic::PointCount { value: None, .. } => Self::Total,
+            SketchStatistic::PointCount { value: Some(_), .. } => Self::ItemFrequency,
+            SketchStatistic::Quantile { .. } => Self::Quantile,
+            SketchStatistic::Cardinality => Self::Distinct,
+            SketchStatistic::FrequencyL2 => Self::FrequencyL2,
+            SketchStatistic::FrequencyEntropy => Self::FrequencyEntropy,
+            SketchStatistic::TopK { .. } => Self::TopK,
+        }
+    }
 }
 
 /// How a family's states merge.
@@ -66,9 +105,21 @@ pub enum MergedError {
 }
 
 impl FamilyCapability {
+    /// Whether one state of the family answers `statistic`.
+    pub fn answers(&self, statistic: &SketchStatistic) -> bool {
+        self.readouts.contains(&Readout::of(statistic))
+    }
+
     /// The capability of `family`. Families not listed have no capability
     /// (they fail closed).
     pub fn of(family: &FieldDataType) -> Self {
+        Self {
+            readouts: readouts(family),
+            ..Self::merge_facts(family)
+        }
+    }
+
+    fn merge_facts(family: &FieldDataType) -> Self {
         use ExactKind as E;
         use SelectionRelation::{Disjoint, DisjointInTime, OverlapAllowed};
         use SketchAlgorithm as S;
@@ -150,6 +201,7 @@ impl FamilyCapability {
         Self {
             merge,
             subtractable,
+            readouts: &[],
         }
     }
 
@@ -161,5 +213,170 @@ impl FamilyCapability {
             (Some(heap), SketchStatistic::FrequencyEntropy | SketchStatistic::TopK { .. }) => heap,
             _ => merge.error,
         })
+    }
+}
+
+/// The readouts one state of `family` answers.
+fn readouts(family: &FieldDataType) -> &'static [Readout] {
+    use Readout::*;
+    use SketchAlgorithm as S;
+    match family {
+        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
+            match kind {
+                // Per subpopulation, as the inner family answers.
+                HydraKind::HydraCms | HydraKind::HydraCountSketch => &[ItemFrequency],
+                HydraKind::HydraKll => &[Quantile],
+            }
+        }
+        FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
+            match kind.algorithm() {
+                // One frequency vector serves its total and every moment.
+                S::UnivMon => &[Total, Distinct, FrequencyL2, FrequencyEntropy],
+                // A quantile sketch answers every rank.
+                S::Kll => &[Quantile],
+                S::DDSketch => &[Quantile, Total],
+                S::Cms => &[ItemFrequency, Total],
+                // Each row's squared counters estimate F2 (AMS).
+                S::CountSketch => &[ItemFrequency, FrequencyL2],
+                S::CmsWithHeap | S::CountSketchWithHeap => &[TopK, ItemFrequency],
+                S::Hll | S::Kmv | S::Theta => &[Distinct],
+            }
+        }
+        FieldDataType::ExactAggregate(..)
+        | FieldDataType::Plain(_)
+        | FieldDataType::Sample(..)
+        | FieldDataType::Wavelet(..)
+        | FieldDataType::StatModel(..) => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::post_asap::{ExactParams, SketchKind, SketchParams};
+    use crate::pre_asap::expr_ir::ColumnRef;
+
+    fn sketch(algorithm: SketchAlgorithm, params: SketchParams) -> FieldDataType {
+        FieldDataType::Sketch(
+            SketchKind::new(algorithm, params),
+            GroupingStrategy::default(),
+        )
+    }
+
+    fn total() -> SketchStatistic {
+        SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        }
+    }
+
+    fn item() -> SketchStatistic {
+        SketchStatistic::PointCount {
+            key: ColumnRef::Named("src_ip".into()),
+            value: Some("10.0.0.1".into()),
+        }
+    }
+
+    /// One UnivMon answers its total, the distinct count, L2 and entropy,
+    /// so it can serve all four; it answers no quantile or top-k.
+    #[test]
+    fn univmon_answers_its_total_and_every_frequency_moment() {
+        let univmon = FamilyCapability::of(&sketch(
+            SketchAlgorithm::UnivMon,
+            SketchParams::UnivMon {
+                heap_size: 256,
+                sketch_rows: 5,
+                sketch_cols: 1024,
+                layers: 16,
+                distinct_failure_probability: None,
+            },
+        ));
+        for statistic in [
+            total(),
+            SketchStatistic::Cardinality,
+            SketchStatistic::FrequencyL2,
+            SketchStatistic::FrequencyEntropy,
+        ] {
+            assert!(univmon.answers(&statistic), "{statistic:?}");
+        }
+        for statistic in [
+            SketchStatistic::Quantile { q: 0.5 },
+            SketchStatistic::TopK { k: 3 },
+        ] {
+            assert!(!univmon.answers(&statistic), "{statistic:?}");
+        }
+    }
+
+    /// A quantile sketch answers every rank; heap sketches answer top-k and
+    /// item frequencies; CountSketch answers item frequencies and L2.
+    #[test]
+    fn summary_capability_facts() {
+        let kll = sketch(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+        );
+        let count_sketch = sketch(
+            SketchAlgorithm::CountSketch,
+            SketchParams::CountSketch {
+                width: 64,
+                depth: 5,
+            },
+        );
+        let cms_heap = sketch(
+            SketchAlgorithm::CmsWithHeap,
+            SketchParams::CmsWithHeap {
+                width: 64,
+                depth: 5,
+                heap_size: 10,
+            },
+        );
+        let hll = sketch(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 });
+        for (family, yes, no) in [
+            (
+                &kll,
+                vec![
+                    SketchStatistic::Quantile { q: 0.5 },
+                    SketchStatistic::Quantile { q: 0.99 },
+                ],
+                vec![SketchStatistic::Cardinality, total()],
+            ),
+            (
+                &count_sketch,
+                vec![item(), SketchStatistic::FrequencyL2],
+                vec![
+                    SketchStatistic::FrequencyEntropy,
+                    SketchStatistic::TopK { k: 3 },
+                ],
+            ),
+            (
+                &cms_heap,
+                vec![SketchStatistic::TopK { k: 10 }, item()],
+                vec![SketchStatistic::FrequencyL2],
+            ),
+            (
+                &hll,
+                vec![SketchStatistic::Cardinality],
+                vec![SketchStatistic::FrequencyL2, item()],
+            ),
+        ] {
+            let capability = FamilyCapability::of(family);
+            for statistic in yes {
+                assert!(capability.answers(&statistic), "{family:?} {statistic:?}");
+            }
+            for statistic in no {
+                assert!(!capability.answers(&statistic), "{family:?} {statistic:?}");
+            }
+        }
+    }
+
+    /// An exact accumulator is read as its finalized value, not a readout.
+    #[test]
+    fn exact_accumulators_answer_no_readout() {
+        let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        assert!(FamilyCapability::of(&sum).readouts.is_empty());
+        assert!(!FamilyCapability::of(&sum).answers(&total()));
     }
 }
