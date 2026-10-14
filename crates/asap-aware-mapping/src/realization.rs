@@ -1,19 +1,24 @@
 //! Summary realization helpers shared by Pass 1 (`per_computation_candidates`)
 //! and the legacy replacement search: which sketch kinds can serve an intent,
 //! the intent's accuracy target and `(ε, δ)` budget, default sketch sizing,
-//! and the column/tuple a summary consumes.
+//! the column/tuple a summary consumes, the column a top-k ranks, and the
+//! keyed-additive rule for a heap sketch that reads a larger sub-DAG.
 
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr, SchemaDerivationError,
 };
 use asap_types::post_asap::{AccuracyError, ExactOperationSchemaError, ExecutionDataStateError};
-use asap_types::post_asap::{Field, Schema, SketchAlgorithm, SketchParams, SummaryInputExpr};
+use asap_types::post_asap::{
+    EntityIdentity, Field, FieldDataType, NonNegativeWeightProof, Schema, SketchAlgorithm,
+    SketchParams, SummaryInputExpr, SummaryUpdate, WeightDomain,
+};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::schema::ColumnId;
 use asap_types::pre_asap::Reduction;
 use asap_types::types::AccuracyTarget;
+use std::rc::Rc;
 use thiserror::Error;
 
 /// Confidence δ assumed when the target carries only an ε
@@ -258,4 +263,161 @@ pub enum RealizationError {
     /// child — the child carries summary state the operator can't read.
     #[error("exact operator schema derivation failed: {0}")]
     ExactOperationSchema(#[from] ExactOperationSchemaError),
+}
+
+/// The physical input consumed by one summary realization. Most summaries
+/// consume the logical aggregate's immediate child and summarize its declared
+/// input value. Composite realizations can instead consume a larger
+/// logical sub-DAG and bind a different key or value.
+pub(crate) struct PhysicalSummaryInput {
+    pub(crate) child: Rc<OperatorNode>,
+    pub(crate) input: SummaryUpdate,
+}
+
+pub(crate) enum PhysicalSummaryInputRuleResult {
+    NotApplicable,
+    Realized(PhysicalSummaryInput),
+    Unsupported(&'static str),
+}
+
+/// Realize the composite heavy-hitter realization for
+/// `TopK(Count GROUP BY key)`. The heap sketch consumes the raw keyed stream;
+/// it does not consume an independently materialized Count result.
+pub(crate) fn realize_keyed_additive_summary_input(
+    intent: &AggIntent,
+    family: &FieldDataType,
+    output_reduction: &Reduction,
+    child: &Rc<OperatorNode>,
+) -> PhysicalSummaryInputRuleResult {
+    if !matches!(intent, AggIntent::TopK { .. }) {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    let FieldDataType::Sketch(kind, _) = family else {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    };
+    let heap_algorithm = kind.algorithm();
+    if !matches!(
+        heap_algorithm,
+        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+    ) {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    let Some(NonASAPOp::Aggregate {
+        reduction,
+        measures,
+        filters,
+        having: None,
+        child: raw_child,
+        ..
+    }) = child.non_asap()
+    else {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    };
+    // The heap sketch consumes every raw row; a filtered measure counts only
+    // some of them (#466).
+    if asap_types::ir::non_asap::any_measure_filtered(filters) {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+        && matches!(raw_child.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
+            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
+    let weight = match measures.as_slice() {
+        [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
+        [AggIntent::Sum { .. }] if counter_input => {
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
+        }
+        [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
+            None => ColumnRef::SampleValue,
+            Some(index) => match schema_column_ref(raw_child, *index) {
+                Some(column) => column,
+                None => {
+                    return PhysicalSummaryInputRuleResult::Unsupported(
+                        "sum-ranked Top-K value column is outside the raw input schema",
+                    )
+                }
+            },
+        }),
+        _ => return PhysicalSummaryInputRuleResult::NotApplicable,
+    };
+    let weight_domain = match measures.as_slice() {
+        [AggIntent::Count { .. }] => WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::UnitCount,
+        },
+        [AggIntent::Sum { .. }] if counter_input => WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
+        },
+        _ => WeightDomain::UnknownOrSigned,
+    };
+    if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
+        && !matches!(weight_domain, WeightDomain::NonNegative { .. })
+    {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
+        );
+    }
+    let subpopulation_columns = match output_reduction {
+        Reduction::PerEntity => vec![],
+        Reduction::Reduce(keys) => keys
+            .iter()
+            .filter_map(|index| schema_column_ref(child, *index))
+            .collect(),
+    };
+    let item = match reduction {
+        Reduction::PerEntity => SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet {
+            excluding: subpopulation_columns,
+        }),
+        Reduction::Reduce(keys) if !keys.is_without() && !keys.is_empty() => {
+            let Some(columns) = keys
+                .iter()
+                .map(|index| schema_column_ref(raw_child, *index))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return PhysicalSummaryInputRuleResult::Unsupported(
+                    "ranked item column is outside the raw input schema",
+                );
+            };
+            let item_columns: Vec<_> = columns
+                .into_iter()
+                .filter(|column| !subpopulation_columns.contains(column))
+                .collect();
+            match item_columns.as_slice() {
+                [] => {
+                    return PhysicalSummaryInputRuleResult::Unsupported(
+                        "subpopulation columns consume the complete ranked item identity",
+                    )
+                }
+                [column] => SummaryInputExpr::Column(column.clone()),
+                _ => SummaryInputExpr::Tuple(
+                    item_columns
+                        .into_iter()
+                        .map(SummaryInputExpr::Column)
+                        .collect(),
+                ),
+            }
+        }
+        Reduction::Reduce(_) => {
+            return PhysicalSummaryInputRuleResult::Unsupported(
+                "an empty or without grouping does not identify ranked items",
+            )
+        }
+    };
+    PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
+        child: Rc::clone(raw_child),
+        input: SummaryUpdate {
+            item: Some(item),
+            weight,
+            weight_domain,
+        },
+    })
+}
+
+pub(crate) fn schema_column_ref(child: &OperatorNode, index: usize) -> Option<ColumnRef> {
+    let column = child.schema.fields.get(index)?;
+    Some(match &column.table {
+        Some(table) => ColumnRef::Qualified {
+            table: table.clone(),
+            name: column.name.clone(),
+        },
+        None => ColumnRef::Named(column.name.clone()),
+    })
 }
