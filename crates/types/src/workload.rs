@@ -548,6 +548,15 @@ pub struct DataWorkload {
     /// absolute errors; a source without a norm leaves that bound unmet.
     #[serde(default)]
     pub stream_norms: Evidence<BTreeMap<String, StreamNorms>>,
+    /// Upper bound per source (PromQL metric or SQL table name) on the
+    /// distinct items any one distinct-count summary over the source's own
+    /// rows counts in one complete evaluation, including every merged pane.
+    /// A filter or a shorter window only lowers it. The deployment must
+    /// enforce it; an observed distinct count is not a bound. Plan selection
+    /// binds it to give classic HLL its failure probability; a source
+    /// without a bound leaves that probability unknown.
+    #[serde(default)]
+    pub max_distinct_per_evaluation: Evidence<BTreeMap<String, u64>>,
 }
 
 /// Upper bounds on the norms of the frequency (weight) vector any one
@@ -627,6 +636,10 @@ impl DataWorkload {
                     return Err(WorkloadError::InvalidStreamNorm(value));
                 }
             }
+        }
+        let bounds = self.max_distinct_per_evaluation.value.iter();
+        if bounds.flat_map(BTreeMap::values).any(|bound| *bound == 0) {
+            return Err(WorkloadError::ZeroMaxDistinct);
         }
         Ok(())
     }
@@ -734,6 +747,8 @@ pub enum WorkloadError {
     AtRestWithPositiveIngestionRate,
     #[error("a stream norm must be finite and non-negative, got {0}")]
     InvalidStreamNorm(f64),
+    #[error("a source's max_distinct_per_evaluation must be greater than zero")]
+    ZeroMaxDistinct,
 }
 
 #[cfg(test)]
@@ -766,6 +781,20 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// A distinct-count bound is positive: a summary counts at least one item.
+    #[test]
+    fn max_distinct_per_evaluation_must_be_positive() {
+        let with = |bound: u64| DataWorkload {
+            max_distinct_per_evaluation: Evidence {
+                value: Some(BTreeMap::from([("m".to_string(), bound)])),
+                ..Evidence::default()
+            },
+            ..DataWorkload::default()
+        };
+        assert!(with(1).validate().is_ok());
+        assert_eq!(with(0).validate(), Err(WorkloadError::ZeroMaxDistinct));
     }
 
     fn base_workload() -> QueryWorkload {
