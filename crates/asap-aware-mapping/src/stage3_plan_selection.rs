@@ -165,6 +165,10 @@ pub struct Rejection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
     pub selected: String,
+    /// The selected candidate's query roots with every weight requirement
+    /// Stage 3 confirmed made a proof ([`with_confirmed_weights`]): the plan
+    /// to run. The Stage 2 candidate keeps the open requirement.
+    pub plan: Vec<QueryRoot>,
     pub costs: BTreeMap<String, CandidateCost>,
     pub rejected: Vec<Rejection>,
 }
@@ -257,8 +261,14 @@ pub fn select_plan(
             });
         }
     }
+    let plan = cands
+        .iter()
+        .find(|c| c.id == selected)
+        .map(|c| with_confirmed_weights(&c.roots, data))
+        .unwrap_or_default();
     Ok(Selection {
         selected: selected.to_string(),
+        plan,
         costs,
         rejected,
     })
@@ -1508,6 +1518,60 @@ mod tests {
         ] {
             assert_eq!(bound(&with(&types)), None, "{types:?}");
         }
+    }
+
+    /// Every consumer of a run sees the selected plan with its weight
+    /// requirements answered: the logical plan (`selected_logical`) and the
+    /// executable roots (`Selection::plan`) carry the counter proof, not the
+    /// open requirement the executor rejects.
+    #[test]
+    fn the_selected_plan_carries_confirmed_weights() {
+        use asap_types::workload::MetricType;
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        };
+        let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
+        let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
+        let data = DataWorkload {
+            metric_types: [("m".to_string(), MetricType::Counter)].into(),
+            input_cardinality: Evidence {
+                value: Some(10_000_000),
+                ..Default::default()
+            },
+            ..data()
+        };
+        let run = crate::pass::run_stage1_to_stage3(
+            vec![(0, QueryRoot::Operator(root))],
+            &[Some(target)],
+            &every_10s(1),
+            &data,
+            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
+        )
+        .unwrap();
+        let domains = |roots: &[QueryRoot]| -> Vec<WeightDomain> {
+            roots
+                .iter()
+                .flat_map(root_operators)
+                .flat_map(OperatorNode::reachable)
+                .filter_map(|n| match n.asap() {
+                    Some(ASAPOp::SummaryAgg {
+                        input,
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    }) if *kind.algorithm() == SketchAlgorithm::CmsWithHeap => {
+                        Some(input.weight_domain.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let proven = [WeightDomain::NonNegative {
+            proof: asap_types::post_asap::NonNegativeWeightProof::CounterSamples,
+        }];
+        let selection = run.stage3_plan_selection.as_ref().unwrap();
+        assert_eq!(domains(&selection.plan), proven, "{selection:?}");
+        assert_eq!(domains(run.selected_logical().unwrap()), proven);
     }
 
     /// The selected plan's open requirement becomes a proof when confirmed
