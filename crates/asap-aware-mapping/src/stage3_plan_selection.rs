@@ -454,9 +454,26 @@ fn bound_root_guarantee(
 ) -> Option<AccuracyGuarantee> {
     let guarantee = root_guarantee(root)?;
     let domains = operand_domain_bounds(root, data, models);
-    Some(guarantee.bind(&|statistic| {
+    Some(bind_statistics(&guarantee, &|statistic| {
         workload_statistic(statistic, data).or_else(|| domains.get(statistic).copied().flatten())
     }))
+}
+
+/// `guarantee` with the statistics `value` supplies bound. A sign gate
+/// ([`samples_sign_statistic`](crate::accuracy::composition::samples_sign_statistic))
+/// is an indicator that only 1 (proven) opens: any other value leaves it
+/// unbound, so it can never read as a perfect bound.
+fn bind_statistics(
+    guarantee: &AccuracyGuarantee,
+    value: &dyn Fn(&str) -> Option<f64>,
+) -> AccuracyGuarantee {
+    guarantee.bind(&|statistic| {
+        let supplied = value(statistic);
+        match parse_samples_sign_statistic(statistic) {
+            Some(_) => supplied.filter(|v| *v == 1.0),
+            None => supplied,
+        }
+    })
 }
 
 /// A data-workload statistic Stage 1 left symbolic: the input row count,
@@ -1487,6 +1504,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The sign gate is an indicator that only 1 (proven) opens: any other
+    /// value a binder supplies, 0 included, leaves it unbound rather than
+    /// reading as a perfect bound. Other statistics pass through.
+    #[test]
+    fn the_sign_gate_opens_only_at_one() {
+        use crate::accuracy::composition::samples_sign_statistic;
+        let gated = AccuracyGuarantee {
+            metric: ErrorMetric::RelativeValue,
+            bound: BoundExpr::Product {
+                factors: vec![
+                    BoundExpr::Constant { value: 0.01 },
+                    BoundExpr::Unknown {
+                        statistic: samples_sign_statistic("m"),
+                    },
+                ],
+            },
+            failure_probability: ProbabilityExpr::Constant { value: 0.001 },
+            provenance: vec![],
+        };
+        for value in [0.0, 0.5, 2.0, -1.0] {
+            assert_eq!(
+                bind_statistics(&gated, &|_| Some(value)).bound.evaluate(),
+                None,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            bind_statistics(&gated, &|_| Some(1.0)).bound.evaluate(),
+            Some(0.01)
+        );
+        let norm = AccuracyGuarantee {
+            bound: BoundExpr::Unknown {
+                statistic: INPUT_ROW_COUNT.into(),
+            },
+            ..gated
+        };
+        assert_eq!(
+            bind_statistics(&norm, &|_| Some(0.0)).bound.evaluate(),
+            Some(0.0)
+        );
     }
 
     /// A relative bound gated on the sign of one metric's samples is bound
