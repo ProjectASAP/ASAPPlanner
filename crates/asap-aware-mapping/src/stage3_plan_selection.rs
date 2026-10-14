@@ -647,11 +647,23 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
     )
 }
 
-/// Update operations per input row and bytes per state. A KLL sketch keeps
-/// at most about `3k` items (its level capacities shrink geometrically by
-/// 2/3); a DDSketch keeps one 8-byte count per bin it touches
-/// ([`ddsketch_bins`]); other sketches without a sizing rule here are
-/// assumed 1 KiB.
+/// Update operations per input row and bytes per state, from the sketch's
+/// parameters as `asap_sketchlib` allocates it:
+/// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
+///   24-byte entry per heap slot for the top-k variants;
+/// - KLL: at most about `3k` 8-byte items (its level capacities shrink
+///   geometrically by 2/3);
+/// - DDSketch: one 8-byte count per bin it touches over an assumed nine
+///   decades of values ([`ddsketch_bins`]);
+/// - HLL: one 1-byte register per bucket, `2^precision`;
+/// - KMV: its `k` smallest 64-bit hashes;
+/// - Theta: an Apache DataSketches update table of `2k` 64-bit hashes
+///   (`asap_sketchlib` has no Theta sketch);
+/// - UnivMon: per layer, a `rows × cols` Count-Sketch of 8-byte counters and
+///   a heap of `heap_size` 24-byte entries.
+///
+/// Update operations stay 1 per row for every sketch but Count-Min and
+/// Count-Sketch, which update one counter per row of depth.
 fn summary_shape(family: &FieldDataType) -> (u64, u64) {
     match family {
         FieldDataType::Sketch(kind, _) => match kind.params() {
@@ -673,7 +685,20 @@ fn summary_shape(family: &FieldDataType) -> (u64, u64) {
             ),
             SketchParams::Kll { k, .. } => (1, 8 * 3 * u64::from(*k)),
             SketchParams::DDSketch { alpha } => (1, ddsketch_bins(*alpha).saturating_mul(8)),
-            _ => (1, 1_024),
+            SketchParams::Hll { precision } => (1, 1u64 << (*precision).min(63)),
+            SketchParams::Kmv { k } => (1, 8 * u64::from(*k)),
+            SketchParams::Theta { k } => (1, 16 * u64::from(*k)),
+            SketchParams::UnivMon {
+                heap_size,
+                sketch_rows,
+                sketch_cols,
+                layers,
+            } => (
+                1,
+                u64::from(*layers)
+                    * (8 * u64::from(*sketch_rows) * u64::from(*sketch_cols)
+                        + 24 * u64::from(*heap_size)),
+            ),
         },
         _ => (1, 8),
     }
@@ -1102,6 +1127,77 @@ mod tests {
             bytes(0.01),
             bytes(0.001)
         );
+    }
+
+    /// Every sketch family's state is sized from its parameters, as
+    /// `asap_sketchlib` allocates it (Theta as an Apache DataSketches update
+    /// table).
+    #[test]
+    fn summary_state_is_sized_from_sketch_params() {
+        let bytes = |algorithm, params| {
+            summary_shape(&FieldDataType::Sketch(
+                SketchKind::new(algorithm, params),
+                GroupingStrategy::default(),
+            ))
+            .1
+        };
+        assert_eq!(
+            bytes(SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
+            1 << 14
+        );
+        assert_eq!(
+            bytes(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1_000 }),
+            8 * 1_000
+        );
+        assert_eq!(
+            bytes(SketchAlgorithm::Theta, SketchParams::Theta { k: 1_000 }),
+            16 * 1_000
+        );
+        assert_eq!(
+            bytes(
+                SketchAlgorithm::UnivMon,
+                SketchParams::UnivMon {
+                    heap_size: 256,
+                    sketch_rows: 5,
+                    sketch_cols: 1_024,
+                    layers: 16,
+                }
+            ),
+            16 * (8 * 5 * 1_024 + 24 * 256)
+        );
+    }
+
+    /// Exact distinct-count state keeps every item of its group: over 10 000
+    /// groups of 300 rows it is smaller than a distinct-count sketch sized for
+    /// ε = 0.01 and is selected; over one group of 3 000 000 rows a sketch is.
+    #[test]
+    fn exact_distinct_count_beats_a_sketch_over_small_groups() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let one_series = DataWorkload {
+            input_cardinality: Evidence {
+                value: Some(1),
+                ..Default::default()
+            },
+            ..data()
+        };
+        for (data, sketch_wins) in [(data(), false), (one_series, true)] {
+            let candidates = all_candidates("distinct_over_time(x[5m])", &target);
+            let selection = select_plan(
+                &candidates,
+                &[Some(target.clone())],
+                &data,
+                PlanningModels::builtin(),
+            )
+            .unwrap();
+            let selected = candidates
+                .iter()
+                .find(|c| c.id == selection.selected)
+                .unwrap();
+            assert_eq!(has_summary_estimate(selected), sketch_wins, "{selection:?}");
+        }
     }
 
     /// A candidate that ties the selected one is rejected for losing on
