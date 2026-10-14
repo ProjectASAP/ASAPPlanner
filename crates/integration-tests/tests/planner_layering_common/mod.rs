@@ -86,7 +86,7 @@ pub struct Logical {
 
 impl Logical {
     /// Whether two queries read a common node. Only Pass 2's
-    /// identical-expression rule (#588) shares a node across queries.
+    /// identical-expression rule shares a node across queries.
     pub fn shared_input(&self) -> bool {
         !cross_query_nodes(&self.dag, &self.query_roots).is_empty()
     }
@@ -477,7 +477,7 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
     }
 }
 
-/// How many times each node is computed per workload evaluation (#509; the
+/// How many times each node is computed per evaluation of its consumers (#509; the
 /// rule of plan selection's private `computations`): 1 for a materialized
 /// node; for a `NotMaterialized` one, the number of consumers that reach
 /// it. A consumer is a query (operator or scalar root) or a materialized
