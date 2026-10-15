@@ -9,9 +9,8 @@ use asap_physical_operators::physical_planner::promql_rows::SERIES_IDENTITY_COLU
 use planner_types::{
     types::AccuracyTarget,
     workload::{
-        AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence,
-        PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
-        TimeSelection,
+        BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence, PlanningWorkload,
+        Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
     },
 };
 use std::rc::Rc;
@@ -23,7 +22,7 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                    accuracy: accuracy.clone(),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

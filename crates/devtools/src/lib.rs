@@ -44,7 +44,7 @@ pub fn lower_promql_with_data_ingestion_interval(
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: asap_types::workload::AccuracyRequirement::Explicit(accuracy),
+                    accuracy,
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

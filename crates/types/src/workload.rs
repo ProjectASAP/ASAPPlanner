@@ -56,48 +56,29 @@ pub enum QueryLanguage {
 
 // ── Per-query requirements ────────────────────────────────────────────────────
 
-/// Whether the caller explicitly requested an accuracy target or inherited
-/// the normalized exact default. An explicit request may omit its metric
-/// ([`AccuracyTarget`]).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccuracyRequirement {
-    Explicit(AccuracyTarget),
-    ImplicitExact,
-}
-
-impl AccuracyRequirement {
-    pub fn requested(&self) -> AccuracyTarget {
-        match self {
-            Self::Explicit(requested) => requested.clone(),
-            Self::ImplicitExact => AccuracyTarget::exact(),
-        }
-    }
-}
-
-/// Optional maximum wall-clock response time for one query execution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LatencyRequirement {
-    ExplicitMaxMs(f64),
-    #[default]
-    Unspecified,
-}
-
 /// Independent accuracy and response-latency constraints attached to one
 /// query in the workload.
+///
+/// JSON: `{"accuracy": {"error": 0.01, "metric": "rank"}, "max_latency_ms":
+/// 200.0}`. An omitted `accuracy` is [`AccuracyTarget::exact`] and an
+/// omitted `max_latency_ms` imposes no bound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRequirements {
-    pub accuracy: AccuracyRequirement,
-    pub response_latency: LatencyRequirement,
+    /// The accuracy the query's answer must meet.
+    #[serde(default = "AccuracyTarget::exact")]
+    pub accuracy: AccuracyTarget,
+    /// The longest one evaluation may take, in milliseconds; `None` for no
+    /// bound.
+    #[serde(default)]
+    pub max_latency_ms: Option<f64>,
 }
 
 impl Default for QueryRequirements {
     fn default() -> Self {
         Self {
-            accuracy: AccuracyRequirement::ImplicitExact,
-            response_latency: LatencyRequirement::Unspecified,
+            accuracy: AccuracyTarget::exact(),
+            max_latency_ms: None,
         }
     }
 }
@@ -411,18 +392,18 @@ pub struct QueryWorkloadEntry {
 /// # Example
 ///
 /// ```
-/// use asap_types::workload::{LatencyRequirement, Predictability, QueryDemand, QueryRecurrence};
+/// use asap_types::workload::{Predictability, QueryDemand, QueryRecurrence};
 ///
 /// // Anything not declared: unknown predictability, no latency bound.
 /// let demand = QueryDemand::from(QueryRecurrence::Unknown);
 /// assert_eq!(demand.predictability, Predictability::Unknown);
-/// assert_eq!(demand.response_latency, LatencyRequirement::Unspecified);
+/// assert_eq!(demand.max_latency_ms, None);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryDemand {
     pub recurrence: QueryRecurrence,
     pub predictability: Predictability,
-    pub response_latency: LatencyRequirement,
+    pub max_latency_ms: Option<f64>,
 }
 
 impl From<&QueryWorkloadEntry> for QueryDemand {
@@ -430,7 +411,7 @@ impl From<&QueryWorkloadEntry> for QueryDemand {
         Self {
             recurrence: entry.recurrence.clone(),
             predictability: entry.predictability.clone(),
-            response_latency: entry.requirements.response_latency,
+            max_latency_ms: entry.requirements.max_latency_ms,
         }
     }
 }
@@ -442,7 +423,7 @@ impl From<QueryRecurrence> for QueryDemand {
         Self {
             recurrence,
             predictability: Predictability::Unknown,
-            response_latency: LatencyRequirement::Unspecified,
+            max_latency_ms: None,
         }
     }
 }
@@ -740,7 +721,7 @@ impl PlanningWorkload {
 }
 
 fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
-    if let LatencyRequirement::ExplicitMaxMs(ms) = entry.requirements.response_latency {
+    if let Some(ms) = entry.requirements.max_latency_ms {
         if !ms.is_finite() || ms < 0.0 {
             return Err(WorkloadError::InvalidLatency(ms));
         }
@@ -848,7 +829,6 @@ mod tests {
             assert!(parse(old).is_err(), "{old}");
         }
     }
-
 
     /// A stream norm is a finite, non-negative magnitude.
     #[test]
@@ -1014,10 +994,8 @@ mod tests {
                     query: Query("rate(requests_total[5m])".into()),
                     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::epsilon_delta(
-                            0.01, 0.001,
-                        )),
-                        response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
+                        accuracy: AccuracyTarget::epsilon_delta(0.01, 0.001),
+                        max_latency_ms: Some(100.0),
                     },
                     predictability: Predictability::Predictable { known_at: None },
                     time_selection: TimeSelection {

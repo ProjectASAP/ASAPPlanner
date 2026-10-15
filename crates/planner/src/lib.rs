@@ -206,7 +206,7 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
                     &entry.query.0,
                     catalog,
                     dialect.clone(),
-                    entry.requirements.accuracy.requested(),
+                    entry.requirements.accuracy.clone(),
                 )
                 .await
                 .map_err(|source| PlanError::Lowering {

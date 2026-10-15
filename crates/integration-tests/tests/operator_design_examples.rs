@@ -283,7 +283,7 @@ async fn batch_planning_replaces_summary_operators() {
                     .map(|query| BatchEntry {
                         query: Query((*query).into()),
                         requirements: QueryRequirements {
-                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
+                            accuracy: AccuracyTarget::exact(),
                             ..Default::default()
                         },
                         predictability: Predictability::Unknown,

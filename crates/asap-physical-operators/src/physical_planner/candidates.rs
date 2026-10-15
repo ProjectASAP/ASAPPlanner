@@ -350,9 +350,7 @@ mod tests {
                 query_batch: Some(vec![BatchEntry {
                     query: Query("sum by(job)(rate(m[1m]))".into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(
-                            planner_types::types::AccuracyTarget::exact(),
-                        ),
+                        accuracy: planner_types::types::AccuracyTarget::exact(),
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,

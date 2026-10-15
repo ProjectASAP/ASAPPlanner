@@ -23,8 +23,8 @@ use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload,
+    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query, QueryLanguage,
+    QueryRequirements, QueryWorkload,
 };
 use futures::StreamExt;
 
@@ -56,7 +56,7 @@ fn promql(query: &str) -> QueryRoot {
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy()),
+                    accuracy: accuracy(),
                     ..Default::default()
                 },
                 predictability: Default::default(),

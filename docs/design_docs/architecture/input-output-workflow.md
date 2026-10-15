@@ -201,8 +201,8 @@ fields expand as follows:
 
 | Structure | Field | Meaning |
 |---|---|---|
-| `QueryRequirements` | `accuracy` | `Explicit(AccuracyTarget)` or `ImplicitExact`. Use an explicit target when approximation is allowed. |
-| `QueryRequirements` | `response_latency` | An optional finite, non-negative maximum in milliseconds. The default is unspecified. |
+| `QueryRequirements` | `accuracy` | An `AccuracyTarget`; omitted, it is `AccuracyTarget::exact()`. Set ε (and δ) when approximation is allowed. |
+| `QueryRequirements` | `max_latency_ms` | An optional finite, non-negative maximum in milliseconds for one evaluation; omitted, there is no bound. |
 | `TimeSelection` | `scope` | `RealTime`, `Longitudinal`, `Mixed`, or `Unknown`. |
 | `TimeSelection` | `lookback` | Optional event-time duration selected before the upper bound. |
 | `TimeSelection` | `as_of` | Optional fixed upper-bound timestamp; `None` means planning/evaluation time. |

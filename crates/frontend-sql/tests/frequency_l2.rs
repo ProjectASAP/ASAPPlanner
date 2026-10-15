@@ -126,16 +126,16 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
 #[tokio::test]
 async fn batch_lowering_recognizes_frequency_l2() {
     use asap_types::workload::{
-        AccuracyRequirement, BatchEntry, LatencyRequirement, Predictability, Query, QueryLanguage,
-        QueryRequirements, QueryWorkload, SqlDialect, TimeSelection,
+        BatchEntry, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
+        SqlDialect, TimeSelection,
     };
     let workload = QueryWorkload {
         language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
         query_batch: Some(vec![BatchEntry {
             query: Query(CAST_COUNT.into()),
             requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
-                response_latency: LatencyRequirement::Unspecified,
+                accuracy: AccuracyTarget::exact(),
+                max_latency_ms: None,
             },
             predictability: Predictability::Unknown,
             invocations: 1,

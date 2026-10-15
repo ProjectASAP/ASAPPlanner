@@ -176,9 +176,8 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
 
 use asap_frontend_promql::lower_promql_workload;
 use planner_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence,
-    PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
-    TimeSelection,
+    BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence, PlanningWorkload,
+    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 pub fn lower_promql(
     query: &str,
@@ -190,7 +189,7 @@ pub fn lower_promql(
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy),
+                    accuracy,
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

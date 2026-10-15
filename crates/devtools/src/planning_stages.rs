@@ -69,7 +69,7 @@ pub fn lower_sql_roots(
                     &entry.query.0,
                     catalog,
                     dialect.clone(),
-                    entry.requirements.accuracy.requested(),
+                    entry.requirements.accuracy.clone(),
                 ))
                 .map(QueryRoot::Operator)
                 .map_err(|e| format!("lowering: {e}"))
@@ -145,7 +145,7 @@ pub fn run_planning_stages(
     let targets: Vec<_> = workload
         .query_workload
         .entries()
-        .map(|entry| entry.requirements.accuracy.requested())
+        .map(|entry| entry.requirements.accuracy.clone())
         .collect();
     let demand: Vec<_> = workload
         .query_workload

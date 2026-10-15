@@ -82,9 +82,8 @@ use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{default_metric_for_root, AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, LatencyRequirement,
-    PlanningWorkload, Query, QueryDemand, QueryLanguage, QueryRecurrence, QueryRequirements,
-    QueryWorkload, RepeatedDemand, SqlDialect,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryDemand,
+    QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
 };
 use serde_json::{json, Value};
 
@@ -464,10 +463,10 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
         .entries()
         .enumerate()
         .map(|(index, entry)| {
-            let accuracy = json!(entry.requirements.accuracy.requested());
+            let accuracy = json!(entry.requirements.accuracy.clone());
             let mut requirements = json!({ "accuracy": accuracy });
-            if let LatencyRequirement::ExplicitMaxMs(ms) = entry.requirements.response_latency {
-                requirements["latency_ms"] = json!(ms);
+            if let Some(ms) = entry.requirements.max_latency_ms {
+                requirements["max_latency_ms"] = json!(ms);
             }
             if let QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) =
                 &entry.recurrence
@@ -570,7 +569,7 @@ fn query_batch(
                     .map(|query| BatchEntry {
                         query: Query(query.clone()),
                         requirements: QueryRequirements {
-                            accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                            accuracy: accuracy.clone(),
                             ..Default::default()
                         },
                         predictability: Default::default(),

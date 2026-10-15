@@ -915,7 +915,7 @@ mod tests {
 
     // ── Materialization ──────────────────────────────────────────────────
 
-    use asap_types::workload::{DataArrival, LatencyRequirement, RepetitionInterval, TimestampMs};
+    use asap_types::workload::{DataArrival, RepetitionInterval, TimestampMs};
 
     const MINUTE: u64 = 60_000;
 
@@ -970,7 +970,7 @@ mod tests {
                 RepetitionInterval(MINUTE as u32),
             )),
             predictability: Predictability::Predictable { known_at: None },
-            response_latency: LatencyRequirement::Unspecified,
+            max_latency_ms: None,
         }
     }
 

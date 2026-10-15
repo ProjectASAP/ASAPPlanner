@@ -19,9 +19,9 @@ use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
-    AccuracyRequirement, DataArrival, DataWorkload, DurationMs, Evidence, LatencyRequirement,
-    PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection,
+    DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
+    RepetitionInterval, SqlDialect, TimeSelection,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -39,8 +39,8 @@ fn requested(query: &str, epsilon: f64) -> AccuracyTarget {
 
 fn requirements(query: &str, epsilon: f64) -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(requested(query, epsilon)),
-        response_latency: LatencyRequirement::Unspecified,
+        accuracy: requested(query, epsilon),
+        max_latency_ms: None,
     }
 }
 

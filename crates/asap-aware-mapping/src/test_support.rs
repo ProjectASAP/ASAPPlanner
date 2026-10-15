@@ -6,8 +6,8 @@ use std::rc::Rc;
 use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
 pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
@@ -17,7 +17,7 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy),
+                    accuracy,
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

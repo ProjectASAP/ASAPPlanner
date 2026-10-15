@@ -26,10 +26,9 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::DataType;
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
-    AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs,
-    LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
-    QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-    SqlDialect, TimeSelection,
+    DataArrival, DataDistribution, DataWorkload, DurationMs, PlanningWorkload, Predictability,
+    Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
+    RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection,
 };
 use planner_layering_common::*;
 
@@ -59,11 +58,11 @@ fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> Rep
         query: Query(query.into()),
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
         requirements: QueryRequirements {
-            accuracy: AccuracyRequirement::Explicit(AccuracyTarget {
+            accuracy: AccuracyTarget {
                 scope,
                 ..AccuracyTarget::epsilon_delta(epsilon, delta)
-            }),
-            response_latency: LatencyRequirement::Unspecified,
+            },
+            max_latency_ms: None,
         },
         predictability: Predictability::Predictable { known_at: None },
         time_selection: TimeSelection {
@@ -156,7 +155,7 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
             &entry.query.0,
             &catalog(),
             SqlDialect::DataFusionSQL,
-            entry.requirements.accuracy.requested(),
+            entry.requirements.accuracy.clone(),
         )
         .await
         .unwrap_or_else(|e| panic!("{}: {e}", entry.query.0));
@@ -678,10 +677,10 @@ fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound
             .repeating_queries
             .as_mut()
             .expect("repeating queries")[0];
-        q1.requirements.accuracy = AccuracyRequirement::Explicit(AccuracyTarget {
+        q1.requirements.accuracy = AccuracyTarget {
             scope: AccuracyScope::PerValue,
             ..AccuracyTarget::epsilon_delta(0.02, delta)
-        });
+        };
         let run = run_stages(&workload, lower_promql(&workload));
         for id in q1_only_candidates(&run, "Kmv") {
             assert!(
@@ -952,7 +951,7 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let targets: Vec<_> = entries
         .iter()
-        .map(|e| Some(e.requirements.accuracy.requested()))
+        .map(|e| Some(e.requirements.accuracy.clone()))
         .collect();
     let demand: Vec<_> = entries
         .iter()

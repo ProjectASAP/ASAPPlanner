@@ -774,7 +774,7 @@ impl OptimizationPass for Stage1ToStage3Pass {
         let targets: Vec<_> = workload
             .query_workload()
             .entries()
-            .map(|entry| Some(entry.requirements.accuracy.requested()))
+            .map(|entry| Some(entry.requirements.accuracy.clone()))
             .collect();
         let demand: Vec<_> = workload
             .query_workload()

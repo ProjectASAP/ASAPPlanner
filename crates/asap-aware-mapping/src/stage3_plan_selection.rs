@@ -93,7 +93,7 @@
 //! `k` partial copies of its newest window, and compacting them takes
 //! `(k − 1)` one-operation merges for each of its states per window; with
 //! one core there is nothing to compact. A query with
-//! `LatencyRequirement::ExplicitMaxMs(bound)` whose latency is above the
+//! `Some(bound)` whose latency is above the
 //! bound makes the candidate invalid, with the latency as the reason.
 //! [`CandidateCost::latency`] reports every query's latency.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -117,7 +117,7 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
-    DataWorkload, LatencyRequirement, MetricType, QueryDemand, QueryRecurrence, RepeatedDemand,
+    DataWorkload, MetricType, QueryDemand, QueryRecurrence, RepeatedDemand,
 };
 use thiserror::Error;
 
@@ -216,17 +216,15 @@ fn latency_violation(cost: &CandidateCost, demand: &[QueryDemand]) -> Option<Str
         .iter()
         .zip(demand)
         .enumerate()
-        .find_map(|(query, (latency, demand))| match demand.response_latency {
-            LatencyRequirement::ExplicitMaxMs(bound) if latency.total_ms() > bound => {
-                Some(format!(
-                    "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms) \
+        .find_map(|(query, (latency, demand))| match demand.max_latency_ms {
+            Some(bound) if latency.total_ms() > bound => Some(format!(
+                "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms) \
                  is over its {bound} ms bound",
-                    query + 1,
-                    latency.total_ms(),
-                    latency.compaction_ms,
-                    latency.query_ms
-                ))
-            }
+                query + 1,
+                latency.total_ms(),
+                latency.compaction_ms,
+                latency.query_ms
+            )),
             _ => None,
         })
 }
@@ -4025,7 +4023,7 @@ mod tests {
         QueryDemand {
             recurrence: repeating(MINUTE),
             predictability: asap_types::workload::Predictability::Predictable { known_at: None },
-            response_latency: LatencyRequirement::Unspecified,
+            max_latency_ms: None,
         }
     }
 
@@ -4162,7 +4160,7 @@ mod tests {
         assert!(b1.query_ms < b2.query_ms, "{b1:?} vs {b2:?}");
         let bound = (b1.query_ms + b2.query_ms) / 2.0;
         let demand = QueryDemand {
-            response_latency: LatencyRequirement::ExplicitMaxMs(bound),
+            max_latency_ms: Some(bound),
             ..every_minute()
         };
         let selection = select_plan(

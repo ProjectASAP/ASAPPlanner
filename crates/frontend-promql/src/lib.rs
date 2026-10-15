@@ -101,7 +101,7 @@ fn lower_promql_query_workload_inner(
         .map(|entry| {
             let root = promql::PromqlLowerer::lower_query_with_ingestion_interval(
                 &entry.query.0,
-                &entry.requirements.accuracy.requested(),
+                &entry.requirements.accuracy.clone(),
                 std::time::Duration::from_millis(interval_ms),
             )?;
             Ok(root)

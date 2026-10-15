@@ -68,7 +68,7 @@ pub fn lower_metricsql_query_workload(
         .map(|entry| {
             lower_metricsql_query(
                 &entry.query.0,
-                entry.requirements.accuracy.requested(),
+                entry.requirements.accuracy.clone(),
                 Duration::from_millis(interval_ms),
             )
         })

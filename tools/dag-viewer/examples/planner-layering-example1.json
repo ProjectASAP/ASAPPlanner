@@ -105466,7 +105466,7 @@
             "scope": "whole_result"
           },
           "default_metric": "absolute_stream_l1",
-          "latency_ms": 100.0,
+          "max_latency_ms": 100.0,
           "repeat_interval_ms": 10000
         },
         "text": "topk by (job) (10, sum_over_time(http_requests_total[1m]))"

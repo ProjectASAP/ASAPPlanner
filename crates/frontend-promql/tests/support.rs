@@ -7,8 +7,8 @@ use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::pre_asap::ScalarValue;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
 pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
@@ -18,7 +18,7 @@ pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy),
+                    accuracy,
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

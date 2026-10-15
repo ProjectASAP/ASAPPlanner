@@ -17,8 +17,8 @@ pub mod fixtures {
     use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
-        AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
-        Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+        BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+        QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
     };
     use std::rc::Rc;
 
@@ -46,7 +46,7 @@ pub mod fixtures {
                 query_batch: Some(vec![BatchEntry {
                     query: Query(query.into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(accuracy),
+                        accuracy,
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,
