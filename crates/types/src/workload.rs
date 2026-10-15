@@ -821,6 +821,35 @@ pub enum WorkloadError {
 mod tests {
     use super::*;
 
+    /// Query requirements: an accuracy target (omitted: exact) and an
+    /// optional latency bound in ms (omitted: none). The old tagged forms
+    /// and unknown fields are rejected.
+    #[test]
+    fn query_requirements_json_is_a_target_and_an_optional_bound() {
+        let parse = |json: &str| serde_json::from_str::<QueryRequirements>(json);
+        let empty = serde_json::to_value(parse("{}").unwrap()).unwrap();
+        assert_eq!(
+            empty,
+            serde_json::json!({"accuracy": {"error": 0.0, "failure_probability": 0.0,
+                "scope": "whole_result"}, "max_latency_ms": null})
+        );
+        let bounded = serde_json::to_value(
+            parse(r#"{"accuracy": {"error": 0.01}, "max_latency_ms": 200.0}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bounded["accuracy"]["error"], 0.01);
+        assert_eq!(bounded["max_latency_ms"], 200.0);
+        for old in [
+            r#"{"accuracy": "implicit_exact", "response_latency": "unspecified"}"#,
+            r#"{"accuracy": {"explicit": {"error": 0.01}}}"#,
+            r#"{"response_latency": {"explicit_max_ms": 100.0}}"#,
+            r#"{"max_latency_ms": 100.0, "unknown": 1}"#,
+        ] {
+            assert!(parse(old).is_err(), "{old}");
+        }
+    }
+
+
     /// A stream norm is a finite, non-negative magnitude.
     #[test]
     fn stream_norms_must_be_finite_and_non_negative() {
