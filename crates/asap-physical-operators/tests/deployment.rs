@@ -91,9 +91,14 @@ fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     let state = operator.into_accumulator();
     let state = state
         .as_any()
-        .downcast_ref::<asap_physical_operators::summary_kernels::CountSketchWithHeapAccumulator>()
+        .downcast_ref::<asap_physical_operators::summary_kernels::weighted_frequency::WeightedFrequency>()
         .unwrap();
-    assert_eq!(state.query_key(&key), 7.0);
+    assert_eq!(
+        state
+            .point_estimate(&[asap_physical_operators::values::Value::Utf8("a".into())])
+            .unwrap(),
+        7.0
+    );
 }
 
 fn plain_count_sketch(width: u32, depth: u32) -> FieldDataType {
@@ -115,11 +120,11 @@ fn build_plain_count_sketch(
     family: &FieldDataType,
     events: impl IntoIterator<Item = usize>,
 ) -> Box<dyn AggregateCore> {
-    build_weighted_plain_count_sketch(family, events.into_iter().map(|i| (i, 1.0)))
+    build_weighted_frequency(family, events.into_iter().map(|i| (i, 1.0)))
 }
 
-/// Build a plain CountSketch over `(key index, weight)` updates.
-fn build_weighted_plain_count_sketch(
+/// Build a keyed frequency summary over `(key index, weight)` updates.
+fn build_weighted_frequency(
     family: &FieldDataType,
     updates: impl IntoIterator<Item = (usize, f64)>,
 ) -> Box<dyn AggregateCore> {
@@ -153,28 +158,25 @@ fn zipf_events(keys: usize) -> Vec<usize> {
         .collect()
 }
 
-// A deep plain CountSketch, sized from a small δ, builds and keeps every row
-// independent: each row hashes with its own seed, so no row geometry limit
-// applies and two rows rarely put a key in the same column.
-#[test]
-fn deep_plain_count_sketch_rows_hash_independently() {
-    let (width, depth) = (30_000usize, 15usize);
-    let family = plain_count_sketch(width as u32, depth as u32);
-    let keys = 2_000;
-    // Key `base + p` of a batch carries weight 3^p, so a cell holds a signed
-    // sum whose balanced-ternary digits name the keys that hit it.
+/// Decode, for `keys` keys, the column each row of `family` (a keyed
+/// frequency sketch of `width` x `depth`) puts the key in, and assert every
+/// pair of rows shares a column for few keys, as independent rows do.
+fn assert_rows_hash_independently(family: &FieldDataType, width: usize, depth: usize, keys: usize) {
+    // Key `base + p` of a batch carries weight 3^p, so a cell holds a sum
+    // whose balanced-ternary digits name the keys that hit it (CountSketch
+    // signs give digits -1 or 1, Count-Min only 1).
     const BATCH: usize = 33;
     let mut columns = vec![vec![None; depth]; keys];
     for base in (0..keys).step_by(BATCH) {
         let batch = base..keys.min(base + BATCH);
-        let state = build_weighted_plain_count_sketch(
-            &family,
+        let state = build_weighted_frequency(
+            family,
             batch.clone().map(|i| (i, 3f64.powi((i - base) as i32))),
         );
         let state = state
             .as_any()
             .downcast_ref::<asap_physical_operators::summary_kernels::weighted_frequency::WeightedFrequency>()
-            .unwrap();
+            .expect("the per-row-seeded weighted frequency kernel");
         let cells = serde_json::to_value(state).unwrap()["cells"].clone();
         for (index, cell) in cells.as_array().unwrap().iter().enumerate() {
             let (row, column) = (index / width, index % width);
@@ -204,10 +206,105 @@ fn deep_plain_count_sketch_rows_hash_independently() {
     for a in 0..depth {
         for b in a + 1..depth {
             let shared = columns.iter().filter(|c| c[a] == c[b]).count();
-            // Independent rows share a column for 2000 / 30000 < 1 key per pair.
+            // Independent rows share a column for keys / width < 1 key per pair.
             assert!(shared <= 5, "rows {a} and {b} share {shared} columns");
         }
     }
+}
+
+// A deep plain CountSketch, sized from a small δ, builds and keeps every row
+// independent: each row hashes with its own seed, so no row geometry limit
+// applies and two rows rarely put a key in the same column.
+#[test]
+fn deep_plain_count_sketch_rows_hash_independently() {
+    assert_rows_hash_independently(&plain_count_sketch(30_000, 15), 30_000, 15, 2_000);
+}
+
+fn heap_sketch(
+    algorithm: SketchAlgorithm,
+    width: u32,
+    depth: u32,
+    heap_size: u32,
+) -> FieldDataType {
+    let params = match algorithm {
+        SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size,
+        },
+        _ => SketchParams::CountSketchWithHeap {
+            width,
+            depth,
+            heap_size,
+        },
+    };
+    FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
+}
+
+// The factory's top-k sketches use the same per-row-seeded kernel: past 20
+// rows (where a fixed seed list would repeat) every row stays independent.
+#[test]
+fn deep_heap_sketch_rows_hash_independently() {
+    for algorithm in [
+        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountSketchWithHeap,
+    ] {
+        assert_rows_hash_independently(&heap_sketch(algorithm, 30_000, 25, 4), 30_000, 25, 1_000);
+    }
+}
+
+// A factory-built top-k state is the DAG's state type, so it loads as a typed
+// summary value, and it keeps fractional weights exactly.
+#[test]
+fn heap_sketch_states_load_as_dag_summary_values() {
+    use asap_physical_operators::{
+        planner::post_asap::{Field, Schema},
+        summary_kernels::weighted_frequency::WeightedFrequency,
+        values::{Batch, Value},
+    };
+    for algorithm in [
+        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountSketchWithHeap,
+    ] {
+        let family = heap_sketch(algorithm, 1_024, 5, 4);
+        let state = build_weighted_frequency(&family, [(0, 0.25), (0, 0.5), (1, 2.0)]);
+        let estimate = state
+            .as_any()
+            .downcast_ref::<WeightedFrequency>()
+            .expect("the DAG's weighted frequency state")
+            .point_estimate(&[Value::Utf8("host-0".into())])
+            .unwrap();
+        assert_eq!(estimate, 0.75);
+        let schema = std::sync::Arc::new(Schema {
+            fields: vec![Field {
+                name: "state".into(),
+                dtype: family.clone(),
+                nullable: false,
+                table: None,
+            }],
+            unique_keys: vec![],
+            closed: false,
+            time_index: None,
+        });
+        let row = vec![Value::Summary {
+            family,
+            state: std::sync::Arc::from(state),
+        }];
+        assert!(Batch::try_new(schema, vec![row]).is_ok());
+    }
+}
+
+// Count-Min needs nonnegative weights; a negative input is an error at
+// validation, never silently dropped.
+#[test]
+fn count_min_heap_rejects_negative_inputs() {
+    use asap_physical_operators::planner::post_asap::SummaryInputExpr;
+    let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
+    update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
+    let family = heap_sketch(SketchAlgorithm::CmsWithHeap, 64, 3, 4);
+    let operator = create_planner_accumulator(&family, &update, &Default::default()).unwrap();
+    assert!(operator.validate_single_input(-1.0).is_err());
+    assert!(operator.validate_single_input(0.5).is_ok());
 }
 
 // The planner certifies `|estimate − truth| ≤ √(3/w) ‖f‖₂` for every point
