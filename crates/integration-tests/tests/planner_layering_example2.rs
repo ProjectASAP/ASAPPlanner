@@ -759,6 +759,19 @@ fn stage3_plan_selection_accepts_univmon_l2() {
     }
 }
 
+/// SQL Q3's L2 through UnivMon keeps its guarantee: the exact population
+/// count joined beside it (a cross join, no key) and the `CASE` deciding the
+/// empty-input NULL on that exact count keep the estimate's guarantee, so
+/// plan selection accepts it.
+#[tokio::test]
+async fn stage3_plan_selection_accepts_sql_univmon_l2_beside_its_exact_population_count() {
+    let workload = sql_workload();
+    let run = run_stages(&workload, lower_sql(&workload).await);
+    for id in univmon_only_candidates(&run, 2) {
+        assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
+    }
+}
+
 /// One materialized UnivMon for all three costs no more than three separate UnivMons.
 #[test]
 #[ignore = "needs a UnivMon entropy accuracy model and materializing the shared UnivMon (#604): not materialized, it is charged once per consuming query"]
