@@ -141,8 +141,8 @@ mod tests {
         );
     }
 
-    // Above k the estimate is within KMV's relative standard error
-    // 1/sqrt(k - 2) times ten (the 99% Chebyshev bound Stage 1 sizes for).
+    // Above k the estimate is within ten times KMV's relative standard
+    // error 1/sqrt(k - 2).
     #[test]
     fn estimates_many_distinct_items_within_its_error() {
         let k = 1024;
@@ -152,6 +152,21 @@ mod tests {
             let error = (estimate - f64::from(exact)).abs() / f64::from(exact);
             assert!(error < bound, "{exact}: {estimate} (error {error})");
         }
+    }
+
+    // From k distinct items on, the estimate is `(k - 1) / U`, with `U` the
+    // k-th smallest hash mapped into (0, 1]: the estimator the planner's
+    // KMV bound is proved for (`accuracy::estimators::cardinality`, #694).
+    #[test]
+    fn estimates_k_minus_one_over_the_kth_smallest_hash() {
+        let k = 256;
+        for exact in [k, 5_000] {
+            let kmv = build(k, 0..exact);
+            let kth = kmv.inner.k_vals.iter().copied().max().unwrap();
+            let u = (kth as f64 + 1.0) / 18_446_744_073_709_551_616.0;
+            assert_eq!(cardinality(&kmv), f64::from(k - 1) / u);
+        }
+        assert_eq!(cardinality(&build(k, 0..k - 1)), f64::from(k - 1));
     }
 
     // Merging two overlapping states keeps the same k smallest distinct

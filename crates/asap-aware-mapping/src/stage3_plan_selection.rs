@@ -480,11 +480,22 @@ pub fn sized_roots(
     let resize = |state: &OperatorNode, params: &SketchParams| {
         let delta = *required.get(&std::ptr::from_ref(state))?;
         Some(match params {
-            SketchParams::Hll { precision } => {
+            SketchParams::Hll {
+                precision,
+                relative_error,
+            } => {
                 let source = summary_source(state)?;
                 let bound = data.max_distinct_per_evaluation.value_at(ANY_TIME)?;
+                // The guarantee keeps the relative error Pass 1 sized for.
+                let relative_error = hll::classic_relative_error(*precision, *relative_error);
                 SketchParams::Hll {
-                    precision: hll::precision_for(*precision, *bound.get(&source)?, delta),
+                    precision: hll::precision_for(
+                        *precision,
+                        relative_error,
+                        *bound.get(&source)?,
+                        delta,
+                    ),
+                    relative_error: Some(relative_error),
                 }
             }
             params => with_failure_probability(params, delta),
@@ -724,10 +735,13 @@ fn workload_statistic(statistic: &str, data: &DataWorkload) -> Option<f64> {
             .value_at(ANY_TIME)
             .map(|rows| *rows as f64);
     }
-    if let Some((precision, source)) = hll::parse_classic_failure_statistic(statistic) {
+    if let Some((precision, relative_error, source)) =
+        hll::parse_classic_failure_statistic(statistic)
+    {
         let bound = data.max_distinct_per_evaluation.value_at(ANY_TIME)?;
         return Some(hll::classic_failure_probability(
             precision,
+            relative_error,
             *bound.get(source)?,
         ));
     }
@@ -1595,8 +1609,8 @@ fn summary_shape(family: &FieldDataType) -> (f64, u64) {
             ),
             SketchParams::Kll { k, .. } => (1.0, 8 * kll_items(*k)),
             SketchParams::DDSketch { alpha } => (1.0, ddsketch_bins(*alpha).saturating_mul(8)),
-            SketchParams::Hll { precision } => (1.0, 1u64 << (*precision).min(63)),
-            SketchParams::Kmv { k } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
+            SketchParams::Hll { precision, .. } => (1.0, 1u64 << (*precision).min(63)),
+            SketchParams::Kmv { k, .. } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
             SketchParams::UnivMon {
                 heap_size,
                 sketch_rows,
@@ -1701,6 +1715,27 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// Classic HLL's failure probability over a source binds only that
+    /// source's distinct bound: a bound keyed to another source leaves it
+    /// unknown.
+    #[test]
+    fn classic_hll_failure_probability_binds_only_its_own_sources_bound() {
+        let statistic = hll::classic_failure_statistic(15, 0.05, "a");
+        let bounded = |source: &str| DataWorkload {
+            max_distinct_per_evaluation: Evidence {
+                value: Some(std::collections::BTreeMap::from([(source.into(), 100)])),
+                ..Default::default()
+            },
+            ..data()
+        };
+        assert_eq!(workload_statistic(&statistic, &bounded("b")), None);
+        assert_eq!(
+            workload_statistic(&statistic, &bounded("a")),
+            Some(hll::classic_failure_probability(15, 0.05, 100))
+        );
+        assert!(hll::classic_failure_probability(15, 0.05, 100) <= 0.01);
     }
 
     /// Exact (P1), whole-expression CMS+heap (P2) and CountSketch+heap (P3) realizations of
@@ -2601,11 +2636,23 @@ mod tests {
             .1
         };
         assert_eq!(
-            bytes(SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
+            bytes(
+                SketchAlgorithm::Hll,
+                SketchParams::Hll {
+                    precision: 14,
+                    relative_error: None
+                }
+            ),
             1 << 14
         );
         assert_eq!(
-            bytes(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1_000 }),
+            bytes(
+                SketchAlgorithm::Kmv,
+                SketchParams::Kmv {
+                    k: 1_000,
+                    relative_error: None
+                }
+            ),
             8 * 1_000
         );
         assert_eq!(

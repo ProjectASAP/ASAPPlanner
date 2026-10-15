@@ -117,6 +117,12 @@ pub enum SketchParams {
     },
     Hll {
         precision: u8,
+        /// The relative error `precision` was sized for (#694): the error
+        /// bound of its guarantee, at which its failure probability is
+        /// evaluated. `None`: not sized for a target; its error bound is
+        /// the relative standard error `1.04/√m`. Ignored by equality.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relative_error: Option<f64>,
     },
     DDSketch {
         alpha: f64,
@@ -128,6 +134,12 @@ pub enum SketchParams {
     },
     Kmv {
         k: u32,
+        /// The relative error `k` was sized for (#694): the error bound of
+        /// its guarantee, at which its failure probability is evaluated.
+        /// `None`: not sized for a target; its error bound is the relative
+        /// standard error `1/√(k-2)`. Ignored by equality.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relative_error: Option<f64>,
     },
     Theta {
         k: u32,
@@ -208,9 +220,11 @@ impl PartialEq for SketchParams {
                     heap_size: b2,
                 },
             ) => (a0, a1, a2) == (b0, b1, b2),
-            (P::Hll { precision: a }, P::Hll { precision: b }) => a == b,
+            (P::Hll { precision: a, .. }, P::Hll { precision: b, .. }) => a == b,
             (P::DDSketch { alpha: a }, P::DDSketch { alpha: b }) => a == b,
-            (P::Kmv { k: a }, P::Kmv { k: b }) | (P::Theta { k: a }, P::Theta { k: b }) => a == b,
+            (P::Kmv { k: a, .. }, P::Kmv { k: b, .. }) | (P::Theta { k: a }, P::Theta { k: b }) => {
+                a == b
+            }
             // Different variants. Listed by `self`'s variant, not `_`, so a
             // new variant fails to compile here until it is compared above.
             (P::UnivMon { .. }, _)
@@ -821,7 +835,13 @@ mod tests {
         assert_eq!(kll(331, Some(0.001)), kll(331, None));
         assert_eq!(kll(331, Some(0.001)), kll(331, Some(0.0001)));
         assert_ne!(kll(331, None), kll(269, None));
-        assert_ne!(kll(331, None), SketchParams::Kmv { k: 331 });
+        assert_ne!(
+            kll(331, None),
+            SketchParams::Kmv {
+                k: 331,
+                relative_error: None
+            }
+        );
         let family = |params| {
             crate::post_asap::FieldDataType::Sketch(
                 SketchKind::new(SketchAlgorithm::Kll, params),
@@ -834,7 +854,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "SketchKind parameter mismatch")]
     fn sketch_kind_rejects_params_from_another_algorithm() {
-        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Hll { precision: 14 });
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Hll {
+                precision: 14,
+                relative_error: None,
+            },
+        );
     }
 
     #[test]

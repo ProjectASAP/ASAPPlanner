@@ -320,11 +320,11 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
                 .as_any()
                 .downcast_ref::<DDSketchAccumulator>()
                 .is_some_and(|s| s.inner.alpha == *alpha),
-            SketchParams::Hll { precision } => state
+            SketchParams::Hll { precision, .. } => state
                 .as_any()
                 .downcast_ref::<HllSketchAccumulator>()
                 .is_some_and(|s| s.inner.precision == u32::from(*precision)),
-            SketchParams::Kmv { k } => state
+            SketchParams::Kmv { k, .. } => state
                 .as_any()
                 .downcast_ref::<KmvAccumulator>()
                 .is_some_and(|s| s.inner.k == *k as usize),
