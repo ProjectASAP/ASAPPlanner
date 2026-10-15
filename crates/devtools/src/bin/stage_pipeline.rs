@@ -45,6 +45,9 @@
 // `--promql` and `--sql` may repeat and mix, in workload order; `--name`
 // names the query before it (default `q<n>`). `--epsilon`/
 // `--delta` apply to every query; without them the queries are exact.
+// `--metric` (`absolute`, `absolute_stream_l1`, `absolute_stream_l2`,
+// `relative` or `rank`) names the error metric of that target; a quantile
+// query's target must name one.
 // `--interval-ms` is the source cadence (default 15000). `--table '<json>'`
 // (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
@@ -66,7 +69,7 @@ use asap_devtools::SqlCatalog;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{ErrorMetric, RequestedAccuracy};
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, LatencyRequirement,
     PlanningWorkload, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload,
@@ -76,7 +79,7 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | ((--promql | --sql) <query> \
-[--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64>] [--interval-ms <u64>])) \
+[--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64> --metric <metric>] [--interval-ms <u64>])) \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
 /// The default `--max-combinations`: the most Stage 1 candidates (Pass 2's
@@ -155,6 +158,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
     let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
+    let mut metric: Option<ErrorMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
     let mut out = None;
@@ -180,6 +184,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--table" => tables.push(value()?),
             "--epsilon" => epsilon = Some(number(value()?)?),
             "--delta" => delta = Some(number(value()?)?),
+            "--metric" => {
+                let name = value()?;
+                metric = Some(
+                    serde_json::from_value(Value::String(name.clone()))
+                        .map_err(|_| format!("unknown metric {name}"))?,
+                )
+            }
             "--interval-ms" => interval_ms = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
             "--max-combinations" => {
@@ -212,10 +223,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         (None, false) => {
             let accuracy = match (epsilon, delta) {
-                (None, None) => AccuracyTarget::Exact,
-                (Some(epsilon), None) => AccuracyTarget::Epsilon(epsilon),
-                (Some(epsilon), Some(delta)) => AccuracyTarget::EpsilonDelta { epsilon, delta },
+                (None, None) => RequestedAccuracy::exact(),
+                (Some(epsilon), None) => RequestedAccuracy::epsilon(epsilon),
+                (Some(epsilon), Some(delta)) => RequestedAccuracy::epsilon_delta(epsilon, delta),
                 (None, Some(_)) => return Err("--delta needs --epsilon".into()),
+            };
+            let accuracy = match metric {
+                Some(_) if epsilon.is_none() => return Err("--metric needs --epsilon".into()),
+                Some(metric) => accuracy.with_metric(metric),
+                None => accuracy,
             };
             let catalog = sql_catalog(&tables)?;
             let mut names = HashSet::new();
@@ -403,12 +419,18 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
         .entries()
         .enumerate()
         .map(|(index, entry)| {
-            let accuracy = match entry.requirements.accuracy.target() {
-                AccuracyTarget::Exact => json!("exact"),
-                AccuracyTarget::Epsilon(epsilon) => json!({ "epsilon": epsilon }),
-                AccuracyTarget::EpsilonDelta { epsilon, delta } => {
-                    json!({ "epsilon": epsilon, "delta": delta })
+            let requested = entry.requirements.accuracy.requested();
+            let accuracy = if requested.is_exact() {
+                json!("exact")
+            } else {
+                let mut accuracy = json!({ "epsilon": requested.error });
+                if let Some(delta) = requested.failure_probability {
+                    accuracy["delta"] = json!(delta);
                 }
+                if let Some(metric) = requested.metric {
+                    accuracy["metric"] = json!(metric);
+                }
+                accuracy
             };
             let mut requirements = json!({ "accuracy": accuracy });
             if let LatencyRequirement::ExplicitMaxMs(ms) = entry.requirements.response_latency {
@@ -486,7 +508,7 @@ fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
 fn query_batch(
     language: QueryLanguage,
     queries: &[String],
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
     interval_ms: u64,
 ) -> PlanningWorkload {
     PlanningWorkload {
@@ -549,7 +571,7 @@ mod tests {
         let workload = query_batch(
             QueryLanguage::PromQL,
             &["sum(m)".into()],
-            AccuracyTarget::Exact,
+            RequestedAccuracy::exact(),
             15_000,
         );
         let run =

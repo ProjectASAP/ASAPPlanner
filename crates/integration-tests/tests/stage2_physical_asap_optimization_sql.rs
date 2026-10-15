@@ -11,13 +11,10 @@ use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::AggIntent;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
-fn approximate() -> AccuracyTarget {
-    AccuracyTarget::EpsilonDelta {
-        epsilon: 0.01,
-        delta: 0.001,
-    }
+fn approximate() -> RequestedAccuracy {
+    RequestedAccuracy::epsilon_delta(0.01, 0.001)
 }
 
 fn names(node: &OperatorNode) -> Vec<String> {
@@ -56,7 +53,7 @@ fn exact_topk_sort(root: &OperatorNode) -> Option<(String, bool)> {
 /// candidates had an exact top-k.
 async fn check_every_choice(
     sql: &str,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
     ranked: &str,
     root_names: &[&str],
 ) -> usize {
@@ -134,7 +131,7 @@ async fn check_every_choice(
 /// Each query under an exact and an approximate target; every exact top-k
 /// sorts by the ranked measure.
 async fn check(sql: &str, ranked: &str, root_names: &[&str]) {
-    for accuracy in [AccuracyTarget::Exact, approximate()] {
+    for accuracy in [RequestedAccuracy::exact(), approximate()] {
         let exact = check_every_choice(sql, accuracy.clone(), ranked, root_names).await;
         assert!(
             exact > 0,

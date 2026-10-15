@@ -22,7 +22,7 @@ use std::rc::Rc;
 use thiserror::Error;
 
 /// Confidence δ assumed when the target carries only an ε
-/// (`AccuracyTarget::Epsilon`): the (ε, δ)-parameterised sketches (CMS) need
+/// (`AccuracyTarget::epsilon`): the (ε, δ)-parameterised sketches (CMS) need
 /// one. `ln(1/0.01) → depth 5`, matching the conventional CMS sizing.
 pub const DEFAULT_DELTA: f64 = 0.01;
 
@@ -93,11 +93,13 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// `Exact` to [`exact_realization`] instead); degrades to the tightest
 /// parameters for a caller that resolves it directly anyway.
 pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
-    match accuracy {
-        AccuracyTarget::Exact => (f64::MIN_POSITIVE, DEFAULT_DELTA),
-        AccuracyTarget::Epsilon(e) => (*e, DEFAULT_DELTA),
-        AccuracyTarget::EpsilonDelta { epsilon, delta } => (*epsilon, *delta),
+    if accuracy.is_exact() {
+        return (f64::MIN_POSITIVE, DEFAULT_DELTA);
     }
+    (
+        accuracy.error,
+        accuracy.failure_probability.unwrap_or(DEFAULT_DELTA),
+    )
 }
 
 /// `asap-plan`'s built-in `SketchParams` sizing, keyed off the resolved

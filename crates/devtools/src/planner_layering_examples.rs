@@ -2,7 +2,7 @@
 //! (`docs/design_docs/proposals/planner-layering.md`), shared by
 //! `stage_pipeline` and the planner-layering acceptance tests.
 
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{ErrorMetric, RequestedAccuracy};
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
     Evidence, EvidenceSource, LatencyRequirement, MetricType, PlanningWorkload, Predictability,
@@ -71,15 +71,12 @@ pub fn example1() -> PlanningWorkload {
             repeating_queries: Some(vec![
                 panel(
                     EXAMPLE1_Q1,
-                    AccuracyTarget::Exact,
+                    RequestedAccuracy::exact(),
                     LatencyRequirement::Unspecified,
                 ),
                 panel(
                     EXAMPLE1_Q2,
-                    AccuracyTarget::EpsilonDelta {
-                        epsilon: 0.01,
-                        delta: 0.001,
-                    },
+                    RequestedAccuracy::epsilon_delta(0.01, 0.001),
                     LatencyRequirement::ExplicitMaxMs(100.0),
                 ),
             ]),
@@ -124,10 +121,9 @@ pub enum PatternARecurrence {
 
 fn pattern_a_requirements() -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-            epsilon: 0.005,
-            delta: 0.01,
-        }),
+        accuracy: AccuracyRequirement::Explicit(
+            RequestedAccuracy::epsilon_delta(0.005, 0.01).with_metric(ErrorMetric::Rank),
+        ),
         response_latency: LatencyRequirement::Unspecified,
     }
 }
@@ -205,10 +201,9 @@ pub fn pattern_b() -> PlanningWorkload {
                     PATTERN_B_INTERVAL_MS as u32,
                 )),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                        epsilon: 0.01,
-                        delta: 0.01,
-                    }),
+                    accuracy: AccuracyRequirement::Explicit(
+                        RequestedAccuracy::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank),
+                    ),
                     response_latency: LatencyRequirement::ExplicitMaxMs(200.0),
                 },
                 predictability: Predictability::Predictable { known_at: None },

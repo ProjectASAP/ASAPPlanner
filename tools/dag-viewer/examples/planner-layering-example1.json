@@ -544,10 +544,10 @@
                 "measures": [
                   {
                     "accuracy": {
-                      "EpsilonDelta": {
-                        "delta": 0.001,
-                        "epsilon": 0.01
-                      }
+                      "error": 0.01,
+                      "failure_probability": 0.001,
+                      "metric": "absolute_stream_l1",
+                      "scope": "whole_result"
                     },
                     "k": 10,
                     "kind": "top_k"
@@ -610,19 +610,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -730,19 +733,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -884,19 +890,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1020,19 +1029,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1074,19 +1086,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1194,19 +1209,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1348,19 +1366,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1419,19 +1440,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1443,10 +1467,10 @@
                     "measures": [
                       {
                         "accuracy": {
-                          "EpsilonDelta": {
-                            "delta": 0.001,
-                            "epsilon": 0.01
-                          }
+                          "error": 0.01,
+                          "failure_probability": 0.001,
+                          "metric": "absolute_stream_l1",
+                          "scope": "whole_result"
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -1509,19 +1533,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1629,19 +1656,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1783,19 +1813,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1919,19 +1952,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -1973,19 +2009,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2127,19 +2166,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2198,19 +2240,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2222,10 +2267,10 @@
                     "measures": [
                       {
                         "accuracy": {
-                          "EpsilonDelta": {
-                            "delta": 0.001,
-                            "epsilon": 0.01
-                          }
+                          "error": 0.01,
+                          "failure_probability": 0.001,
+                          "metric": "absolute_stream_l1",
+                          "scope": "whole_result"
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -2288,19 +2333,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2408,19 +2456,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2562,19 +2613,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2698,19 +2752,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2830,19 +2887,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2901,19 +2961,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -2925,10 +2988,10 @@
                     "measures": [
                       {
                         "accuracy": {
-                          "EpsilonDelta": {
-                            "delta": 0.001,
-                            "epsilon": 0.01
-                          }
+                          "error": 0.01,
+                          "failure_probability": 0.001,
+                          "metric": "absolute_stream_l1",
+                          "scope": "whole_result"
                         },
                         "k": 10,
                         "kind": "top_k"
@@ -2991,19 +3054,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -3111,19 +3177,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -3265,19 +3334,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -3401,19 +3473,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -3455,19 +3530,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -3575,19 +3653,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -3857,19 +3938,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -3977,19 +4061,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -4131,19 +4218,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -4267,19 +4357,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -4321,19 +4414,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -4603,19 +4699,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -4723,19 +4822,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -4877,19 +4979,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -5013,19 +5118,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -5273,19 +5381,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -5393,19 +5504,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -5547,19 +5661,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -5683,19 +5800,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -5737,19 +5857,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -5857,19 +5980,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -6139,19 +6265,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -6259,19 +6388,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -6413,19 +6545,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -6549,19 +6684,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -6603,19 +6741,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -6885,19 +7026,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -7005,19 +7149,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -7159,19 +7306,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -7295,19 +7445,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "materialization": "NotMaterialized",
               "operator": {
@@ -8160,19 +8313,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -8283,19 +8439,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -8443,19 +8602,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -8585,19 +8747,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -8642,19 +8807,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 6,
               "materialization": "NotMaterialized",
@@ -8765,19 +8933,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 7,
               "materialization": "NotMaterialized",
@@ -8925,19 +9096,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 9,
               "materialization": "NotMaterialized",
@@ -8999,19 +9173,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 10,
               "materialization": "NotMaterialized",
@@ -9085,19 +9262,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 11,
               "materialization": "NotMaterialized",
@@ -9164,19 +9344,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 12,
               "materialization": "NotMaterialized",
@@ -9845,19 +10028,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -9968,19 +10154,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -10128,19 +10317,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -10270,19 +10462,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -10327,19 +10522,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 6,
               "materialization": "NotMaterialized",
@@ -10487,19 +10685,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 8,
               "materialization": "NotMaterialized",
@@ -10561,19 +10762,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 9,
               "materialization": "NotMaterialized",
@@ -10647,19 +10851,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 10,
               "materialization": "NotMaterialized",
@@ -10726,19 +10933,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 11,
               "materialization": "NotMaterialized",
@@ -11352,19 +11562,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -11475,19 +11688,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -11635,19 +11851,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -11777,19 +11996,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -11915,19 +12137,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 7,
               "materialization": "NotMaterialized",
@@ -11989,19 +12214,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 8,
               "materialization": "NotMaterialized",
@@ -12075,19 +12303,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 9,
               "materialization": "NotMaterialized",
@@ -12154,19 +12385,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 10,
               "materialization": "NotMaterialized",
@@ -12701,19 +12935,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -12824,19 +13061,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -12984,19 +13224,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -13126,19 +13369,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -13183,19 +13429,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 6,
               "materialization": "NotMaterialized",
@@ -13306,19 +13555,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 7,
               "materialization": "NotMaterialized",
@@ -14063,19 +14315,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -14186,19 +14441,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -14346,19 +14604,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -14488,19 +14749,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -14545,19 +14809,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 6,
               "materialization": "NotMaterialized",
@@ -15247,19 +15514,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -15370,19 +15640,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -15530,19 +15803,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -15672,19 +15948,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -16407,19 +16686,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -16530,19 +16812,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -16690,19 +16975,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -16832,19 +17120,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -16889,19 +17180,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 6,
               "materialization": "NotMaterialized",
@@ -17012,19 +17306,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 7,
               "materialization": "NotMaterialized",
@@ -17769,19 +18066,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -17892,19 +18192,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -18052,19 +18355,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -18194,19 +18500,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -18251,19 +18560,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 6,
               "materialization": "NotMaterialized",
@@ -18953,19 +19265,22 @@
           "nodes": [
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 0,
               "materialization": "NotMaterialized",
@@ -19076,19 +19391,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact over exact inputs"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 1,
               "materialization": "NotMaterialized",
@@ -19236,19 +19554,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 3,
               "materialization": "NotMaterialized",
@@ -19378,19 +19699,22 @@
             },
             {
               "guarantee": {
-                "bound": {
-                  "op": "zero"
-                },
-                "failure_probability": {
-                  "op": "zero"
-                },
-                "metric": "absolute_value",
                 "provenance": [
                   {
                     "kind": "exact",
                     "reason": "exact accumulator over exact input"
                   }
-                ]
+                ],
+                "spec": {
+                  "error": {
+                    "op": "zero"
+                  },
+                  "failure_probability": {
+                    "op": "zero"
+                  },
+                  "metric": "absolute",
+                  "scope": "per_value"
+                }
               },
               "id": 5,
               "materialization": "NotMaterialized",
@@ -19853,32 +20177,32 @@
     "rejected": [
       {
         "id": "P4",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P5",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P6",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P7",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P8",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P9",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target EpsilonDelta { epsilon: 0.01, delta: 0.001 }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {

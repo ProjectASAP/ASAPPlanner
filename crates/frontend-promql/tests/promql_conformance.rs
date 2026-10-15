@@ -44,20 +44,21 @@ use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, PromQLVectorSetOpKind,
     Reduction, SampleKind, ScalarValue, Source, TimeFunc,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::types::ErrorMetric;
+use asap_types::types::RequestedAccuracy;
 use support::{lower_promql, promql_scalar};
 
 // ── harness helpers ─────────────────────────────────────────────────────────────
 
 /// Lower, expecting success.
 fn ok(q: &str) -> Rc<OperatorNode> {
-    lower_promql(q, AccuracyTarget::Exact)
+    lower_promql(q, RequestedAccuracy::exact())
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
 
 /// Lower, expecting a clean `LoweringError` (an unsupported capability).
 fn rejected(q: &str) -> LoweringError {
-    match lower_promql(q, AccuracyTarget::Exact) {
+    match lower_promql(q, RequestedAccuracy::exact()) {
         Err(e) => e,
         Ok(dag) => panic!("expected {q:?} to be rejected, but it lowered to: {dag:?}"),
     }
@@ -692,25 +693,22 @@ fn double_unary_negation_nests() {
 #[test]
 fn count_maps_to_count_and_inherits_accuracy() {
     // Counts preserve the workload accuracy target without counting distinct values.
-    let exact = lower_promql("count by (job) (up)", AccuracyTarget::Exact).unwrap();
+    let exact = lower_promql("count by (job) (up)", RequestedAccuracy::exact()).unwrap();
     assert!(
         has(&exact, |i| matches!(
             i,
-            AggIntent::Count {
-                accuracy: AccuracyTarget::Exact
-            }
+            AggIntent::Count { accuracy } if accuracy.is_exact()
         )),
-        "Count must stay Exact under AccuracyTarget::Exact, got {:?}",
+        "Count must stay exact under an exact target, got {:?}",
         intents(&exact)
     );
 
-    let approx = lower_promql("count by (job) (up)", AccuracyTarget::Epsilon(0.01)).unwrap();
+    let approx = lower_promql("count by (job) (up)", RequestedAccuracy::epsilon(0.01)).unwrap();
     assert!(
         has(&approx, |i| matches!(
             i,
-            AggIntent::Count {
-                accuracy: AccuracyTarget::Epsilon(e)
-            } if (*e - 0.01).abs() < 1e-9
+            AggIntent::Count { accuracy } if (accuracy.error - 0.01).abs() < 1e-9
+                && accuracy.metric == ErrorMetric::ABSOLUTE_STREAM_L1
         )),
         "Count must carry the approximate target, got {:?}",
         intents(&approx)

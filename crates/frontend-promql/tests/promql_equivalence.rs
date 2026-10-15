@@ -21,11 +21,12 @@ use std::rc::Rc;
 
 mod support;
 use asap_types::ir::OperatorNode;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use support::lower_promql;
 
 fn lo(q: &str) -> Rc<OperatorNode> {
-    lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("{q:?} should lower: {e}"))
+    lower_promql(q, RequestedAccuracy::exact())
+        .unwrap_or_else(|e| panic!("{q:?} should lower: {e}"))
 }
 
 /// Every member of an equivalence class must lower to the *same* canonical DAG.

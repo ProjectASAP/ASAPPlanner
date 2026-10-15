@@ -17,7 +17,7 @@ use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{ErrorMetric, RequestedAccuracy};
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataWorkload, DurationMs, Evidence, LatencyRequirement,
     PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, Rate,
@@ -26,9 +26,20 @@ use asap_types::workload::{
 
 const NOW_MS: u64 = 1_700_000_000_000;
 
-fn requirements(epsilon: f64) -> QueryRequirements {
+/// `epsilon` as a query's requested accuracy; a quantile query's target
+/// names its metric (a rank error).
+fn requested(query: &str, epsilon: f64) -> RequestedAccuracy {
+    let requested = RequestedAccuracy::epsilon(epsilon);
+    if query.contains("quantile") {
+        requested.with_metric(ErrorMetric::Rank)
+    } else {
+        requested
+    }
+}
+
+fn requirements(query: &str, epsilon: f64) -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(epsilon)),
+        accuracy: AccuracyRequirement::Explicit(requested(query, epsilon)),
         response_latency: LatencyRequirement::Unspecified,
     }
 }
@@ -38,7 +49,7 @@ fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
     RepeatingEntry {
         query: Query(query.into()),
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(600_000)),
-        requirements: requirements(epsilon),
+        requirements: requirements(query, epsilon),
         predictability: Predictability::Unknown,
         time_selection: TimeSelection::default(),
     }
@@ -90,7 +101,7 @@ fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
     let roots = lower_promql_query_workload(&workload, NOW_MS).expect("lowers");
     let targets: Vec<_> = queries
         .iter()
-        .map(|(_, epsilon)| Some(AccuracyTarget::Epsilon(*epsilon)))
+        .map(|(query, epsilon)| Some(requested(query, *epsilon)))
         .collect();
     run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
@@ -299,7 +310,7 @@ async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
         assert_eq!(kll_k(plan), kll_k_for(0.001));
         let guarantee = plan.root.guarantee.as_ref().expect("certified");
         assert!(
-            guarantee.bound.evaluate().unwrap() <= epsilon,
+            guarantee.spec.error.evaluate().unwrap() <= epsilon,
             "{guarantee:?}"
         );
     }

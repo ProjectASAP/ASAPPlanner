@@ -257,6 +257,7 @@ mod tests {
     use asap_types::ir::ASAPOp;
     use asap_types::post_asap::ExecutionTiming;
     use asap_types::types::AccuracyTarget;
+    use asap_types::types::RequestedAccuracy;
 
     fn operator_root(candidate: &PhysicalCandidate, i: usize) -> Rc<OperatorNode> {
         match &candidate.roots[i] {
@@ -297,7 +298,7 @@ mod tests {
     fn promql_topk_over_series_sorts_by_value_descending() {
         let root = lower_promql(
             "topk by (job) (10, sum_over_time(m[1m]))",
-            AccuracyTarget::Exact,
+            RequestedAccuracy::exact(),
         );
         let candidate = optimize_physical_asap("L1", &[root.clone().into()]).unwrap();
         let physical = operator_root(&candidate, 0);
@@ -310,7 +311,7 @@ mod tests {
     /// `topk(k, sum by (job) (..))` sorts by the summed measure.
     #[test]
     fn promql_topk_over_grouped_aggregate_sorts_by_its_measure() {
-        let root = lower_promql("topk(5, sum by (job) (m))", AccuracyTarget::Exact);
+        let root = lower_promql("topk(5, sum by (job) (m))", RequestedAccuracy::exact());
         let candidate = optimize_physical_asap("L1", &[root.into()]).unwrap();
         let physical = operator_root(&candidate, 0);
         assert_eq!(names(&physical), ["topk_5"]);
@@ -326,7 +327,7 @@ mod tests {
     fn consumer_of_exact_topk_reads_its_logical_columns() {
         let root = lower_promql(
             "sum by (job) (topk by (job) (10, sum_over_time(m[1m])))",
-            AccuracyTarget::Exact,
+            RequestedAccuracy::exact(),
         );
         let candidate = optimize_physical_asap("L1", &[root.clone().into()]).unwrap();
         let physical = operator_root(&candidate, 0);
@@ -371,10 +372,10 @@ mod tests {
         use asap_types::pre_asap::expr_ir::ScalarValue;
         let topk = AggIntent::TopK {
             k: 3,
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         };
         let count = AggIntent::Count {
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         };
         let by_job = || Reduction::by(vec![2]);
         let cases = [
@@ -406,7 +407,7 @@ mod tests {
     /// child shared by two roots stays one node (one `Rc`, one DAG node).
     #[test]
     fn exact_topk_becomes_sort_then_limit_and_keeps_shared_child() {
-        let exact = AccuracyTarget::Exact;
+        let exact = RequestedAccuracy::exact();
         let topk = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", exact.clone());
         let sum = lower_promql("sum by (job) (sum_over_time(m[1m]))", exact);
         // Share Q2's per-series child with Q1, as Stage 1 sharing would.
@@ -479,10 +480,7 @@ mod tests {
     fn everything_runs_at_query_time() {
         let root = lower_promql(
             "topk by (job) (10, sum_over_time(m[1m]))",
-            AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.001,
-            },
+            RequestedAccuracy::epsilon_delta(0.01, 0.001),
         );
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],

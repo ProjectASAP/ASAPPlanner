@@ -932,18 +932,18 @@ mod tests {
         };
         let intent = AggIntent::Cardinality {
             cols: vec![qualified("b"), qualified("a")],
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         };
         assert_eq!(
             resolve_agg_intent(&intent, &schema).unwrap(),
             AggIntent::Cardinality {
                 cols: vec![1, 0],
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             }
         );
         let missing = AggIntent::Cardinality {
             cols: vec![qualified("a"), ColumnRef::Named("missing".into())],
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         };
         assert!(resolve_agg_intent(&missing, &schema).is_err());
     }

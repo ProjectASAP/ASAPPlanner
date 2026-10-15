@@ -6,7 +6,7 @@
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::SqlDialect;
 
 fn col(name: &str, dtype: DataType) -> Field {
@@ -70,7 +70,7 @@ async fn main() {
     ];
     for (label, q) in promql_examples {
         println!("=== {label} === promql> {q}");
-        match lower_promql_with_data_ingestion_interval(q, AccuracyTarget::Exact, 1_000) {
+        match lower_promql_with_data_ingestion_interval(q, RequestedAccuracy::exact(), 1_000) {
             Ok(qe) => println!("{qe:#?}"),
             Err(e) => println!("ERR: {e}"),
         }
@@ -98,7 +98,13 @@ async fn main() {
             &packets
         };
         println!("=== {label} === sql> {q}");
-        match lower_sql_dialect(q, catalog, SqlDialect::DataFusionSQL, AccuracyTarget::Exact).await
+        match lower_sql_dialect(
+            q,
+            catalog,
+            SqlDialect::DataFusionSQL,
+            RequestedAccuracy::exact(),
+        )
+        .await
         {
             Ok(qe) => println!("{qe:#?}"),
             Err(e) => println!("ERR: {e}"),

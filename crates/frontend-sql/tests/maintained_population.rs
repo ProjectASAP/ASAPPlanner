@@ -1,6 +1,7 @@
 //! SQL and PromQL use the same shared-state rule without sharing membership semantics.
 use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_types::types::RequestedAccuracy;
 use asap_types::{
     ir::{
         apply_materialization_timings, cse::share_common_sub_dags,
@@ -9,7 +10,6 @@ use asap_types::{
     },
     post_asap::maintained_population::{MaintainedPopulation, PopulationInput},
     pre_asap::{DataType, Field, Schema},
-    types::AccuracyTarget,
 };
 use std::rc::Rc;
 
@@ -21,7 +21,9 @@ async fn aggregate(q: &str) -> Rc<OperatorNode> {
             Field::plain("job", DataType::Utf8, false),
         ]),
     );
-    lower_sql(q, &catalog, AccuracyTarget::Exact).await.unwrap()
+    lower_sql(q, &catalog, RequestedAccuracy::exact())
+        .await
+        .unwrap()
 }
 
 /// The `MaintainPopulation` node a candidate's evaluation reads, and its spec.

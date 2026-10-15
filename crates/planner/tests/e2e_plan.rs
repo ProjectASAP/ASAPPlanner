@@ -10,7 +10,7 @@ use asap_aware_mapping::pass::{
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{ErrorMetric, RequestedAccuracy};
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence,
     LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -21,15 +21,27 @@ const NOW_MS: u64 = 1_700_000_000_000;
 
 fn approximate() -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.01)),
+        accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::epsilon(0.01)),
         response_latency: LatencyRequirement::Unspecified,
     }
+}
+
+/// [`approximate`], stated as a rank error for a quantile query, whose
+/// target names its metric.
+fn approximate_for(sql: &str) -> QueryRequirements {
+    let mut requirements = approximate();
+    if sql.contains("percentile") {
+        requirements.accuracy = AccuracyRequirement::Explicit(
+            RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Rank),
+        );
+    }
+    requirements
 }
 
 fn batch(sql: &str) -> BatchEntry {
     BatchEntry {
         query: Query(sql.into()),
-        requirements: approximate(),
+        requirements: approximate_for(sql),
         predictability: Predictability::AdHoc,
         invocations: 1,
         execute_at: None,
@@ -115,7 +127,7 @@ async fn facade_plans_match_run_stage1_to_stage3() {
     let mut roots = Vec::new();
     let mut targets = Vec::new();
     for (index, entry) in workload.query_workload.entries().enumerate() {
-        let accuracy = entry.requirements.accuracy.target();
+        let accuracy = entry.requirements.accuracy.requested();
         let expr = lower_sql_dialect(
             &entry.query.0,
             &catalog,
@@ -160,7 +172,7 @@ async fn lowers_repeating_sql_entries_too() {
                 "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem".into(),
             ),
             demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
-            requirements: approximate(),
+            requirements: approximate_for("approx_percentile_cont"),
             predictability: Predictability::Unknown,
             time_selection: TimeSelection::default(),
         }]),

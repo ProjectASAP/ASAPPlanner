@@ -2,12 +2,12 @@ mod support;
 use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::post_asap::maintained_population::PopulationInput;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 // A population for a one-second selector must expire members after one second.
 #[test]
 fn population_preserves_selector_horizon() {
-    let root = support::lower_promql("sum(a)", AccuracyTarget::Exact).unwrap();
+    let root = support::lower_promql("sum(a)", RequestedAccuracy::exact()).unwrap();
     let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
         .candidate(&root)
         .unwrap();

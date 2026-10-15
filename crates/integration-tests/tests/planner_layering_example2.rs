@@ -22,7 +22,7 @@ use asap_types::post_asap::{
     Field, ProbabilityExpr, Schema, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::pre_asap::DataType;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs,
     LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -55,10 +55,9 @@ fn panel(query: &str, (epsilon, delta): (f64, f64)) -> RepeatingEntry {
         query: Query(query.into()),
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
         requirements: QueryRequirements {
-            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                epsilon,
-                delta,
-            }),
+            accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::epsilon_delta(
+                epsilon, delta,
+            )),
             response_latency: LatencyRequirement::Unspecified,
         },
         predictability: Predictability::Predictable { known_at: None },
@@ -142,7 +141,7 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
             &entry.query.0,
             &catalog(),
             SqlDialect::DataFusionSQL,
-            entry.requirements.accuracy.target(),
+            entry.requirements.accuracy.requested(),
         )
         .await
         .unwrap_or_else(|e| panic!("{}: {e}", entry.query.0));
@@ -644,7 +643,7 @@ fn stage1_logical_asap_optimization_leaves_the_hll_failure_probability_symbolic(
         };
         let guarantee = q1.guarantee.as_ref().expect("Q1 has a guarantee");
         assert_eq!(
-            guarantee.failure_probability,
+            guarantee.spec.failure_probability,
             ProbabilityExpr::Unknown {
                 statistic: "classic_hll_failure_probability[p=12](max_distinct[flows_src_ip])"
                     .into()
