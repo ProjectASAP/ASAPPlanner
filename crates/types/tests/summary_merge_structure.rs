@@ -5,8 +5,9 @@ use asap_types::{
     ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr},
     post_asap::{
         ExactKind, ExactParams, ExecutionTiming, FamilyCapability, GroupingStrategy, HydraKind,
-        HydraParams, Materialization, Medium, MergeInputRule, MergedError, SketchAlgorithm,
-        SketchKind, SketchParams, SketchStatistic, StatisticKind, SummaryUpdate,
+        HydraParams, Materialization, Medium, MergeInputRule, MergedError, SamplingKind,
+        SamplingParams, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, StatModelKind,
+        StatModelParams, StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
     },
     pre_asap::expr_ir::{CompareOpKind, ScalarValue},
     pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema},
@@ -315,6 +316,29 @@ fn family_capability_table() {
             vec![(Quantile, Approximate)],
         ),
         (FieldDataType::Plain(DataType::Float64), None, vec![]),
+        (
+            FieldDataType::Sample(
+                SamplingKind::Reservoir,
+                SamplingParams::Reservoir { size: 64 },
+            ),
+            None,
+            vec![],
+        ),
+        (
+            FieldDataType::Wavelet(WaveletKind::Haar, WaveletParams::Haar { coefficients: 16 }),
+            None,
+            vec![],
+        ),
+        (
+            FieldDataType::StatModel(
+                StatModelKind::Parametric,
+                StatModelParams::Parametric {
+                    family: "gaussian_mixture".into(),
+                },
+            ),
+            None,
+            vec![],
+        ),
     ];
     // One statistic of every kind.
     let statistics = [
@@ -346,11 +370,15 @@ fn family_capability_table() {
                 row.is_some(),
                 "{family:?} {statistic:?}"
             );
-            assert_eq!(
-                capability.merged_error(statistic),
-                merge_inputs.and(row),
-                "{family:?} {statistic:?}"
-            );
+            // An answered statistic's merged error is its row's; the
+            // default for the others is pinned below.
+            if row.is_some() || merge_inputs.is_none() {
+                assert_eq!(
+                    capability.merged_error(statistic),
+                    merge_inputs.and(row),
+                    "{family:?} {statistic:?}"
+                );
+            }
         }
     }
 }
@@ -361,7 +389,7 @@ fn family_capability_table() {
 /// any heap that keeps `min(|S_j|, k)` of a layer's keys, as the merge's
 /// does, so both keep the guarantee of one build over the union. Counter
 /// readouts of a heap family (item frequencies) keep their guarantee. A
-/// statistic the family does not answer has no merged error.
+/// statistic the family does not answer takes the family's default.
 #[test]
 fn merged_error_depends_on_the_readout() {
     use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
@@ -387,8 +415,12 @@ fn merged_error_depends_on_the_readout() {
     ] {
         assert_eq!(univmon.merged_error(&readout), Some(error), "{readout:?}");
     }
-    // UnivMon answers no top-k, merged or not.
-    assert_eq!(univmon.merged_error(&TopK { k: 5 }), None);
+    // A statistic the family does not answer takes its default: a heavy
+    // item readout of a family with heaps is approximate.
+    assert_eq!(
+        univmon.merged_error(&TopK { k: 5 }),
+        Some(MergedError::Approximate)
+    );
     let heap = FamilyCapability::of(&cms_with_heap());
     assert_eq!(
         heap.merged_error(&TopK { k: 5 }),
@@ -402,8 +434,32 @@ fn merged_error_depends_on_the_readout() {
         heap.merged_error(&item),
         Some(MergedError::AsIfBuiltOverUnion)
     );
-    // A CMS with a heap answers item frequencies, not its total.
-    assert_eq!(heap.merged_error(&point()), None);
+    // A CMS with a heap answers item frequencies, not its total, whose
+    // default is the guarantee of one build over the union.
+    assert_eq!(
+        heap.merged_error(&point()),
+        Some(MergedError::AsIfBuiltOverUnion)
+    );
+    // Pass 1 offers CountSketch for a count (a bare point count), which
+    // its row does not answer: merged panes keep one build's guarantee.
+    let count_sketch = FamilyCapability::of(&sketch(
+        SketchAlgorithm::CountSketch,
+        SketchParams::CountSketch {
+            width: 64,
+            depth: 5,
+        },
+    ));
+    assert!(!count_sketch.answers(&point()));
+    assert_eq!(
+        count_sketch.merged_error(&point()),
+        Some(MergedError::AsIfBuiltOverUnion)
+    );
+    // An exact accumulator's merged state is exact.
+    let sum = exact(ExactKind::Sum, ExactParams::Sum);
+    assert_eq!(
+        FamilyCapability::of(&sum).merged_error(&point()),
+        Some(MergedError::Exact)
+    );
     assert_eq!(
         FamilyCapability::of(&hll()).merged_error(&Cardinality),
         Some(MergedError::AsIfBuiltOverUnion)

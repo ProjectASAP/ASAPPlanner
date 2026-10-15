@@ -129,6 +129,26 @@ fn increase_pane(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> 
     )
 }
 
+/// KLL over `TimeRange(width_ms)` over `TimeShift(shift_ms)` over `m`: the
+/// window `(-(shift + width), -shift]`.
+fn window(shift_ms: i64, width_ms: u64) -> Rc<OperatorNode> {
+    let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms: shift_ms,
+            at: None,
+        },
+        child: series(vec![]),
+    }))
+    .unwrap();
+    let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_millis(width_ms),
+        kind: TimeRangeKind::Range,
+        child: shifted,
+    }))
+    .unwrap();
+    kll(range, "value")
+}
+
 fn pane_rows(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
     let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
         shift: TimeShift {
@@ -360,6 +380,39 @@ fn a_day_of_minute_panes_merges_into_one_window() {
         CoverageError::InputsOverlap {
             required: MergeInputRule::Disjoint,
         }
+    );
+}
+
+/// A long window that spans two short ones overlaps both, though the
+/// short ones are apart: sorted by start, the long window's neighbour
+/// overlaps it, so the all-pairs check runs and rejects the merge. The
+/// short windows alone merge as two boxes.
+#[test]
+fn a_long_window_spanning_others_is_rejected() {
+    let long = window(0, 100_000);
+    let (near, far) = (window(10_000, 10_000), window(50_000, 10_000));
+    assert_eq!(
+        rejected(vec![long.clone(), near.clone(), far.clone()]),
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
+    );
+    assert_eq!(
+        rejected(vec![near.clone(), far.clone(), long]),
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
+    );
+    let apart = merge(vec![far, near]).unwrap();
+    assert_eq!(
+        apart
+            .coverage()
+            .unwrap()
+            .selection
+            .iter()
+            .map(|b| b.relative_time)
+            .collect::<Vec<_>>(),
+        [relative(-60_000, -50_000), relative(-20_000, -10_000)]
     );
 }
 
