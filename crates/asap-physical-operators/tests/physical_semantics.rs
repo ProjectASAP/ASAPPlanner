@@ -730,6 +730,66 @@ fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
     }
 }
 
+// Counter panes merged in any input order (here A, C, B) give the increase
+// of one build over the whole window, including the jumps between panes
+// and a counter reset inside B.
+#[test]
+fn counter_panes_merge_in_any_order() {
+    use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
+    use planner_types::post_asap::{ExactKind, ExactParams};
+    let input = schema(&[
+        ("v", DataType::Float64, false),
+        ("t", DataType::Timestamp, false),
+    ]);
+    let family = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
+    let build =
+        || Operator::summary_build(input.clone(), family.clone(), 0, Some(1), vec![]).unwrap();
+    let state = build().schema();
+    let samples = |range: std::ops::Range<i64>| -> Vec<Vec<Value>> {
+        range
+            .map(|i| {
+                // Rises by 3 per sample and resets once, at sample 7.
+                let value = if i < 7 { 3 * i } else { 3 * (i - 7) + 1 };
+                vec![Value::Float64(value as f64), Value::Timestamp(i * 1_000)]
+            })
+            .collect()
+    };
+    let increase = |dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64| -> f64 {
+        let rows = collect(dag, root);
+        let Value::Summary { state, .. } = &rows[0][0] else {
+            panic!("summary state expected");
+        };
+        state
+            .as_any()
+            .downcast_ref::<ExactAccumulator>()
+            .unwrap()
+            .evaluation(asap_physical_operators::Statistic::Increase, None, None)
+            .unwrap()
+            .unwrap()
+    };
+    let mut dag = PhysicalDAG::default();
+    // Panes A = [0, 4), B = [4, 8), C = [8, 12), added as A, C, B.
+    for (id, range) in [(0, 0..4), (1, 8..12), (2, 4..8), (3, 0..12)] {
+        let batch = Batch::try_new(input.clone(), samples(range)).unwrap();
+        dag.add(
+            id,
+            vec![],
+            Operator::source(input.clone(), vec![batch]).unwrap(),
+        )
+        .unwrap();
+        dag.add(id + 4, vec![id], build()).unwrap();
+    }
+    dag.add(8, vec![4, 5, 6], Operator::union(state.clone(), 3).unwrap())
+        .unwrap();
+    dag.add(
+        9,
+        vec![8],
+        Operator::summary_merge(state, 0, vec![]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(increase(&dag, 9), increase(&dag, 7));
+}
+
 // Retained zero-column rows still own Vec headers and must consume the output budget.
 #[test]
 fn zero_column_output_obeys_memory_limit() {

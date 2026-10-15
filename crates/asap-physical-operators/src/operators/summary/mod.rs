@@ -1,4 +1,5 @@
 use super::*;
+use planner_types::post_asap::{FamilyCapability, SelectionRelation};
 /// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SummaryEvaluation {
@@ -474,11 +475,26 @@ async fn build_summary(
         .collect())
 }
 async fn merge_summary(
-    rows: Vec<Vec<Value>>,
+    mut rows: Vec<Vec<Value>>,
     state_column: usize,
     groups: &[usize],
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
+    // Counter states join consecutive windows pairwise, which is exact only
+    // in time order: order the inputs by their window start.
+    if let Some(Value::Summary { family, .. }) = rows.first().map(|row| &row[state_column]) {
+        if FamilyCapability::of(family).merge.map(|m| m.inputs)
+            == Some(SelectionRelation::DisjointInTime)
+        {
+            rows.sort_by_cached_key(|row| match &row[state_column] {
+                Value::Summary { state, .. } => state
+                    .as_any()
+                    .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+                    .and_then(|state| state.counter_window_start()),
+                _ => None,
+            });
+        }
+    }
     type GroupState = (Vec<Value>, SummaryFamilyType, Arc<dyn crate::AggregateCore>);
     let mut states: BTreeMap<Vec<Vec<u8>>, GroupState> = BTreeMap::new();
     let mut work = Cooperative::new(context);
