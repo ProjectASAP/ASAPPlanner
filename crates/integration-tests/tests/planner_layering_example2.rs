@@ -710,6 +710,33 @@ fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound
     );
 }
 
+/// The physical candidates among `ids` that build their sketch as a
+/// tumbling-pane `PaneChain`.
+fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
+    ids.into_iter()
+        .filter(|id| {
+            let dag = run.physical(id).dag();
+            sketch_builds(dag).iter().any(|(build, _, _)| {
+                matches!(window_form(dag, *build), WindowForm::Tumbling { .. })
+            })
+        })
+        .collect()
+}
+
+/// Plan selection's enlargement reaches a sketch carried by a tumbling-pane
+/// `PaneChain` too (#713): Q1's HLL over a bound of 3,000 is valid only at
+/// precision 18, above Pass 1's 17, so a valid tumbling-pane HLL candidate
+/// had its chain's precision enlarged.
+#[test]
+fn stage3_plan_selection_enlarges_tumbling_pane_hll() {
+    let run = pipeline_with_distinct_bound(Some(3_000));
+    let hll = tumbling(&run, hll_only_candidates(&run));
+    assert!(!hll.is_empty(), "a tumbling-pane HLL candidate answers Q1");
+    for id in hll {
+        assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
+    }
+}
+
 /// Stage 1 does not read the distinct bound: its candidates are the same
 /// with and without one, and Q1's HLL estimate leaves its failure
 /// probability symbolic in the source's bound.
