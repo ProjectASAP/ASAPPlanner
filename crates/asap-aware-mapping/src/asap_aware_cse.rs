@@ -4,7 +4,8 @@
 //!
 //! Its three rules are implemented: the identical-expression rule, the
 //! summary-capability rule and, for tumbling panes of one query, the
-//! window-composition rule.
+//! window-composition rule; so are two reuse rules (#680), rollup and exact
+//! top-k reuse.
 //!
 //! # Identical-expression rule
 //!
@@ -62,6 +63,32 @@
 //! the panes are rebuilt at each evaluation until Stage 2 keeps them. A pane
 //! width shared by several queries, sliding windows and Exponential
 //! Histograms are not implemented.
+//!
+//! # Rollup rule
+//!
+//! A coarse grouped computation can be answered from a finer one the
+//! candidate already computes over the same rows: `sum by (job)` from
+//! `sum by (job, instance)`. The rule never introduces a finer grouping
+//! nobody asked for. A *rollup site* ([`rollup_sites`]) is a coarse exact
+//! accumulator build whose family merges across disjoint groups in the
+//! family-capability table with an exact merged value ([`rollup_kind`]:
+//! sums, counts, minima and maxima; counter states merge only in time, and
+//! a sketch's states would need a merge that regroups them, which the IR
+//! does not have), and a finer build of the same family over the same rows
+//! (a PromQL scan may project other labels), whose group keys include the
+//! coarse ones. The coarse build becomes an exact accumulator over the
+//! finer one's finalized values, grouped by the coarse keys (a count sums
+//! the finer counts), so the value stays exact. [`rollup_variants`]
+//! returns one candidate per non-empty subset of the sites, each read from
+//! its coarsest finer build.
+//!
+//! # Exact top-k reuse rule
+//!
+//! Exact top-k computations of one input and partition with different `k`
+//! read one ranking: the rows of the largest top-k, `Limit(k_max)` over
+//! `Sort`, which hold every smaller top-k ([`topk_reuse_sites`],
+//! [`topk_reuse_variants`]). Only exact computations over exact input are
+//! reused; a sketch's heap is not, as its membership has no guarantee yet.
 
 use std::collections::HashMap;
 #[cfg(test)]
@@ -69,12 +96,17 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_types::ir::cse::share_common_sub_dags;
+use asap_types::ir::operator_properties::{Reduction, Source};
+use asap_types::ir::SortKey;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, TimeRangeKind,
 };
+use asap_types::ir::{OperatorResultKind as ResultKind, ScalarExpr};
 use asap_types::post_asap::{
-    FamilyCapability, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind,
+    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergedError, SelectionRelation,
+    SketchAlgorithm, SketchKind,
 };
+use asap_types::pre_asap::AggIntent;
 
 use crate::accuracy::estimators::shared_size_params;
 use crate::per_computation_candidates::{with_composed_guarantees, PerComputationCandidateError};
@@ -855,6 +887,556 @@ fn rebuild(
     Ok(out)
 }
 
+/// One coarse build the rollup rule can answer from a finer one: the
+/// coarse `SummaryAgg`, the finalized finer build it reads, and the value
+/// that replaces the coarse build's finalized value.
+#[derive(Debug, Clone)]
+pub struct RollupSite {
+    pub coarse: Rc<OperatorNode>,
+    pub finer: Rc<OperatorNode>,
+    /// The finalized exact accumulator over `finer`'s values, grouped by
+    /// the coarse keys, with the coarse value's column names.
+    pub rollup: Rc<OperatorNode>,
+}
+
+/// A Pass 2 candidate of the rollup rule: the candidate's roots with each
+/// coarse build in `sites` (indices into [`rollup_sites`]) answered from its
+/// finer build, and every guarantee composed again; the error when that
+/// fails.
+#[derive(Debug)]
+pub struct RollupVariant {
+    pub sites: Vec<usize>,
+    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+}
+
+/// The most sites of one reuse rule a candidate may have: every non-empty
+/// subset is a candidate, about a million at 20.
+pub const MAX_REUSE_SITES: usize = 20;
+
+/// The exact accumulator that merges finalized values of `family` across
+/// disjoint groups, by the family-capability table: a family whose states
+/// merge over disjoint (or overlapping) selections into an exact state.
+/// `None` for a family without such a merge: counter states merge only
+/// consecutive windows, and sketch states have no regrouping merge in the IR.
+pub fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
+    let FieldDataType::ExactAggregate(kind, _) = family else {
+        return None;
+    };
+    let merge = FamilyCapability::of(family).merge?;
+    if merge.inputs == SelectionRelation::DisjointInTime || merge.error != MergedError::Exact {
+        return None;
+    }
+    match kind {
+        // Counts add up.
+        ExactKind::Sum | ExactKind::Count => Some(ExactKind::Sum),
+        ExactKind::Min => Some(ExactKind::Min),
+        ExactKind::Max => Some(ExactKind::Max),
+        ExactKind::Rate | ExactKind::IRate | ExactKind::Increase => None,
+    }
+}
+
+/// The rollup sites of the candidate with query roots `roots`, children
+/// first: each coarse exact accumulator build read only through its
+/// finalized value, with its coarsest finer build of the same family over
+/// the same rows that the candidate finalizes.
+pub fn rollup_sites(roots: &[QueryRoot]) -> Vec<RollupSite> {
+    let mut nodes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node in roots.iter().flat_map(root_operators) {
+        collect_children_first(node, &mut seen, &mut nodes);
+    }
+    let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
+    for node in &nodes {
+        for child in node.children() {
+            readers.entry(Rc::as_ptr(child)).or_default().push(node);
+        }
+    }
+    let finalized = |build: &Rc<OperatorNode>| -> Vec<&Rc<OperatorNode>> {
+        readers
+            .get(&Rc::as_ptr(build))
+            .map_or_else(Vec::new, |readers| {
+                readers
+                    .iter()
+                    .filter(|r| matches!(r.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. })))
+                    .copied()
+                    .collect()
+            })
+    };
+    let builds: Vec<&Rc<OperatorNode>> = nodes.iter().filter(|n| grouped_exact(n)).collect();
+    let mut sites = Vec::new();
+    for &coarse in &builds {
+        let finals = finalized(coarse);
+        // Every reader of the coarse state reads its finalized value.
+        if finals.is_empty() || finals.len() != readers[&Rc::as_ptr(coarse)].len() {
+            continue;
+        }
+        let mut best: Option<(usize, RollupSite)> = None;
+        for &fine in &builds {
+            let Some(keys) = finer_keys(coarse, fine) else {
+                continue;
+            };
+            if best.as_ref().is_some_and(|(k, _)| *k <= keys) {
+                continue;
+            }
+            let Some(&finer) = finalized(fine).first() else {
+                continue;
+            };
+            if let Some(rollup) = rolled_up(coarse, finer, finals[0]) {
+                best = Some((
+                    keys,
+                    RollupSite {
+                        coarse: Rc::clone(coarse),
+                        finer: Rc::clone(finer),
+                        rollup,
+                    },
+                ));
+            }
+        }
+        sites.extend(best.map(|(_, site)| site));
+    }
+    sites
+}
+
+/// Whether `node` is an exact accumulator build grouped by listed keys whose
+/// family merges across groups ([`rollup_kind`]).
+fn grouped_exact(node: &OperatorNode) -> bool {
+    matches!(
+        node.asap(),
+        Some(ASAPOp::SummaryAgg {
+            family,
+            reduction: Reduction::Reduce(by),
+            grouping: GroupingStrategy::PerSubpopulationInstance,
+            ..
+        }) if !by.is_without() && rollup_kind(family).is_some()
+    )
+}
+
+/// The number of group keys of `fine` when it can answer `coarse`: the same
+/// family, update and filter over the same rows, and group keys (by column)
+/// that strictly include the coarse ones.
+fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
+    let (
+        Some(ASAPOp::SummaryAgg {
+            child,
+            family,
+            input,
+            reduction: Reduction::Reduce(by),
+            filter,
+            ..
+        }),
+        Some(ASAPOp::SummaryAgg {
+            child: fine_child,
+            family: fine_family,
+            input: fine_input,
+            reduction: Reduction::Reduce(fine_by),
+            filter: fine_filter,
+            ..
+        }),
+    ) = (coarse.asap(), fine.asap())
+    else {
+        return None;
+    };
+    let names = |node: &OperatorNode, keys: &[usize]| -> Option<Vec<ColumnName>> {
+        keys.iter()
+            .map(|&k| node.schema.fields.get(k).map(column_name))
+            .collect()
+    };
+    let coarse_keys = names(child, by.keys())?;
+    let fine_keys = names(fine_child, fine_by.keys())?;
+    let same_filter = match (filter, fine_filter) {
+        (None, None) => true,
+        // A filter indexes its input's columns: equal only over equal rows.
+        (a, b) => a == b && (Rc::ptr_eq(child, fine_child) || child == fine_child),
+    };
+    (family == fine_family
+        && input == fine_input
+        && same_filter
+        && fine_keys.len() > coarse_keys.len()
+        && coarse_keys.iter().all(|key| fine_keys.contains(key))
+        && same_rows(child, fine_child)
+        // A global SQL aggregate has a row over no input; a rollup of no
+        // finer group has none.
+        && !(coarse_keys.is_empty() && child.result_kind == ResultKind::Relation))
+        .then_some(fine_keys.len())
+}
+
+type ColumnName = (Option<String>, String);
+
+fn column_name(field: &asap_types::pre_asap::Field) -> ColumnName {
+    (field.table.clone(), field.name.clone())
+}
+
+/// Whether `a` and `b` output the same rows: the same or equal nodes, or
+/// time-series scans of one metric without predicates (projecting perhaps
+/// other labels) under the same time ranges and shifts.
+fn same_rows(a: &Rc<OperatorNode>, b: &Rc<OperatorNode>) -> bool {
+    if Rc::ptr_eq(a, b) || a == b {
+        return true;
+    }
+    match (a.non_asap(), b.non_asap()) {
+        (
+            Some(NonASAPOp::Scan {
+                source: source @ Source::TimeSeries { .. },
+                predicates,
+                ..
+            }),
+            Some(NonASAPOp::Scan {
+                source: other,
+                predicates: other_predicates,
+                ..
+            }),
+        ) => source == other && predicates.is_empty() && other_predicates.is_empty(),
+        (
+            Some(NonASAPOp::TimeRange { range, kind, child }),
+            Some(NonASAPOp::TimeRange {
+                range: other_range,
+                kind: other_kind,
+                child: other,
+            }),
+        ) => range == other_range && kind == other_kind && same_rows(child, other),
+        (
+            Some(NonASAPOp::TimeShift { shift, child }),
+            Some(NonASAPOp::TimeShift {
+                shift: other_shift,
+                child: other,
+            }),
+        ) => shift == other_shift && same_rows(child, other),
+        _ => false,
+    }
+}
+
+/// The finalized value of `coarse` (`coarse_value`) as an exact
+/// accumulator over `finer` (the finer build's finalized values), grouped by
+/// the coarse keys, finalized, with `coarse_value`'s column names; `None`
+/// when it cannot be built or differs from `coarse_value` in type.
+fn rolled_up(
+    coarse: &OperatorNode,
+    finer: &Rc<OperatorNode>,
+    coarse_value: &OperatorNode,
+) -> Option<Rc<OperatorNode>> {
+    use crate::per_computation_candidates::{exact_accumulator, partitions_over};
+    let Some(ASAPOp::SummaryAgg {
+        child,
+        family,
+        reduction,
+        ..
+    }) = coarse.asap()
+    else {
+        return None;
+    };
+    let Some(ASAPOp::FinalizeExactAccumulator { child: fine }) = finer.asap() else {
+        return None;
+    };
+    let Some(ASAPOp::SummaryAgg {
+        reduction: Reduction::Reduce(fine_by),
+        ..
+    }) = fine.asap()
+    else {
+        return None;
+    };
+    // A grouped accumulator outputs its keys, then its value.
+    let value = fine_by.len();
+    let regrouped = partitions_over(reduction, &child.schema, &finer.schema)?;
+    if regrouped
+        .group_keys()
+        .is_some_and(|keys| keys.iter().any(|&k| k >= value))
+    {
+        return None;
+    }
+    let kind = rollup_kind(family)?;
+    let intent = match kind {
+        ExactKind::Min => AggIntent::Min { col: Some(value) },
+        ExactKind::Max => AggIntent::Max { col: Some(value) },
+        _ => AggIntent::Sum { col: Some(value) },
+    };
+    let state = exact_accumulator(kind, &intent, finer, regrouped).ok()?;
+    let mut finalized =
+        OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: state,
+        }))
+        .ok()?;
+    let types = |node: &OperatorNode| -> Vec<FieldDataType> {
+        node.schema.fields.iter().map(|f| f.dtype.clone()).collect()
+    };
+    if types(&finalized) != types(coarse_value) {
+        return None;
+    }
+    // A count summed is named after the sum: rename to the coarse columns.
+    if finalized.schema.fields != coarse_value.schema.fields {
+        let cols = coarse_value
+            .schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(column, field)| asap_types::ir::ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: ScalarExpr::Column(column),
+            })
+            .collect();
+        finalized = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: finalized,
+        }))
+        .ok()?;
+    }
+    Some(finalized)
+}
+
+/// Every Pass 2 candidate of the rollup rule for the candidate with query
+/// roots `roots` and sites `sites` ([`rollup_sites`]): one per non-empty
+/// subset of the sites, in binary-counter order (the first site the lowest
+/// bit). An error only for more than [`MAX_REUSE_SITES`] sites; a variant
+/// whose composition fails carries its own error.
+pub fn rollup_variants(
+    roots: &[QueryRoot],
+    sites: &[RollupSite],
+) -> Result<Vec<RollupVariant>, PerComputationCandidateError> {
+    Ok(subsets(sites.len(), "rollup")?
+        .into_iter()
+        .map(|chosen| {
+            let values: HashMap<*const OperatorNode, &RollupSite> = chosen
+                .iter()
+                .map(|&i| (Rc::as_ptr(&sites[i].coarse), &sites[i]))
+                .collect();
+            // Every finalized value of a chosen coarse build is replaced.
+            let replaced = roots
+                .iter()
+                .flat_map(root_operators)
+                .flat_map(OperatorNode::reachable)
+                .filter_map(|node| match node.asap() {
+                    Some(ASAPOp::FinalizeExactAccumulator { child }) => {
+                        let site = values.get(&Rc::as_ptr(child))?;
+                        Some((Rc::as_ptr(&node), Rc::clone(&site.rollup)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            RollupVariant {
+                roots: replace_all(roots, &replaced),
+                sites: chosen,
+            }
+        })
+        .collect())
+}
+
+/// Every non-empty subset of `n` sites, in binary-counter order; an error
+/// past [`MAX_REUSE_SITES`].
+fn subsets(n: usize, rule: &'static str) -> Result<Vec<Vec<usize>>, PerComputationCandidateError> {
+    if n > MAX_REUSE_SITES {
+        return Err(PerComputationCandidateError::Unsupported(match rule {
+            "rollup" => "more than 20 rollup sites (2^n candidates)",
+            _ => "more than 20 top-k reuse sites (2^n candidates)",
+        }));
+    }
+    Ok((1u64..(1u64 << n))
+        .map(|mask| (0..n).filter(|&i| mask >> i & 1 == 1).collect())
+        .collect())
+}
+
+/// `roots` with every node in `replaced` swapped for its replacement, and
+/// the nodes a replacement reads rebuilt too (a rollup may read a build
+/// another rollup replaces); every guarantee composed again.
+fn replace_all(
+    roots: &[QueryRoot],
+    replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
+) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+    fn walk(
+        node: &Rc<OperatorNode>,
+        replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
+        rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+        if let Some(done) = rebuilt.get(&Rc::as_ptr(node)) {
+            return Ok(Rc::clone(done));
+        }
+        let source = replaced.get(&Rc::as_ptr(node)).unwrap_or(node);
+        let mut changed = !Rc::ptr_eq(source, node);
+        let mut children = HashMap::new();
+        for child in source.children() {
+            let new = walk(child, replaced, rebuilt)?;
+            changed |= !Rc::ptr_eq(&new, child);
+            children.insert(Rc::as_ptr(child), new);
+        }
+        let out = if !changed {
+            Rc::clone(node)
+        } else if children
+            .iter()
+            .all(|(old, new)| std::ptr::eq(*old, Rc::as_ptr(new)))
+        {
+            Rc::clone(source)
+        } else {
+            Rc::new(source.with_new_children(|child| children[&Rc::as_ptr(child)].clone())?)
+        };
+        rebuilt.insert(Rc::as_ptr(node), Rc::clone(&out));
+        Ok(out)
+    }
+    let mut rebuilt = HashMap::new();
+    let mut out = Vec::new();
+    for root in roots {
+        out.push(match root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, replaced, &mut rebuilt)?),
+            QueryRoot::Scalar(expr) => {
+                let mut nodes = HashMap::new();
+                for node in expr.operator_refs() {
+                    nodes.insert(Rc::as_ptr(node), walk(node, replaced, &mut rebuilt)?);
+                }
+                QueryRoot::Scalar(
+                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
+                )
+            }
+        });
+    }
+    with_composed_guarantees(&out)
+}
+
+/// Exact top-k computations of one input and partition with at least two
+/// different `k`, in the order a children-first walk meets them, and the
+/// ranking they all read in a reuse candidate: `Limit(k_max)` over `Sort`
+/// of the input, partitioned as they are.
+#[derive(Debug, Clone)]
+pub struct TopKReuseSite {
+    pub members: Vec<Rc<OperatorNode>>,
+    pub ranking: Rc<OperatorNode>,
+}
+
+/// A Pass 2 candidate of the exact top-k reuse rule: the candidate's roots
+/// with every member of each site in `sites` (indices into
+/// [`topk_reuse_sites`]) reading its site's ranking, and every guarantee
+/// composed again; the error when that fails.
+#[derive(Debug)]
+pub struct TopKReuseVariant {
+    pub sites: Vec<usize>,
+    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+}
+
+/// The exact top-k reuse sites of the candidate with query roots `roots`:
+/// plain (exact) `Aggregate` top-k nodes over an exact input, unfiltered and
+/// grouped by listed keys, grouped by equal input and partition.
+pub fn topk_reuse_sites(roots: &[QueryRoot]) -> Vec<TopKReuseSite> {
+    let mut nodes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node in roots.iter().flat_map(root_operators) {
+        collect_children_first(node, &mut seen, &mut nodes);
+    }
+    let mut groups: Vec<Vec<Rc<OperatorNode>>> = Vec::new();
+    for node in nodes.into_iter().filter(|n| exact_topk(n).is_some()) {
+        let same = |member: &Rc<OperatorNode>| {
+            let (Some((child, by, _)), Some((other, other_by, _))) =
+                (exact_topk(member), exact_topk(&node))
+            else {
+                return false;
+            };
+            by == other_by && (Rc::ptr_eq(child, other) || child == other)
+        };
+        match groups.iter_mut().find(|g| same(&g[0])) {
+            Some(group) => group.push(node),
+            None => groups.push(vec![node]),
+        }
+    }
+    groups
+        .into_iter()
+        .filter_map(|members| {
+            let ks: Vec<usize> = members
+                .iter()
+                .filter_map(|m| exact_topk(m))
+                .map(|t| t.2)
+                .collect();
+            let largest = *ks.iter().max()?;
+            if ks.iter().all(|&k| k == largest) {
+                return None;
+            }
+            let (child, by, _) = exact_topk(&members[0])?;
+            let ranking = ranking(child, by, largest)?;
+            Some(TopKReuseSite { members, ranking })
+        })
+        .collect()
+}
+
+/// The input, partition and `k` of an exact top-k over an exact input.
+fn exact_topk(node: &OperatorNode) -> Option<(&Rc<OperatorNode>, &Reduction, usize)> {
+    let Some(NonASAPOp::Aggregate {
+        child,
+        reduction: reduction @ Reduction::Reduce(by),
+        measures,
+        filters,
+        having: None,
+        ..
+    }) = node.non_asap()
+    else {
+        return None;
+    };
+    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
+        return None;
+    };
+    let exact = child
+        .guarantee
+        .as_ref()
+        .is_some_and(asap_types::post_asap::AccuracyGuarantee::is_exact);
+    (exact && !by.is_without() && filters.iter().all(Option::is_none))
+        .then_some((child, reduction, *k))
+}
+
+/// The `k` highest-ranked rows of `child` per partition: `Limit` over a
+/// descending `Sort` by its ranked column, as exact top-k runs.
+fn ranking(child: &Rc<OperatorNode>, by: &Reduction, k: usize) -> Option<Rc<OperatorNode>> {
+    let Reduction::Reduce(keys) = by else {
+        return None;
+    };
+    let value = crate::realization::ranked_column(child).ok()?;
+    let sorted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Sort {
+        keys: vec![SortKey {
+            expr: ScalarExpr::Column(value),
+            ascending: false,
+            nulls_first: false,
+        }],
+        partition_by: keys.clone(),
+        child: Rc::clone(child),
+    }))
+    .ok()?;
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Limit {
+        n: Some(k),
+        offset: 0,
+        partition_by: keys.clone(),
+        child: sorted,
+    }))
+    .ok()
+}
+
+/// Every Pass 2 candidate of the exact top-k reuse rule for the candidate
+/// with query roots `roots` and sites `sites` ([`topk_reuse_sites`]): one
+/// per non-empty subset of the sites, in binary-counter order. An error
+/// only for more than [`MAX_REUSE_SITES`] sites.
+pub fn topk_reuse_variants(
+    roots: &[QueryRoot],
+    sites: &[TopKReuseSite],
+) -> Result<Vec<TopKReuseVariant>, PerComputationCandidateError> {
+    Ok(subsets(sites.len(), "top-k reuse")?
+        .into_iter()
+        .map(|chosen| {
+            let mut replaced = HashMap::new();
+            let mut failed = None;
+            for &i in &chosen {
+                let site = &sites[i];
+                for member in &site.members {
+                    match member.with_new_children(|_| Rc::clone(&site.ranking)) {
+                        Ok(node) => {
+                            replaced.insert(Rc::as_ptr(member), Rc::new(node));
+                        }
+                        Err(error) => failed = Some(error.into()),
+                    }
+                }
+            }
+            TopKReuseVariant {
+                roots: match failed {
+                    Some(error) => Err(error),
+                    None => replace_all(roots, &replaced),
+                },
+                sites: chosen,
+            }
+        })
+        .collect())
+}
+
 fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     match root {
         QueryRoot::Operator(node) => vec![node],
@@ -1433,5 +2015,284 @@ mod tests {
             })
             .collect();
         assert_eq!(subsets, [vec![0], vec![1], vec![0, 1]]);
+    }
+    /// The composed candidate of `queries` with every target at its exact
+    /// option (an exact accumulator, or plain exact execution).
+    fn exact(queries: &[&str]) -> Vec<QueryRoot> {
+        use crate::per_computation_candidates::ComputationCandidate as C;
+        let queries: Vec<(&str, f64)> = queries.iter().map(|q| (*q, 0.01)).collect();
+        chose_where(&queries, |c| {
+            matches!(c, C::Exact | C::ExactAccumulator { .. })
+        })
+    }
+
+    fn operator(root: &QueryRoot) -> &Rc<OperatorNode> {
+        let QueryRoot::Operator(node) = root else {
+            panic!("operator root")
+        };
+        node
+    }
+
+    fn builds(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
+        OperatorNode::reachable(operator(root))
+            .into_iter()
+            .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            .collect()
+    }
+
+    /// `sum by (job)` is answered from `sum by (job, instance)`, which the
+    /// workload computes anyway: the coarse query reads the finer query's
+    /// finalized sums, summed by `job`, so it builds nothing over the raw
+    /// rows; both values stay exact and keep their columns.
+    #[test]
+    fn rollup_from_a_finer_exact_sum() {
+        let roots = exact(&["sum by (job) (m)", "sum by (job, instance) (m)"]);
+        let sites = rollup_sites(&roots);
+        let [site] = sites.as_slice() else {
+            panic!("one site: {sites:?}")
+        };
+        assert!(Rc::ptr_eq(&site.coarse, &builds(&roots[0])[0]));
+        let variants = rollup_variants(&roots, &sites).unwrap();
+        let [variant] = variants.as_slice() else {
+            panic!("one variant")
+        };
+        let rolled = variant.roots.as_ref().unwrap();
+        let coarse = builds(&rolled[0]);
+        let fine = builds(&rolled[1]);
+        assert_eq!(fine.len(), 1);
+        // The finer build, then the sum over its values.
+        assert_eq!(coarse.len(), 2);
+        assert!(Rc::ptr_eq(&coarse[0], &fine[0]) || Rc::ptr_eq(&coarse[1], &fine[0]));
+        let rollup = coarse.iter().find(|b| !Rc::ptr_eq(b, &fine[0])).unwrap();
+        let Some(ASAPOp::SummaryAgg { child, family, .. }) = rollup.asap() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            child.asap(),
+            Some(ASAPOp::FinalizeExactAccumulator { .. })
+        ));
+        assert_eq!(
+            *family,
+            FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::post_asap::ExactParams::Sum)
+        );
+        for (before, after) in roots.iter().zip(rolled) {
+            let (before, after) = (operator(before), operator(after));
+            after.validate_structure().unwrap();
+            assert_eq!(before.schema, after.schema);
+            assert!(after
+                .guarantee
+                .as_ref()
+                .is_some_and(asap_types::post_asap::AccuracyGuarantee::is_exact));
+        }
+    }
+
+    /// Counts roll up as the sum of the finer counts; minima as minima.
+    #[test]
+    fn counts_and_extrema_roll_up() {
+        for (query, kind) in [
+            ("count by (job) (m)", ExactKind::Sum),
+            ("min by (job) (m)", ExactKind::Min),
+            ("max by (job) (m)", ExactKind::Max),
+        ] {
+            let finer = query.replace("(job)", "(job, instance)");
+            let roots = exact(&[query, &finer]);
+            let sites = rollup_sites(&roots);
+            let [site] = sites.as_slice() else {
+                panic!("{query}: one site: {sites:?}")
+            };
+            let mut value = Rc::clone(&site.rollup);
+            if let Some(NonASAPOp::Project { child, .. }) = value.non_asap() {
+                value = Rc::clone(child);
+            }
+            let Some(ASAPOp::FinalizeExactAccumulator { child: state }) = value.asap() else {
+                panic!("a finalized value")
+            };
+            let Some(ASAPOp::SummaryAgg {
+                family: FieldDataType::ExactAggregate(rolled, _),
+                ..
+            }) = state.asap()
+            else {
+                panic!("an exact accumulator")
+            };
+            assert_eq!(*rolled, kind, "{query}");
+            let variant = rollup_variants(&roots, &sites).unwrap().remove(0);
+            assert_eq!(
+                operator(&variant.roots.unwrap()[0]).schema,
+                operator(&roots[0]).schema,
+                "{query}"
+            );
+        }
+    }
+
+    /// The rule reuses only a finer computation the workload already has:
+    /// keys that are not a superset, another metric, window or measure, or
+    /// a lone query, give no site.
+    #[test]
+    fn rollup_needs_a_finer_computation_of_the_same_rows() {
+        for queries in [
+            &["sum by (job) (m)"][..],
+            &["sum by (job) (m)", "sum by (instance) (m)"],
+            &["sum by (job) (m)", "sum by (job, instance) (n)"],
+            &["sum by (job) (m)", "max by (job, instance) (m)"],
+            &[
+                "sum by (job) (sum_over_time(m[5m]))",
+                "sum by (job, instance) (sum_over_time(m[1m]))",
+            ],
+        ] {
+            assert!(rollup_sites(&exact(queries)).is_empty(), "{queries:?}");
+        }
+    }
+
+    /// Rollup follows the family-capability table: sums, counts and
+    /// extrema merge exactly across groups; counter states merge only in
+    /// time, IRate not at all; a heap sketch's merged top-k has no
+    /// guarantee, and no sketch's states can be regrouped in the IR.
+    #[test]
+    fn rollup_is_refused_for_families_without_an_exact_merge_across_groups() {
+        use asap_types::post_asap::{ExactParams as P, SketchParams};
+        let exact = |kind, params| FieldDataType::ExactAggregate(kind, params);
+        assert_eq!(
+            rollup_kind(&exact(ExactKind::Sum, P::Sum)),
+            Some(ExactKind::Sum)
+        );
+        assert_eq!(
+            rollup_kind(&exact(ExactKind::Count, P::Count)),
+            Some(ExactKind::Sum)
+        );
+        for family in [
+            exact(ExactKind::Rate, P::Rate),
+            exact(ExactKind::Increase, P::Increase),
+            exact(ExactKind::IRate, P::IRate),
+            FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::CmsWithHeap,
+                    SketchParams::CmsWithHeap {
+                        width: 64,
+                        depth: 5,
+                        heap_size: 10,
+                    },
+                ),
+                GroupingStrategy::default(),
+            ),
+            FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::Kll,
+                    SketchParams::Kll {
+                        k: 200,
+                        failure_probability: None,
+                    },
+                ),
+                GroupingStrategy::default(),
+            ),
+        ] {
+            assert_eq!(rollup_kind(&family), None, "{family:?}");
+        }
+        // A grouped KLL beside a finer one is no site.
+        let roots = chose(
+            &[
+                ("quantile by (job) (0.9, m)", 0.01),
+                ("quantile by (job, instance) (0.9, m)", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        assert!(rollup_sites(&roots).is_empty());
+    }
+
+    /// Two exact top-k over the same per-job sums: both read one ranking,
+    /// the 10 highest sums, and the top-5 is computed from it; each keeps
+    /// its `k`, output and exact value.
+    #[test]
+    fn exact_topk_reuses_the_larger_ranking() {
+        let roots = exact(&["topk(5, sum by (job) (m))", "topk(10, sum by (job) (m))"]);
+        let sites = topk_reuse_sites(&roots);
+        let [site] = sites.as_slice() else {
+            panic!("one site: {sites:?}")
+        };
+        assert_eq!(site.members.len(), 2);
+        let Some(NonASAPOp::Limit { n: Some(10), .. }) = site.ranking.non_asap() else {
+            panic!("{:?}", site.ranking.operator)
+        };
+        let variant = topk_reuse_variants(&roots, &sites).unwrap().remove(0);
+        let reused = variant.roots.unwrap();
+        let read = |root: &QueryRoot| {
+            let Some(NonASAPOp::Aggregate {
+                child, measures, ..
+            }) = operator(root).non_asap()
+            else {
+                panic!("top-k aggregate")
+            };
+            (Rc::clone(child), measures[0].clone())
+        };
+        let ((a, small), (b, large)) = (read(&reused[0]), read(&reused[1]));
+        assert!(Rc::ptr_eq(&a, &b), "one ranking");
+        assert!(matches!(small, AggIntent::TopK { k: 5, .. }));
+        assert!(matches!(large, AggIntent::TopK { k: 10, .. }));
+        for (before, after) in roots.iter().zip(&reused) {
+            let (before, after) = (operator(before), operator(after));
+            after.validate_structure().unwrap();
+            assert_eq!(before.schema, after.schema);
+            assert!(after
+                .guarantee
+                .as_ref()
+                .is_some_and(asap_types::post_asap::AccuracyGuarantee::is_exact));
+        }
+    }
+
+    /// Top-k over other partitions or inputs, or of one `k`, share no
+    /// ranking; a top-k a heap sketch answers is not reused.
+    #[test]
+    fn topk_reuse_needs_exact_topk_of_one_input_and_partition() {
+        for queries in [
+            &[
+                "topk(5, sum by (job) (m))",
+                "topk by (job) (10, sum by (job, instance) (m))",
+            ][..],
+            &["topk(5, sum by (job) (m))", "topk(10, sum by (job) (n))"],
+            &["topk(5, sum by (job) (m))", "topk(5, max by (job) (m))"],
+        ] {
+            assert!(topk_reuse_sites(&exact(queries)).is_empty(), "{queries:?}");
+        }
+        use crate::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates,
+            ComputationCandidate as C,
+        };
+        let inventory = generate_per_computation_candidates(
+            [
+                "topk by (job) (5, sum_over_time(m[1m]))",
+                "topk by (job) (10, sum_over_time(m[1m]))",
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let root = lower_promql(
+                    q,
+                    asap_types::types::AccuracyTarget::epsilon_delta(0.01, 0.01),
+                );
+                (i, QueryRoot::Operator(root))
+            })
+            .collect(),
+        )
+        .unwrap();
+        let heap = |c: &C| {
+            matches!(
+                c,
+                C::WholeExpression(SketchAlgorithm::CountSketchWithHeap)
+                    | C::Summary(SketchAlgorithm::CountSketchWithHeap)
+            )
+        };
+        let choice: Vec<usize> = inventory
+            .targets
+            .iter()
+            .map(|t| t.choices.candidates.iter().position(heap).unwrap_or(0))
+            .collect();
+        let heaps: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        assert!(OperatorNode::reachable(operator(&heaps[0]))
+            .iter()
+            .any(|n| matches!(n.asap(), Some(ASAPOp::SummaryEstimate { .. }))));
+        assert!(topk_reuse_sites(&heaps).is_empty());
     }
 }
