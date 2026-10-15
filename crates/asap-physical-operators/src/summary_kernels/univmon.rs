@@ -40,18 +40,25 @@ pub(crate) fn check_dimensions(
 #[derive(Debug, Clone)]
 pub struct UnivMonAccumulator {
     inner: UnivMon,
+    /// The longest variable-length key the heaps may retain, in bytes: the
+    /// memory charge bounds the retained keys by every heap slot holding
+    /// one this long, so it never walks the heaps (a build charges memory
+    /// after every row).
+    max_key_bytes: usize,
 }
 
 impl UnivMonAccumulator {
     /// Empty the sketch in place, keeping its shape.
     pub(crate) fn clear(&mut self) {
         self.inner.free();
+        self.max_key_bytes = 0;
     }
 
     pub fn new(heap_size: usize, rows: usize, cols: usize, layers: usize) -> Result<Self, Error> {
         check_dimensions(heap_size, rows, cols, layers)?;
         Ok(Self {
             inner: UnivMon::init_univmon(heap_size, rows, cols, layers),
+            max_key_bytes: 0,
         })
     }
 
@@ -68,7 +75,20 @@ impl UnivMonAccumulator {
         if !sketch.accepts_standard_updates() {
             return Err("terminal-mode UnivMon state cannot accept standard updates".into());
         }
-        Ok(Self { inner: sketch })
+        // One walk of the decoded heaps, not one per charge.
+        let max_key_bytes = (0..sketch.layer_size)
+            .flat_map(|layer| sketch.hh_layers[layer].heap())
+            .map(|item| match &item.key {
+                asap_sketchlib::HeapItem::String(key) => key.capacity(),
+                asap_sketchlib::HeapItem::Bytes(key) => key.capacity(),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        Ok(Self {
+            inner: sketch,
+            max_key_bytes,
+        })
     }
 
     /// The underlying sketch, so a deployment can encode it with sketchlib's codec.
@@ -108,6 +128,7 @@ impl UnivMonAccumulator {
             .checked_add(1)
             .ok_or("UnivMon count overflow")?;
         self.inner.insert(&DataInput::Bytes(&key), 1);
+        self.max_key_bytes = self.max_key_bytes.max(key.len());
         Ok(())
     }
 
@@ -143,22 +164,22 @@ impl UnivMonAccumulator {
             .checked_add(other.inner.bucket_size)
             .ok_or("UnivMon count overflow")?;
         self.inner.merge(&other.inner);
+        self.max_key_bytes = self.max_key_bytes.max(other.max_key_bytes);
         Ok(())
     }
 }
 
 impl AggregateCore for UnivMonAccumulator {
-    /// Counters and heap slots of every layer, plus the bytes of the
-    /// variable-length keys the heaps retain.
+    /// Counters and heap slots of every layer, plus an upper bound on the
+    /// variable-length keys the heaps retain: every slot holding the
+    /// longest key seen. Constant time, since a build charges memory after
+    /// every row.
     fn approx_memory_bytes(&self) -> usize {
-        let key_bytes = (0..self.inner.layer_size)
-            .flat_map(|layer| self.inner.hh_layers[layer].heap())
-            .map(|item| match &item.key {
-                asap_sketchlib::HeapItem::String(key) => key.capacity(),
-                asap_sketchlib::HeapItem::Bytes(key) => key.capacity(),
-                _ => 0,
-            })
-            .fold(0usize, usize::saturating_add);
+        let key_bytes = self
+            .inner
+            .layer_size
+            .saturating_mul(self.inner.heap_size)
+            .saturating_mul(self.max_key_bytes);
         key_bytes
             .saturating_add(std::mem::size_of::<Self>())
             .saturating_add(
@@ -341,5 +362,41 @@ mod tests {
         assert!(state.approx_memory_bytes() >= empty + 4096);
         state.clear();
         assert_eq!(state.approx_memory_bytes(), empty);
+    }
+
+    // A build charges memory after every row, so the charge must not walk
+    // the heaps: with keys of one length it stays the same however many
+    // keys the heaps hold.
+    #[test]
+    fn memory_charge_does_not_grow_with_heap_occupancy() {
+        let mut state = UnivMonAccumulator::new(512, 3, 64, 4).unwrap();
+        let key = |i: i64| crate::values::Value::Utf8(format!("{i:08}").into());
+        state.insert_value(&key(0)).unwrap();
+        let one = state.approx_memory_bytes();
+        for i in 1..2000 {
+            state.insert_value(&key(i)).unwrap();
+        }
+        assert_eq!(state.approx_memory_bytes(), one);
+    }
+
+    // Charging memory after every row of a large build stays linear in the
+    // rows (it was quadratic: 3 s for this build). Timing-based, so ignored
+    // by default; run with `--ignored --release`.
+    #[test]
+    #[ignore = "timing; run in release"]
+    fn per_row_memory_charge_of_a_large_build_is_fast() {
+        let mut state = UnivMonAccumulator::new(20_000, 3, 1024, 19).unwrap();
+        let start = std::time::Instant::now();
+        let mut charged = 0usize;
+        for i in 0..40_000i64 {
+            state.insert_value(&crate::values::Value::Int64(i)).unwrap();
+            charged = charged.max(state.approx_memory_bytes());
+        }
+        assert!(charged > 0);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }
