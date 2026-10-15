@@ -252,7 +252,7 @@ function validateStagePipeline(doc) {
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
 // `error`, `failure_probability`, `accuracy_scope`) as one line, e.g. "ε=0.01, δ=0.001
 // (rank)" or "ε=0.01 (metric not set; default relative)"; "exact" for
-// zero error with certainty; "" without a target. `defaultMetric` is the
+// zero error with certainty; "" for a malformed target. `defaultMetric` is the
 // query's default metric the document shows for a target without one.
 function accuracyText(target, defaultMetric) {
   if (!target || typeof target !== 'object') return '';
@@ -264,7 +264,7 @@ function accuracyText(target, defaultMetric) {
 }
 
 // What Stage 3 accepted for a valid candidate's queries (`accepted[id]`:
-// one entry per query, null without a target), as "q1: …; q2: …"; null
+// one entry per query), as "q1: …; q2: …"; null
 // when the document has none.
 function acceptedText(queries) {
   if (!Array.isArray(queries)) return null;

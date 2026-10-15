@@ -180,7 +180,8 @@ fn scalar_root_producers_are_discovered_once() {
 
 /// #509 Example 1 Q1 is exact: each target's one exact option is its exact
 /// accumulator state (grouped sum, rate); no plain exact form and no summary.
-/// One ImplicitExact PromQL query lowered through the workload frontend.
+/// One PromQL query with the default exact target, lowered through the
+/// workload frontend.
 fn exact_promql(query: &str) -> Vec<QueryRoot> {
     use asap_types::workload::{
         BatchEntry, PlanningWorkload, Query, QueryLanguage, QueryRequirements, QueryWorkload,
@@ -661,7 +662,7 @@ fn global_aggregate_having_stays_above() {
     }
 }
 
-/// #509 Example 1 Q2 under ImplicitExact: the top-k's one option is plain
+/// #509 Example 1 Q2 under the default exact target: the top-k's one option is plain
 /// `Exact`, its heap summaries pruned `RequiresExact`; `sum_over_time` gets
 /// its exact Sum accumulator.
 #[test]
