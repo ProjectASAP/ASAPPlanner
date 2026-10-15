@@ -316,6 +316,8 @@ pub struct Selection {
 
 #[derive(Debug, Error)]
 pub enum SelectionError {
+    /// Bad input: the caller gave a different number of workload entries
+    /// than the candidate has query roots.
     #[error("candidate {candidate} has {roots} roots but {entries} workload entries were given")]
     EntryCount {
         candidate: String,
