@@ -44,6 +44,14 @@ for example:
 - `whole_result_guarantee(guarantee, output_values: Option<f64>)` →
   `guarantee.over_whole_result(values_per_result: Option<u64>)`. Trade-off: a
   method on a public type, but a count that cannot be fractional.
+- `Pass2Candidate { .. }` and `Pass2Of { .. }`, which carry nearly the same fields
+  as ready-formatted strings, plus `SharedSummary { group: usize, members:
+  Vec<usize> }`, which indexes into two other lists → one
+  `Stage1Candidate.pass2: Option<Pass2Candidate>` holding the Pass 1 candidate
+  and the shared build nodes themselves (`shared_builds:
+  Vec<Vec<Rc<OperatorNode>>>`), with display text moved to the devtools.
+  Trade-off: one more rename across the Pass 2 rules, but readers no longer
+  follow indexes.
 
 The author picks; the reviewer does not decide.
 
@@ -60,6 +68,18 @@ Required step: review the implementation's performance complexity
 Each efficiency finding states the complexity, a realistic input size at which
 it hurts, and a concrete cheaper alternative. When the cheaper alternative has
 a trade-off, give the author choices here too.
+
+For example:
+
+- `price` recomputes `query_reach(dag)`, a walk over the whole DAG, for every
+  MatAtQuery node: O(n · (n + e)) per candidate, times every candidate. At
+  Example 3's 972 candidates with about 50 nodes each, that is about 2.5·10⁶
+  node visits instead of 5·10⁴. Alternative: compute it once per candidate
+  before the loop and pass it in.
+- Subset enumeration over one sharing group's members is 2^n. It is capped by
+  `MAX_GROUP_MEMBERS = 20` (about 10⁶ subsets). Choices: keep the cap and
+  report a group that hits it, or enumerate lazily and stop at
+  `--max-combinations`.
 
 Review output format, in this order:
 
