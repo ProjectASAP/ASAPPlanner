@@ -23,7 +23,7 @@ use asap_types::post_asap::{
     Field, ProbabilityExpr, Schema, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::pre_asap::DataType;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::{ErrorMetric, RequestedAccuracy};
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs,
     LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -51,14 +51,21 @@ const PROMQL_Q3: &str = "l2_over_time(flows_src_ip[1m])";
 /// (ε, δ) of Q1, Q2, Q3. Q3 is the strictest.
 const ACCURACY: [(f64, f64); 3] = [(0.02, 0.01), (0.05, 0.01), (0.01, 0.01)];
 
-fn panel(query: &str, (epsilon, delta): (f64, f64)) -> RepeatingEntry {
+/// The metric each query's target names: Q1's distinct count defaults to a
+/// relative error, Q2's entropy to an absolute one, and Q3's L2 norm names
+/// a relative error (an L2 root's default is an absolute error).
+const METRIC: [Option<ErrorMetric>; 3] = [None, None, Some(ErrorMetric::Relative)];
+
+fn panel(query: &str, (epsilon, delta): (f64, f64), metric: Option<ErrorMetric>) -> RepeatingEntry {
+    let requested = RequestedAccuracy::epsilon_delta(epsilon, delta);
     RepeatingEntry {
         query: Query(query.into()),
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
         requirements: QueryRequirements {
-            accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::epsilon_delta(
-                epsilon, delta,
-            )),
+            accuracy: AccuracyRequirement::Explicit(match metric {
+                Some(metric) => requested.with_metric(metric),
+                None => requested,
+            }),
             response_latency: LatencyRequirement::Unspecified,
         },
         predictability: Predictability::Predictable { known_at: None },
@@ -99,7 +106,8 @@ fn workload(language: QueryLanguage, queries: [&str; 3]) -> PlanningWorkload {
                 queries
                     .iter()
                     .zip(ACCURACY)
-                    .map(|(q, accuracy)| panel(q, accuracy))
+                    .zip(METRIC)
+                    .map(|((q, accuracy), metric)| panel(q, accuracy, metric))
                     .collect(),
             ),
         },

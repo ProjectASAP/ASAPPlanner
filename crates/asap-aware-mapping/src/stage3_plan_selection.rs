@@ -350,8 +350,10 @@ fn accuracy_violation(
         }
         return Some(match guarantee {
             Some(g) => format!(
-                "q{query}: the output guarantees bound {:?}, failure probability {:?}, which \
-                 misses target {target:?}, and the deployment has no evidence that it meets it",
+                "q{query}: the output guarantees a {:?} bound {:?}, failure probability {:?}, \
+                 which misses target {target:?}, and the deployment has no evidence that it \
+                 meets it",
+                g.spec.metric,
                 g.spec.error.evaluate(),
                 g.spec.failure_probability.evaluate(),
             ),
@@ -1856,6 +1858,62 @@ mod tests {
         fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
             Some(AccuracyGuarantee::exact("measured"))
         }
+    }
+
+    /// Deployment evidence of a small error in a fixed metric for every
+    /// output that is not exact.
+    struct EveryOutputMeasuredIn(ErrorMetric);
+
+    impl AccuracyEvidenceProvider for EveryOutputMeasuredIn {
+        fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
+            Some(AccuracyGuarantee::new(
+                self.0,
+                BoundExpr::Constant { value: 1e-6 },
+                ProbabilityExpr::Constant { value: 1e-6 },
+                vec![],
+            ))
+        }
+    }
+
+    /// A bound stated in another metric misses the target however small it
+    /// is: a relative bound does not bound a top-k frequency's L1-scaled
+    /// error, so only the exact candidate stays valid; the same evidence in
+    /// the target's metric admits the sketches.
+    #[test]
+    fn a_bound_in_another_metric_misses_the_target() {
+        let counter = DataWorkload {
+            metric_types: [("m".to_string(), asap_types::workload::MetricType::Counter)].into(),
+            ..data()
+        };
+        let target =
+            RequestedAccuracy::epsilon_delta(0.5, 0.5).target_in(ErrorMetric::ABSOLUTE_STREAM_L1);
+        let select = |metric| {
+            select_plan(
+                &candidates(),
+                &[Some(target.clone())],
+                &every_10s(1),
+                &counter,
+                PlanningModels::builtin().with_evidence(&EveryOutputMeasuredIn(metric)),
+            )
+            .unwrap()
+        };
+        let relative = select(ErrorMetric::Relative);
+        assert_eq!(relative.selected, "P1");
+        let mut invalid: Vec<_> = relative.rejected.iter().filter(|r| !r.valid).collect();
+        invalid.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            invalid.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["P2", "P3"]
+        );
+        for rejected in invalid {
+            assert!(
+                rejected.reason.contains("no evidence that it meets"),
+                "{}",
+                rejected.reason
+            );
+        }
+        let l1 = select(ErrorMetric::ABSOLUTE_STREAM_L1);
+        assert!(l1.rejected.iter().all(|r| r.valid), "{:?}", l1.rejected);
     }
 
     /// A difference of two quantile estimates has no output guarantee, though
