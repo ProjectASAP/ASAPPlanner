@@ -23,8 +23,14 @@ Write the pull-request description top-down:
    - Under each group, put one fenced code block in the source language. It
      holds the real declarations copied from the diff: type definitions with
      their fields or variants, and function, method and trait signatures with
-     bodies elided (`;` or `/* ... */`). Add a short trailing comment where the
-     meaning or the change isn't obvious (`// new`, `// was X`, `// removed`).
+     bodies elided (`;` or `/* ... */`). Mark each change with a trailing
+     comment (`// new`, `// was X`, `// removed`).
+   - Explain every interface. Above each declaration, write a short `///` (or
+     the language's doc-comment form) saying what it is, what it is for, and
+     when a caller uses it. For an enum variant or an error, say when it is
+     produced and whether it reflects bad input, an unsatisfiable request, or an
+     internal bug. For a field, say what it holds and its default. Keep each
+     explanation to one or two lines.
    - End with a short **Usage** snippet that shows how a caller combines the
      main interfaces, when that helps.
    See [references/key-code-interfaces-example.md](references/key-code-interfaces-example.md).

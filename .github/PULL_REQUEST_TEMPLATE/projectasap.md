@@ -14,8 +14,9 @@ What is the core algorithm, interface, or design decision? Keep this top-down.
 
 Group by source file, with links to the files at a fixed commit. Under each group,
 put one fenced code block holding the real declarations: types with their fields
-or variants, and function/method/trait signatures with bodies elided. Add short
-comments for what changed (`// new`, `// was X`, `// removed`). End with a short
+or variants, and function/method/trait signatures with bodies elided. Mark what
+changed (`// new`, `// was X`, `// removed`), and explain each interface in a short
+doc comment: what it is, what it is for, and when it is used or produced. End with a short
 usage snippet when it helps. Write "None" if no interface changes.
 
 ## Before this PR
