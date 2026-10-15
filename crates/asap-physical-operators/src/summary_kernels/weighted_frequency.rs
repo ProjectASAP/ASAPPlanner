@@ -1,4 +1,8 @@
 //! ASAP type and trait adapter for sketchlib's Float64 weighted frequency kernel.
+//!
+//! The kernel backs Count-Min and CountSketch, with a top-k heap or, at
+//! capacity 0, without one. Each row hashes with its own seed, so a shape of
+//! any depth keeps the row independence the planner's guarantees assume.
 use crate::AggregateCore;
 use crate::{values::Value, Error};
 pub use asap_sketchlib::FrequencyAlgorithm;
@@ -96,6 +100,12 @@ impl WeightedFrequency {
     pub fn update(&mut self, values: &[Value], weight: f64) -> Result<(), Error> {
         let values = values.iter().map(identity).collect::<Result<Vec<_>, _>>()?;
         self.inner.update(&values, weight).map_err(adapt_error)
+    }
+    /// Point estimate for one identity tuple: the minimum over rows for
+    /// Count-Min, the sign-corrected median over rows for CountSketch.
+    pub fn point_estimate(&self, values: &[Value]) -> Result<f64, Error> {
+        let values = values.iter().map(identity).collect::<Result<Vec<_>, _>>()?;
+        self.inner.estimate(&values).map_err(adapt_error)
     }
     pub fn rows(&self, n: usize) -> Vec<Vec<Value>> {
         self.inner

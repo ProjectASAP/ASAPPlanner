@@ -407,7 +407,7 @@ dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=e6b03142628a3109b6482ebe8512bff7e75f5b35)",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=9415c5b161237ad238e101ed9166d4dbaace3031)",
  "chrono",
  "futures",
  "regex",
@@ -464,7 +464,7 @@ dependencies = [
 [[package]]
 name = "asap_sketchlib"
 version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=e6b03142628a3109b6482ebe8512bff7e75f5b35#e6b03142628a3109b6482ebe8512bff7e75f5b35"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=9415c5b161237ad238e101ed9166d4dbaace3031#9415c5b161237ad238e101ed9166d4dbaace3031"
 dependencies = [
  "bincode",
  "bytes",
