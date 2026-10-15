@@ -427,17 +427,25 @@ fn compile_internal(
                 let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
-                if !schema.closed || update.item.is_some() {
+                // An unkeyed frequency family (UnivMon) counts each value of
+                // its one item column once, as a value-frequency build.
+                let frequency_item = crate::capability::unit_frequency_column(update)
+                    .filter(|_| unkeyed_frequency_family(family));
+                if !schema.closed || (update.item.is_some() && frequency_item.is_none()) {
                     return Err(invalid(
                         "per-entity summary requires complete source identity",
                     ));
                 }
                 crate::capability::validate_summary_kernel(family, update, grouping)
                     .map_err(Error::Invalid)?;
-                let SummaryInputExpr::Column(value) = &update.weight else {
-                    return Err(invalid(
-                        "per-entity update requires a projected value column",
-                    ));
+                let value = match (frequency_item, &update.weight) {
+                    (Some(item), _) => item,
+                    (None, SummaryInputExpr::Column(value)) => value,
+                    (None, _) => {
+                        return Err(invalid(
+                            "per-entity update requires a projected value column",
+                        ))
+                    }
                 };
                 let input = schemas[0].clone();
                 let value = named_column(&input, value)?;
@@ -966,6 +974,27 @@ fn summary_build(
             groups(input, keys)?,
         );
     }
+    // An unkeyed frequency family (UnivMon) counts each value of its
+    // one item column once: a value-frequency build over that column.
+    if let (Some(item), true) = (
+        crate::capability::unit_frequency_column(update),
+        unkeyed_frequency_family(family),
+    ) {
+        crate::capability::validate_summary_kernel(family, update, grouping)
+            .map_err(Error::Invalid)?;
+        let PlannerReduction::Reduce(keys) = reduction else {
+            return Err(invalid(
+                "summary construction requires explicit grouping columns",
+            ));
+        };
+        return Operator::summary_build(
+            input.clone(),
+            family.clone(),
+            named_column(input, item)?,
+            input.time_index,
+            groups(input, keys)?,
+        );
+    }
     if let Some(item) = &update.item {
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
@@ -1027,6 +1056,15 @@ fn summary_build(
         input.time_index,
         groups(input, keys)?,
     )
+}
+/// Families whose state counts values of one column without keyed items:
+/// their unit-frequency update builds over that column.
+fn unkeyed_frequency_family(family: &FieldDataType) -> bool {
+    matches!(family, FieldDataType::Sketch(kind, _) if matches!(
+        kind.algorithm(),
+        planner_types::post_asap::SketchAlgorithm::UnivMon
+            | planner_types::post_asap::SketchAlgorithm::Hll
+    ))
 }
 fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
     let columns = input

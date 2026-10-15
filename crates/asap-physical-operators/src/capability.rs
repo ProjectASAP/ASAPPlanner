@@ -110,7 +110,7 @@ pub fn validate_summary_kernel(
         }
         _ => return Err(format!("unsupported summary kernel {family:?}")),
     };
-    if keyed != input.item.is_some() && !is_unit_sample_frequency(input) {
+    if keyed != input.item.is_some() && unit_frequency_column(input).is_none() {
         return Err("Planner item expression does not match kernel layout".into());
     }
     Ok(())
@@ -215,6 +215,25 @@ fn valid_matrix(width: u32, depth: u32) -> bool {
             .is_some()
 }
 
+/// The one item column of a unit-count frequency update (each value is one
+/// occurrence), the update an unkeyed frequency family (HLL, UnivMon) builds
+/// from that column's values.
+pub(crate) fn unit_frequency_column(
+    update: &planner_types::post_asap::SummaryUpdate,
+) -> Option<&planner_types::pre_asap::ColumnRef> {
+    use planner_types::post_asap::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
+    match (&update.item, &update.weight, &update.weight_domain) {
+        (
+            Some(SummaryInputExpr::Column(column)),
+            SummaryInputExpr::Constant(weight),
+            WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount,
+            },
+        ) if *weight == 1.0 => Some(column),
+        _ => None,
+    }
+}
+
 pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::SummaryUpdate) -> bool {
     use planner_types::post_asap::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
     matches!(
@@ -264,7 +283,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     match family {
         SummaryFamilyType::ExactAggregate(..) => {}
         SummaryFamilyType::Sketch(kind, _)
-            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll) => {}
+            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll | A::UnivMon) => {}
         _ => {
             return Err(Error::Invalid(
                 "summary family has no native DAG state implementation".into(),
@@ -319,6 +338,15 @@ pub fn validate_sketch_evaluation(
                 }
                 true
             }
+            // One frequency state answers its total, distinct count, L2 norm
+            // and entropy.
+            (
+                A::UnivMon,
+                SketchStatistic::Cardinality
+                | SketchStatistic::FrequencyL2
+                | SketchStatistic::FrequencyEntropy,
+            ) => true,
+            (A::UnivMon, _) => bare_count,
             // Only count intents read a Count-Min bare count, and their
             // updates have unit weight; the evaluation is typed Int64 on that basis.
             (A::Cms, _) => bare_count,
