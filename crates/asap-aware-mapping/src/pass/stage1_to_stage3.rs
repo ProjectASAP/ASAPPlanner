@@ -40,7 +40,7 @@ use asap_types::ir::flat::flatten;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-use asap_types::types::{AccuracyTarget, RequestedAccuracy};
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence, RepeatedDemand};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
@@ -154,7 +154,7 @@ impl<Id> Stage1ToStage3Run<Id> {
 /// listed with its reason, and a failed selection is reported in the run.
 pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
-    targets: &[Option<RequestedAccuracy>],
+    targets: &[Option<AccuracyTarget>],
     recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -487,7 +487,7 @@ fn readers_of(roots: &[QueryRoot], node: &Rc<OperatorNode>) -> Vec<usize> {
 /// enumerating.
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
-    targets: &[Option<RequestedAccuracy>],
+    targets: &[Option<AccuracyTarget>],
     recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -502,7 +502,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
 pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     stage1: Vec<Stage1Candidate>,
-    targets: &[Option<RequestedAccuracy>],
+    targets: &[Option<AccuracyTarget>],
     recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -545,13 +545,7 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
             roots: candidate.roots,
         });
     }
-    let (resolved, selection) = match resolve_targets(&per_computation.roots, targets) {
-        Ok(targets) => {
-            let selection = select_plan(&physical, &targets, recurrence, data, models);
-            (Some(targets), selection)
-        }
-        Err(error) => (None, Err(error)),
-    };
+    let selection = select_plan(&physical, targets, recurrence, data, models);
     let selected_logical = selection.as_ref().ok().and_then(|selection| {
         let from = &physical
             .iter()
@@ -564,8 +558,7 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
             .as_ref()
             .ok()?;
         // As Stage 3 sized it for its queries' failure probabilities.
-        let sized =
-            crate::stage3_plan_selection::sized_roots(roots, resolved.as_deref()?, data).ok()?;
+        let sized = crate::stage3_plan_selection::sized_roots(roots, targets, data).ok()?;
         Some(crate::stage3_plan_selection::with_confirmed_weights(
             &sized, data,
         ))
@@ -580,30 +573,6 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         stage2_pruned: pruned,
         stage3_plan_selection: selection,
     }
-}
-
-/// Each query's requested accuracy resolved for its frontend root
-/// ([`RequestedAccuracy::for_root`]): the metric plan selection checks.
-fn resolve_targets<Id>(
-    roots: &[(Id, QueryRoot)],
-    targets: &[Option<RequestedAccuracy>],
-) -> Result<Vec<Option<AccuracyTarget>>, SelectionError> {
-    roots
-        .iter()
-        .zip(targets)
-        .enumerate()
-        .map(|(query, ((_, root), requested))| {
-            requested
-                .as_ref()
-                .map(|requested| requested.for_root(root))
-                .transpose()
-                .map_err(|error| SelectionError::AccuracyRequest {
-                    query: query + 1,
-                    error,
-                })
-        })
-        .chain(targets.iter().skip(roots.len()).map(|_| Ok(None)))
-        .collect()
 }
 
 /// Mixed-radix increment of `choice`: the last target varies fastest.

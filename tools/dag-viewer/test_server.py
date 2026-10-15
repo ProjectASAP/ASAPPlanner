@@ -245,17 +245,20 @@ class PlanEndpointTests(unittest.TestCase):
         self.assertEqual(document["workload"]["queries"][0]["id"], "job_rate")
         self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
 
-    def test_a_quantile_query_plans_with_the_metric_it_names(self):
-        """A quantile target must name its metric: with one, a plan is
-        selected; without one, plan selection reports the missing metric."""
+    def test_a_quantile_query_plans_with_or_without_a_metric(self):
+        """A quantile target may set its metric or leave it unset: either
+        way a plan is selected, and Stage 3 reports the metric it accepted."""
         query = {"name": "p99", "language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
         named = post_plan({"queries": [query], "epsilon": 0.01, "metric": "rank"})
         self.assertEqual(named["workload"]["queries"][0]["requirements"]["accuracy"]["metric"], "rank")
-        self.assertIsNotNone(named["stage3_plan_selection"]["selected"])
+        selected = named["stage3_plan_selection"]["selected"]
+        self.assertIsNotNone(selected)
+        self.assertTrue(named["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric rank; accepted "))
         unnamed = post_plan({"queries": [query], "epsilon": 0.01})
-        self.assertIsNone(unnamed["stage3_plan_selection"]["selected"])
-        self.assertIn("must name its metric", unnamed["stage3_plan_selection"]["error"])
-
+        self.assertNotIn("metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
+        selected = unnamed["stage3_plan_selection"]["selected"]
+        self.assertIsNotNone(selected)
+        self.assertTrue(unnamed["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric not set; accepted "))
 
 if __name__ == "__main__":
     unittest.main()

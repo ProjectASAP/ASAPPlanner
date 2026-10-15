@@ -127,8 +127,8 @@ def plan_args(payload: object, out: str) -> list[str]:
         if not 0 < epsilon < 1:
             raise ValueError("epsilon must be between 0 and 1")
         args.extend(["--epsilon", str(epsilon)])
-    # The target's error metric; empty means the query's default metric. A
-    # quantile query's target must name one.
+    # The target's error metric; empty leaves it unset, and Stage 3 then
+    # accepts a guarantee in any metric and reports the one it accepted.
     metric = payload.get("metric")
     if metric not in (None, ""):
         if metric not in ("absolute", "relative", "rank"):

@@ -10,7 +10,7 @@ use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, CompareOpKind, GroupKeys,
     PromQLVectorSetOpKind, Reduction, ScalarValue, Source,
 };
-use asap_types::types::{ErrorMetric, RequestedAccuracy};
+use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
 use metricsql_parser::functions::{AggregateFunction, BuiltinFunction, RollupFunction};
@@ -77,7 +77,7 @@ pub fn lower_metricsql_query_workload(
 
 pub fn lower_metricsql(
     query: &str,
-    accuracy: RequestedAccuracy,
+    accuracy: AccuracyTarget,
     ingestion_interval: Duration,
 ) -> Result<Rc<OperatorNode>, MetricsqlError> {
     match lower_metricsql_query(query, accuracy, ingestion_interval)? {
@@ -90,7 +90,7 @@ pub fn lower_metricsql(
 /// instant selector looks back `ingestion_interval` for its latest sample.
 pub fn lower_metricsql_query(
     query: &str,
-    accuracy: RequestedAccuracy,
+    accuracy: AccuracyTarget,
     ingestion_interval: Duration,
 ) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
     let ast = parse_metricsql(query)?;
@@ -110,7 +110,7 @@ pub fn lower_metricsql_query(
 }
 
 struct Lowerer {
-    accuracy: RequestedAccuracy,
+    accuracy: AccuracyTarget,
     ingestion_interval: Duration,
 }
 

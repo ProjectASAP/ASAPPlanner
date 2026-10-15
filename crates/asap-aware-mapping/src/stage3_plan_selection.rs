@@ -171,6 +171,49 @@ pub struct Rejection {
     pub reason: String,
 }
 
+/// The accuracy Stage 3 accepted for one query of a valid candidate: the
+/// metric the query's target set (if any) and the metric of the guarantee
+/// that met it. With no metric set, any metric meeting the target's ε, δ
+/// and scope is accepted, so ε means different things across candidates
+/// (e.g. 0.01 of the true value vs 0.01 of the rank); this record makes
+/// the accepted metric visible.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedAccuracy {
+    /// The target's metric; `None` when the user did not set one.
+    pub target_metric: Option<ErrorMetric>,
+    /// The metric the accepted guarantee is stated in; `None` for an exact
+    /// output, which meets every metric.
+    pub accepted_metric: Option<ErrorMetric>,
+    /// The sketch algorithms the query's output reads, in plan order
+    /// (e.g. `["Kll"]`); empty for an exact plan.
+    pub sketches: Vec<String>,
+}
+
+impl std::fmt::Display for AcceptedAccuracy {
+    /// E.g. `metric not set; accepted rank (Kll)`, or
+    /// `metric relative; accepted relative (DDSketch)`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = |metric: ErrorMetric| {
+            serde_json::to_value(metric)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| format!("{metric:?}"))
+        };
+        match self.target_metric {
+            None => write!(f, "metric not set; ")?,
+            Some(metric) => write!(f, "metric {}; ", name(metric))?,
+        }
+        match self.accepted_metric {
+            None => write!(f, "accepted exact")?,
+            Some(metric) => write!(f, "accepted {}", name(metric))?,
+        }
+        if !self.sketches.is_empty() {
+            write!(f, " ({})", self.sketches.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
 /// Costs are present for valid candidates only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
@@ -180,6 +223,9 @@ pub struct Selection {
     /// to run. The Stage 2 candidate keeps the open requirement.
     pub plan: Vec<QueryRoot>,
     pub costs: BTreeMap<String, CandidateCost>,
+    /// For each valid candidate, per query, the accuracy Stage 3 accepted
+    /// (`None` for a query without a target).
+    pub accepted: BTreeMap<String, Vec<Option<AcceptedAccuracy>>>,
     pub rejected: Vec<Rejection>,
 }
 
@@ -210,13 +256,6 @@ pub enum SelectionError {
         candidate: String,
         error: SizingError,
     },
-    /// A query's requested accuracy cannot be resolved for its root, e.g. a
-    /// quantile query's target names no metric.
-    #[error("q{query}: {error}")]
-    AccuracyRequest {
-        query: usize,
-        error: asap_types::types::AccuracyRequestError,
-    },
 }
 
 /// Stage 3 (plan selection): reject candidates that miss a query's accuracy
@@ -231,6 +270,7 @@ pub fn select_plan(
     models: PlanningModels<'_>,
 ) -> Result<Selection, SelectionError> {
     let mut costs = BTreeMap::new();
+    let mut accepted = BTreeMap::new();
     let mut rejected = Vec::new();
     let mut best: Option<(String, f64, Vec<QueryRoot>)> = None;
     for candidate in cands {
@@ -249,14 +289,17 @@ pub fn select_plan(
                     error,
                 }
             })?;
-        if let Some(reason) = accuracy_violation(candidate, targets, data, &models) {
-            rejected.push(Rejection {
-                id: candidate.id.clone(),
-                valid: false,
-                reason,
-            });
-            continue;
-        }
+        let accepted_accuracy = match accuracy_check(candidate, targets, data, &models) {
+            Ok(accepted_accuracy) => accepted_accuracy,
+            Err(reason) => {
+                rejected.push(Rejection {
+                    id: candidate.id.clone(),
+                    valid: false,
+                    reason,
+                });
+                continue;
+            }
+        };
         let calibration = illustrative_calibration();
         let cost =
             price(&candidate.dag, recurrence, data, &calibration).map_err(|(node, error)| {
@@ -273,6 +316,7 @@ pub fn select_plan(
             best = Some((candidate.id.clone(), cost.total, candidate.roots.clone()));
         }
         costs.insert(candidate.id.clone(), cost);
+        accepted.insert(candidate.id.clone(), accepted_accuracy);
     }
     let Some((selected, best_total, selected_roots)) = best else {
         return Err(SelectionError::NoValidCandidate(rejected));
@@ -300,6 +344,7 @@ pub fn select_plan(
         selected,
         plan,
         costs,
+        accepted,
         rejected,
     })
 }
@@ -504,8 +549,8 @@ pub fn sized_roots(
     with_resized_summaries(roots, &resize)
 }
 
-/// The first query whose output is not shown to meet its target, as a
-/// reason. An output meets its target when its theoretical root guarantee
+/// What Stage 3 accepted for each query ([`AcceptedAccuracy`]), or the
+/// first query whose output is not shown to meet its target, as a reason. An output meets its target when its theoretical root guarantee
 /// (composed in Stage 1 with the built-in model) satisfies it, or when the
 /// deployment's empirical evidence shows that this candidate's output does
 /// ([`crate::accuracy::AccuracyEvidenceProvider::output_guarantee`]). A
@@ -516,15 +561,24 @@ pub fn sized_roots(
 /// weights proven non-negative, which its bound assumes: an open
 /// [`WeightDomain::SamplesOfMetric`] requirement is met when `data` declares
 /// the metric a counter ([`confirmed_weights`]), and unmet otherwise.
-fn accuracy_violation(
+///
+/// A target that sets no metric accepts a guarantee in any metric that meets
+/// its ε, δ and scope ([`crate::accuracy::AccuracyModel::satisfies`]); one that sets a metric
+/// accepts only guarantees in it (or convertible to it).
+fn accuracy_check(
     candidate: &PhysicalCandidate,
     targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
-) -> Option<String> {
+) -> Result<Vec<Option<AcceptedAccuracy>>, String> {
+    let mut accepted = Vec::with_capacity(targets.len());
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
         let query = query + 1;
-        let Some(target) = target else { continue };
+        let Some(target) = target else {
+            accepted.push(None);
+            continue;
+        };
+        let mut sketches: Vec<String> = Vec::new();
         for node in root_operators(root)
             .iter()
             .flat_map(|node| OperatorNode::reachable(node))
@@ -535,6 +589,12 @@ fn accuracy_violation(
             else {
                 continue;
             };
+            if let FieldDataType::Sketch(kind, _) = family {
+                let name = format!("{:?}", kind.algorithm());
+                if !sketches.contains(&name) {
+                    sketches.push(name);
+                }
+            }
             if matches!(family, FieldDataType::Sketch(kind, _)
                     if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
                 && !matches!(
@@ -548,7 +608,7 @@ fn accuracy_violation(
                     }
                     _ => String::new(),
                 };
-                return Some(format!(
+                return Err(format!(
                     "q{query}: {} needs non-negative update weights, and these are not proven \
                      non-negative{unconfirmed}",
                     family_name(family)
@@ -564,17 +624,22 @@ fn accuracy_violation(
         };
         let guarantee = bound_root_guarantee(root, data, models).map(over_scope);
         let meets = |g: &AccuracyGuarantee| models.accuracy.satisfies(g, target);
-        if guarantee.as_ref().is_some_and(meets)
-            || models
+        let met = guarantee.clone().filter(meets).or_else(|| {
+            models
                 .evidence
                 .output_guarantee(root)
                 .map(over_scope)
-                .as_ref()
-                .is_some_and(meets)
-        {
+                .filter(meets)
+        });
+        if let Some(met) = met {
+            accepted.push(Some(AcceptedAccuracy {
+                target_metric: target.metric,
+                accepted_metric: (!met.is_exact()).then_some(met.spec.metric),
+                sketches,
+            }));
             continue;
         }
-        return Some(match guarantee {
+        return Err(match guarantee {
             Some(g)
                 if values.is_none()
                     && target.scope == AccuracyScope::WholeResult
@@ -603,7 +668,7 @@ fn accuracy_violation(
             ),
         });
     }
-    None
+    Ok(accepted)
 }
 
 /// `domain` with an open [`WeightDomain::SamplesOfMetric`] requirement
@@ -1688,7 +1753,7 @@ mod tests {
         BoundExpr, ErrorMetric, GroupingStrategy, ProbabilityExpr, SketchKind,
     };
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
-    use asap_types::types::RequestedAccuracy;
+    use asap_types::types::AccuracyTarget;
     use asap_types::workload::{Evidence, Rate};
 
     /// `n` queries repeating every 10 s, as Example 1's panels do.
@@ -1743,7 +1808,7 @@ mod tests {
     fn candidates() -> Vec<PhysicalCandidate> {
         let root = lower_promql(
             "topk by (job) (10, sum_over_time(m[1m]))",
-            RequestedAccuracy::epsilon_delta(0.01, 0.001),
+            AccuracyTarget::epsilon_delta(0.01, 0.001),
         );
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -1778,7 +1843,7 @@ mod tests {
     /// estimates carry no guarantee since #575, so a quantile summary is used.)
     #[test]
     fn accuracy_failing_candidate_is_rejected_as_invalid() {
-        let planned = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let planned = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let candidates = all_candidates("quantile_over_time(0.99, m[1m])", &planned);
         let strict = AccuracyTarget::epsilon_delta(1e-6, 1e-9);
         let summaries: Vec<_> = candidates
@@ -1826,7 +1891,7 @@ mod tests {
     /// non-negative is invalid.
     #[test]
     fn count_min_over_signed_weights_is_rejected_as_invalid() {
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let selection = select_plan(
             &candidates(),
             &[Some(target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1))],
@@ -1847,7 +1912,7 @@ mod tests {
     #[test]
     fn count_min_over_samples_needs_a_declared_counter() {
         use asap_types::workload::MetricType;
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let with_types = |types: &[(&str, MetricType)]| DataWorkload {
             metric_types: types.iter().map(|(m, t)| (m.to_string(), *t)).collect(),
             ..data()
@@ -1953,7 +2018,7 @@ mod tests {
             ProbabilityExpr::Constant { value: 0.001 },
             vec![],
         );
-        let node = lower_promql("sum(m)", RequestedAccuracy::exact());
+        let node = lower_promql("sum(m)", AccuracyTarget::exact());
         let root = QueryRoot::Operator(Rc::new((*node).clone().with_guarantee(Some(gated))));
         let with = |types: &[(&str, MetricType)]| DataWorkload {
             metric_types: types.iter().map(|(m, t)| (m.to_string(), *t)).collect(),
@@ -1983,7 +2048,7 @@ mod tests {
     #[test]
     fn the_selected_plan_carries_confirmed_weights() {
         use asap_types::workload::MetricType;
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
         let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
         let data = DataWorkload {
@@ -2098,7 +2163,7 @@ mod tests {
     #[test]
     fn per_node_costs_cover_the_dag_and_sum_to_the_total() {
         let candidates = candidates();
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let selection = select_plan(
             &candidates,
             &[Some(target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1))],
@@ -2130,7 +2195,7 @@ mod tests {
     /// and the nodes below it once, since they run only when it does.
     #[test]
     fn not_materialized_shared_nodes_are_charged_per_query() {
-        let outer = lower_promql("sum(sum_over_time(m[1m]))", RequestedAccuracy::exact());
+        let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
         let inner = outer.children()[0].clone();
         let mut candidate = optimize_physical_asap(
             "L",
@@ -2178,7 +2243,7 @@ mod tests {
 
     /// Every combination of Pass 1 candidates of one query, as Stage 2
     /// candidates `P1`, `P2`, ...
-    fn all_candidates(query: &str, target: &RequestedAccuracy) -> Vec<PhysicalCandidate> {
+    fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalCandidate> {
         let root = lower_promql(query, target.clone());
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -2226,7 +2291,7 @@ mod tests {
     /// The KLL candidates of `quantile_over_time(0.99, x[5m])`, per series,
     /// within rank error 0.01 at δ = 0.01 over `scope`.
     fn per_series_kll(scope: AccuracyScope) -> (Vec<PhysicalCandidate>, AccuracyTarget) {
-        let requested = RequestedAccuracy::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank);
+        let requested = AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank);
         let candidates = all_candidates("quantile_over_time(0.99, x[5m])", &requested)
             .into_iter()
             .filter(|c| !kll_params(&c.roots).is_empty())
@@ -2341,9 +2406,8 @@ mod tests {
     #[test]
     fn a_root_of_at_most_one_row_returns_one_value() {
         let none = DataWorkload::default();
-        let root = |query: &str| {
-            QueryRoot::Operator(lower_promql(query, RequestedAccuracy::epsilon(0.01)))
-        };
+        let root =
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::epsilon(0.01)));
         assert_eq!(output_values(&root("sum(rate(x[5m]))"), &none), Some(1.0));
         assert_eq!(output_values(&root("topk(5, rate(x[5m]))"), &none), None);
         assert_eq!(
@@ -2420,7 +2484,7 @@ mod tests {
             ..data()
         };
         let target =
-            RequestedAccuracy::epsilon_delta(0.5, 0.5).target_in(ErrorMetric::ABSOLUTE_STREAM_L1);
+            AccuracyTarget::epsilon_delta(0.5, 0.5).target_in(ErrorMetric::ABSOLUTE_STREAM_L1);
         let select = |metric| {
             select_plan(
                 &candidates(),
@@ -2456,7 +2520,7 @@ mod tests {
     /// output admits them.
     #[test]
     fn combined_estimates_need_evidence_about_the_output() {
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let candidates = all_candidates(
             "quantile_over_time(0.99, m[1m]) - quantile_over_time(0.5, m[1m])",
             &target,
@@ -2525,7 +2589,7 @@ mod tests {
     /// query runs is not charged.)
     #[test]
     fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
         for (query, sketch_wins) in [
             ("quantile(0.99, rate(x[5m]))", true),
             ("quantile by (job) (0.99, rate(x[5m]))", false),
@@ -2556,7 +2620,7 @@ mod tests {
     #[test]
     fn exact_l2_state_is_priced_like_exact_quantile_state() {
         let aggregate_cost = |query: &str| {
-            let candidates = all_candidates(query, &RequestedAccuracy::exact());
+            let candidates = all_candidates(query, &AccuracyTarget::exact());
             let selection = select_plan(
                 &candidates,
                 &[None],
@@ -2725,7 +2789,7 @@ mod tests {
     /// sketch is.
     #[test]
     fn exact_distinct_count_beats_a_sketch_over_small_groups() {
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
         let one_series = DataWorkload {
             input_cardinality: Evidence {
                 value: Some(1),
@@ -2780,7 +2844,7 @@ mod tests {
     /// At δ = 0.001 a KLL candidate meets the target and is valid.
     #[test]
     fn kll_candidate_meets_a_failure_probability_below_one_percent() {
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let candidates = all_candidates("quantile(0.99, rate(x[5m]))", &target);
         let selection = select_plan(
             &candidates,
@@ -2809,7 +2873,7 @@ mod tests {
     /// operands only is exact.
     #[test]
     fn scalar_root_guarantees_compose_through_arithmetic() {
-        let node = lower_promql("sum(m)", RequestedAccuracy::exact());
+        let node = lower_promql("sum(m)", AccuracyTarget::exact());
         let approximate = AccuracyGuarantee::new(
             ErrorMetric::ABSOLUTE,
             BoundExpr::Constant { value: 0.01 },
@@ -2855,7 +2919,7 @@ mod tests {
     /// Every candidate of the Stage 1 to Stage 3 run of one query.
     fn run(
         query: &str,
-        target: &RequestedAccuracy,
+        target: &AccuracyTarget,
         data: &DataWorkload,
         models: PlanningModels<'_>,
     ) -> (Vec<PhysicalCandidate>, Selection) {
@@ -2866,8 +2930,8 @@ mod tests {
     /// against `selected`.
     fn run_selecting(
         query: &str,
-        planned: &RequestedAccuracy,
-        selected: &RequestedAccuracy,
+        planned: &AccuracyTarget,
+        selected: &AccuracyTarget,
         data: &DataWorkload,
         models: PlanningModels<'_>,
     ) -> (Vec<PhysicalCandidate>, Selection) {
@@ -2916,7 +2980,7 @@ mod tests {
     /// result is a rank interval: no guarantee in the MVP.
     #[test]
     fn extremum_and_scaling_over_per_series_estimates_compose() {
-        let target = RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
         for query in [
             "max by (job) (quantile_over_time(0.99, m[1m]))",
             "2 * max by (job) (quantile_over_time(0.99, m[1m]))",
@@ -2948,7 +3012,7 @@ mod tests {
     /// guarantee in the MVP, so those are not.
     #[test]
     fn lipschitz_functions_keep_and_shifts_and_comparisons_drop_a_relative_bound() {
-        let target = RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
         let q = "quantile_over_time(0.99, m[1m])";
         for (query, kept) in [
             (format!("-{q}"), true),
@@ -2987,7 +3051,7 @@ mod tests {
     /// the query, and the fold has no guarantee.
     #[test]
     fn a_fold_over_subquery_estimates_counts_its_steps() {
-        let target = RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
         let q = "quantile_over_time(0.99, m[1m])";
         let (candidates, selection) = run(
             &format!("max_over_time({q}[10m:1m])"),
@@ -3028,7 +3092,7 @@ mod tests {
     /// are labels, not the estimates (#669).
     #[test]
     fn counting_estimates_by_a_label_stays_exact() {
-        let target = RequestedAccuracy::epsilon(0.01);
+        let target = AccuracyTarget::epsilon(0.01);
         let (candidates, _) = run(
             "count by (le) (quantile_over_time(0.99, m[1m]))",
             &target,
@@ -3061,7 +3125,7 @@ mod tests {
     /// symbolic and plan selection treats it as unmet.
     #[test]
     fn average_over_relative_estimates_needs_the_sign() {
-        let target = RequestedAccuracy::epsilon(0.01);
+        let target = AccuracyTarget::epsilon(0.01);
         let (candidates, selection) = run(
             "avg by (job) (quantile_over_time(0.99, m[1m]))",
             &target,
@@ -3085,8 +3149,7 @@ mod tests {
     /// workload's input cardinality; without one, the target is unmet.
     #[test]
     fn stage3_binds_the_input_row_count_from_the_data_workload() {
-        let target =
-            RequestedAccuracy::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Relative);
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
         let ddsketch = |candidates: &[PhysicalCandidate]| -> Vec<String> {
             candidates
@@ -3132,8 +3195,8 @@ mod tests {
     /// twice that, is checked against a looser one.
     #[test]
     fn ddsketch_ratio_meets_its_target_only_with_operand_domains() {
-        let planned = RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Relative);
-        let target = RequestedAccuracy::epsilon(0.05).with_metric(ErrorMetric::Relative);
+        let planned = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::epsilon(0.05).with_metric(ErrorMetric::Relative);
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
         let run = |models| run_selecting(query, &planned, &target, &data(), models);
         let (candidates, without) = run(PlanningModels::builtin());
@@ -3151,7 +3214,7 @@ mod tests {
 
     /// `query` carrying `guarantee`, as a `scalar(…)` operand.
     fn scalar_of(query: &str, guarantee: AccuracyGuarantee) -> ScalarExpr {
-        let node = lower_promql(query, RequestedAccuracy::exact());
+        let node = lower_promql(query, AccuracyTarget::exact());
         ScalarExpr::PromqlScalarFromVector(Rc::new((*node).clone().with_guarantee(Some(guarantee))))
     }
 
@@ -3324,8 +3387,8 @@ mod tests {
     /// inherited it, so the candidate is selectable.
     #[test]
     fn a_scaled_ratio_binds_at_its_division() {
-        let planned = RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Relative);
-        let target = RequestedAccuracy::epsilon(0.05).with_metric(ErrorMetric::Relative);
+        let planned = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::epsilon(0.05).with_metric(ErrorMetric::Relative);
         let query = "(quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])) \
                      / max_over_time(m[1m])";
         let (candidates, selection) = run_selecting(
@@ -3352,7 +3415,7 @@ mod tests {
     /// have expired) is not used; timeless declared evidence is.
     #[test]
     fn stage3_binds_only_fresh_input_cardinality() {
-        let target = RequestedAccuracy::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
         let expiring = DataWorkload {
             input_cardinality: Evidence {
@@ -3382,7 +3445,7 @@ mod tests {
         };
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
-            RequestedAccuracy::epsilon_delta(0.01, 0.01),
+            AccuracyTarget::epsilon_delta(0.01, 0.01),
         );
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -3428,7 +3491,7 @@ mod tests {
     /// The physical DAG of `query`'s first per-computation candidates,
     /// with nothing materialized.
     fn first_candidate_dag(query: &str) -> PhysicalASAPDAG {
-        let root = lower_promql(query, RequestedAccuracy::exact());
+        let root = lower_promql(query, AccuracyTarget::exact());
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
         )
@@ -3556,7 +3619,7 @@ mod tests {
             "quantile_over_time(0.99, m[1m])",
             "quantile by (job) (0.99, m)",
         ] {
-            let target = RequestedAccuracy::exact();
+            let target = AccuracyTarget::exact();
             let root = lower_promql(query, target);
             let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
                 .unwrap()
@@ -3593,7 +3656,7 @@ mod tests {
     #[test]
     fn kept_exact_state_is_charged_by_the_values_it_keeps() {
         let kept = |query: &str| {
-            let root = lower_promql(query, RequestedAccuracy::exact());
+            let root = lower_promql(query, AccuracyTarget::exact());
             let mut dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
                 .unwrap()
                 .dag;
@@ -3628,7 +3691,7 @@ mod tests {
     /// rate, where queries at the same interval run together.
     #[test]
     fn rates_follow_per_consumer_charging() {
-        let root = lower_promql("sum by (job) (rate(m[1m]))", RequestedAccuracy::exact());
+        let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
         let one = optimize_physical_asap("L", &[QueryRoot::Operator(root.clone())])
             .unwrap()
             .dag;
@@ -3663,7 +3726,7 @@ mod tests {
     /// invocations × per-evaluation cost / horizon_s.
     #[test]
     fn one_off_recurrence_is_spread_over_the_horizon() {
-        let root = lower_promql("sum by (job) (rate(m[1m]))", RequestedAccuracy::exact());
+        let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
         let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
             .unwrap()
             .dag;

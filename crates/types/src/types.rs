@@ -2,11 +2,11 @@
 //!
 //! A requirement and a guarantee share one outer shape, [`AccuracySpec`]:
 //! an error metric, an error ε, a failure probability δ and a scope. A
-//! requirement ([`AccuracyTarget`]) holds concrete numbers; a guarantee
-//! ([`crate::post_asap::AccuracyGuarantee`]) holds symbolic expressions that
-//! plan selection binds. Workloads and the query-language frontends take a
-//! [`RequestedAccuracy`], whose metric may be omitted; it is resolved to an
-//! [`AccuracyTarget`] for each aggregate intent and for each query root.
+//! requirement ([`AccuracyTarget`]) holds concrete numbers and may leave its
+//! metric unset; a guarantee ([`crate::post_asap::AccuracyGuarantee`])
+//! always states its metric and holds symbolic expressions that plan
+//! selection binds. A target without a metric accepts a guarantee in any
+//! metric that meets its ε, δ and scope.
 
 use serde::{Deserialize, Serialize};
 
@@ -115,9 +115,11 @@ pub enum AccuracyScope {
     WholeResult,
 }
 
-/// The outer shape an accuracy target and an accuracy guarantee share:
+/// The outer shape of an accuracy guarantee
+/// ([`crate::post_asap::AccuracyGuarantee`]):
 /// `Pr[err_metric(estimate, truth) > error] ≤ failure_probability` over the
-/// values `scope` names.
+/// values `scope` names. An [`AccuracyTarget`] has the same fields, with
+/// concrete numbers and an optional metric.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccuracySpec<E, P> {
@@ -129,35 +131,64 @@ pub struct AccuracySpec<E, P> {
     pub scope: AccuracyScope,
 }
 
-/// A concrete accuracy requirement. `failure_probability: None` imposes no
-/// δ requirement (sizing then uses the planner's default δ). Exact is
-/// `error = 0`, `failure_probability = Some(0)`, whatever the metric.
-pub type AccuracyTarget = AccuracySpec<f64, Option<f64>>;
+/// An accuracy requirement, as a workload, a caller or a frontend states
+/// it: `Pr[err_metric(estimate, truth) > error] ≤ failure_probability` over
+/// the values `scope` names.
+///
+/// `metric: None` means the user did not set one: plan selection then
+/// accepts a guarantee in any metric whose ε, δ and scope meet this
+/// target's, and reports the metric it accepted. A set metric accepts only
+/// guarantees in that metric (or convertible to it with evidence).
+/// `failure_probability: None` imposes no δ requirement (sizing then uses
+/// the planner's default δ). Exact is `error = 0`,
+/// `failure_probability = Some(0)`, whatever the metric.
+///
+/// JSON: `{"metric": "rank", "error": 0.01, "failure_probability": 0.001,
+/// "scope": "whole_result"}`; every field but `error` may be omitted
+/// (`scope` defaults to `whole_result`). Exact is
+/// `{"error": 0.0, "failure_probability": 0.0}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccuracyTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<ErrorMetric>,
+    /// ε, in the metric's units.
+    pub error: f64,
+    /// δ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_probability: Option<f64>,
+    #[serde(default = "whole_result")]
+    pub scope: AccuracyScope,
+}
 
-impl AccuracySpec<f64, Option<f64>> {
+fn whole_result() -> AccuracyScope {
+    AccuracyScope::WholeResult
+}
+
+impl AccuracyTarget {
     /// No approximation permitted.
     pub const fn exact() -> Self {
         Self {
-            metric: ErrorMetric::ABSOLUTE,
+            metric: None,
             error: 0.0,
             failure_probability: Some(0.0),
             scope: AccuracyScope::WholeResult,
         }
     }
 
-    /// Error at most `epsilon` in absolute value units, with no δ
-    /// requirement. [`Self::with_metric`] states another metric.
+    /// Error at most `epsilon`, with no δ requirement and no metric set.
+    /// [`Self::with_metric`] sets one.
     pub const fn epsilon(epsilon: f64) -> Self {
         Self {
-            metric: ErrorMetric::ABSOLUTE,
+            metric: None,
             error: epsilon,
             failure_probability: None,
             scope: AccuracyScope::WholeResult,
         }
     }
 
-    /// Error at most `epsilon` in absolute value units with probability at
-    /// least `1 − delta`. [`Self::with_metric`] states another metric.
+    /// Error at most `epsilon` with probability at least `1 − delta`, and
+    /// no metric set. [`Self::with_metric`] sets one.
     pub const fn epsilon_delta(epsilon: f64, delta: f64) -> Self {
         Self {
             failure_probability: Some(delta),
@@ -165,9 +196,12 @@ impl AccuracySpec<f64, Option<f64>> {
         }
     }
 
-    /// This target stated in `metric`.
+    /// This target with its metric set to `metric`.
     pub fn with_metric(self, metric: ErrorMetric) -> Self {
-        Self { metric, ..self }
+        Self {
+            metric: Some(metric),
+            ..self
+        }
     }
 
     /// This target over `scope`.
@@ -179,179 +213,47 @@ impl AccuracySpec<f64, Option<f64>> {
     pub fn is_exact(&self) -> bool {
         self.error == 0.0 && self.failure_probability == Some(0.0)
     }
-}
 
-/// An accuracy requirement as a workload or a caller states it: the
-/// metric may be omitted. [`Self::for_root`] resolves it for a query root
-/// (the target plan selection checks); [`Self::target_in`] states it in an
-/// aggregate intent's own metric (the target a summary is sized against).
-///
-/// Reads the workload forms `"Exact"`, `{"Epsilon": ε}` and
-/// `{"EpsilonDelta": {"epsilon": ε, "delta": δ}}`, as well as
-/// `{"metric": …, "error": ε, "failure_probability": δ, "scope": …}`, in
-/// which every field but `error` is optional.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "RequestedAccuracyWire")]
-pub struct RequestedAccuracy {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metric: Option<ErrorMetric>,
-    pub error: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_probability: Option<f64>,
-    pub scope: AccuracyScope,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RequestedAccuracyWire {
-    Named(NamedTarget),
-    Spec(SpecWire),
-}
-
-/// The workload forms that name no metric.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-enum NamedTarget {
-    Epsilon(f64),
-    EpsilonDelta { epsilon: f64, delta: f64 },
-    Exact,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SpecWire {
-    #[serde(default)]
-    metric: Option<ErrorMetric>,
-    error: f64,
-    #[serde(default)]
-    failure_probability: Option<f64>,
-    #[serde(default = "whole_result")]
-    scope: AccuracyScope,
-}
-
-fn whole_result() -> AccuracyScope {
-    AccuracyScope::WholeResult
-}
-
-impl From<RequestedAccuracyWire> for RequestedAccuracy {
-    fn from(wire: RequestedAccuracyWire) -> Self {
-        match wire {
-            RequestedAccuracyWire::Named(NamedTarget::Exact) => Self::exact(),
-            RequestedAccuracyWire::Named(NamedTarget::Epsilon(epsilon)) => Self::epsilon(epsilon),
-            RequestedAccuracyWire::Named(NamedTarget::EpsilonDelta { epsilon, delta }) => {
-                Self::epsilon_delta(epsilon, delta)
-            }
-            RequestedAccuracyWire::Spec(spec) => Self {
-                metric: spec.metric,
-                error: spec.error,
-                failure_probability: spec.failure_probability,
-                scope: spec.scope,
-            },
-        }
-    }
-}
-
-/// A requested accuracy that cannot be resolved for a query root.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub enum AccuracyRequestError {
-    /// A quantile's error may be a rank or a value error, and which one is
-    /// the user's choice: the planner never guesses it.
-    #[error(
-        "the accuracy target of a {intent} query must name its metric \
-         (\"rank\", \"relative\" or \"absolute\")"
-    )]
-    MissingQuantileMetric { intent: &'static str },
-}
-
-impl RequestedAccuracy {
-    /// No approximation permitted.
-    pub const fn exact() -> Self {
-        Self {
-            metric: None,
-            error: 0.0,
-            failure_probability: Some(0.0),
-            scope: AccuracyScope::WholeResult,
-        }
-    }
-
-    /// Error at most `epsilon` in the query's default metric, with no δ
-    /// requirement.
-    pub const fn epsilon(epsilon: f64) -> Self {
-        Self {
-            metric: None,
-            error: epsilon,
-            failure_probability: None,
-            scope: AccuracyScope::WholeResult,
-        }
-    }
-
-    /// Error at most `epsilon` in the query's default metric with
-    /// probability at least `1 − delta`.
-    pub const fn epsilon_delta(epsilon: f64, delta: f64) -> Self {
-        Self {
-            failure_probability: Some(delta),
-            ..Self::epsilon(epsilon)
-        }
-    }
-
-    /// This request stated in `metric`.
-    pub fn with_metric(self, metric: ErrorMetric) -> Self {
-        Self {
-            metric: Some(metric),
-            ..self
-        }
-    }
-
-    /// Whether this request permits no approximation.
-    pub fn is_exact(&self) -> bool {
-        self.error == 0.0 && self.failure_probability == Some(0.0)
-    }
-
-    /// This request's ε, δ and scope, stated in `metric`. An exact request
-    /// is [`AccuracyTarget::exact`] whatever `metric`: exact is exact in
+    /// This target's ε, δ and scope, stated in `metric`: the target an
+    /// aggregate intent's summary is sized against, in the intent's own
+    /// metric. An exact target stays [`Self::exact`]: exact is exact in
     /// every metric.
-    pub fn target_in(&self, metric: ErrorMetric) -> AccuracyTarget {
+    pub fn target_in(&self, metric: ErrorMetric) -> Self {
         if self.is_exact() {
-            return AccuracyTarget::exact().with_scope(self.scope);
+            return Self::exact().with_scope(self.scope);
         }
-        AccuracyTarget {
-            metric,
-            error: self.error,
-            failure_probability: self.failure_probability,
-            scope: self.scope,
-        }
+        self.clone().with_metric(metric)
     }
 
-    /// The target a quantile intent is sized against: the requested metric,
-    /// or `Rank` when none is named. A summary is sized in its own native
-    /// terms (#690 §4), so only ε, δ and the scope matter there; a quantile
-    /// root's metric must be named ([`Self::for_root`]).
+    /// The target a quantile intent is sized against: the set metric, or
+    /// `Rank` when none is set. A summary is sized in its own native terms
+    /// (#690 §4), so only ε, δ and the scope matter there; the query's own
+    /// metric, set or not, is checked at its root.
     ///
     /// The other intents with a target are stated in their own metric with
     /// [`Self::target_in`]: an L1-scaled absolute error for counts and top-k
     /// frequencies, a relative error for distinct counts, and an absolute
-    /// value error for frequency moments. The query's own metric is checked
-    /// at its root.
-    pub fn for_quantile(&self) -> AccuracyTarget {
+    /// value error for frequency moments.
+    pub fn for_quantile(&self) -> Self {
         self.target_in(self.metric.unwrap_or(ErrorMetric::Rank))
     }
+}
 
-    /// The target plan selection checks at `root`: the requested metric, or
-    /// the one derived from the root's computation — an L1-scaled absolute
-    /// error for counts and top-k frequencies, a relative error for
-    /// distinct counts and L2 frequency moments, and an absolute value
-    /// error for anything else (sums, arithmetic, rates, averages, extrema,
-    /// entropy). A
-    /// quantile root has no default: its request must name the metric. An
-    /// exact request needs none.
-    pub fn for_root(&self, root: &QueryRoot) -> Result<AccuracyTarget, AccuracyRequestError> {
-        if let Some(metric) = self.metric {
-            return Ok(self.target_in(metric));
-        }
-        if self.is_exact() {
-            return Ok(self.target_in(ErrorMetric::ABSOLUTE));
-        }
-        root_metric(root).map(|metric| self.target_in(metric))
+/// The metric a query's result is most naturally stated in, from the
+/// computation at `root`: an L1-scaled absolute error for counts and top-k
+/// frequencies, a relative error for distinct counts and L2 frequency
+/// moments, and an absolute value error for anything else (sums,
+/// arithmetic, rates, averages, extrema, entropy). `None` for a quantile
+/// root, whose error is as naturally a rank as a relative one.
+///
+/// Used only to size and to display: a target whose metric is not set
+/// accepts a guarantee in any metric (#690).
+pub fn default_metric_for_root(root: &QueryRoot) -> Option<ErrorMetric> {
+    match root {
+        QueryRoot::Operator(node) => node_metric(node),
+        QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node))
+        | QueryRoot::Scalar(ScalarExpr::ScalarSubquery(node)) => node_metric(node),
+        QueryRoot::Scalar(_) => Some(ErrorMetric::ABSOLUTE),
     }
 }
 
@@ -367,20 +269,11 @@ fn intent_metric(intent: &AggIntent) -> Option<ErrorMetric> {
     }
 }
 
-fn root_metric(root: &QueryRoot) -> Result<ErrorMetric, AccuracyRequestError> {
-    match root {
-        QueryRoot::Operator(node) => node_metric(node),
-        QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node))
-        | QueryRoot::Scalar(ScalarExpr::ScalarSubquery(node)) => node_metric(node),
-        QueryRoot::Scalar(_) => Ok(ErrorMetric::ABSOLUTE),
-    }
-}
-
 /// The metric of `node`'s values, looking through operators that only
 /// select, order or rename rows.
-fn node_metric(node: &OperatorNode) -> Result<ErrorMetric, AccuracyRequestError> {
+fn node_metric(node: &OperatorNode) -> Option<ErrorMetric> {
     let Operator::NonASAP(op) = &node.operator else {
-        return Ok(ErrorMetric::ABSOLUTE);
+        return Some(ErrorMetric::ABSOLUTE);
     };
     match op {
         NonASAPOp::Filter { child, .. }
@@ -399,7 +292,7 @@ fn node_metric(node: &OperatorNode) -> Result<ErrorMetric, AccuracyRequestError>
         // count: the metric of the columns its value branches read.
         NonASAPOp::Project { .. } => (0..node.schema.fields.len())
             .map(|column| column_metric(node, column))
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Option<Vec<_>>>()
             .map(|metrics| match metrics.split_first() {
                 Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
                 _ => ErrorMetric::ABSOLUTE,
@@ -408,27 +301,20 @@ fn node_metric(node: &OperatorNode) -> Result<ErrorMetric, AccuracyRequestError>
             let mut metrics = Vec::new();
             for intent in measures {
                 match intent {
-                    AggIntent::Quantile { .. } => {
-                        return Err(AccuracyRequestError::MissingQuantileMetric {
-                            intent: "quantile",
-                        })
-                    }
-                    AggIntent::HistogramQuantile { .. } => {
-                        return Err(AccuracyRequestError::MissingQuantileMetric {
-                            intent: "histogram_quantile",
-                        })
+                    AggIntent::Quantile { .. } | AggIntent::HistogramQuantile { .. } => {
+                        return None
                     }
                     intent => metrics.push(intent_metric(intent).unwrap_or(ErrorMetric::ABSOLUTE)),
                 }
             }
             // Measures with different default metrics share one value-unit
             // statement.
-            Ok(match metrics.split_first() {
+            Some(match metrics.split_first() {
                 Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
                 _ => ErrorMetric::ABSOLUTE,
             })
         }
-        _ => Ok(ErrorMetric::ABSOLUTE),
+        _ => Some(ErrorMetric::ABSOLUTE),
     }
 }
 
@@ -436,10 +322,10 @@ fn node_metric(node: &OperatorNode) -> Result<ErrorMetric, AccuracyRequestError>
 /// projections, `CASE` value branches, joins and operators that only
 /// select, order or rename rows, down to an aggregate's measure. A group
 /// key or any other expression is absolute.
-fn column_metric(node: &OperatorNode, column: usize) -> Result<ErrorMetric, AccuracyRequestError> {
+fn column_metric(node: &OperatorNode, column: usize) -> Option<ErrorMetric> {
     use crate::ir::operator_properties::JoinKind;
     let Operator::NonASAP(op) = &node.operator else {
-        return Ok(ErrorMetric::ABSOLUTE);
+        return Some(ErrorMetric::ABSOLUTE);
     };
     match op {
         NonASAPOp::Filter { child, .. }
@@ -465,15 +351,15 @@ fn column_metric(node: &OperatorNode, column: usize) -> Result<ErrorMetric, Accu
                         ScalarExpr::Cast { expr, .. }
                             if matches!(**expr, ScalarExpr::Literal(_)) => {}
                         ScalarExpr::Column(id) => metrics.push(column_metric(child, *id)?),
-                        _ => return Ok(ErrorMetric::ABSOLUTE),
+                        _ => return Some(ErrorMetric::ABSOLUTE),
                     }
                 }
-                Ok(match metrics.split_first() {
+                Some(match metrics.split_first() {
                     Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
                     _ => ErrorMetric::ABSOLUTE,
                 })
             }
-            _ => Ok(ErrorMetric::ABSOLUTE),
+            _ => Some(ErrorMetric::ABSOLUTE),
         },
         NonASAPOp::Join {
             kind:
@@ -493,19 +379,12 @@ fn column_metric(node: &OperatorNode, column: usize) -> Result<ErrorMetric, Accu
             // Group keys first, then one column per measure.
             let keys = node.schema.fields.len().saturating_sub(measures.len());
             match column.checked_sub(keys).and_then(|m| measures.get(m)) {
-                Some(AggIntent::Quantile { .. }) => {
-                    Err(AccuracyRequestError::MissingQuantileMetric { intent: "quantile" })
-                }
-                Some(AggIntent::HistogramQuantile { .. }) => {
-                    Err(AccuracyRequestError::MissingQuantileMetric {
-                        intent: "histogram_quantile",
-                    })
-                }
-                Some(intent) => Ok(intent_metric(intent).unwrap_or(ErrorMetric::ABSOLUTE)),
-                None => Ok(ErrorMetric::ABSOLUTE),
+                Some(AggIntent::Quantile { .. } | AggIntent::HistogramQuantile { .. }) => None,
+                Some(intent) => Some(intent_metric(intent).unwrap_or(ErrorMetric::ABSOLUTE)),
+                None => Some(ErrorMetric::ABSOLUTE),
             }
         }
-        _ => Ok(ErrorMetric::ABSOLUTE),
+        _ => Some(ErrorMetric::ABSOLUTE),
     }
 }
 
@@ -551,40 +430,45 @@ mod tests {
         }
     }
 
-    /// The old workload forms still read, and name no metric; the spec
-    /// form may name one.
+    /// A target reads and writes as a plain struct: every field but
+    /// `error` may be omitted (no metric, no δ, the whole result), an unset
+    /// metric or δ writes nothing, and the old named forms (`"Exact"`,
+    /// `{"Epsilon": ε}`, `{"EpsilonDelta": …}`) and unknown fields are
+    /// rejected.
     #[test]
-    fn requested_accuracy_reads_old_and_spec_forms() {
-        let read = |value: serde_json::Value| -> RequestedAccuracy {
-            serde_json::from_value(value).unwrap()
-        };
-        assert_eq!(read(serde_json::json!("Exact")), RequestedAccuracy::exact());
+    fn accuracy_target_json_is_a_plain_struct() {
+        use serde_json::json;
+        let read = |value: serde_json::Value| serde_json::from_value::<AccuracyTarget>(value);
         assert_eq!(
-            read(serde_json::json!({"Epsilon": 0.01})),
-            RequestedAccuracy::epsilon(0.01)
+            read(json!({"error": 0.01})).unwrap(),
+            AccuracyTarget::epsilon(0.01)
         );
         assert_eq!(
-            read(serde_json::json!({"EpsilonDelta": {"epsilon": 0.01, "delta": 0.001}})),
-            RequestedAccuracy::epsilon_delta(0.01, 0.001)
+            read(json!({"error": 0.0, "failure_probability": 0.0})).unwrap(),
+            AccuracyTarget::exact()
         );
-        let rank = RequestedAccuracy::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank);
+        let rank = AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank);
         assert_eq!(
-            read(
-                serde_json::json!({"metric": "rank", "error": 0.01, "failure_probability": 0.001})
-            ),
+            read(json!({"metric": "rank", "error": 0.01, "failure_probability": 0.001})).unwrap(),
             rank
         );
-        assert_eq!(read(serde_json::to_value(&rank).unwrap()), rank);
-        assert!(
-            serde_json::from_value::<RequestedAccuracy>(serde_json::json!({
-                "EpsilonDelta": {"epsilon": 0.1, "delta": 0.01, "typo": true}
-            }))
-            .is_err()
+        assert_eq!(
+            serde_json::to_value(&rank).unwrap(),
+            json!({"metric": "rank", "error": 0.01, "failure_probability": 0.001,
+                   "scope": "whole_result"})
         );
-        assert!(serde_json::from_value::<RequestedAccuracy>(
-            serde_json::json!({"error": 0.1, "typo": true})
-        )
-        .is_err());
+        assert_eq!(
+            serde_json::to_value(AccuracyTarget::epsilon(0.01)).unwrap(),
+            json!({"error": 0.01, "scope": "whole_result"})
+        );
+        for old in [
+            json!("Exact"),
+            json!({"Epsilon": 0.01}),
+            json!({"EpsilonDelta": {"epsilon": 0.01, "delta": 0.001}}),
+            json!({"error": 0.1, "typo": true}),
+        ] {
+            assert!(read(old.clone()).is_err(), "{old}");
+        }
     }
 
     /// Metrics have stable wire names.
@@ -611,8 +495,7 @@ mod tests {
     /// among them) absolute value errors.
     #[test]
     fn root_metric_defaults_follow_the_query_intent() {
-        let request = RequestedAccuracy::epsilon(0.01);
-        let metric = |intent: AggIntent| request.for_root(&aggregate(vec![intent])).unwrap().metric;
+        let metric = |intent: AggIntent| default_metric_for_root(&aggregate(vec![intent])).unwrap();
         let exact = AccuracyTarget::exact();
         assert_eq!(
             metric(AggIntent::Count {
@@ -651,11 +534,8 @@ mod tests {
         );
         assert_eq!(metric(AggIntent::Avg { col: None }), ErrorMetric::ABSOLUTE);
         assert_eq!(
-            request
-                .for_root(&QueryRoot::Scalar(ScalarExpr::literal_f64(1.0)))
-                .unwrap()
-                .metric,
-            ErrorMetric::ABSOLUTE
+            default_metric_for_root(&QueryRoot::Scalar(ScalarExpr::literal_f64(1.0))),
+            Some(ErrorMetric::ABSOLUTE)
         );
     }
 
@@ -712,12 +592,7 @@ mod tests {
                 child: joined.clone(),
             }))
         };
-        let metric = |root: QueryRoot| {
-            RequestedAccuracy::epsilon(0.01)
-                .for_root(&root)
-                .unwrap()
-                .metric
-        };
+        let metric = |root: QueryRoot| default_metric_for_root(&root).unwrap();
         assert_eq!(metric(guard(ScalarExpr::Column(0))), ErrorMetric::Relative);
         // The count's column, or arithmetic over the statistic.
         assert_eq!(
@@ -733,27 +608,12 @@ mod tests {
         );
     }
 
-    /// A quantile root's request must name its metric; a named metric or an
-    /// exact request needs no default.
+    /// A quantile root has no default metric: its error is as naturally a
+    /// rank as a relative one, and a target that sets none accepts either.
+    /// It is not an input error.
     #[test]
-    fn a_quantile_root_must_name_its_metric() {
-        let root = aggregate(vec![quantile()]);
-        assert_eq!(
-            RequestedAccuracy::epsilon(0.01).for_root(&root),
-            Err(AccuracyRequestError::MissingQuantileMetric { intent: "quantile" })
-        );
-        assert_eq!(
-            RequestedAccuracy::epsilon(0.01)
-                .with_metric(ErrorMetric::Relative)
-                .for_root(&root)
-                .unwrap()
-                .metric,
-            ErrorMetric::Relative
-        );
-        assert!(RequestedAccuracy::exact()
-            .for_root(&root)
-            .unwrap()
-            .is_exact());
+    fn a_quantile_root_has_no_default_metric() {
+        assert_eq!(default_metric_for_root(&aggregate(vec![quantile()])), None);
     }
 
     /// Exact means zero error with certainty, whatever the metric; an
@@ -761,6 +621,7 @@ mod tests {
     #[test]
     fn exact_targets() {
         assert!(AccuracyTarget::exact().is_exact());
+        assert_eq!(AccuracyTarget::exact().metric, None);
         assert!(AccuracyTarget::exact()
             .with_metric(ErrorMetric::Rank)
             .is_exact());

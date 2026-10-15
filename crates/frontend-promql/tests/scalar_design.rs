@@ -2,11 +2,11 @@
 mod support;
 use asap_types::ir::{NonASAPOp, QueryRoot, ScalarExpr};
 use asap_types::pre_asap::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 
 fn root(query: &str) -> QueryRoot {
     asap_frontend_promql::lower_promql_query_workload(
-        &support::workload(query, RequestedAccuracy::exact()),
+        &support::workload(query, AccuracyTarget::exact()),
         0,
     )
     .unwrap()

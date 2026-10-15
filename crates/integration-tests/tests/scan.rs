@@ -15,10 +15,10 @@ use asap_types::ir::{
     ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
 };
 use asap_types::pre_asap::{CompareOpKind, ScalarValue, Source};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
-    lower_promql(q, RequestedAccuracy::exact())
+    lower_promql(q, AccuracyTarget::exact())
         .unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 

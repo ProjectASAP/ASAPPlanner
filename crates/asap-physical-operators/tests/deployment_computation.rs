@@ -11,14 +11,14 @@ use common::{compile_physical_asap_dag, logical_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::ASAPOp;
-use planner_types::{post_asap::*, types::RequestedAccuracy, workload::*};
+use planner_types::{post_asap::*, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
 fn lower(query: &str) -> Rc<planner_types::ir::OperatorNode> {
-    lower_with(query, RequestedAccuracy::exact())
+    lower_with(query, AccuracyTarget::exact())
 }
 
-fn lower_with(query: &str, accuracy: RequestedAccuracy) -> Rc<planner_types::ir::OperatorNode> {
+fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -52,7 +52,7 @@ fn lower_with(query: &str, accuracy: RequestedAccuracy) -> Rc<planner_types::ir:
 fn exact_dag(query: &str) -> PhysicalASAPDAG {
     let expression = lower(query);
     let root = promql_rows::with_series_identity(&expression).unwrap_or(expression);
-    compile_physical_asap_dag(&selected_dag(root, RequestedAccuracy::exact())).unwrap()
+    compile_physical_asap_dag(&selected_dag(root, AccuracyTarget::exact())).unwrap()
 }
 
 fn population_dag(query: &str) -> PhysicalASAPDAG {
@@ -614,7 +614,7 @@ fn population_sums_and_averages_are_compensated() {
 #[test]
 fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
-    let accuracy = RequestedAccuracy::epsilon(0.02);
+    let accuracy = AccuracyTarget::epsilon(0.02);
     let root = lower_with("count(up)", accuracy.clone());
     let dag = logical_candidates(root, accuracy)
         .into_iter()

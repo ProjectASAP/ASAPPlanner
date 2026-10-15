@@ -249,6 +249,29 @@ function validateStagePipeline(doc) {
   return validateSelection(stage3, physicalById);
 }
 
+// A query's accuracy target (`AccuracyTarget` JSON: `metric`, `error`,
+// `failure_probability`, `scope`) as one line, e.g. "ε=0.01, δ=0.001
+// (rank)" or "ε=0.01 (metric not set; default relative)"; "exact" for
+// zero error with certainty; "" without a target. `defaultMetric` is the
+// query's default metric the document shows for a target without one.
+function accuracyText(target, defaultMetric) {
+  if (!target || typeof target !== 'object') return '';
+  if (target.error === 0 && target.failure_probability === 0) return 'exact';
+  const delta = target.failure_probability !== undefined && target.failure_probability !== null
+    ? `, δ=${target.failure_probability}` : '';
+  const metric = target.metric || `metric not set${defaultMetric ? `; default ${defaultMetric}` : ''}`;
+  return `ε=${target.error}${delta} (${metric})`;
+}
+
+// What Stage 3 accepted for a valid candidate's queries (`accepted[id]`:
+// one entry per query, null without a target), as "q1: …; q2: …"; null
+// when the document has none.
+function acceptedText(queries) {
+  if (!Array.isArray(queries)) return null;
+  const parts = queries.map((q, index) => (q && q.summary ? `q${index + 1}: ${q.summary}` : null)).filter(Boolean);
+  return parts.length ? parts.join('; ') : null;
+}
+
 // Stage 3's view of every candidate the document shows: the selected one,
 // the other valid ones cheapest first ("costlier"), the rejected ones with
 // their reasons ("not judged" when selection failed with an error), then
@@ -259,6 +282,7 @@ function stageCandidateRows(doc) {
   const selection = doc.stage3_plan_selection || {};
   const costs = selection.costs || {};
   const rejected = new Map((selection.rejected || []).map((r) => [r.id, r]));
+  const accepted = selection.accepted || {};
   const physical = doc.stage2_physical_asap_optimization || {};
   const rows = (physical.candidates || []).map((candidate) => {
     const cost = costs[candidate.id];
@@ -275,6 +299,7 @@ function stageCandidateRows(doc) {
       rank: null,
       status,
       reason: status === 'rejected' && rejection ? rejection.reason : null,
+      accepted: acceptedText(accepted[candidate.id]),
     };
   });
   (physical.pruned || []).forEach((p) => rows.push({

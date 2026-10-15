@@ -15,7 +15,7 @@
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;
 use serde::Deserialize;
@@ -75,7 +75,7 @@ async fn lower(q: &str) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, Sql
         q,
         &catalog(),
         SqlDialect::ClickhouseSQL,
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await
 }

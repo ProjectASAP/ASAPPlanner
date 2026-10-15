@@ -15,7 +15,7 @@ pub mod fixtures {
 
     use asap_types::ir::OperatorNode;
     use asap_types::pre_asap::schema::{DataType, Field, Schema};
-    use asap_types::types::RequestedAccuracy;
+    use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
         Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
@@ -26,7 +26,7 @@ pub mod fixtures {
     /// suite's declared one-second source cadence.
     pub fn lower_promql(
         query: &str,
-        accuracy: RequestedAccuracy,
+        accuracy: AccuracyTarget,
     ) -> Result<Rc<OperatorNode>, asap_frontend_promql::PromqlError> {
         match lower_promql_root(query, accuracy)? {
             asap_types::ir::QueryRoot::Operator(node) => Ok(node),
@@ -38,7 +38,7 @@ pub mod fixtures {
 
     pub fn lower_promql_root(
         query: &str,
-        accuracy: RequestedAccuracy,
+        accuracy: AccuracyTarget,
     ) -> Result<asap_types::ir::QueryRoot, asap_frontend_promql::PromqlError> {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
@@ -146,14 +146,14 @@ pub mod post_asap {
 /// query, with the built-in models.
 pub mod planning {
     use asap_types::ir::{OperatorNode, QueryRoot};
-    use asap_types::types::RequestedAccuracy;
+    use asap_types::types::AccuracyTarget;
     use asap_types::workload::DataWorkload;
     use std::rc::Rc;
 
     /// Every planning stage's output for the single query `root`.
     pub fn run_stage1_to_stage3(
         root: Rc<OperatorNode>,
-        accuracy: RequestedAccuracy,
+        accuracy: AccuracyTarget,
     ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
         asap_aware_mapping::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
@@ -167,7 +167,7 @@ pub mod planning {
 
     /// The logical DAG the planner pipeline selects for the single query
     /// `root` at `accuracy`.
-    pub fn selected_dag(root: Rc<OperatorNode>, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
+    pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
         match run_stage1_to_stage3(root, accuracy).selected_logical() {
             Some([QueryRoot::Operator(node)]) => Rc::clone(node),
             other => panic!("one selected operator root: {other:?}"),
@@ -179,7 +179,7 @@ pub mod planning {
     /// compose panics, so none is silently skipped.
     pub fn logical_candidates(
         root: Rc<OperatorNode>,
-        accuracy: RequestedAccuracy,
+        accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
         run_stage1_to_stage3(root, accuracy)
             .stage1_logical_asap_optimization

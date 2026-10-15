@@ -89,8 +89,11 @@ resource use.
 One box per query, with its language and text and the requirements the
 planner must meet:
 
-- **accuracy**: `exact`, or `ε=…, δ=…` (relative error ε with probability at
-  least 1 − δ);
+- **accuracy**: `exact`, or `ε=…, δ=… (metric)` (error ε in that metric
+  with probability at least 1 − δ); `(metric not set; default …)` when the
+  query leaves the metric to the planner, which then accepts a plan in any
+  metric that meets ε and δ (the default is the metric the query's result is
+  naturally stated in, shown for reference);
 - **latency**: the maximum time an evaluation may take at query time;
 - **every N s**: how often a repeating query runs.
 
@@ -124,6 +127,9 @@ it (plus once for each query that also reads them directly).
 
 - **✓ selected**: the plan ASAPPlanner chooses.
 - **valid · costlier**: meets every requirement, but costs more.
+
+A selected or costlier plan also says, per query, which metric its accuracy
+was accepted in, e.g. `q1: metric not set; accepted rank (Kll)`.
 - **✗ invalid**: fails a check, with the reason. Examples: an accuracy target
   the sketch cannot guarantee, an evaluation over the latency bound, or a
   summary the deployment cannot build.

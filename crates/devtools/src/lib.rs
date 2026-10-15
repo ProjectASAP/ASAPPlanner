@@ -28,7 +28,7 @@ pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError, Sq
 /// Tools intentionally require the cadence rather than choosing a default.
 pub fn lower_promql_with_data_ingestion_interval(
     query: &str,
-    accuracy: asap_types::types::RequestedAccuracy,
+    accuracy: asap_types::types::AccuracyTarget,
     interval_ms: u64,
 ) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, PromqlError> {
     use asap_types::workload::{

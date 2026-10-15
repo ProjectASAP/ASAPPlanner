@@ -10,7 +10,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/netflow.sql");
 
@@ -113,7 +113,7 @@ async fn netflow_sql_corpus_lowers_to_expected_intents() {
 
     for (idx, (query, expected)) in queries.iter().zip(EXPECTED).enumerate() {
         // A successful `lower_sql` already derived every node's schema.
-        let qe = lower_sql(query, &catalog(), RequestedAccuracy::exact())
+        let qe = lower_sql(query, &catalog(), AccuracyTarget::exact())
             .await
             .unwrap_or_else(|err| panic!("q{} failed to lower:\n{query}\n{err}", idx + 1));
         assert!(

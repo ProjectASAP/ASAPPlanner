@@ -7,7 +7,7 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
     ErrorMetric, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
 };
-use asap_types::types::{AccuracyTarget, RequestedAccuracy};
+use asap_types::types::AccuracyTarget;
 use support::{logical_candidates, lower_promql, post_asap_dag, run_stage1_to_stage3};
 
 /// The summary evaluation over a UnivMon state that `root` reads, if any.
@@ -22,7 +22,7 @@ fn univmon_estimate(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
 }
 
 /// The logical candidate of `query` that evaluates a UnivMon state.
-fn candidate(query: &str, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
+fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy.clone()).unwrap();
     logical_candidates(root, accuracy)
         .into_iter()
@@ -36,7 +36,7 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
     // own shapes, while the total and entropy keep the baseline shape and so
     // share one state. Sharing across readouts is the summary-capability
     // rule's job.
-    let accuracy = RequestedAccuracy::epsilon(0.02);
+    let accuracy = AccuracyTarget::epsilon(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
         ("count_over_time(m[5m])", accuracy.clone()),
@@ -128,9 +128,9 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // L2 is certified; entropy is not.
     for query in ["entropy_over_time(m[5m])"] {
         for target in [
-            RequestedAccuracy::exact(),
-            RequestedAccuracy::epsilon(0.02),
-            RequestedAccuracy::epsilon_delta(0.02, 0.01),
+            AccuracyTarget::exact(),
+            AccuracyTarget::epsilon(0.02),
+            AccuracyTarget::epsilon_delta(0.02, 0.01),
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
             let run = run_stage1_to_stage3(root, target.clone());

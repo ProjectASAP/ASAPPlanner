@@ -16,7 +16,7 @@
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use support::{logical_plan, lower_promql};
 
 const DOCS: &str = include_str!("data/promql_corpus_docs.txt");
@@ -48,7 +48,7 @@ fn tally(corpus: &str) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
         match asap_frontend_promql::lower_promql_query_workload(
-            &support::workload(q, RequestedAccuracy::exact()),
+            &support::workload(q, AccuracyTarget::exact()),
             0,
         ) {
             Ok(_) => t.lowered += 1,
@@ -75,7 +75,7 @@ struct BindTally {
     errored: usize,
 }
 
-fn bind_tally(corpus: &str, accuracy: RequestedAccuracy) -> BindTally {
+fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
     let mut t = BindTally::default();
     for q in queries(corpus) {
         let Ok(dag) = lower_promql(q, accuracy.clone()) else {
@@ -92,7 +92,7 @@ fn bind_tally(corpus: &str, accuracy: RequestedAccuracy) -> BindTally {
 
 #[test]
 fn binding_is_total_over_the_entire_corpus() {
-    let accuracy = RequestedAccuracy::epsilon(0.01);
+    let accuracy = AccuracyTarget::epsilon(0.01);
     let docs = bind_tally(DOCS, accuracy.clone());
     let td = bind_tally(TESTDATA, accuracy);
     eprintln!("docs corpus post-ASAP binding:     {docs:?}");

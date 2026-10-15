@@ -539,25 +539,75 @@ fn table_time_index_must_be_a_column_index() {
     }
 }
 
-/// A quantile query's target names its metric: with `--metric rank` a plan
-/// is selected; without one, plan selection reports the missing metric.
+/// A query whose target sets no metric shows the metric its result is
+/// naturally stated in (the default-metric table, display only): a top-k's
+/// is the L1-scaled absolute error; an exact query shows none.
 #[test]
-fn a_quantile_target_names_its_metric() {
+fn a_target_without_a_metric_shows_the_query_default() {
+    let document = generate(&[]);
+    let queries = &document["workload"]["queries"];
+    assert!(queries[0]["requirements"].get("default_metric").is_none());
+    assert_eq!(
+        queries[1]["requirements"]["default_metric"],
+        "absolute_stream_l1"
+    );
+}
+
+/// A quantile query's target may leave its metric unset: then KLL (rank)
+/// and DDSketch (relative) candidates both meet it and compete on cost, and
+/// the document reports, per valid candidate, the metric each was accepted
+/// in and that the target's metric was not set. With `--metric rank` only
+/// rank guarantees (and exact plans) are accepted, and the report says so. The workload's
+/// accuracy is the target's own JSON form.
+#[test]
+fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let query = [
         "--promql",
         "quantile_over_time(0.99, m[1m])",
         "--epsilon",
         "0.01",
     ];
-    let named = document_of(&[&query[..], &["--metric", "rank"]].concat());
-    assert!(named["stage3_plan_selection"]["selected"].is_string());
-    let unnamed = document_of(&query);
-    assert!(unnamed["stage3_plan_selection"]["selected"].is_null());
+    let accepted = |document: &Value| -> Vec<String> {
+        let selection = &document["stage3_plan_selection"];
+        assert!(selection["selected"].is_string(), "{selection}");
+        selection["accepted"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|queries| queries[0]["summary"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let unset = document_of(&query);
+    assert_eq!(
+        unset["workload"]["queries"][0]["requirements"]["accuracy"],
+        serde_json::json!({"error": 0.01, "scope": "whole_result"})
+    );
+    // A quantile has no single default metric to show.
+    assert!(unset["workload"]["queries"][0]["requirements"]
+        .get("default_metric")
+        .is_some_and(Value::is_null));
+    let summaries = accepted(&unset);
     assert!(
-        unnamed["stage3_plan_selection"]["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("must name its metric")),
-        "{}",
-        unnamed["stage3_plan_selection"]
+        summaries
+            .iter()
+            .all(|s| s.starts_with("metric not set; accepted ")),
+        "{summaries:?}"
+    );
+    for wanted in ["accepted rank (Kll)", "accepted relative (DDSketch)"] {
+        assert!(
+            summaries.iter().any(|s| s.contains(wanted)),
+            "{wanted}: {summaries:?}"
+        );
+    }
+    let selected = unset["stage3_plan_selection"]["selected"].as_str().unwrap();
+    assert!(unset["stage3_plan_selection"]["accepted"][selected][0]["accepted_metric"].is_string());
+
+    let rank = document_of(&[&query[..], &["--metric", "rank"]].concat());
+    let summaries = accepted(&rank);
+    assert!(
+        summaries
+            .iter()
+            .all(|s| s == "metric rank; accepted rank (Kll)" || s == "metric rank; accepted exact"),
+        "{summaries:?}"
     );
 }

@@ -19,7 +19,7 @@ use asap_types::ir::{
     TimingMemo,
 };
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 
 mod physical_common;
 
@@ -124,7 +124,7 @@ fn standin_exact_and_univmon_candidates_execute() {
             0.01,
         ),
     ] {
-        let accuracy = RequestedAccuracy::epsilon_delta(epsilon, delta);
+        let accuracy = AccuracyTarget::epsilon_delta(epsilon, delta);
         let root = lower_promql(query, accuracy.clone()).unwrap();
         let root = promql_rows::with_series_identity(&root).unwrap();
         let mut executed = Vec::new();

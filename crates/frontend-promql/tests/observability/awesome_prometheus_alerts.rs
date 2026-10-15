@@ -33,7 +33,7 @@ use std::rc::Rc;
 
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::pre_asap::{AggIntent, BinaryOpKind, CompareOpKind, Reduction, ScalarValue};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");
@@ -48,7 +48,7 @@ fn queries() -> impl Iterator<Item = &'static str> {
 
 /// Lower, expecting success.
 fn ok(q: &str) -> Rc<OperatorNode> {
-    lower_promql(q, RequestedAccuracy::exact())
+    lower_promql(q, AccuracyTarget::exact())
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
 
@@ -96,7 +96,7 @@ fn corpus_lowering_is_total_and_fully_parseable() {
     for q in queries() {
         // A panic here (not an `Err`) fails the test — that is the totality
         // guarantee over real-world input.
-        match lower_promql(q, RequestedAccuracy::exact()) {
+        match lower_promql(q, AccuracyTarget::exact()) {
             Ok(_) => t.lowered += 1,
             Err(LoweringError::Parse(_)) => t.unparseable += 1,
             Err(_) => t.rejected += 1,

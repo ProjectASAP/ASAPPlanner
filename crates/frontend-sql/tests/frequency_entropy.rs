@@ -5,7 +5,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog, SqlLowerer};
 use asap_types::{
     ir::{NonASAPOp, OperatorNode},
     pre_asap::{AggIntent, DataType, Field, Schema},
-    types::{ErrorMetric, RequestedAccuracy},
+    types::{AccuracyTarget, ErrorMetric},
 };
 
 fn catalog(nullable: bool) -> SqlCatalog {
@@ -32,12 +32,12 @@ fn has_entropy(node: &OperatorNode) -> bool {
 #[tokio::test]
 async fn recognizes_sql_entropy_in_nats() {
     let sql = "SELECT -SUM(p * LN(p)) AS entropy FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f";
-    let rewritten = lower_sql(sql, &catalog(false), RequestedAccuracy::exact())
+    let rewritten = lower_sql(sql, &catalog(false), AccuracyTarget::exact())
         .await
         .unwrap();
     let original = resolve_root(
         &SqlLowerer::new(&catalog(false))
-            .lower(sql, &RequestedAccuracy::exact())
+            .lower(sql, &AccuracyTarget::exact())
             .await
             .unwrap(),
     )
@@ -60,7 +60,7 @@ async fn declines_non_equivalent_entropy_shapes() {
         ("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip HAVING COUNT(*) > 1) f", false),
         ("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f", true),
     ] {
-        let root = lower_sql(sql, &catalog(nullable), RequestedAccuracy::exact())
+        let root = lower_sql(sql, &catalog(nullable), AccuracyTarget::exact())
             .await
             .unwrap();
         assert!(!has_entropy(&root), "{sql}");
@@ -71,7 +71,7 @@ async fn declines_non_equivalent_entropy_shapes() {
 /// is an exact count.
 #[tokio::test]
 async fn entropy_accuracy_and_population_guard_are_separate() {
-    let target = RequestedAccuracy::epsilon_delta(0.05, 0.01);
+    let target = AccuracyTarget::epsilon_delta(0.05, 0.01);
     let node = lower_sql("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f", &catalog(false), target.clone()).await.unwrap();
     let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
         panic!("project");

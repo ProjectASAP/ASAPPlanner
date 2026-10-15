@@ -62,7 +62,8 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 {
   "format": "asap-stage-pipeline/v1",
   "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
-                "requirements": { "accuracy": "exact", "repeat_interval_ms": 10000 } }] },
+                "requirements": { "accuracy": { "error": 0.0, "failure_probability": 0.0, "scope": "whole_result" },
+                                  "repeat_interval_ms": 10000 } }] },
   "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
   "stage1_logical_asap_optimization": {
     "combinations": 9, "capped": false,
@@ -76,6 +77,8 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   "stage3_plan_selection": {
     "costs": { "P1": { "total": 7.9, "unit": "cost_per_second", "source": "...",
                        "per_node": { "<node id>": { "cost": 2.3, "multiplier": 1, "detail": "..." } } } },
+    "accepted": { "P1": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
+                           "summary": "metric not set; accepted rank (Kll)" }] },
     "selected": "P1",
     "rejected": [{ "id": "P2", "valid": true, "reason": "..." }]
   }
@@ -88,6 +91,14 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 - A `PhysicalASAPDAG` has node ids, an edge list, operator roots in `roots`,
   and standalone scalar queries in `scalar_roots` as `[query position,
   expr]`.
+- A query's `requirements.accuracy` is its accuracy target's own JSON
+  (`metric` omitted when not set, `failure_probability` omitted without a
+  δ). An approximate target without a metric also has
+  `requirements.default_metric`, the metric the query's result is naturally
+  stated in (null for a quantile), for display only.
+- `stage3_plan_selection.accepted` has, per shown valid candidate and query,
+  the metric the target set (null when not set) and the metric Stage 3
+  accepted (null for an exact output).
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 

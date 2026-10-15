@@ -6,13 +6,13 @@ use asap_frontend_metricsql::{
 };
 use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
 use asap_types::pre_asap::{AggIntent, Reduction, Source};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 
 /// The workload's ingestion interval, the lookback of a bare selector.
 const INTERVAL: Duration = Duration::from_secs(15);
 
 fn lower(query: &str) -> Rc<OperatorNode> {
-    lower_metricsql(query, RequestedAccuracy::epsilon(0.01), INTERVAL).unwrap()
+    lower_metricsql(query, AccuracyTarget::epsilon(0.01), INTERVAL).unwrap()
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn keep_metric_names_is_preserved_in_ast_and_rejected_without_lineage() {
     assert!(ast.keep_metric_names());
     let error = lower_metricsql(
         "rate(requests_total[5m]) keep_metric_names",
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
         INTERVAL,
     )
     .unwrap_err();
@@ -97,7 +97,7 @@ fn victoria_metrics_extension_corpus_parses_natively_and_fails_closed() {
         let ast = parse_metricsql(query)
             .unwrap_or_else(|error| panic!("native MetricsQL parser rejected {query:?}: {error}"));
         assert!(!ast.to_string().is_empty());
-        let result = lower_metricsql(query, RequestedAccuracy::exact(), INTERVAL);
+        let result = lower_metricsql(query, AccuracyTarget::exact(), INTERVAL);
         assert!(
             result.is_err(),
             "extension semantics must be represented or routed to exact fallback: {query}"
@@ -135,7 +135,7 @@ fn canonical_identity_recursively_formats_metricsql_extensions() {
 fn metricsql_multi_argument_aggregates_fail_closed() {
     for query in ["sum(foo, bar)", "avg(foo, bar)", "count(foo, bar)"] {
         parse_metricsql(query).expect("MetricsQL accepts multi-argument aggregates");
-        let error = lower_metricsql(query, RequestedAccuracy::exact(), INTERVAL).unwrap_err();
+        let error = lower_metricsql(query, AccuracyTarget::exact(), INTERVAL).unwrap_err();
         assert!(
             matches!(error, MetricsqlError::UnsupportedFeature(message) if message.contains("requires exactly 1")),
             "{query} must not silently discard an aggregate input"

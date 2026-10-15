@@ -15,7 +15,7 @@ use common::{compile_physical_asap_dag, logical_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::ASAPOp;
-use planner_types::types::RequestedAccuracy;
+use planner_types::types::AccuracyTarget;
 use planner_types::{post_asap::*, pre_asap::DataType, workload::*};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -32,7 +32,7 @@ fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -57,11 +57,7 @@ fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode
 }
 
 fn grouped_rate() -> PhysicalASAPDAG {
-    compile_physical_asap_dag(&selected_dag(
-        grouped_rate_root(),
-        RequestedAccuracy::exact(),
-    ))
-    .unwrap()
+    compile_physical_asap_dag(&selected_dag(grouped_rate_root(), AccuracyTarget::exact())).unwrap()
 }
 fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs
@@ -419,7 +415,7 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
 #[test]
 fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
     let mut executed = 0;
-    for root in logical_candidates(grouped_rate_root(), RequestedAccuracy::exact()) {
+    for root in logical_candidates(grouped_rate_root(), AccuracyTarget::exact()) {
         let dag = compile_physical_asap_dag(&root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
@@ -637,7 +633,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
             query_batch: Some(vec![BatchEntry {
                 query: Query("topk by(job)(1, m)".into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -747,6 +743,6 @@ fn cut_candidate_rejects_invalid_frontiers() {
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
     logical_candidates(
         exact_promql_root("sum by (job) (topk by (job, instance) (1, rate(m[5m])))"),
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     );
 }

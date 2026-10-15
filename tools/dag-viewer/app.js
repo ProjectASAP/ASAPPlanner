@@ -113,7 +113,7 @@
     $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}">
         <span class="pid">${esc(r.id)}</span><span class="plabel">${esc(r.display_name || r.id)}</span>
         <span class="ptotal">${r.total === null ? '—' : fmtCost(r.total)}</span>
-        <span class="pstatus">${statusChip(r.status)}${r.reason ? `<span>${esc(r.reason)}</span>` : ''}</span></button></li>`).join('');
+        <span class="pstatus">${statusChip(r.status)}${r.reason ? `<span>${esc(r.reason)}</span>` : ''}${r.accepted ? `<span class="accepted">${esc(r.accepted)}</span>` : ''}</span></button></li>`).join('');
     $('rank').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
       const [kind, id] = [b.dataset.key.slice(0, 1), b.dataset.key.slice(2)];
       if (kind === 'P') selectPhysical(id);
@@ -161,7 +161,8 @@
     const priced = rows.filter((r) => r.rank !== null).length;
     $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
       (cost ? `total <b>${fmtCost(cost.total)}</b> ${esc(cost.unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}` : 'not priced') +
-      ` · ${statusChip(row.status)}`;
+      ` · ${statusChip(row.status)}` +
+      (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '');
     if (c.from_logical !== current.logical) showLogical(c.from_logical);
     renderRanking();
   }
@@ -190,7 +191,7 @@
 
     $('queries').innerHTML = doc.workload.queries.map((q) => {
       const r = q.requirements || {};
-      const acc = r.accuracy === 'exact' ? 'exact' : r.accuracy ? `ε=${r.accuracy.epsilon}${r.accuracy.delta !== undefined ? `, δ=${r.accuracy.delta}` : ''}${r.accuracy.metric ? ` (${r.accuracy.metric})` : ''}` : '';
+      const acc = accuracyText(r.accuracy, r.default_metric);
       const req = [acc && `accuracy ${acc}`, r.latency_ms && `latency ≤ ${r.latency_ms} ms`, r.repeat_interval_ms && `every ${r.repeat_interval_ms / 1000} s`].filter(Boolean).join(' · ');
       return `<div class="query"><span class="qid">${esc(q.id)} · ${esc(q.language)}</span><code>${esc(q.text)}</code>${req ? `<span class="req">${esc(req)}</span>` : ''}</div>`;
     }).join('');

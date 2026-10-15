@@ -24,7 +24,7 @@ use asap_types::post_asap::{
     Field, ProbabilityExpr, Schema, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::pre_asap::DataType;
-use asap_types::types::{AccuracyScope, RequestedAccuracy};
+use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs,
     LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -59,9 +59,9 @@ fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> Rep
         query: Query(query.into()),
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
         requirements: QueryRequirements {
-            accuracy: AccuracyRequirement::Explicit(RequestedAccuracy {
+            accuracy: AccuracyRequirement::Explicit(AccuracyTarget {
                 scope,
-                ..RequestedAccuracy::epsilon_delta(epsilon, delta)
+                ..AccuracyTarget::epsilon_delta(epsilon, delta)
             }),
             response_latency: LatencyRequirement::Unspecified,
         },
@@ -678,9 +678,9 @@ fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound
             .repeating_queries
             .as_mut()
             .expect("repeating queries")[0];
-        q1.requirements.accuracy = AccuracyRequirement::Explicit(RequestedAccuracy {
+        q1.requirements.accuracy = AccuracyRequirement::Explicit(AccuracyTarget {
             scope: AccuracyScope::PerValue,
-            ..RequestedAccuracy::epsilon_delta(0.02, delta)
+            ..AccuracyTarget::epsilon_delta(0.02, delta)
         });
         let run = run_stages(&workload, lower_promql(&workload));
         for id in q1_only_candidates(&run, "Kmv") {
@@ -952,8 +952,7 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let targets: Vec<_> = entries
         .iter()
-        .zip(&roots)
-        .map(|(e, root)| Some(e.requirements.accuracy.requested().for_root(root).unwrap()))
+        .map(|e| Some(e.requirements.accuracy.requested()))
         .collect();
     let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let selection = select_plan(

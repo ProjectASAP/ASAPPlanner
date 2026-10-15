@@ -69,7 +69,7 @@ use asap_types::pre_asap::{
     resolve_column_ref, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue,
     WindowFuncKind,
 };
-use asap_types::types::{ErrorMetric, RequestedAccuracy};
+use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::SqlDialect;
 
 use crate::error::SqlError as LoweringError;
@@ -84,8 +84,8 @@ pub use types::SqlCatalog;
 use self::types::{arrow_to_dtype, scalar_value_to_asap, schema_to_arrow};
 
 std::thread_local! {
-    static ACCURACY: std::cell::RefCell<RequestedAccuracy> =
-        const { std::cell::RefCell::new(RequestedAccuracy::exact()) };
+    static ACCURACY: std::cell::RefCell<AccuracyTarget> =
+        const { std::cell::RefCell::new(AccuracyTarget::exact()) };
 }
 
 /// RAII guard installing `accuracy` as the ambient accuracy target for the
@@ -95,10 +95,10 @@ std::thread_local! {
 /// `lower_plan` recursion without a parameter on every one of its
 /// signatures, consulted only at the couple of sites that build an
 /// accuracy-bearing `AggIntent`.
-struct AccuracyGuard(RequestedAccuracy);
+struct AccuracyGuard(AccuracyTarget);
 
 impl AccuracyGuard {
-    fn install(accuracy: RequestedAccuracy) -> Self {
+    fn install(accuracy: AccuracyTarget) -> Self {
         let prev = ACCURACY.with(|a| a.replace(accuracy));
         AccuracyGuard(prev)
     }
@@ -107,11 +107,11 @@ impl AccuracyGuard {
 impl Drop for AccuracyGuard {
     fn drop(&mut self) {
         ACCURACY
-            .with(|a| *a.borrow_mut() = std::mem::replace(&mut self.0, RequestedAccuracy::exact()));
+            .with(|a| *a.borrow_mut() = std::mem::replace(&mut self.0, AccuracyTarget::exact()));
     }
 }
 
-fn current_accuracy() -> RequestedAccuracy {
+fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
 
@@ -176,7 +176,7 @@ impl<'a> SqlLowerer<'a> {
     pub async fn lower(
         &self,
         sql: &str,
-        accuracy: &RequestedAccuracy,
+        accuracy: &AccuracyTarget,
     ) -> Result<Unresolved, LoweringError> {
         let ctx = self.build_context()?;
         let state = ctx.state();
