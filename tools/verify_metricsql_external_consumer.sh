@@ -21,7 +21,7 @@ cat > "$consumer_dir/src/main.rs" <<'EOF'
 fn main() {
     asap_frontend_metricsql::lower_metricsql(
         "sum(rate(requests_total[5m]))",
-        asap_types::types::AccuracyTarget::Exact,
+        asap_types::types::RequestedAccuracy::exact(),
         std::time::Duration::from_secs(15),
     )
     .expect("a downstream stable crate can parse and lower MetricsQL");
