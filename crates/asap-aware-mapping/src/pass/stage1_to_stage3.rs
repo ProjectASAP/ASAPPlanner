@@ -15,14 +15,20 @@
 //!    groups), then those of the summary-capability rule
 //!    ([`summary_capability_variants`]: one per choice of shared summary
 //!    builds), each followed by its own identical-expression candidates,
-//!    every distinct candidate once; the independent candidate is kept;
+//!    and, for the composed candidate and each summary-capability candidate,
+//!    those of the window-composition rule ([`window_composition_variants`]:
+//!    one per non-empty subset of the builds a repeating query could build
+//!    as tumbling panes), each followed by its own identical-expression
+//!    candidates; every distinct candidate once; the independent candidate
+//!    is kept;
 //! 2. Stage 2, physical ASAP-aware optimization of every Stage 1 candidate
 //!    ([`optimize_physical_asap`]);
 //! 3. Stage 3, plan selection over the physical candidates ([`select_plan`]).
 //!
 //! Stage 0, the query-language frontends, runs before it (the `asap-planner`
-//! facade lowers the workload). Pass 2's window-composition rule is not
-//! planned yet.
+//! facade lowers the workload). The window-composition rule offers
+//! per-query tumbling panes only; sliding windows, Exponential Histograms
+//! and a pane width shared across queries are not planned yet.
 //!
 //! Every combination is enumerated and plan selection prices every
 //! candidate; nothing is capped. A search that avoids building every
@@ -32,14 +38,15 @@ use std::rc::Rc;
 
 use asap_types::ir::flat::flatten;
 use asap_types::ir::schema_support::with_promql_series_identity;
-use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::post_asap::SketchAlgorithm;
+use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
 use asap_types::types::{AccuracyTarget, RequestedAccuracy};
-use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence};
+use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence, RepeatedDemand};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::asap_aware_cse::{
-    capability_groups, identical_expression_variants, sharing_groups, summary_capability_variants,
+    capability_groups, identical_expression_variants, pane_sites, sharing_groups,
+    summary_capability_variants, window_composition_variants,
 };
 use crate::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
@@ -66,14 +73,17 @@ pub struct LogicalCandidate {
 /// A Stage 1 candidate Pass 2 added: `id` is `from_logical` with each
 /// summary build set in `summaries` made one build sized for all its
 /// consumers (the summary-capability rule, e.g. "UnivMon for Q1, Q3"),
-/// then the nodes of each group in `shared` (named by operator kind,
-/// children first) made one node (the identical-expression rule). It has
-/// `from_logical`'s `choice`.
+/// then each build in `panes` built as tumbling panes (the
+/// window-composition rule, e.g. "Kll for Q1 in 5 × 1m panes"), then the
+/// nodes of each group in `shared` (named by operator kind, children first)
+/// made one node (the identical-expression rule). It has `from_logical`'s
+/// `choice`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pass2Candidate {
     pub id: String,
     pub from_logical: String,
     pub summaries: Vec<String>,
+    pub panes: Vec<String>,
     pub shared: Vec<String>,
 }
 
@@ -179,6 +189,8 @@ pub struct Pass2Of {
     pub from: usize,
     /// The summary builds made one build each (summary-capability rule).
     pub summaries: Vec<String>,
+    /// The builds built as tumbling panes (window-composition rule).
+    pub panes: Vec<String>,
     /// The identical groups shared (operator kinds, children first).
     pub shared: Vec<String>,
 }
@@ -187,14 +199,20 @@ pub struct Pass2Of {
 /// candidate at a time: each composed Pass 1 candidate (every choice of a
 /// per-computation candidate for every target, the last target varying
 /// fastest), followed by its Pass 2 candidates: the identical-expression
-/// rule's, then each summary-capability candidate followed by its own
-/// identical-expression candidates. A Pass 2 candidate equal to an earlier
-/// one of the same Pass 1 candidate (same nodes, same sharing) is listed
-/// once. Lazy and uncapped: a caller that limits the candidates stops
-/// consuming it.
-pub fn stage1_logical_asap_optimization<Id: Clone>(
-    per_computation: &PerComputationCandidates<Id>,
-) -> impl Iterator<Item = Stage1Candidate> + '_ {
+/// rule's, then the window-composition rule's, then each summary-capability
+/// candidate followed by its own identical-expression and
+/// window-composition candidates; every window-composition candidate is
+/// followed by its own identical-expression candidates. `recurrence[q]` is
+/// how often query `q` is evaluated: the window-composition rule splits
+/// only builds of queries that repeat at a fixed interval. A Pass 2
+/// candidate equal to an earlier one of the same Pass 1 candidate (same
+/// nodes, same sharing) is listed once. Lazy and uncapped: a caller that
+/// limits the candidates stops consuming it.
+pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
+    per_computation: &'a PerComputationCandidates<Id>,
+    recurrence: &[QueryRecurrence],
+) -> impl Iterator<Item = Stage1Candidate> + 'a {
+    let interval_ms: Vec<Option<u64>> = recurrence.iter().map(fixed_interval_ms).collect();
     let query_of_target = query_of_target(per_computation);
     let mut choice = Some(vec![0; per_computation.targets.len()]);
     let mut queue = std::collections::VecDeque::new();
@@ -215,7 +233,7 @@ pub fn stage1_logical_asap_optimization<Id: Clone>(
                 .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
             let from = position + queue.len();
             let pass2 = match &roots {
-                Ok(roots) => pass2_candidates(roots),
+                Ok(roots) => pass2_candidates(roots, &interval_ms),
                 Err(_) => Vec::new(),
             };
             queue.push_back(Stage1Candidate {
@@ -224,10 +242,19 @@ pub fn stage1_logical_asap_optimization<Id: Clone>(
                 roots,
                 pass2_of: None,
             });
-            for (summaries, shared, roots) in pass2 {
+            for Pass2 {
+                summaries,
+                panes,
+                shared,
+                roots,
+            } in pass2
+            {
                 let mut name = display_name.clone();
                 if !summaries.is_empty() {
                     name += &format!(" · one {}", summaries.join(", one "));
+                }
+                if !panes.is_empty() {
+                    name += &format!(" · {}", panes.join(", "));
                 }
                 if !shared.is_empty() {
                     name += &format!(" · shared {}", shared.join(", "));
@@ -239,6 +266,7 @@ pub fn stage1_logical_asap_optimization<Id: Clone>(
                     pass2_of: Some(Pass2Of {
                         from,
                         summaries,
+                        panes,
                         shared,
                     }),
                 });
@@ -250,26 +278,52 @@ pub fn stage1_logical_asap_optimization<Id: Clone>(
 }
 
 /// A Pass 2 candidate: the summary builds it shares (summary-capability
-/// rule), the identical groups it shares, and its roots.
-type Pass2 = (
-    Vec<String>,
-    Vec<String>,
-    Result<Vec<QueryRoot>, PerComputationCandidateError>,
-);
+/// rule), the builds it builds as tumbling panes (window-composition rule),
+/// the identical groups it shares, and its roots.
+struct Pass2 {
+    summaries: Vec<String>,
+    panes: Vec<String>,
+    shared: Vec<String>,
+    roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+}
+
+impl Pass2 {
+    fn failed(summaries: &[String], panes: &[String], error: PerComputationCandidateError) -> Self {
+        Self {
+            summaries: summaries.to_vec(),
+            panes: panes.to_vec(),
+            shared: Vec::new(),
+            roots: Err(error),
+        }
+    }
+}
+
+/// The fixed interval at which a query repeats, in milliseconds.
+fn fixed_interval_ms(recurrence: &QueryRecurrence) -> Option<u64> {
+    match recurrence {
+        QueryRecurrence::Repeated(
+            RepeatedDemand::FixedInterval(interval)
+            | RepeatedDemand::FixedIntervalAt { interval, .. },
+        ) => Some(u64::from(interval.0)).filter(|&ms| ms > 0),
+        _ => None,
+    }
+}
 
 /// The Pass 2 candidates of the composed candidate with roots `roots`, in
-/// enumeration order, each distinct candidate once.
-fn pass2_candidates(roots: &[QueryRoot]) -> Vec<Pass2> {
+/// enumeration order, each distinct candidate once. `interval_ms[q]` is the
+/// fixed interval of query `q`, if it repeats at one.
+fn pass2_candidates(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<Pass2> {
     let mut found = Pass2List {
         seen: vec![flatten(roots).0],
         out: Vec::new(),
     };
-    found.identical_variants(&[], roots);
+    found.identical_variants(&[], &[], roots);
+    found.window_variants(&[], roots, interval_ms);
     let groups = capability_groups(roots);
     let variants = match summary_capability_variants(roots, &groups) {
         Ok(variants) => variants,
         Err(error) => {
-            found.out.push((Vec::new(), Vec::new(), Err(error)));
+            found.out.push(Pass2::failed(&[], &[], error));
             return found.out;
         }
     };
@@ -292,12 +346,13 @@ fn pass2_candidates(roots: &[QueryRoot]) -> Vec<Pass2> {
             .collect();
         match variant.roots {
             Ok(roots) => {
-                found.push(&summaries, Vec::new(), &roots);
-                found.identical_variants(&summaries, &roots);
+                found.push(&summaries, &[], Vec::new(), &roots);
+                found.identical_variants(&summaries, &[], &roots);
+                found.window_variants(&summaries, &roots, interval_ms);
             }
             // Listed as a candidate that cannot be composed; the other
             // variants go on.
-            Err(error) => found.out.push((summaries, Vec::new(), Err(error))),
+            Err(error) => found.out.push(Pass2::failed(&summaries, &[], error)),
         }
     }
     found.out
@@ -311,19 +366,29 @@ struct Pass2List {
 }
 
 impl Pass2List {
-    fn push(&mut self, summaries: &[String], shared: Vec<String>, roots: &[QueryRoot]) {
+    fn push(
+        &mut self,
+        summaries: &[String],
+        panes: &[String],
+        shared: Vec<String>,
+        roots: &[QueryRoot],
+    ) {
         let flat = flatten(roots).0;
         if self.seen.contains(&flat) {
             return;
         }
         self.seen.push(flat);
-        self.out
-            .push((summaries.to_vec(), shared, Ok(roots.to_vec())));
+        self.out.push(Pass2 {
+            summaries: summaries.to_vec(),
+            panes: panes.to_vec(),
+            shared,
+            roots: Ok(roots.to_vec()),
+        });
     }
 
     /// The identical-expression candidates of `roots`, which shares
-    /// `summaries`.
-    fn identical_variants(&mut self, summaries: &[String], roots: &[QueryRoot]) {
+    /// `summaries` and builds `panes` in tumbling panes.
+    fn identical_variants(&mut self, summaries: &[String], panes: &[String], roots: &[QueryRoot]) {
         let groups = sharing_groups(roots);
         for variant in identical_expression_variants(roots, &groups) {
             let shared = variant
@@ -331,8 +396,70 @@ impl Pass2List {
                 .iter()
                 .map(|&g| format!("{} #{}", groups[g].nodes[0].operator.kind_name(), g + 1))
                 .collect();
-            self.push(summaries, shared, &variant.roots);
+            self.push(summaries, panes, shared, &variant.roots);
         }
+    }
+
+    /// The window-composition candidates of `roots`, which shares
+    /// `summaries`, each followed by its identical-expression candidates.
+    fn window_variants(
+        &mut self,
+        summaries: &[String],
+        roots: &[QueryRoot],
+        interval_ms: &[Option<u64>],
+    ) {
+        let sites = pane_sites(roots, interval_ms);
+        let variants = match window_composition_variants(roots, &sites) {
+            Ok(variants) => variants,
+            Err(error) => {
+                self.out.push(Pass2::failed(summaries, &[], error));
+                return;
+            }
+        };
+        for variant in variants {
+            let panes: Vec<String> = variant
+                .sites
+                .iter()
+                .map(|&i| {
+                    let site = &sites[i];
+                    let queries: Vec<String> =
+                        site.readers.iter().map(|q| format!("Q{}", q + 1)).collect();
+                    format!(
+                        "{} for {} in {} × {} panes",
+                        state_name(&site.build),
+                        queries.join(", "),
+                        site.pane_count,
+                        duration_name(site.pane_width_ms)
+                    )
+                })
+                .collect();
+            match variant.roots {
+                Ok(roots) => {
+                    self.push(summaries, &panes, Vec::new(), &roots);
+                    self.identical_variants(summaries, &panes, &roots);
+                }
+                Err(error) => self.out.push(Pass2::failed(summaries, &panes, error)),
+            }
+        }
+    }
+}
+
+/// The state a summary build keeps, e.g. "Kll" or "Rate acc".
+fn state_name(build: &OperatorNode) -> String {
+    match build.asap().and_then(ASAPOp::produced_state) {
+        Some(FieldDataType::Sketch(kind, _)) => sketch_name(kind.algorithm()),
+        Some(FieldDataType::ExactAggregate(kind, _)) => format!("{kind:?} acc"),
+        _ => build.operator.kind_name().to_string(),
+    }
+}
+
+/// `ms` in the largest whole unit: "1m", "10s", "250ms".
+fn duration_name(ms: u64) -> String {
+    match ms {
+        ms if ms % 3_600_000 == 0 => format!("{}h", ms / 3_600_000),
+        ms if ms % 60_000 == 0 => format!("{}m", ms / 60_000),
+        ms if ms % 1_000 == 0 => format!("{}s", ms / 1_000),
+        ms => format!("{ms}ms"),
     }
 }
 
@@ -365,7 +492,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
-    let stage1 = stage1_logical_asap_optimization(&per_computation).collect();
+    let stage1 = stage1_logical_asap_optimization(&per_computation, recurrence).collect();
     run_stage2_and_stage3(per_computation, stage1, targets, recurrence, data, models)
 }
 
@@ -407,6 +534,7 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
                 id: id.clone(),
                 from_logical: format!("L{}", of.from + 1),
                 summaries: of.summaries,
+                panes: of.panes,
                 shared: of.shared,
             });
         }
@@ -565,11 +693,7 @@ fn display_name<Id>(
                     }
                     ComputationCandidate::Summary(algorithm)
                     | ComputationCandidate::WholeExpression(algorithm) => {
-                        sketches.push(match algorithm {
-                            SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-                            SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-                            other => format!("{other:?}"),
-                        })
+                        sketches.push(sketch_name(algorithm))
                     }
                 }
             }
@@ -586,6 +710,15 @@ fn display_name<Id>(
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// A sketch algorithm's display name, e.g. "CMS+heap" or "Kll".
+fn sketch_name(algorithm: &SketchAlgorithm) -> String {
+    match algorithm {
+        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
+        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// The planner pipeline behind the optimization-pass interface: the

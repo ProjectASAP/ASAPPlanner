@@ -53,7 +53,12 @@
 //! Prices come from [`crate::analytical_cost::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
-//! groups × k. Kept state is sized by its bytes: a sketch by its parameters, a
+//! groups × k. A query-time scan reads the longest window above it (a time
+//! shift moves a window without widening it); a time shift is free, and a
+//! time range is priced by the rows it keeps. A tumbling-pane chain is
+//! priced as one build over its whole window plus one operation per row to
+//! place it in its pane, and keeps one state per group and pane; a merge
+//! costs one operation per state it reads. Kept state is sized by its bytes: a sketch by its parameters, a
 //! fixed-size exact accumulator (sum, count, min, max, rate, ...) as one
 //! value per group, and exact state that grows with the data (quantile,
 //! top-k, distinct count, L2, entropy keep every value or item) as one value
@@ -74,7 +79,7 @@ use asap_types::ir::physical_export::{
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot,
-    ScalarExpr, SchemaDerivationError,
+    ScalarExpr, SchemaDerivationError, TimeRangeKind,
 };
 use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::ExecutionDataStateError;
@@ -361,6 +366,13 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
                     .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. }))
         }
         Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => global(reduction),
+        // A merge gives one state per group, whatever the panes it merges.
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => matches!(
+            node.summary_build(),
+            Some(
+                ASAPOp::SummaryAgg { reduction, .. } | ASAPOp::PaneChain { reduction, .. }
+            ) if global(reduction)
+        ),
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query,
@@ -506,7 +518,10 @@ fn accuracy_violation(
             .iter()
             .flat_map(|node| OperatorNode::reachable(node))
         {
-            let Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. }) = &node.operator else {
+            let Operator::ASAP(
+                ASAPOp::SummaryAgg { family, input, .. } | ASAPOp::PaneChain { family, input, .. },
+            ) = &node.operator
+            else {
                 continue;
             };
             if matches!(family, FieldDataType::Sketch(kind, _)
@@ -606,7 +621,9 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
             changed |= !Rc::ptr_eq(&rebuilt, child);
             rebuilt
         });
-        if let Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) = &mut operator {
+        if let Operator::ASAP(ASAPOp::SummaryAgg { input, .. } | ASAPOp::PaneChain { input, .. }) =
+            &mut operator
+        {
             let confirmed = confirmed_weights(&input.weight_domain, data);
             if confirmed != input.weight_domain {
                 input.weight_domain = confirmed;
@@ -1172,17 +1189,9 @@ fn price(
             Payload::NonASAP(operator) => match operator {
                 NonASAPOp::Scan { .. } => {
                     // At ingestion time, one second of arriving rows; at
-                    // query time, what its time range keeps.
-                    let lookback = dag
-                        .edges
-                        .iter()
-                        .filter(|e| e.producer == node.id)
-                        .filter_map(|e| match &nodes[&e.consumer].payload {
-                            Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                                Some(range.as_millis() as u64)
-                            }
-                            _ => None,
-                        })
+                    // query time, the longest window read above it.
+                    let lookback = windows_read(dag, &nodes, node.id)
+                        .into_iter()
                         .max()
                         .unwrap_or(DEFAULT_LOOKBACK_MS);
                     let lookback = if ingestion { 1_000 } else { lookback };
@@ -1281,18 +1290,55 @@ fn price(
                     );
                     (out, estimate, format!("limit to {} rows", out.rows))
                 }
-                other => {
+                NonASAPOp::TimeShift { .. } => (
+                    input,
+                    estimate_operator(
+                        PhysicalOperator::TimeShift,
+                        OperatorStatistics::PassThrough {
+                            edges: unary(input),
+                        },
+                    ),
+                    format!("time shift: pass {} rows, free", input.rows),
+                ),
+                NonASAPOp::TimeRange { range, kind, .. } => {
+                    // A range keeps its window's samples; an instant
+                    // selector the latest sample of each series.
+                    let kept = match kind {
+                        TimeRangeKind::Range => {
+                            (shape.rows_per_ms * range.as_millis() as f64).round() as u64
+                        }
+                        TimeRangeKind::Instant => shape.series,
+                    };
+                    let out = edge(input.rows.min(kept.max(1)));
+                    let out = EdgeStatistics {
+                        rows: out.rows,
+                        bytes: out.bytes.min(input.bytes),
+                    };
+                    let estimate = estimate_operator(
+                        PhysicalOperator::TimeRange,
+                        OperatorStatistics::PassThrough { edges: unary(out) },
+                    );
+                    (
+                        out,
+                        estimate,
+                        format!(
+                            "time range {range:?}: keep {} of {} rows",
+                            out.rows, input.rows
+                        ),
+                    )
+                }
+                _ => {
                     let estimate = estimate_operator(
                         PhysicalOperator::PassThrough,
                         OperatorStatistics::PassThrough {
                             edges: unary(input),
                         },
                     );
-                    let name = match other {
-                        NonASAPOp::TimeRange { range, .. } => format!("time range {range:?}"),
-                        _ => "operator".into(),
-                    };
-                    (input, estimate, format!("{name}: pass {} rows", input.rows))
+                    (
+                        input,
+                        estimate,
+                        format!("operator: pass {} rows", input.rows),
+                    )
                 }
             },
             Payload::ASAP(ASAPOp::SummaryAgg {
@@ -1313,6 +1359,62 @@ fn price(
                         family_name(family),
                         input.rows
                     ),
+                )
+            }
+            Payload::ASAP(ASAPOp::PaneChain {
+                family,
+                reduction,
+                pane_width_ms,
+                pane_count,
+                ..
+            }) => {
+                // Each input row is kept by the one pane its time falls in,
+                // as a time range keeps it (one operation), and updates
+                // that pane.
+                let group_count = groups(reduction);
+                let (depth, state_bytes) = summary_shape(family);
+                let states = group_count * u64::from(*pane_count);
+                let out = EdgeStatistics {
+                    rows: states,
+                    bytes: states * state_bytes,
+                };
+                let ops = input.rows as f64 * (depth + 1.0);
+                (
+                    out,
+                    Ok(ResourceEstimate::new(ops, out.bytes, 0)),
+                    format!(
+                        "build {} in {pane_count} panes of {pane_width_ms} ms for \
+                         {group_count} groups: {} rows x (1 + depth {depth})",
+                        family_name(family),
+                        input.rows
+                    ),
+                )
+            }
+            Payload::ASAP(ASAPOp::SummaryMerge { .. }) => {
+                // One operation per input state; one state per group out,
+                // each pane of a chain being a state of its group.
+                let producers = dag.edges.iter().filter(|e| e.consumer == node.id);
+                let mut states = 0;
+                let mut group_count = 0;
+                for edge in producers {
+                    let rows = output[&edge.producer].rows;
+                    let panes = match &nodes[&edge.producer].payload {
+                        Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
+                            u64::from(*pane_count)
+                        }
+                        _ => 1,
+                    };
+                    states += rows;
+                    group_count = group_count.max(rows / panes.max(1));
+                }
+                let out = EdgeStatistics {
+                    rows: group_count,
+                    bytes: input.bytes.div_ceil(input.rows.max(1)) * group_count,
+                };
+                (
+                    out,
+                    Ok(ResourceEstimate::new(states as f64, out.bytes, 0)),
+                    format!("merge {states} states into {group_count}"),
                 )
             }
             Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
@@ -1381,6 +1483,39 @@ fn price(
         source: COST_SOURCE,
         per_node,
     })
+}
+
+/// The windows, in milliseconds, read above the scan `scan` at query time:
+/// each range `TimeRange` and `PaneChain` (its whole window) reached
+/// through time shifts, which move a window without widening it.
+fn windows_read(
+    dag: &PhysicalASAPDAG,
+    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+    scan: PhysicalASAPNodeId,
+) -> Vec<u64> {
+    let mut windows = Vec::new();
+    let mut stack = vec![scan];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for edge in dag.edges.iter().filter(|e| e.producer == id) {
+            match &nodes[&edge.consumer].payload {
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                    windows.push(range.as_millis() as u64)
+                }
+                Payload::ASAP(ASAPOp::PaneChain {
+                    pane_width_ms,
+                    pane_count,
+                    ..
+                }) => windows.push(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+                Payload::NonASAP(NonASAPOp::TimeShift { .. }) => stack.push(edge.consumer),
+                _ => {}
+            }
+        }
+    }
+    windows
 }
 
 /// `input` split as evenly as integers allow into `partitions` parts.
@@ -3241,6 +3376,51 @@ mod tests {
         ])
         .unwrap()
         .dag
+    }
+
+    /// The physical DAG of `query`'s first per-computation candidates,
+    /// with nothing materialized.
+    fn first_candidate_dag(query: &str) -> PhysicalASAPDAG {
+        let root = lower_promql(query, RequestedAccuracy::exact());
+        let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+        )
+        .unwrap();
+        let choice = vec![0; inventory.targets.len()];
+        let roots: Vec<_> =
+            crate::per_computation_candidates::compose_logical_candidate(&inventory, &choice)
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect();
+        optimize_physical_asap("L1", &roots).unwrap().dag
+    }
+
+    /// A time shift is free and does not change what the scan below it
+    /// reads: the scan reads the window above the shift, as without it. A
+    /// time range is priced by the rows it keeps.
+    #[test]
+    fn time_shift_is_free_and_the_scan_reads_the_shifted_window() {
+        let every_minute = [repeating(60_000)];
+        let plain = first_candidate_dag("sum_over_time(m[5m])");
+        let shifted = first_candidate_dag("sum_over_time(m[5m] offset 1h)");
+        let (plain_cost, shifted_cost) = (
+            priced(&plain, &every_minute),
+            priced(&shifted, &every_minute),
+        );
+        let cost_of = |dag: &PhysicalASAPDAG, cost: &CandidateCost, pick: fn(&Payload) -> bool| {
+            cost.per_node[&node_of(dag, pick)].cost
+        };
+        let is_shift = |p: &Payload| matches!(p, Payload::NonASAP(NonASAPOp::TimeShift { .. }));
+        let is_range = |p: &Payload| matches!(p, Payload::NonASAP(NonASAPOp::TimeRange { .. }));
+        assert_eq!(cost_of(&shifted, &shifted_cost, is_shift), 0.0);
+        assert!(close(
+            cost_of(&shifted, &shifted_cost, is_scan),
+            cost_of(&plain, &plain_cost, is_scan)
+        ));
+        assert!(close(shifted_cost.total, plain_cost.total));
+        let range = &plain_cost.per_node[&node_of(&plain, is_range)];
+        assert!(range.detail.contains("keep"), "{}", range.detail);
     }
 
     const AT_INGESTION: Materialization =

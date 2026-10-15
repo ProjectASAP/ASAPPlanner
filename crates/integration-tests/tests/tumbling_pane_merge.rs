@@ -1,13 +1,14 @@
 //! Tumbling panes merged by `SummaryMerge` answer the same per-series query
-//! as one build over the whole window (#509 Example 3/4, Pattern B).
-//! The panes are written by hand here; the planner's window-composition
-//! rule emits them later.
+//! as one build over the whole window (#509 Example 3/4, Pattern B): panes
+//! written by hand, and the planner's window-composition rule's
+//! `PaneChain`, expanded into the panes the executor runs.
 mod physical_common;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use asap_aware_mapping::asap_aware_cse::{pane_sites, window_composition_variants};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::selected_dag;
 use asap_physical_operators::physical_planner::{
@@ -16,10 +17,11 @@ use asap_physical_operators::physical_planner::{
 use asap_physical_operators::runtime::Scope;
 use asap_physical_operators::values::{Batch, Value};
 use asap_types::ir::operator_properties::TimeShift;
+use asap_types::ir::pane_chain::expand_pane_chains;
 use asap_types::ir::physical_export::{compile_physical_asap_dag_with_node_ids, PhysicalASAPDAG};
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
-    NonASAPOp, Operator, OperatorNode, TimingMemo,
+    NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
 };
 use asap_types::post_asap::Schema;
 use asap_types::types::{ErrorMetric, RequestedAccuracy};
@@ -77,6 +79,33 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
     let root = replace(root, &agg, &merged);
     root.validate_structure().unwrap();
     (root, panes)
+}
+
+/// `root` with its summary built in tumbling panes by the planner's
+/// window-composition rule, for a query repeating every minute: the
+/// planned root (a `SummaryMerge` over one `PaneChain`) and its expansion
+/// into the panes the executor runs.
+fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
+    let roots = [QueryRoot::Operator(Rc::clone(root))];
+    let sites = pane_sites(&roots, &[Some(PANE_MS as u64)]);
+    let [site] = sites.as_slice() else {
+        panic!("one build to split: {sites:?}")
+    };
+    assert_eq!((site.pane_width_ms, site.pane_count), (PANE_MS as u64, 5));
+    let mut variants = window_composition_variants(&roots, &sites).unwrap();
+    let variant = variants.pop().unwrap();
+    assert!(variants.is_empty());
+    let QueryRoot::Operator(planned) = variant.roots.unwrap().remove(0) else {
+        panic!("an operator root")
+    };
+    planned.validate_structure().unwrap();
+    assert_eq!(
+        planned.guarantee, root.guarantee,
+        "merged panes keep the whole build's guarantee"
+    );
+    let expanded = expand_pane_chains(&planned).unwrap();
+    expanded.validate_structure().unwrap();
+    (planned, expanded)
 }
 
 /// `node` with `from` replaced by `to`.
@@ -324,6 +353,14 @@ fn assert_pane_merge_matches_single_build(query: &str, accuracy: RequestedAccura
         expected,
         "retained panes"
     );
+    let (planned, expanded) = planned_panes(&single);
+    assert_eq!(
+        render(&execute(&expanded)),
+        expected,
+        "the planner's pane chain, expanded"
+    );
+    let unexpanded = compile_at_query_time(&planned).err().unwrap_or_default();
+    assert!(unexpanded.contains("PaneChain"), "{unexpanded}");
     result
 }
 

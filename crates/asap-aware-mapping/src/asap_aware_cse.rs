@@ -2,8 +2,9 @@
 //! common-subexpression elimination, as defined in
 //! `docs/design_docs/proposals/planner-layering.md` (Algorithm 2).
 //!
-//! Two of its rules are implemented: the identical-expression rule and the
-//! summary-capability rule.
+//! Its three rules are implemented: the identical-expression rule, the
+//! summary-capability rule and, for tumbling panes of one query, the
+//! window-composition rule.
 //!
 //! # Identical-expression rule
 //!
@@ -40,8 +41,27 @@
 //! minimum), and every guarantee above it is composed again, so plan
 //! selection checks each consumer against the shared state. Members of
 //! equal size are the identical-expression rule's; builds that are not
-//! shared are untouched, and a consumer never changes family. The window-
-//! composition rule is not implemented.
+//! shared are untouched, and a consumer never changes family.
+//!
+//! # Window-composition rule
+//!
+//! A query repeating every `E` over a window `W` can build its summary as
+//! back-to-back tumbling panes of width `w = gcd(W, E)` (Algorithm 2's
+//! `Tumbling(L)` for one query), merged before each read. A *pane site*
+//! ([`pane_sites`]) is a `SummaryAgg` over a range `TimeRange(W)` whose
+//! family merges in the family-capability table ([`FamilyCapability`]):
+//! exact accumulators included, and also families whose merged readouts
+//! are only approximate (heap top-k), whose readers then carry no
+//! guarantee and are left to plan selection's evidence. A family without a
+//! merge (IRate) has no site. [`window_composition_variants`] returns one
+//! candidate per non-empty subset of the sites: each site in the subset
+//! becomes a `SummaryMerge` over one [`ASAPOp::PaneChain`] of `W / w` panes,
+//! a compact node whatever the pane count, with the build's family and
+//! size (a mergeable family's merged state has one build's guarantee), and
+//! every guarantee above is composed again. Nothing is materialized here:
+//! the panes are rebuilt at each evaluation until Stage 2 keeps them. A pane
+//! width shared by several queries, sliding windows and Exponential
+//! Histograms are not implemented.
 
 use std::collections::HashMap;
 #[cfg(test)]
@@ -49,7 +69,9 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_types::ir::cse::share_common_sub_dags;
-use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::ir::{
+    ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, TimeRangeKind,
+};
 use asap_types::post_asap::{
     FamilyCapability, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind,
 };
@@ -601,6 +623,207 @@ fn sized_for_all(
     Ok(Some(Rc::new(build)))
 }
 
+/// One summary build the window-composition rule can build as tumbling
+/// panes: a `SummaryAgg` over a range `TimeRange(W)` whose family merges
+/// (the family-capability table: exact accumulators included, and families
+/// whose merged readouts are only approximate), read only by queries that
+/// repeat at a fixed interval. Its panes are `pane_count = W / w` back-to-back
+/// windows of `w = gcd(W, E)` over the queries' intervals `E`, at least two.
+#[derive(Debug, Clone)]
+pub struct PaneSite {
+    pub build: Rc<OperatorNode>,
+    /// The queries (indices into the roots) that read the build.
+    pub readers: Vec<usize>,
+    pub pane_width_ms: u64,
+    pub pane_count: u32,
+}
+
+/// A Pass 2 candidate of the window-composition rule: the candidate's roots
+/// with each build in `sites` (indices into [`pane_sites`]) built as its
+/// tumbling panes, merged before every read, and every guarantee composed
+/// again; the error when that fails, which leaves the other variants
+/// unaffected.
+#[derive(Debug)]
+pub struct WindowCompositionVariant {
+    pub sites: Vec<usize>,
+    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+}
+
+/// The most pane sites one candidate may have: every non-empty subset is a
+/// candidate, about a million at 20.
+pub const MAX_PANE_SITES: usize = 20;
+
+/// The pane sites of the candidate with query roots `roots`, children
+/// first. `interval_ms[q]` is how often query `q` repeats, `None` when it
+/// does not repeat at a fixed interval.
+pub fn pane_sites(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<PaneSite> {
+    let mut nodes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node in roots.iter().flat_map(root_operators) {
+        collect_children_first(node, &mut seen, &mut nodes);
+    }
+    let reach: Vec<std::collections::HashSet<*const OperatorNode>> = roots
+        .iter()
+        .map(|root| {
+            root_operators(root)
+                .into_iter()
+                .flat_map(OperatorNode::reachable)
+                .map(|node| Rc::as_ptr(&node))
+                .collect()
+        })
+        .collect();
+    nodes
+        .into_iter()
+        .filter_map(|build| {
+            let window_ms = pane_window_ms(&build)?;
+            let readers: Vec<usize> = (0..roots.len())
+                .filter(|&q| reach[q].contains(&Rc::as_ptr(&build)))
+                .collect();
+            let mut width = window_ms;
+            for &q in &readers {
+                width = gcd(width, interval_ms.get(q).copied().flatten()?);
+            }
+            let pane_count = u32::try_from(window_ms / width).ok()?;
+            (!readers.is_empty() && pane_count >= 2).then_some(PaneSite {
+                build,
+                readers,
+                pane_width_ms: width,
+                pane_count,
+            })
+        })
+        .collect()
+}
+
+/// The window `W` of a build the rule can split: a `SummaryAgg` whose
+/// family merges, over a range `TimeRange(W)` over an instant vector read
+/// at the query's time or a fixed offset from it.
+fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
+    let Some(ASAPOp::SummaryAgg { child, family, .. }) = build.asap() else {
+        return None;
+    };
+    FamilyCapability::of(family).merge?;
+    let Some(NonASAPOp::TimeRange {
+        range,
+        kind: TimeRangeKind::Range,
+        child: input,
+    }) = child.non_asap()
+    else {
+        return None;
+    };
+    if input.result_kind != OperatorResultKind::InstantVector
+        || matches!(input.non_asap(), Some(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_some())
+    {
+        return None;
+    }
+    u64::try_from(range.as_millis()).ok().filter(|&ms| ms > 0)
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// Every Pass 2 candidate of the window-composition rule for the candidate
+/// with query roots `roots` and pane sites `sites` ([`pane_sites`]): one per
+/// non-empty subset of the sites, in binary-counter order (the first site
+/// the lowest bit). Each build in the subset becomes a `SummaryMerge` over
+/// one [`ASAPOp::PaneChain`] of its panes; every other build is untouched.
+/// An error only for more than [`MAX_PANE_SITES`] sites; a variant whose
+/// composition fails carries its own error.
+pub fn window_composition_variants(
+    roots: &[QueryRoot],
+    sites: &[PaneSite],
+) -> Result<Vec<WindowCompositionVariant>, PerComputationCandidateError> {
+    if sites.len() > MAX_PANE_SITES {
+        return Err(PerComputationCandidateError::Unsupported(
+            "more than 20 summary builds that could be built in tumbling panes (2^n candidates)",
+        ));
+    }
+    let mut variants = Vec::new();
+    for mask in 1u64..(1u64 << sites.len()) {
+        let chosen: Vec<usize> = (0..sites.len()).filter(|&i| mask >> i & 1 == 1).collect();
+        variants.push(WindowCompositionVariant {
+            roots: in_panes(roots, chosen.iter().map(|&i| &sites[i])),
+            sites: chosen,
+        });
+    }
+    Ok(variants)
+}
+
+/// `roots` with each of `sites` built as its tumbling panes, and every
+/// guarantee composed again.
+fn in_panes<'a>(
+    roots: &[QueryRoot],
+    sites: impl Iterator<Item = &'a PaneSite>,
+) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+    let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    for site in sites {
+        replaced.insert(Rc::as_ptr(&site.build), merged_panes(site)?);
+    }
+    let mut rebuilt: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    let mut out = Vec::new();
+    for root in roots {
+        out.push(match root {
+            QueryRoot::Operator(node) => {
+                QueryRoot::Operator(rebuild(node, &replaced, &mut rebuilt)?)
+            }
+            QueryRoot::Scalar(expr) => {
+                let mut nodes = HashMap::new();
+                for node in expr.operator_refs() {
+                    nodes.insert(Rc::as_ptr(node), rebuild(node, &replaced, &mut rebuilt)?);
+                }
+                QueryRoot::Scalar(
+                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
+                )
+            }
+        });
+    }
+    with_composed_guarantees(&out)
+}
+
+/// `SummaryMerge` over the [`ASAPOp::PaneChain`] of `site`'s panes, with
+/// the build's output names.
+fn merged_panes(site: &PaneSite) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let Some(ASAPOp::SummaryAgg {
+        child: range,
+        family,
+        input,
+        reduction,
+        grouping,
+        filter,
+    }) = site.build.asap()
+    else {
+        unreachable!("a pane site is a SummaryAgg");
+    };
+    let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::PaneChain {
+        child: Rc::clone(range.children()[0]),
+        family: family.clone(),
+        input: input.clone(),
+        reduction: reduction.clone(),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+        pane_width_ms: site.pane_width_ms,
+        pane_count: site.pane_count,
+    }))?;
+    for (field, kept) in chain
+        .schema
+        .fields
+        .iter_mut()
+        .zip(&site.build.schema.fields)
+    {
+        field.name = kept.name.clone();
+        field.table = kept.table.clone();
+    }
+    Ok(Rc::new(OperatorNode::new(Operator::ASAP(
+        ASAPOp::SummaryMerge {
+            children: vec![Rc::new(chain)],
+        },
+    ))?))
+}
+
 /// `node` with every replaced build below it swapped for its shared build;
 /// the same `Rc` when nothing below changed.
 fn rebuild(
@@ -835,8 +1058,20 @@ mod tests {
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
     /// in which every target chose `family`.
     fn chose(queries: &[(&str, f64)], family: SketchAlgorithm) -> Vec<QueryRoot> {
+        use crate::per_computation_candidates::ComputationCandidate;
+        chose_where(queries, |c| {
+            *c == ComputationCandidate::Summary(family.clone())
+        })
+    }
+
+    /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
+    /// in which every target chose the first candidate `pick` accepts.
+    fn chose_where(
+        queries: &[(&str, f64)],
+        pick: impl Fn(&crate::per_computation_candidates::ComputationCandidate) -> bool,
+    ) -> Vec<QueryRoot> {
         use crate::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
         };
         let roots = queries
             .iter()
@@ -861,7 +1096,7 @@ mod tests {
                 t.choices
                     .candidates
                     .iter()
-                    .position(|c| *c == ComputationCandidate::Summary(family.clone()))
+                    .position(&pick)
                     .expect("the family is a candidate")
             })
             .collect();
@@ -1070,5 +1305,133 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The pane sites of `roots` as (pane width, pane count).
+    fn panes(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<(u64, u32)> {
+        pane_sites(roots, interval_ms)
+            .iter()
+            .map(|site| (site.pane_width_ms, site.pane_count))
+            .collect()
+    }
+
+    /// A 5-min window evaluated every 2 min, 90 s or 1 min is built in panes
+    /// of gcd(window, interval); a query evaluated once per window, or not
+    /// at a fixed interval, has no panes.
+    #[test]
+    fn pane_width_is_the_gcd_of_the_window_and_the_interval() {
+        let roots = chose(
+            &[("quantile_over_time(0.99, m[5m])", 0.01)],
+            SketchAlgorithm::Kll,
+        );
+        assert_eq!(panes(&roots, &[Some(120_000)]), [(60_000, 5)]);
+        assert_eq!(panes(&roots, &[Some(90_000)]), [(30_000, 10)]);
+        assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)]);
+        assert!(panes(&roots, &[Some(300_000)]).is_empty());
+        assert!(panes(&roots, &[None]).is_empty());
+    }
+
+    /// Exact accumulators whose states merge get panes; IRate, which reads
+    /// the last two samples of the window, does not.
+    #[test]
+    fn exact_accumulators_that_merge_get_panes() {
+        use crate::per_computation_candidates::ComputationCandidate;
+        let accumulator =
+            |c: &ComputationCandidate| matches!(c, ComputationCandidate::ExactAccumulator { .. });
+        for query in [
+            "rate(m[5m])",
+            "increase(m[5m])",
+            "sum_over_time(m[5m])",
+            "max_over_time(m[5m])",
+        ] {
+            let roots = chose_where(&[(query, 0.01)], accumulator);
+            assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)], "{query}");
+        }
+        let roots = chose_where(&[("irate(m[5m])", 0.01)], accumulator);
+        assert!(panes(&roots, &[Some(60_000)]).is_empty());
+    }
+
+    /// The rule's candidate reads a `SummaryMerge` over one `PaneChain` of
+    /// the build's family and size over the range's input, keeps the
+    /// build's output names, and keeps the whole build's guarantee (a KLL
+    /// merges into the state of one build over the union).
+    #[test]
+    fn panes_replace_the_build_with_a_merged_chain() {
+        let roots = chose(
+            &[("quantile_over_time(0.99, m[5m])", 0.01)],
+            SketchAlgorithm::Kll,
+        );
+        let sites = pane_sites(&roots, &[Some(60_000)]);
+        let variants = window_composition_variants(&roots, &sites).unwrap();
+        let [variant] = variants.as_slice() else {
+            panic!("one variant: {variants:?}")
+        };
+        assert_eq!(variant.sites, [0]);
+        let panes = variant.roots.as_ref().unwrap();
+        let QueryRoot::Operator(root) = &panes[0] else {
+            panic!("operator root")
+        };
+        root.validate_structure().unwrap();
+        let QueryRoot::Operator(whole) = &roots[0] else {
+            panic!("operator root")
+        };
+        assert_eq!(root.guarantee, whole.guarantee);
+        assert!(root.guarantee.is_some());
+        let merge = OperatorNode::reachable(root)
+            .into_iter()
+            .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryMerge { .. })))
+            .expect("a merge");
+        let Some(ASAPOp::SummaryMerge { children }) = merge.asap() else {
+            unreachable!()
+        };
+        let [chain] = children.as_slice() else {
+            panic!("one chain")
+        };
+        let Some(ASAPOp::PaneChain {
+            child,
+            family,
+            pane_width_ms: 60_000,
+            pane_count: 5,
+            ..
+        }) = chain.asap()
+        else {
+            panic!("{:?}", chain.operator)
+        };
+        let Some(ASAPOp::SummaryAgg {
+            child: range,
+            family: whole_family,
+            ..
+        }) = sites[0].build.asap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(family, whole_family);
+        assert_eq!(child.operator, range.children()[0].operator);
+        assert_eq!(chain.schema, sites[0].build.schema);
+        assert_eq!(merge.coverage(), sites[0].build.coverage());
+    }
+
+    /// Two builds that could be split give three candidates: each alone and
+    /// both, in binary-counter order.
+    #[test]
+    fn every_non_empty_subset_of_the_sites_is_a_candidate() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.99, m[5m])", 0.01),
+                ("quantile_over_time(0.5, m[2m])", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let sites = pane_sites(&roots, &[Some(60_000), Some(60_000)]);
+        assert_eq!(sites.len(), 2);
+        let subsets: Vec<_> = window_composition_variants(&roots, &sites)
+            .unwrap()
+            .into_iter()
+            .map(|v| {
+                assert!(v.roots.is_ok());
+                v.sites
+            })
+            .collect();
+        assert_eq!(subsets, [vec![0], vec![1], vec![0, 1]]);
     }
 }

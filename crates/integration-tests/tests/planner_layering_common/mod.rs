@@ -6,7 +6,7 @@
 //! `asap_devtools::planning_stages::run_planning_stages`, the pipeline
 //! `stage_pipeline` also runs; the example workloads come from
 //! `asap_devtools::planner_layering_examples`. The functions under "Pending adapters" read properties the IR
-//! cannot express yet (window summaries, retention). They return today's
+//! cannot express yet (sliding and EH window summaries, retention). They return today's
 //! only possible answer; the implementer of each feature replaces the body
 //! with a read of the new IR. Tests that depend on them are `#[ignore]`d
 //! with the feature.
@@ -312,6 +312,9 @@ pub fn is_summary(payload: &Payload) -> bool {
             ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(..),
                 ..
+            } | ASAPOp::PaneChain {
+                family: FieldDataType::Sketch(..),
+                ..
             } | ASAPOp::SummaryEstimate { .. }
                 | ASAPOp::SummaryMerge { .. }
         )
@@ -322,16 +325,22 @@ pub fn is_merge(payload: &Payload) -> bool {
     matches!(payload, Operator::ASAP(ASAPOp::SummaryMerge { .. }))
 }
 
-/// The sketch build nodes (`SummaryAgg` over a sketch family) of `dag`,
-/// with their algorithm and parameters.
+/// The sketch build nodes (`SummaryAgg` or tumbling-pane `PaneChain` over a
+/// sketch family) of `dag`, with their algorithm and parameters.
 pub fn sketch_builds(dag: &impl ExportedDag) -> Vec<(NodeId, SketchAlgorithm, SketchParams)> {
     dag.node_ids()
         .into_iter()
         .filter_map(|id| match dag.payload(id) {
-            Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(kind, _),
-                ..
-            }) => Some((id, kind.algorithm().clone(), kind.params().clone())),
+            Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }
+                | ASAPOp::PaneChain {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                },
+            ) => Some((id, kind.algorithm().clone(), kind.params().clone())),
             _ => None,
         })
         .collect()
@@ -600,10 +609,17 @@ pub enum WindowForm {
     ExponentialHistogram { horizon_ms: u64 },
 }
 
-/// Pending (needs Pass 2 window composition, #601/#628): the IR has no
-/// window summary yet, so every build is rebuilt from its query window.
-pub fn window_form(_dag: &impl ExportedDag, _build: NodeId) -> WindowForm {
-    WindowForm::None
+/// The window summary of a build: a `PaneChain` keeps back-to-back panes of
+/// its pane width (tumbling); a `SummaryAgg` is rebuilt from its query
+/// window. Sliding windows and Exponential Histograms are not planned yet
+/// (#628).
+pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
+    match dag.payload(build) {
+        Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }) => WindowForm::Tumbling {
+            length_ms: *pane_width_ms,
+        },
+        _ => WindowForm::None,
+    }
 }
 
 /// Pending (needs retention in the physical DAG): how long a materialized

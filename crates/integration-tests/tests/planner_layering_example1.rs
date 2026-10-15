@@ -6,11 +6,15 @@
 //! yet are `#[ignore]`d with the PR or issue that delivers it.
 //!
 //! Scope: logical ASAP-aware optimization = Pass 1 and Pass 2's
-//! identical-expression rule (no window composition); physical ASAP-aware
-//! optimization = operator implementation with every sub-DAG
-//! `NotMaterialized`. Pass 1 gives 3 candidates; Pass 2 adds, for each, one
-//! sharing the scan and one sharing the scan and the range selector: 9 → 9 →
-//! 1, a subset of the doc's 1 → 54 → 156 → 1.
+//! identical-expression and window-composition rules (tumbling panes only);
+//! physical ASAP-aware optimization = operator implementation with every
+//! sub-DAG `NotMaterialized`. Pass 1 gives 3 candidates; Pass 2 adds, for
+//! each, one sharing the scan and one sharing the scan and the range
+//! selector, and the tumbling-pane forms of Q1's rate and of Q2's option
+//! (each alone or both, each also with a shared scan): 27 → 27 → 1, a subset
+//! of the doc's 1 → 54 → 156 → 1. Tests about Pass 1 and the
+//! identical-expression rule read the candidates with whole windows
+//! ([`whole_windows`]).
 
 mod planner_layering_common;
 
@@ -53,10 +57,16 @@ fn sketch_options(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> BTreeSet<Q
     nodes
         .iter()
         .filter_map(|&id| match dag.payload(id) {
-            Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(kind, grouping),
-                ..
-            }) => Some(match (grouping, kind.algorithm()) {
+            Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, grouping),
+                    ..
+                }
+                | ASAPOp::PaneChain {
+                    family: FieldDataType::Sketch(kind, grouping),
+                    ..
+                },
+            ) => Some(match (grouping, kind.algorithm()) {
                 (
                     GroupingStrategy::SharedMultiSubpopulation {
                         kind: HydraKind::HydraCms,
@@ -80,6 +90,14 @@ fn sketch_options(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> BTreeSet<Q
         .collect()
 }
 
+/// Whether every summary of `dag` is built over its whole window: no
+/// tumbling panes (Pass 2's window-composition rule).
+fn whole_windows(dag: &impl ExportedDag) -> bool {
+    dag.node_ids()
+        .into_iter()
+        .all(|id| !matches!(dag.payload(id), Operator::ASAP(ASAPOp::PaneChain { .. })))
+}
+
 fn roots(query_roots: &[NodeId]) -> (NodeId, NodeId) {
     assert_eq!(query_roots.len(), 2, "every candidate covers Q1 and Q2");
     (query_roots[0], query_roots[1])
@@ -95,13 +113,14 @@ fn classify(dag: &impl ExportedDag, query_roots: &[NodeId]) -> (Q2Option, bool) 
     (option, !c1.is_disjoint(&c2))
 }
 
-/// The candidate with Q2 `option` whose queries share no node (Pass 2 adds
-/// shared-input variants of each).
+/// The candidate with Q2 `option` whose queries share no node and whose
+/// summaries are built over whole windows (Pass 2 adds shared-input and
+/// tumbling-pane variants of each).
 fn physical_with(run: &Run, option: Q2Option) -> &Physical {
     let mut found = run
         .physical
         .iter()
-        .filter(|p| classify(p.dag(), &p.query_roots) == (option, false));
+        .filter(|p| whole_windows(p.dag()) && classify(p.dag(), &p.query_roots) == (option, false));
     let p = found.next().unwrap_or_else(|| panic!("no {option:?}"));
     assert!(found.next().is_none(), "one {option:?} candidate");
     p
@@ -165,13 +184,14 @@ fn stage0_query_language_frontends_queries_do_not_share_nodes() {
 
 /// Pass 1 gives 1 × 3 = 3 candidates without a shared input: Q2's top-k is
 /// exact, Count-Min + heap or CountSketch + heap. (Pass 2 adds shared-input
-/// variants of each.)
+/// and tumbling-pane variants of each.)
 #[test]
 fn stage1_logical_asap_optimization_has_three_pass1_candidates() {
     let run = pipeline();
     let found: Vec<_> = run
         .logical
         .iter()
+        .filter(|c| whole_windows(&c.dag))
         .map(|c| classify(&c.dag, &c.query_roots))
         .filter(|(_, shared)| !shared)
         .collect();
@@ -181,16 +201,18 @@ fn stage1_logical_asap_optimization_has_three_pass1_candidates() {
     assert_eq!(sorted, expected, "each Q2 option exactly once: {found:?}");
 }
 
-/// Q1 is exact in every candidate: no summary is reachable from its root.
+/// Q1 is exact in every candidate: no sketch build or estimate is reachable
+/// from its root (its rate may be merged from exact tumbling panes).
 #[test]
 fn stage1_logical_asap_optimization_q1_is_always_exact() {
     let run = pipeline();
     for c in &run.logical {
         let (q1, _) = roots(&c.query_roots);
         assert!(
-            closure(&c.dag, q1)
-                .iter()
-                .all(|&id| !is_summary(c.dag.payload(id))),
+            closure(&c.dag, q1).iter().all(|&id| {
+                let payload = c.dag.payload(id);
+                !is_summary(payload) || is_merge(payload)
+            }),
             "{}: Q1 reaches a summary",
             c.id
         );
@@ -270,6 +292,48 @@ fn stage1_logical_asap_optimization_keeps_independent_and_shared_variants() {
     }
 }
 
+/// Pass 2's window-composition rule builds Q1's rate and Q2's option in six
+/// 10-s tumbling panes (the gcd of the 1-min window and the 10-s interval),
+/// each alone and both together, next to the whole-window candidates: 27
+/// candidates in all.
+#[test]
+fn stage1_logical_asap_optimization_window_composition_adds_10s_tumbling_panes() {
+    let run = pipeline();
+    assert_eq!(run.logical.len(), 27);
+    let mut chains = BTreeSet::new();
+    for c in &run.logical {
+        for id in c.dag.node_ids() {
+            if let Operator::ASAP(ASAPOp::PaneChain {
+                family,
+                pane_width_ms,
+                pane_count,
+                ..
+            }) = c.dag.payload(id)
+            {
+                let state = match family {
+                    FieldDataType::ExactAggregate(kind, _) => format!("{kind:?}"),
+                    FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
+                    other => panic!("{}: {other:?}", c.id),
+                };
+                let query = readers(&c.dag, &c.query_roots, id);
+                chains.insert((state, query, *pane_width_ms, *pane_count));
+            }
+        }
+    }
+    let expected: BTreeSet<_> = [
+        ("Rate", 0),
+        ("Sum", 1),
+        ("CmsWithHeap", 1),
+        ("CountSketchWithHeap", 1),
+    ]
+    .into_iter()
+    .map(|(state, query)| (state.to_string(), BTreeSet::from([query]), 10_000, 6))
+    .collect();
+    assert_eq!(chains, expected);
+    let whole = run.logical.iter().filter(|c| whole_windows(&c.dag)).count();
+    assert_eq!(whole, 9);
+}
+
 /// Only the raw input is ever shared between Q1 and Q2; no summary is shared.
 #[test]
 fn stage1_logical_asap_optimization_shares_input_but_never_a_summary() {
@@ -295,7 +359,7 @@ fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 // ── Physical ASAP-aware optimization ─────────────────────────────────────
 
 /// No candidate is discarded before plan selection: the logical candidates
-/// map one-to-one, 3 of them without a shared input.
+/// map one-to-one, 3 of them without a shared input or tumbling panes.
 #[test]
 fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let run = pipeline();
@@ -303,7 +367,7 @@ fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let unshared = run
         .physical
         .iter()
-        .filter(|p| !classify(p.dag(), &p.query_roots).1)
+        .filter(|p| whole_windows(p.dag()) && !classify(p.dag(), &p.query_roots).1)
         .count();
     assert_eq!(unshared, 3);
 }
@@ -378,12 +442,13 @@ fn stage2_physical_asap_optimization_exact_topk_returns_job_and_topk_10() {
     assert_eq!(partition_by.len(), 1, "{}: partitioned by job", p.id);
 }
 
-/// A summary Q2 is a build node feeding a top-10 estimation node, with no merge.
+/// A summary Q2 over its whole window is a build node feeding a top-10
+/// estimation node, with no merge.
 #[test]
 fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
     let run = pipeline();
     for p in &run.physical {
-        if classify(p.dag(), &p.query_roots).0 == Q2Option::Exact {
+        if classify(p.dag(), &p.query_roots).0 == Q2Option::Exact || !whole_windows(p.dag()) {
             continue;
         }
         assert!(
@@ -543,7 +608,9 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding() {
     let shared: Vec<_> = run
         .physical
         .iter()
-        .filter(|p| classify(p.dag(), &p.query_roots) == (Q2Option::Exact, true))
+        .filter(|p| {
+            whole_windows(p.dag()) && classify(p.dag(), &p.query_roots) == (Q2Option::Exact, true)
+        })
         .map(|p| (p.id.clone(), run.cost(&p.id).unwrap()))
         .collect();
     assert!(!shared.is_empty());
@@ -562,6 +629,33 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding() {
         assert!(rejection.reason.contains("tied"), "{}", rejection.reason);
     }
     assert_eq!(run.selection.selected, independent.id);
+}
+
+/// Tumbling panes rebuilt at every evaluation cost more than the whole
+/// window: the panes read the same rows and update the same states, and
+/// merging them adds work. Heap panes are invalid like their whole-window
+/// builds (and their merged top-k is only approximate).
+#[test]
+fn stage3_plan_selection_tumbling_panes_at_query_time_cost_more() {
+    let run = pipeline();
+    let selected = run.cost(&run.selection.selected).unwrap();
+    let invalid = run.invalid();
+    let mut compared = 0;
+    for p in run.physical.iter().filter(|p| !whole_windows(p.dag())) {
+        match run.cost(&p.id) {
+            Some(cost) => {
+                assert!(cost > selected * (1.0 + 1e-9), "{}: {cost}", p.id);
+                compared += 1;
+            }
+            None => assert_ne!(
+                classify(p.dag(), &p.query_roots).0,
+                Q2Option::Exact,
+                "{}: {invalid:?}",
+                p.id
+            ),
+        }
+    }
+    assert!(compared > 0);
 }
 
 /// The selected plan is the cheapest valid candidate for the whole workload.
@@ -678,6 +772,7 @@ fn stage3_plan_selection_shared_input_is_not_costlier() {
     let by_combo: BTreeMap<_, _> = run
         .physical
         .iter()
+        .filter(|p| whole_windows(p.dag()))
         .filter_map(|p| Some((classify(p.dag(), &p.query_roots), run.cost(&p.id)?)))
         .collect();
     let mut compared = 0;

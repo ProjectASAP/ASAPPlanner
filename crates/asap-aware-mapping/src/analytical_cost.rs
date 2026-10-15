@@ -322,6 +322,12 @@ pub enum PhysicalOperator {
         offset: u64,
     },
     PassThrough,
+    /// Moves when its input is evaluated (PromQL `offset`): the rows pass
+    /// unchanged and nothing is computed.
+    TimeShift,
+    /// Keeps the rows of its input inside a time window: priced by the
+    /// rows it keeps.
+    TimeRange,
     PromqlRange {
         range_millis: u64,
     },
@@ -881,7 +887,9 @@ fn statistics_match_operator(operator: PhysicalOperator, statistics: &OperatorSt
             )
         }
         PhysicalOperator::Limit { .. } => matches!(statistics, OperatorStatistics::Limit { .. }),
-        PhysicalOperator::PassThrough => {
+        PhysicalOperator::PassThrough
+        | PhysicalOperator::TimeShift
+        | PhysicalOperator::TimeRange => {
             matches!(statistics, OperatorStatistics::PassThrough { .. })
         }
         PhysicalOperator::PromqlRange { .. } => {
@@ -959,6 +967,8 @@ fn expected_input_arity(
         | PhysicalOperator::InMemoryAnalyticWindow { .. }
         | PhysicalOperator::Limit { .. }
         | PhysicalOperator::PassThrough
+        | PhysicalOperator::TimeShift
+        | PhysicalOperator::TimeRange
         | PhysicalOperator::PromqlRange { .. }
         | PhysicalOperator::PromqlSubquery { .. }
         | PhysicalOperator::PromqlRelabel { .. }
@@ -1127,6 +1137,12 @@ pub fn estimate_operator(
             _,
         ) => ResourceEstimate::new(
             checked_cpu_product(left.rows, expression_operations_per_row)?,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (PhysicalOperator::TimeShift, _) => ResourceEstimate::new(0.0, 0, 0),
+        (PhysicalOperator::TimeRange, _) => ResourceEstimate::new(
+            output.rows as f64,
             per_row_width(output.rows, output.bytes)?,
             0,
         ),
@@ -1587,7 +1603,12 @@ pub(crate) fn validate_operator_semantics(
             }
             validate_partitioning(input, input_partitioning, partitioned)?;
         }
-        (PhysicalOperator::PassThrough, _) => {
+        (PhysicalOperator::TimeRange, _) => {
+            if output.rows > input.rows || output.bytes > input.bytes {
+                return inconsistent("a time range keeps more rows than it reads");
+            }
+        }
+        (PhysicalOperator::PassThrough | PhysicalOperator::TimeShift, _) => {
             if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
             }
@@ -2272,6 +2293,44 @@ mod tests {
             unknown[field] = serde_json::Value::Null;
             assert!(serde_json::from_value::<ResourceEstimate>(unknown).is_err());
         }
+    }
+
+    /// A time shift only moves when its input is evaluated: it costs
+    /// nothing. A time range is priced by the rows it keeps, and keeps no
+    /// more than it reads.
+    #[test]
+    fn time_shift_is_free_and_time_range_is_priced_by_the_rows_it_keeps() {
+        let shift = estimate_operator(
+            PhysicalOperator::TimeShift,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(1_000, 1_000),
+            },
+        )
+        .unwrap();
+        assert_eq!(shift.cpu_ops(), 0.0);
+        assert_eq!(shift.scan_bytes(), 0);
+        let range = estimate_operator(
+            PhysicalOperator::TimeRange,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(1_000, 200),
+            },
+        )
+        .unwrap();
+        assert_eq!(range.cpu_ops(), 200.0);
+        assert!(estimate_operator(
+            PhysicalOperator::TimeRange,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(200, 1_000),
+            },
+        )
+        .is_err());
+        assert!(estimate_operator(
+            PhysicalOperator::TimeShift,
+            OperatorStatistics::PassThrough {
+                edges: unary_row_edges(1_000, 200),
+            },
+        )
+        .is_err());
     }
 
     fn filter_operator() -> PhysicalOperator {

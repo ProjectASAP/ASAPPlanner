@@ -271,7 +271,8 @@ fn stage3_plan_selection_a_charges_each_node_per_consuming_query() {
 
 /// Sharing the scan never costs more than scanning separately, for the same per-computation choices.
 #[test]
-#[ignore = "needs plan selection row estimates for time-shifted scans and narrower time ranges (#632)"]
+#[ignore = "needs plan selection to charge a shared scan that is not materialized per query by the \
+            window each query reads, not by the longest window it serves (#632)"]
 fn stage3_plan_selection_a_shared_scan_is_not_costlier() {
     let run = run_a();
     let key = |c: &Logical| {
@@ -328,7 +329,8 @@ fn stage1_logical_asap_optimization_b_pass1_offers_exact_and_kll() {
 
 /// Each Pass 1 option gets three window forms: none, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows.
 #[test]
-#[ignore = "needs Pass 2 window composition: tumbling windows (#601) and sliding windows (no PR yet)"]
+#[ignore = "needs Pass 2 window composition: sliding windows (no PR yet); tumbling windows pass in \
+            stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_mergeable_option"]
 fn stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option() {
     let run = run_b();
     let summaries: BTreeSet<_> = options(&run, 0)
@@ -358,9 +360,54 @@ fn stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbli
     }
 }
 
+/// Each summary option of Pass 1 (KLL and DDSketch, both mergeable) also
+/// comes as 1-min tumbling panes, gcd(5 min, 1 min), merged five at a time
+/// before its p99 estimate; the whole-window builds are kept and read no
+/// merge. Exact has no summary to split: 2 options × 2 forms + exact = 5.
+#[test]
+fn stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_mergeable_option() {
+    let run = run_b();
+    assert_eq!(run.logical.len(), 5);
+    let mut found = BTreeSet::new();
+    for c in &run.logical {
+        for (build, algorithm, form, _) in windowed_builds(c) {
+            let merged = estimates_of(&c.dag, build).iter().all(|(e, _)| {
+                c.dag
+                    .producers(*e)
+                    .into_iter()
+                    .any(|p| is_merge(c.dag.payload(p)))
+            });
+            assert_eq!(merged, form != WindowForm::None, "{}: {form:?}", c.id);
+            if let asap_types::ir::Operator::ASAP(asap_types::ir::ASAPOp::PaneChain {
+                pane_count,
+                ..
+            }) = c.dag.payload(build)
+            {
+                assert_eq!(*pane_count, 5, "{}", c.id);
+            }
+            found.insert((format!("{algorithm:?}"), form));
+        }
+    }
+    let tumbling = WindowForm::Tumbling {
+        length_ms: PATTERN_B_INTERVAL_MS,
+    };
+    let expected: BTreeSet<_> = ["DDSketch", "Kll"]
+        .into_iter()
+        .flat_map(|a| [(a.to_string(), WindowForm::None), (a.to_string(), tumbling)])
+        .collect();
+    assert_eq!(found, expected);
+}
+
 /// Window parameters are legal: L divides W, s divides L and the evaluation interval, a tumbling length divides both.
 #[test]
 fn stage1_logical_asap_optimization_b_window_parameters_are_legal() {
+    let tumbling = run_b()
+        .logical
+        .iter()
+        .flat_map(windowed_builds)
+        .filter(|(_, _, form, _)| matches!(form, WindowForm::Tumbling { .. }))
+        .count();
+    assert!(tumbling > 0, "not vacuous");
     let (w, every) = (PATTERN_B_WINDOW_MS, PATTERN_B_INTERVAL_MS);
     for c in &run_b().logical {
         for (_, _, form, _) in windowed_builds(c) {
@@ -388,7 +435,8 @@ fn stage1_logical_asap_optimization_b_window_parameters_are_legal() {
 
 /// A sliding window with L = W reads one completed window (no merge); tumbling windows merge W / length of them.
 #[test]
-#[ignore = "needs Pass 2 window composition: tumbling windows (#601) and sliding windows (no PR yet)"]
+#[ignore = "needs Pass 2 window composition: sliding windows (no PR yet); tumbling merges pass in \
+            stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_mergeable_option"]
 fn stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it() {
     let run = run_b();
     let mut seen = BTreeSet::new();
@@ -445,4 +493,38 @@ fn stage3_plan_selection_b_selects_cheapest_valid() {
     assert_selects_one_and_explains_the_rest(&run);
     assert_selects_cheapest_valid(&run);
     assert_each_node_charged_per_consuming_query(&run);
+}
+
+/// With nothing materialized, the 1-min KLL panes are all rebuilt at every
+/// evaluation: they read the same 5 minutes of samples and update the same
+/// states as one whole-window KLL, and merging five panes per series adds
+/// 1M × 5 operations a minute. So whole-window KLL is selected at 2.100 per
+/// second and the panes cost 2.183; exact costs 2.400. DDSketch, whole or in
+/// panes, misses the rank target.
+#[test]
+fn stage3_plan_selection_b_panes_rebuilt_at_query_time_add_the_merge() {
+    let run = run_b();
+    let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);
+    let with = |algorithm: &str, panes: bool| {
+        run.logical
+            .iter()
+            .find(|c| {
+                query_option(&c.dag, &c.query_roots, 0) == algorithm
+                    && windowed_builds(c)
+                        .iter()
+                        .any(|(_, _, f, _)| (*f != WindowForm::None) == panes)
+            })
+            .unwrap_or_else(|| panic!("{algorithm} panes={panes}"))
+    };
+    let whole = cost(with("Kll", false)).unwrap();
+    let panes = cost(with("Kll", true)).unwrap();
+    assert!((whole - 2.1).abs() < 1e-9, "{whole}");
+    assert!((panes - (2.1 + 5e6 * 1e-6 / 60.0)).abs() < 1e-9, "{panes}");
+    assert_eq!(
+        run.selection.selected,
+        run.physical_of(with("Kll", false)).next().unwrap().id
+    );
+    for panes in [false, true] {
+        assert_eq!(cost(with("DDSketch", panes)), None, "panes={panes}");
+    }
 }
