@@ -13,8 +13,7 @@ use asap_aware_mapping::stage3_plan_selection::{Selection, SelectionError};
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
-use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataWorkload, PlanningWorkload, QueryDemand};
+use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 
 #[derive(Debug)]
 pub struct PlanningStagesRun {
@@ -142,38 +141,27 @@ pub fn run_planning_stages(
     roots: Vec<QueryRoot>,
     max_combinations: Option<usize>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    let targets: Vec<_> = workload
-        .query_workload
-        .entries()
-        .map(|entry| entry.requirements.accuracy.clone())
-        .collect();
-    let demand: Vec<_> = workload
-        .query_workload
-        .entries()
-        .map(|entry| QueryDemand::from(&entry))
-        .collect();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    run_planning_stages_over(roots, &targets, &demand, &data, max_combinations)
+    run_planning_stages_over(roots, &entries, &data, max_combinations)
 }
 
 /// [`run_planning_stages`] over roots lowered from any mix of query
-/// languages: query `i` is `roots[i]` with accuracy target `targets[i]`,
-/// demanded as `demand[i]` says.
+/// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
+/// (its accuracy target, latency bound, recurrence and predictability).
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
-    targets: &[AccuracyTarget],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     max_combinations: Option<usize>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
-    let targets: Vec<_> = targets.iter().cloned().map(Some).collect();
     let per_computation =
         generate_per_computation_candidates(roots.iter().cloned().enumerate().collect())
             .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
     // Count Stage 1 candidates as they are enumerated and stop as soon as
     // the count passes the limit; never truncate.
-    let recurrence: Vec<_> = demand.iter().map(|d| d.recurrence.clone()).collect();
+    let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let mut stage1 = Vec::new();
     for candidate in stage1_logical_asap_optimization(&per_computation, &recurrence) {
         if max_combinations.is_some_and(|limit| stage1.len() == limit) {
@@ -186,7 +174,7 @@ pub fn run_planning_stages_over(
     if let Some(limit) = max_combinations {
         let mut physical = 0usize;
         for roots in stage1.iter().filter_map(|c| c.roots.as_ref().ok()) {
-            physical += physical_candidate_count(roots, demand, data).unwrap_or(0);
+            physical += physical_candidate_count(roots, entries, data).unwrap_or(0);
             if physical > limit {
                 return Err(PlanningStagesError::TooManyPhysicalCandidates { limit });
             }
@@ -195,8 +183,7 @@ pub fn run_planning_stages_over(
     let run = run_stage2_and_stage3(
         per_computation,
         stage1,
-        &targets,
-        demand,
+        entries,
         data,
         PlanningModels::builtin(),
     );

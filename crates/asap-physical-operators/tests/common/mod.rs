@@ -70,8 +70,13 @@ fn run_stage1_to_stage3(
     };
     asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],
-        &[Some(accuracy)],
-        &[planner_types::workload::QueryRecurrence::Unknown.into()],
+        &[planner_types::workload::QueryWorkloadEntry {
+            requirements: planner_types::workload::QueryRequirements {
+                accuracy,
+                max_latency_ms: None,
+            },
+            ..Default::default()
+        }],
         &data,
         asap_aware_mapping::PlanningModels::builtin(),
     )

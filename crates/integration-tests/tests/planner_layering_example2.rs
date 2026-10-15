@@ -949,18 +949,9 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
         .collect();
     assert!(!kmv.is_empty(), "a candidate answers Q1 with KMV");
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let targets: Vec<_> = entries
-        .iter()
-        .map(|e| Some(e.requirements.accuracy.clone()))
-        .collect();
-    let demand: Vec<_> = entries
-        .iter()
-        .map(asap_types::workload::QueryDemand::from)
-        .collect();
     let selection = select_plan(
         &kmv,
-        &targets,
-        &demand,
+        &entries,
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
     )

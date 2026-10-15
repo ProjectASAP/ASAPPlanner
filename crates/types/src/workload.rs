@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 // ── Query surface ─────────────────────────────────────────────────────────────
 
 /// A raw query string in its source language, before any parsing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Query(pub String);
 
@@ -274,7 +274,7 @@ pub enum RepeatedDemand {
 ///     RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueryRecurrence {
     OneTime {
@@ -282,6 +282,7 @@ pub enum QueryRecurrence {
         execute_at: Option<TimestampMs>,
     },
     Repeated(RepeatedDemand),
+    #[default]
     Unknown,
 }
 
@@ -352,7 +353,12 @@ pub struct RepeatingEntry {
 
 /// Planner-facing normalized form of either [`BatchEntry`] or
 /// [`RepeatingEntry`]. It keeps requirements, predictability, recurrence, and
-/// event-time selection as separate axes.
+/// event-time selection as separate axes. Planning takes one per query, in
+/// root order: Stage 2 (physical ASAP-aware optimization) reads the
+/// recurrence and predictability, Stage 3 (plan selection) the accuracy
+/// target, the latency bound and the recurrence. The default is an empty
+/// query, exact, with no latency bound and unknown predictability and
+/// recurrence.
 ///
 /// # Example
 ///
@@ -373,59 +379,21 @@ pub struct RepeatingEntry {
 ///     },
 /// };
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryWorkloadEntry {
+    /// The query text in the workload's language.
     pub query: Query,
+    /// Its accuracy target and latency bound (default: exact, no bound).
     pub requirements: QueryRequirements,
+    /// How far ahead it is known: a build may run at ingestion time only for
+    /// `Predictable` queries (default: unknown).
     pub predictability: Predictability,
+    /// How often it runs: sets how often each node is priced, and only
+    /// repeated queries may keep state from ingestion time (default: unknown).
     pub recurrence: QueryRecurrence,
+    /// The event time it reads (default: unknown scope, no lookback).
     pub time_selection: TimeSelection,
-}
-
-/// How one query is demanded, as planning reads it: its recurrence, how far
-/// ahead it is known, and its response-latency bound. Physical ASAP-aware
-/// optimization reads the recurrence and predictability (whether state may
-/// be kept from ingestion time); plan selection reads the recurrence (how
-/// often each node runs) and the latency bound.
-///
-/// # Example
-///
-/// ```
-/// use asap_types::workload::{Predictability, QueryDemand, QueryRecurrence};
-///
-/// // Anything not declared: unknown predictability, no latency bound.
-/// let demand = QueryDemand::from(QueryRecurrence::Unknown);
-/// assert_eq!(demand.predictability, Predictability::Unknown);
-/// assert_eq!(demand.max_latency_ms, None);
-/// ```
-#[derive(Debug, Clone, PartialEq)]
-pub struct QueryDemand {
-    pub recurrence: QueryRecurrence,
-    pub predictability: Predictability,
-    pub max_latency_ms: Option<f64>,
-}
-
-impl From<&QueryWorkloadEntry> for QueryDemand {
-    fn from(entry: &QueryWorkloadEntry) -> Self {
-        Self {
-            recurrence: entry.recurrence.clone(),
-            predictability: entry.predictability.clone(),
-            max_latency_ms: entry.requirements.max_latency_ms,
-        }
-    }
-}
-
-/// A query known only by its recurrence: unknown predictability and no
-/// latency bound.
-impl From<QueryRecurrence> for QueryDemand {
-    fn from(recurrence: QueryRecurrence) -> Self {
-        Self {
-            recurrence,
-            predictability: Predictability::Unknown,
-            max_latency_ms: None,
-        }
-    }
 }
 
 impl From<&BatchEntry> for QueryWorkloadEntry {

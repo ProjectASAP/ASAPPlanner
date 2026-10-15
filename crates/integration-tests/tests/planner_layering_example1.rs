@@ -26,7 +26,6 @@ use asap_types::ir::flat::NodeId;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
 use asap_types::post_asap::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::post_asap::{Materialization, Medium};
-use asap_types::types::AccuracyTarget;
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
@@ -130,6 +129,14 @@ fn physical_with(run: &Run, option: Q2Option) -> &Physical {
 fn every_10s() -> asap_types::workload::QueryRecurrence {
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
     QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000)))
+}
+
+/// The workload entry of an exact query evaluated every 10 s.
+fn exact_every_10s() -> asap_types::workload::QueryWorkloadEntry {
+    asap_types::workload::QueryWorkloadEntry {
+        recurrence: every_10s(),
+        ..Default::default()
+    }
 }
 
 // ── Workload ─────────────────────────────────────────────────────────────
@@ -728,8 +735,7 @@ fn materialized_case() -> Run {
     time_range.materialization = Materialization::MatAtQuery(Medium::Memory);
     let selection = select_plan(
         std::slice::from_ref(&p.candidate),
-        &[Some(AccuracyTarget::exact()), Some(AccuracyTarget::exact())],
-        &[every_10s().into(), every_10s().into()],
+        &[exact_every_10s(), exact_every_10s()],
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
     )

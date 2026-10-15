@@ -117,7 +117,7 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
-    DataWorkload, MetricType, QueryDemand, QueryRecurrence, RepeatedDemand,
+    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use thiserror::Error;
 
@@ -211,22 +211,32 @@ impl QueryLatency {
 }
 
 /// The first query whose latency is over its bound, as a rejection reason.
-fn latency_violation(cost: &CandidateCost, demand: &[QueryDemand]) -> Option<String> {
+fn latency_violation(cost: &CandidateCost, entries: &[QueryWorkloadEntry]) -> Option<String> {
     cost.latency
         .iter()
-        .zip(demand)
+        .zip(entries)
         .enumerate()
-        .find_map(|(query, (latency, demand))| match demand.max_latency_ms {
-            Some(bound) if latency.total_ms() > bound => Some(format!(
-                "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms) \
+        .find_map(
+            |(query, (latency, entry))| match entry.requirements.max_latency_ms {
+                Some(bound) if latency.total_ms() > bound => Some(format!(
+                    "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms) \
                  is over its {bound} ms bound",
-                query + 1,
-                latency.total_ms(),
-                latency.compaction_ms,
-                latency.query_ms
-            )),
-            _ => None,
-        })
+                    query + 1,
+                    latency.total_ms(),
+                    latency.compaction_ms,
+                    latency.query_ms
+                )),
+                _ => None,
+            },
+        )
+}
+
+/// Each entry's accuracy target, as the per-query targets Stage 3 checks.
+pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTarget> {
+    entries
+        .iter()
+        .map(|entry| entry.requirements.accuracy.clone())
+        .collect()
 }
 
 /// A candidate that was not selected. `valid == false`: it failed a check;
@@ -298,15 +308,11 @@ pub struct Selection {
 
 #[derive(Debug, Error)]
 pub enum SelectionError {
-    #[error(
-        "candidate {candidate} has {roots} roots but {targets} accuracy targets and \
-         {recurrences} recurrences were given"
-    )]
-    TargetCount {
+    #[error("candidate {candidate} has {roots} roots but {entries} workload entries were given")]
+    EntryCount {
         candidate: String,
         roots: usize,
-        targets: usize,
-        recurrences: usize,
+        entries: usize,
     },
     #[error("candidate {candidate}, node {node:?}: {error}")]
     Cost {
@@ -327,28 +333,27 @@ pub enum SelectionError {
 
 /// Stage 3 (plan selection): reject candidates that miss a query's accuracy
 /// target or latency bound, price the rest per second and select the
-/// cheapest (the first on ties). `targets[i]` is the requirement of
-/// `candidate.roots[i]` (`None` imposes none) and `demand[i]` how it is
-/// demanded: how often it is evaluated and its latency bound.
+/// cheapest (the first on ties). `entries[i]` is the workload entry of
+/// `candidate.roots[i]`: its accuracy target, its latency bound and how
+/// often it is evaluated.
 pub fn select_plan(
     cands: &[PhysicalCandidate],
-    targets: &[Option<AccuracyTarget>],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Selection, SelectionError> {
+    let targets = &accuracy_targets(entries);
     let mut costs = BTreeMap::new();
     let mut accepted = BTreeMap::new();
     let mut rejected = Vec::new();
     let mut best: Option<(String, f64, Vec<QueryRoot>)> = None;
-    let recurrence: Vec<QueryRecurrence> = demand.iter().map(|d| d.recurrence.clone()).collect();
+    let recurrence: Vec<QueryRecurrence> = entries.iter().map(|e| e.recurrence.clone()).collect();
     for candidate in cands {
-        if candidate.roots.len() != targets.len() || candidate.roots.len() != recurrence.len() {
-            return Err(SelectionError::TargetCount {
+        if candidate.roots.len() != entries.len() {
+            return Err(SelectionError::EntryCount {
                 candidate: candidate.id.clone(),
                 roots: candidate.roots.len(),
-                targets: targets.len(),
-                recurrences: recurrence.len(),
+                entries: entries.len(),
             });
         }
         let candidate =
@@ -378,7 +383,7 @@ pub fn select_plan(
                     error,
                 }
             })?;
-        if let Some(reason) = latency_violation(&cost, demand) {
+        if let Some(reason) = latency_violation(&cost, entries) {
             rejected.push(Rejection {
                 id: candidate.id.clone(),
                 valid: false,
@@ -539,7 +544,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
 /// stage binds `G`.
 fn sized_for_failure_probability(
     candidate: &PhysicalCandidate,
-    targets: &[Option<AccuracyTarget>],
+    targets: &[AccuracyTarget],
     data: &DataWorkload,
 ) -> Result<PhysicalCandidate, SizingError> {
     let roots = sized_roots(&candidate.roots, targets, data)?;
@@ -572,14 +577,14 @@ fn sized_for_failure_probability(
 /// the selected candidate too.
 pub fn sized_roots(
     roots: &[QueryRoot],
-    targets: &[Option<AccuracyTarget>],
+    targets: &[AccuracyTarget],
     data: &DataWorkload,
 ) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
     let mut required: HashMap<*const OperatorNode, f64> = HashMap::new();
     for (root, target) in roots.iter().zip(targets) {
         let Some((target, delta)) = target
-            .as_ref()
-            .and_then(|t| t.failure_probability.map(|delta| (t, delta)))
+            .failure_probability
+            .map(|delta| (target, delta))
             .filter(|(t, delta)| !t.is_exact() && *delta > 0.0)
         else {
             continue;
@@ -644,17 +649,13 @@ pub fn sized_roots(
 /// accepts only guarantees in it (or convertible to it).
 fn accuracy_check(
     candidate: &PhysicalCandidate,
-    targets: &[Option<AccuracyTarget>],
+    targets: &[AccuracyTarget],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
 ) -> Result<Vec<Option<AcceptedAccuracy>>, String> {
     let mut accepted = Vec::with_capacity(targets.len());
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
         let query = query + 1;
-        let Some(target) = target else {
-            accepted.push(None);
-            continue;
-        };
         let mut sketches: Vec<String> = Vec::new();
         for node in root_operators(root)
             .iter()
@@ -1959,7 +1960,7 @@ mod tests {
     use super::*;
     use crate::accuracy::AccuracyEvidenceProvider;
     use crate::stage2_physical_asap_optimization::optimize_physical_asap;
-    use crate::test_support::lower_promql;
+    use crate::test_support::{entry, entry_with, lower_promql};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
     use asap_types::post_asap::{
         BoundExpr, ErrorMetric, GroupingStrategy, ProbabilityExpr, SketchKind,
@@ -1971,10 +1972,6 @@ mod tests {
     /// `n` queries repeating every 10 s, as Example 1's panels do.
     fn recurrences(n: usize) -> Vec<QueryRecurrence> {
         vec![repeating(10_000); n]
-    }
-
-    fn every_10s(n: usize) -> Vec<QueryDemand> {
-        vec![repeating(10_000).into(); n]
     }
 
     /// A query repeating every `interval_ms`.
@@ -2072,8 +2069,7 @@ mod tests {
         assert!(!summaries.is_empty());
         let selection = select_plan(
             &candidates,
-            &[Some(strict)],
-            &every_10s(1),
+            &[entry_with(strict, repeating(10_000))],
             &data(),
             PlanningModels::builtin(),
         )
@@ -2112,8 +2108,10 @@ mod tests {
         let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let selection = select_plan(
             &candidates(),
-            &[Some(target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1))],
-            &every_10s(1),
+            &[entry_with(
+                target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                repeating(10_000),
+            )],
             &data(),
             PlanningModels::builtin(),
         )
@@ -2144,8 +2142,10 @@ mod tests {
             let data = with_types(&types);
             let selection = select_plan(
                 &candidates(),
-                &[Some(target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1))],
-                &every_10s(1),
+                &[entry_with(
+                    target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                    repeating(10_000),
+                )],
                 &data,
                 PlanningModels::builtin(),
             )
@@ -2279,8 +2279,7 @@ mod tests {
         };
         let run = crate::pass::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
-            &[Some(target)],
-            &every_10s(1),
+            &[entry_with(target, repeating(10_000))],
             &data,
             PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
@@ -2358,22 +2357,6 @@ mod tests {
         assert!(Rc::ptr_eq(before, after));
     }
 
-    /// A query without a target constrains nothing: the Count-Min
-    /// candidate is admitted and priced.
-    #[test]
-    fn count_min_is_admitted_without_a_target() {
-        let selection = select_plan(
-            &candidates(),
-            &[None],
-            &every_10s(1),
-            &data(),
-            PlanningModels::builtin(),
-        )
-        .unwrap();
-        assert!(selection.costs.contains_key("P2"));
-        assert!(selection.rejected.iter().all(|r| r.valid));
-    }
-
     /// Each node is priced under its DAG id, and the total is the sum;
     /// every candidate is either selected or rejected as costlier. The
     /// CountSketch+heap estimate has no analytical guarantee, so deployment
@@ -2384,8 +2367,10 @@ mod tests {
         let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
         let selection = select_plan(
             &candidates,
-            &[Some(target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1))],
-            &every_10s(1),
+            &[entry_with(
+                target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                repeating(10_000),
+            )],
             &data(),
             PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
@@ -2550,8 +2535,7 @@ mod tests {
         let select = |target: &AccuracyTarget| {
             select_plan(
                 &candidates,
-                &[Some(target.clone())],
-                &every_10s(1),
+                &[entry_with(target.clone(), repeating(10_000))],
                 &data(),
                 PlanningModels::builtin(),
             )
@@ -2589,8 +2573,7 @@ mod tests {
         };
         let Err(SelectionError::NoValidCandidate(rejected)) = select_plan(
             &candidates,
-            &[Some(whole)],
-            &every_10s(1),
+            &[entry_with(whole, repeating(10_000))],
             &no_cardinality,
             PlanningModels::builtin(),
         ) else {
@@ -2711,8 +2694,7 @@ mod tests {
         let select = |metric| {
             select_plan(
                 &candidates(),
-                &[Some(target.clone())],
-                &every_10s(1),
+                &[entry_with(target.clone(), repeating(10_000))],
                 &counter,
                 PlanningModels::builtin().with_evidence(&EveryOutputMeasuredIn(metric)),
             )
@@ -2757,8 +2739,10 @@ mod tests {
 
         let builtin = select_plan(
             &candidates,
-            &[Some(target.target_in(ErrorMetric::ABSOLUTE))],
-            &every_10s(1),
+            &[entry_with(
+                target.target_in(ErrorMetric::ABSOLUTE),
+                repeating(10_000),
+            )],
             &data(),
             PlanningModels::builtin(),
         )
@@ -2776,8 +2760,10 @@ mod tests {
 
         let measured = select_plan(
             &candidates,
-            &[Some(target.target_in(ErrorMetric::ABSOLUTE))],
-            &every_10s(1),
+            &[entry_with(
+                target.target_in(ErrorMetric::ABSOLUTE),
+                repeating(10_000),
+            )],
             &data(),
             PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
@@ -2822,8 +2808,10 @@ mod tests {
             let candidates = keeping_state(all_candidates(query, &target));
             let selection = select_plan(
                 &candidates,
-                &[Some(target.target_in(ErrorMetric::Rank))],
-                &every_10s(1),
+                &[entry_with(
+                    target.target_in(ErrorMetric::Rank),
+                    repeating(10_000),
+                )],
                 &data(),
                 PlanningModels::builtin(),
             )
@@ -2848,8 +2836,7 @@ mod tests {
             let candidates = all_candidates(query, &AccuracyTarget::exact());
             let selection = select_plan(
                 &candidates,
-                &[None],
-                &every_10s(1),
+                &[entry(repeating(10_000))],
                 &data(),
                 PlanningModels::builtin(),
             )
@@ -3026,8 +3013,10 @@ mod tests {
             let candidates = keeping_state(all_candidates("distinct_over_time(x[5m])", &target));
             let selection = select_plan(
                 &candidates,
-                &[Some(target.target_in(ErrorMetric::Relative))],
-                &every_10s(1),
+                &[entry_with(
+                    target.target_in(ErrorMetric::Relative),
+                    repeating(10_000),
+                )],
                 &data,
                 PlanningModels::builtin(),
             )
@@ -3051,8 +3040,7 @@ mod tests {
         candidates.push(twin);
         let selection = select_plan(
             &candidates,
-            &[None],
-            &every_10s(1),
+            &[entry(repeating(10_000))],
             &data(),
             PlanningModels::builtin(),
         )
@@ -3073,8 +3061,10 @@ mod tests {
         let candidates = all_candidates("quantile(0.99, rate(x[5m]))", &target);
         let selection = select_plan(
             &candidates,
-            &[Some(target.target_in(ErrorMetric::Rank))],
-            &every_10s(1),
+            &[entry_with(
+                target.target_in(ErrorMetric::Rank),
+                repeating(10_000),
+            )],
             &data(),
             PlanningModels::builtin(),
         )
@@ -3163,8 +3153,7 @@ mod tests {
         let root = lower_promql(query, planned.clone());
         let run = crate::pass::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
-            &[Some(selected.clone())],
-            &[QueryRecurrence::Unknown.into()],
+            &[entry_with(selected.clone(), QueryRecurrence::Unknown)],
             data,
             models,
         )
@@ -4019,11 +4008,16 @@ mod tests {
 
     const MINUTE: u32 = 60_000;
 
-    fn every_minute() -> QueryDemand {
-        QueryDemand {
-            recurrence: repeating(MINUTE),
+    /// The p99 target [`pane_candidates`] are sized for.
+    fn p99_target() -> AccuracyTarget {
+        AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank)
+    }
+
+    /// A predictable p99 query evaluated every minute, with no latency bound.
+    fn every_minute() -> QueryWorkloadEntry {
+        QueryWorkloadEntry {
             predictability: asap_types::workload::Predictability::Predictable { known_at: None },
-            max_latency_ms: None,
+            ..entry_with(p99_target(), repeating(MINUTE))
         }
     }
 
@@ -4044,10 +4038,7 @@ mod tests {
     /// `rows_per_s`: rebuilt at query time (B2), then maintained at
     /// ingestion time (B1).
     fn pane_candidates(rows_per_s: f64) -> Vec<PhysicalCandidate> {
-        let root = lower_promql(
-            "quantile_over_time(0.99, m[5m])",
-            AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank),
-        );
+        let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
         )
@@ -4159,14 +4150,11 @@ mod tests {
         assert_eq!((b2.compaction_ms, b1.compaction_ms), (0.0, 0.0));
         assert!(b1.query_ms < b2.query_ms, "{b1:?} vs {b2:?}");
         let bound = (b1.query_ms + b2.query_ms) / 2.0;
-        let demand = QueryDemand {
-            max_latency_ms: Some(bound),
-            ..every_minute()
-        };
+        let mut bounded = every_minute();
+        bounded.requirements.max_latency_ms = Some(bound);
         let selection = select_plan(
             &candidates,
-            &[None],
-            &[demand],
+            &[bounded],
             &arriving(10_000.0),
             PlanningModels::builtin(),
         )

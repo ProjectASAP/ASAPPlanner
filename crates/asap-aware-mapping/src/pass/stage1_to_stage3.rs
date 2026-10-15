@@ -45,9 +45,8 @@ use asap_types::ir::flat::flatten;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    DataWorkload, QueryDemand, QueryLanguage, QueryRecurrence, RepeatedDemand,
+    DataWorkload, QueryLanguage, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
@@ -154,23 +153,21 @@ impl<Id> Stage1ToStage3Run<Id> {
 }
 
 /// Run Stage 1 → Stage 2 → Stage 3 over the frontends' `roots`, enumerating every
-/// whole-workload candidate. `targets[i]` is the accuracy
-/// requirement of `roots[i]` (`None` imposes none) and `demand[i]` how it is
-/// demanded (recurrence, predictability, latency bound). Only a Pass 1 failure is
+/// whole-workload candidate. `entries[i]` is the workload entry of
+/// `roots[i]`: its accuracy target, latency bound, recurrence and
+/// predictability. Only a Pass 1 failure is
 /// an error; a candidate that does not compose or cannot be implemented is
 /// listed with its reason, and a failed selection is reported in the run.
 pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
-    targets: &[Option<AccuracyTarget>],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
     let per_computation = generate_per_computation_candidates(roots)?;
     Ok(run_stage1_to_stage3_from_pass1(
         per_computation,
-        targets,
-        demand,
+        entries,
         data,
         models,
     ))
@@ -620,14 +617,13 @@ fn readers_of(roots: &[QueryRoot], node: &Rc<OperatorNode>) -> Vec<usize> {
 /// enumerating.
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
-    targets: &[Option<AccuracyTarget>],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
-    let recurrence: Vec<_> = demand.iter().map(|d| d.recurrence.clone()).collect();
+    let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let stage1 = stage1_logical_asap_optimization(&per_computation, &recurrence).collect();
-    run_stage2_and_stage3(per_computation, stage1, targets, demand, data, models)
+    run_stage2_and_stage3(per_computation, stage1, entries, data, models)
 }
 
 /// Stage 2 and Stage 3 over `stage1`, the Stage 1 candidates of
@@ -638,8 +634,7 @@ pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
 pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     stage1: Vec<Stage1Candidate>,
-    targets: &[Option<AccuracyTarget>],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
@@ -652,7 +647,7 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         let number = index + 1;
         let id = format!("L{number}");
         if let Ok(roots) = &candidate.roots {
-            match optimize_physical_asap(&id, roots, demand, data) {
+            match optimize_physical_asap(&id, roots, entries, data) {
                 Ok(implemented) => {
                     for (k, mut p) in implemented.into_iter().enumerate() {
                         p.id = match k {
@@ -684,7 +679,8 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
             roots: candidate.roots,
         });
     }
-    let selection = select_plan(&physical, targets, demand, data, models);
+    let selection = select_plan(&physical, entries, data, models);
+    let targets = &crate::stage3_plan_selection::accuracy_targets(entries);
     let selected_logical = selection.as_ref().ok().and_then(|selection| {
         let from = &physical
             .iter()
@@ -771,18 +767,9 @@ impl OptimizationPass for Stage1ToStage3Pass {
             )
             .collect();
         roots.sort_by_key(|(index, _)| *index);
-        let targets: Vec<_> = workload
-            .query_workload()
-            .entries()
-            .map(|entry| Some(entry.requirements.accuracy.clone()))
-            .collect();
-        let demand: Vec<_> = workload
-            .query_workload()
-            .entries()
-            .map(|entry| QueryDemand::from(&entry))
-            .collect();
+        let entries: Vec<_> = workload.query_workload().entries().collect();
         let data = workload.data_workload().cloned().unwrap_or_default();
-        let run = run_stage1_to_stage3(roots, &targets, &demand, &data, input.models)?;
+        let run = run_stage1_to_stage3(roots, &entries, &data, input.models)?;
         let selection = run.stage3_plan_selection?;
         let roots = selection.plan.clone();
         let mut output = PlanOutput::new(Vec::new());

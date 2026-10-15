@@ -82,8 +82,8 @@ use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{default_metric_for_root, AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryDemand,
-    QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
+    QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
 };
 use serde_json::{json, Value};
 
@@ -251,7 +251,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             };
             let catalog = sql_catalog(&tables)?;
             let mut names = HashSet::new();
-            let (mut described, mut roots, mut demand) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
                 let (name, defaulted) = match name {
                     Some(name) => (name, false),
@@ -274,27 +274,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     QueryLanguage::PromQL => lower_promql_roots(&one)?,
                     _ => lower_sql_roots(&one, &catalog)?,
                 });
-                demand.extend(
-                    one.query_workload
-                        .entries()
-                        .map(|entry| QueryDemand::from(&entry)),
-                );
+                entries.extend(one.query_workload.entries());
                 let mut query = workload_queries(&one).remove(0);
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let targets = vec![accuracy; roots.len()];
             let data = DataWorkload {
                 data_ingestion_interval: declared(DurationMs(interval_ms)),
                 ..Default::default()
             };
-            let result = run_planning_stages_over(
-                roots.clone(),
-                &targets,
-                &demand,
-                &data,
-                Some(max_combinations),
-            );
+            let result =
+                run_planning_stages_over(roots.clone(), &entries, &data, Some(max_combinations));
             document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),

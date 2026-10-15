@@ -138,12 +138,15 @@ async fn facade_plans_match_run_stage1_to_stage3() {
         targets.push(Some(accuracy));
     }
     let data = workload.data_workload.clone().unwrap();
-    let recurrence: Vec<_> = workload
-        .query_workload
-        .entries()
-        .map(|entry| asap_types::workload::QueryDemand::from(&entry))
-        .collect();
-    let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, models).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| Some(e.requirements.accuracy.clone()))
+            .collect::<Vec<_>>(),
+        targets
+    );
+    let run = run_stage1_to_stage3(roots, &entries, &data, models).unwrap();
     let selection = run
         .stage3_plan_selection
         .as_ref()

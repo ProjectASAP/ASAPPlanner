@@ -99,18 +99,9 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
 fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload, NOW_MS).expect("lowers");
-    let targets: Vec<_> = queries
-        .iter()
-        .map(|(query, epsilon)| Some(requested(query, *epsilon)))
-        .collect();
     run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
-        &targets,
-        &workload
-            .query_workload
-            .entries()
-            .map(|entry| asap_types::workload::QueryDemand::from(&entry))
-            .collect::<Vec<_>>(),
+        &workload.query_workload.entries().collect::<Vec<_>>(),
         &workload.data_workload.clone().unwrap(),
         PlanningModels::builtin(),
     )

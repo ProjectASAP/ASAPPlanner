@@ -79,7 +79,7 @@ use asap_types::pre_asap::column_resolution::resolve_column_ref;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::{AggIntent, Reduction};
 use asap_types::workload::{
-    DataArrival, DataWorkload, Predictability, QueryDemand, QueryRecurrence, RepeatedDemand,
+    DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use thiserror::Error;
 
@@ -200,18 +200,20 @@ impl MaterializationCandidate {
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
 /// (physical operator implementation), then one physical candidate per
 /// materialization assignment of its mat_candidates, the all-`NotMaterialized` one
-/// first. `demand[i]` is how query `i` (`roots[i]`) is demanded; a missing
-/// entry is unknown. `id` is left empty for the caller to name. Sharing between `roots` is preserved: one memo serves the whole
-/// workload.
+/// first. `entries[i]` is the workload entry of query `i` (`roots[i]`):
+/// its recurrence and predictability decide whether state may be kept from
+/// ingestion time; a missing entry is unknown. `id` is left empty for the
+/// caller to name. Sharing between `roots` is preserved: one memo serves the
+/// whole workload.
 pub fn optimize_physical_asap(
     from_logical: &str,
     roots: &[QueryRoot],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> Result<Vec<PhysicalCandidate>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
-    let mat_candidates = materialization_candidates(&implemented, demand, data);
+    let mat_candidates = materialization_candidates(&implemented, entries, data);
     let mut candidates = Vec::new();
     for assignment in materialization_assignments(&mat_candidates) {
         let materialized: Vec<_> = mat_candidates
@@ -269,13 +271,13 @@ pub fn optimize_physical_asap(
 /// implemented.
 pub fn physical_candidate_count(
     roots: &[QueryRoot],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> Result<usize, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
     Ok(
-        materialization_assignments(&materialization_candidates(&implemented, demand, data))
+        materialization_assignments(&materialization_candidates(&implemented, entries, data))
             .count(),
     )
 }
@@ -292,7 +294,7 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 /// its readers and whether it may run at ingestion time.
 pub(crate) fn materialization_candidates(
     roots: &[QueryRoot],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> Vec<MaterializationCandidate> {
     let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
@@ -322,17 +324,18 @@ pub(crate) fn materialization_candidates(
         .enumerate()
         .map(|(c, node)| {
             let readers = readers[&Rc::as_ptr(node)].clone();
-            let at_ingestion = ingestion_eligibility(node, &readers, demand, data).and_then(|()| {
-                // Only this build and the builds below it at ingestion time.
-                let mut trial =
-                    MaterializationAssignment::with_default(Materialization::NotMaterialized);
-                for &v in below[c].iter().chain([&c]) {
-                    trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
-                }
-                apply_materialization_timings(node, &trial, &mut TimingMemo::new())
-                    .map(|_| ())
-                    .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
-            });
+            let at_ingestion =
+                ingestion_eligibility(node, &readers, entries, data).and_then(|()| {
+                    // Only this build and the builds below it at ingestion time.
+                    let mut trial =
+                        MaterializationAssignment::with_default(Materialization::NotMaterialized);
+                    for &v in below[c].iter().chain([&c]) {
+                        trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
+                    }
+                    apply_materialization_timings(node, &trial, &mut TimingMemo::new())
+                        .map(|_| ())
+                        .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
+                });
             MaterializationCandidate {
                 node: Rc::clone(node),
                 readers,
@@ -354,7 +357,7 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
 fn ingestion_eligibility(
     node: &OperatorNode,
     readers: &[usize],
-    demand: &[QueryDemand],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> Result<(), IngestionPruneReason> {
     use IngestionPruneReason as Why;
@@ -364,7 +367,8 @@ fn ingestion_eligibility(
     ) {
         return Err(Why::NotIngesting);
     }
-    let demands: Vec<Option<&QueryDemand>> = readers.iter().map(|&q| demand.get(q)).collect();
+    let demands: Vec<Option<&QueryWorkloadEntry>> =
+        readers.iter().map(|&q| entries.get(q)).collect();
     if demands
         .iter()
         .any(|d| !d.is_some_and(|d| matches!(d.recurrence, QueryRecurrence::Repeated(_))))
@@ -964,13 +968,13 @@ mod tests {
             .collect()
     }
 
-    fn every_minute() -> QueryDemand {
-        QueryDemand {
-            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
-                RepetitionInterval(MINUTE as u32),
-            )),
+    /// A predictable query evaluated every minute.
+    fn every_minute() -> QueryWorkloadEntry {
+        QueryWorkloadEntry {
             predictability: Predictability::Predictable { known_at: None },
-            max_latency_ms: None,
+            ..crate::test_support::entry(QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                RepetitionInterval(MINUTE as u32),
+            )))
         }
     }
 
@@ -1044,11 +1048,11 @@ mod tests {
             arrival: DataArrival::AtRest,
             ..Default::default()
         };
-        let unknown = QueryDemand {
+        let unknown = QueryWorkloadEntry {
             predictability: Predictability::Unknown,
             ..every_minute()
         };
-        let once = QueryDemand {
+        let once = QueryWorkloadEntry {
             recurrence: QueryRecurrence::OneTime {
                 invocations: 1,
                 execute_at: None,
@@ -1141,14 +1145,14 @@ mod tests {
     fn a_whole_window_build_needs_a_known_phase_and_a_window_within_the_interval() {
         use IngestionPruneReason as Why;
         let root = summary_root("quantile_over_time(0.99, m[1m])");
-        let at = |interval_ms: u32| QueryDemand {
+        let at = |interval_ms: u32| QueryWorkloadEntry {
             recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval: RepetitionInterval(interval_ms),
                 evaluation_phase: TimestampMs(0),
             }),
             ..every_minute()
         };
-        let mat_candidates = |root: &QueryRoot, demand: QueryDemand| {
+        let mat_candidates = |root: &QueryRoot, demand: QueryWorkloadEntry| {
             let mut memo = HashMap::new();
             let implemented =
                 map_roots(std::slice::from_ref(root), &mut |n| implement(n, &mut memo)).unwrap();

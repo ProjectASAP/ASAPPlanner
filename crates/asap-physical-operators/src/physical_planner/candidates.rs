@@ -376,9 +376,8 @@ mod tests {
         // ingestion time.
         let run = asap_aware_mapping::run_stage1_to_stage3(
             vec![(0, planner_types::ir::QueryRoot::Operator(root))],
-            &[Some(planner_types::types::AccuracyTarget::exact())],
-            &[planner_types::workload::QueryRecurrence::Unknown.into()],
-            &workload.data_workload.unwrap(),
+            &workload.query_workload.entries().collect::<Vec<_>>(),
+            workload.data_workload.as_ref().unwrap(),
             asap_aware_mapping::PlanningModels::builtin(),
         )
         .unwrap();

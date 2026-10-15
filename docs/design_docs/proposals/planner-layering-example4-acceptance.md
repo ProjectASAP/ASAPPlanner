@@ -124,8 +124,9 @@ it.
    shared EH and its materialization options do not exist yet.
 2. **Recurrence input (resolved).** Materialization depends on
    `recurrence`, `predictability` and `arrival`: `optimize_physical_asap`
-   takes each entry's `QueryDemand` (recurrence, predictability, latency
-   bound) and the data workload, and `select_plan` the same demands.
+   takes the workload entries (`QueryWorkloadEntry`: recurrence,
+   predictability, accuracy target, latency bound) and the data workload,
+   and `select_plan` the same entries.
 3. **Monthly variant.** The doc does not say whether each monthly run still
    ends at T or at its own run time, nor give `known_at`. Tests use a
    repeating entry whose window ends at each run, known at T.

@@ -220,8 +220,10 @@ pub(crate) fn cms_summary(query: &str) -> OperatorNode {
     let root = lower_promql(query, target.clone());
     let run = crate::pass::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],
-        &[Some(target)],
-        &[asap_types::workload::QueryRecurrence::Unknown.into()],
+        &[entry_with(
+            target,
+            asap_types::workload::QueryRecurrence::Unknown,
+        )],
         &DataWorkload::default(),
         crate::PlanningModels::builtin(),
     )
@@ -277,4 +279,28 @@ pub(crate) fn estimate_over(
         .unwrap()
         .with_guarantee(Some(guarantee)),
     )
+}
+
+/// The workload entry of a query evaluated as `recurrence` says, exact and
+/// with no latency bound.
+pub(crate) fn entry(
+    recurrence: asap_types::workload::QueryRecurrence,
+) -> asap_types::workload::QueryWorkloadEntry {
+    entry_with(AccuracyTarget::exact(), recurrence)
+}
+
+/// The workload entry of a query with accuracy target `accuracy`, evaluated
+/// as `recurrence` says, with no latency bound.
+pub(crate) fn entry_with(
+    accuracy: AccuracyTarget,
+    recurrence: asap_types::workload::QueryRecurrence,
+) -> asap_types::workload::QueryWorkloadEntry {
+    asap_types::workload::QueryWorkloadEntry {
+        requirements: QueryRequirements {
+            accuracy,
+            max_latency_ms: None,
+        },
+        recurrence,
+        ..Default::default()
+    }
 }
