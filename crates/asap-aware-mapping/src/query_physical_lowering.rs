@@ -1315,6 +1315,7 @@ mod tests {
         PromqlEdgeStatistics, PromqlUnaryEdgeStatistics, PromqlValueKind, UnaryEdgeStatistics,
     };
     use asap_types::ir::{BinaryOperator, ExprSemantics, Predicate, SortKey, TimeRangeKind};
+    use asap_types::types::RequestedAccuracy;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
@@ -2341,7 +2342,7 @@ mod tests {
                 measures: vec![AggIntent::Quantile {
                     col: Some(0),
                     q: 0.99,
-                    accuracy: AccuracyTarget::Exact,
+                    accuracy: AccuracyTarget::exact(),
                 }],
                 output_names: vec![],
                 filters: vec![],
@@ -2797,7 +2798,6 @@ mod tests {
         scalar_inputs: usize,
     ) {
         use crate::physical_operator_statistics::ScalarInputStatistics;
-        use asap_types::types::AccuracyTarget;
         use asap_types::workload::{
             AccuracyRequirement, BatchEntry, DataWorkload, Evidence, PlanningWorkload,
             Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
@@ -2810,7 +2810,7 @@ mod tests {
                 query_batch: Some(vec![BatchEntry {
                     query: Query(query.into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                        accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,

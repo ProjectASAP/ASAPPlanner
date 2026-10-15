@@ -7,7 +7,7 @@ use asap_types::ir::{
     MaterializationAssignment, NonASAPOp, OperatorNode, ScalarExpr, TimingMemo,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 fn catalog() -> SqlCatalog {
     let schema = Schema::new(vec![
@@ -21,7 +21,7 @@ fn catalog() -> SqlCatalog {
 }
 
 async fn lower(sql: &str) -> Rc<OperatorNode> {
-    lower_sql(sql, &catalog(), AccuracyTarget::Exact)
+    lower_sql(sql, &catalog(), RequestedAccuracy::exact())
         .await
         .unwrap()
 }
@@ -114,7 +114,7 @@ async fn corr_rejects_unrepresented_forms() {
         "SELECT corr(x) FROM a",
     ] {
         assert!(
-            lower_sql(sql, &catalog(), AccuracyTarget::Exact)
+            lower_sql(sql, &catalog(), RequestedAccuracy::exact())
                 .await
                 .is_err(),
             "{sql}"
@@ -150,7 +150,7 @@ async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
     let run = asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
-        &[Some(asap_types::types::AccuracyTarget::Exact)],
+        &[Some(asap_types::types::RequestedAccuracy::exact())],
         &[asap_types::workload::QueryRecurrence::Unknown],
         &Default::default(),
         asap_aware_mapping::PlanningModels::builtin(),

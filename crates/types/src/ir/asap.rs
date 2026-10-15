@@ -310,7 +310,7 @@ impl ASAPOp {
                             ExactKind::Min => Some(AggIntent::Min { col: column }),
                             ExactKind::Max => Some(AggIntent::Max { col: column }),
                             ExactKind::Count => Some(AggIntent::Count {
-                                accuracy: crate::types::AccuracyTarget::Exact,
+                                accuracy: crate::types::AccuracyTarget::exact(),
                             }),
                             ExactKind::Rate => Some(AggIntent::Rate),
                             ExactKind::IRate => Some(AggIntent::IRate),
@@ -401,7 +401,7 @@ impl ASAPOp {
                             )
                         }
                     };
-                    let accuracy = crate::types::AccuracyTarget::Exact;
+                    let accuracy = crate::types::AccuracyTarget::exact();
                     let measure = match evaluation {
                         PopulationStatistic::Quantile { q } => AggIntent::Quantile {
                             q: *q,

@@ -34,6 +34,17 @@ class PlanArgsTests(unittest.TestCase):
             ["--promql", "sum(rate(m[1m]))", "--name", "q1", "--epsilon", "0.01", "--interval-ms", "15000", "--out", "out.json"],
         )
 
+    def test_metric_names_the_targets_error_metric(self):
+        query = {"language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
+        for metric in ("absolute", "relative", "rank"):
+            with self.subTest(metric=metric):
+                args = server.plan_args({"queries": [query], "epsilon": 0.01, "metric": metric}, "out.json")
+                self.assertEqual(args[5:9], ["--epsilon", "0.01", "--metric", metric])
+        for empty in ({}, {"metric": ""}, {"metric": None}):
+            with self.subTest(empty=empty):
+                args = server.plan_args({"queries": [query], "epsilon": 0.01, **empty}, "out.json")
+                self.assertNotIn("--metric", args)
+
     def test_sql_queries_declare_their_tables(self):
         table = {"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}], "time_index": 0}
         args = server.plan_args(
@@ -78,6 +89,9 @@ class PlanArgsTests(unittest.TestCase):
             ({"queries": [{"language": "promql", "text": "m"}], "epsilon": True}, "epsilon must be a number"),
             ({"queries": [{"language": "promql", "text": "m"}], "epsilon": "0.1"}, "epsilon must be a number"),
             ({"queries": [{"language": "promql", "text": "m"}], "interval_ms": True}, "interval_ms must be a positive integer"),
+            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": 0.01, "metric": "rnak"}, "metric must be absolute, relative or rank"),
+            ({"queries": [{"language": "promql", "text": "m"}], "epsilon": 0.01, "metric": 3}, "metric must be absolute, relative or rank"),
+            ({"queries": [{"language": "promql", "text": "m"}], "metric": "rank"}, "metric needs epsilon"),
             ({"schemas": [{"name": 3, "columns": [{}]}], "queries": [{"language": "sql", "text": "SELECT 1"}]}, "schema #1: name must be a non-empty string"),
         ]
         for payload, message in cases:
@@ -206,26 +220,41 @@ class WriteExamplesTests(unittest.TestCase):
 
 
 @unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
+def post_plan(payload: dict) -> dict:
+    """POST `payload` to /api/plan on a fresh server and return the document."""
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{httpd.server_address[1]}/api/plan",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 class PlanEndpointTests(unittest.TestCase):
     def test_plan_endpoint_returns_the_stage_pipeline_document(self):
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        try:
-            body = json.dumps({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}]}).encode()
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{httpd.server_address[1]}/api/plan",
-                data=body,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(request, timeout=120) as response:
-                document = json.loads(response.read())
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+        document = post_plan({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}]})
         self.assertEqual(document["format"], "asap-stage-pipeline/v1")
         self.assertEqual(document["workload"]["queries"][0]["text"], "sum by (job) (rate(m[1m]))")
         self.assertEqual(document["workload"]["queries"][0]["id"], "job_rate")
         self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
+
+    def test_a_quantile_query_plans_with_the_metric_it_names(self):
+        """A quantile target must name its metric: with one, a plan is
+        selected; without one, plan selection reports the missing metric."""
+        query = {"name": "p99", "language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
+        named = post_plan({"queries": [query], "epsilon": 0.01, "metric": "rank"})
+        self.assertEqual(named["workload"]["queries"][0]["requirements"]["accuracy"]["metric"], "rank")
+        self.assertIsNotNone(named["stage3_plan_selection"]["selected"])
+        unnamed = post_plan({"queries": [query], "epsilon": 0.01})
+        self.assertIsNone(unnamed["stage3_plan_selection"]["selected"])
+        self.assertIn("must name its metric", unnamed["stage3_plan_selection"]["error"])
 
 
 if __name__ == "__main__":

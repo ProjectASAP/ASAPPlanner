@@ -6,7 +6,7 @@ use asap_types::post_asap::{
     ExactKind, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm,
     SummaryInputExpr, WeightDomain,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use std::rc::Rc;
 use support::{logical_candidates, lower_promql, post_asap_dag, selected_dag};
 
@@ -26,10 +26,7 @@ fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
 #[test]
 #[ignore = "Pass 1 offers no Hydra state for a grouped count yet (#605)"]
 fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
-    let target = AccuracyTarget::EpsilonDelta {
-        epsilon: 0.01,
-        delta: 0.01,
-    };
+    let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
     // Hydra hashes a non-null item per row: the series identity (PromQL
     // labels are nullable).
     let root = asap_types::ir::schema_support::with_promql_series_identity(
@@ -46,8 +43,8 @@ fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
 #[test]
 fn exact_counts_select_count_accumulators() {
     for query in ["count(up)", "count by(job)(up)", "count_over_time(up[5m])"] {
-        let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
-        let selected = selected_dag(root, AccuracyTarget::Exact);
+        let root = lower_promql(query, RequestedAccuracy::exact()).unwrap();
+        let selected = selected_dag(root, RequestedAccuracy::exact());
         assert!(
             OperatorNode::reachable(&selected).iter().any(|node| {
                 matches!(
@@ -67,7 +64,7 @@ fn exact_counts_select_count_accumulators() {
 #[test]
 fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
-        let accuracy = AccuracyTarget::Epsilon(0.02);
+        let accuracy = RequestedAccuracy::epsilon(0.02);
         let root = lower_promql(query, accuracy.clone()).unwrap();
         let candidates = logical_candidates(root, accuracy);
         let mut algorithms = Vec::new();
@@ -141,7 +138,7 @@ fn frequency_count_candidates_use_unit_weights() {
 fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
     use asap_types::ir::NonASAPOp;
     use asap_types::pre_asap::{AggIntent, Reduction};
-    let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
+    let root = lower_promql(query, RequestedAccuracy::exact()).unwrap();
     let NonASAPOp::Aggregate {
         reduction,
         measures,
@@ -230,7 +227,7 @@ fn count_over_time_counts_scrapes_not_sample_values() {
 #[test]
 fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     use asap_types::pre_asap::ColumnRef;
-    let accuracy = AccuracyTarget::Epsilon(0.02);
+    let accuracy = RequestedAccuracy::epsilon(0.02);
     let root = lower_promql("count_over_time(up[5m])", accuracy.clone()).unwrap();
     let candidates = logical_candidates(root, accuracy);
     let dag = candidates
@@ -284,7 +281,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    let accuracy = AccuracyTarget::Epsilon(0.01);
+    let accuracy = RequestedAccuracy::epsilon(0.01);
     let root = lower_promql(
         "sum by (job) (topk by (job, instance) (1, rate(m[5m])))",
         accuracy.clone(),

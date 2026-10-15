@@ -501,3 +501,26 @@ fn table_time_index_must_be_a_column_index() {
         );
     }
 }
+
+/// A quantile query's target names its metric: with `--metric rank` a plan
+/// is selected; without one, plan selection reports the missing metric.
+#[test]
+fn a_quantile_target_names_its_metric() {
+    let query = [
+        "--promql",
+        "quantile_over_time(0.99, m[1m])",
+        "--epsilon",
+        "0.01",
+    ];
+    let named = document_of(&[&query[..], &["--metric", "rank"]].concat());
+    assert!(named["stage3_plan_selection"]["selected"].is_string());
+    let unnamed = document_of(&query);
+    assert!(unnamed["stage3_plan_selection"]["selected"].is_null());
+    assert!(
+        unnamed["stage3_plan_selection"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("must name its metric")),
+        "{}",
+        unnamed["stage3_plan_selection"]
+    );
+}

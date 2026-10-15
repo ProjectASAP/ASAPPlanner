@@ -10,7 +10,7 @@ use common::{compile_physical_asap_dag, logical_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::ASAPOp;
-use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget};
+use planner_types::{post_asap::*, pre_asap::DataType, types::RequestedAccuracy};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 #[test]
 #[ignore = "the whole-expression heap's SummaryEstimate{TopK} output is not the keyed-evaluation \
@@ -37,7 +37,7 @@ fn heap_candidate(
     root: Rc<planner_types::ir::OperatorNode>,
     algorithm: &SketchAlgorithm,
 ) -> Rc<planner_types::ir::OperatorNode> {
-    logical_candidates(root, AccuracyTarget::Epsilon(0.1))
+    logical_candidates(root, RequestedAccuracy::epsilon(0.1))
         .into_iter()
         .find(|candidate| builds(&compile_physical_asap_dag(candidate).unwrap(), algorithm))
         .unwrap_or_else(|| panic!("missing {algorithm:?} candidate"))
@@ -46,7 +46,7 @@ fn heap_candidate(
 fn assert_weighted_binding(algorithm: SketchAlgorithm) {
     let root = lower_promql(
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-        AccuracyTarget::Epsilon(0.1),
+        RequestedAccuracy::epsilon(0.1),
     )
     .unwrap();
     let plan = heap_candidate(root, &algorithm);
@@ -182,7 +182,7 @@ use planner_types::workload::{
 };
 pub fn lower_promql(
     query: &str,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
 ) -> Result<Rc<planner_types::ir::OperatorNode>, asap_frontend_promql::PromqlError> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
@@ -257,8 +257,11 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
     use asap_physical_operators::physical_planner::promql_rows::{
         decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
     };
-    let logical =
-        lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap();
+    let logical = lower_promql(
+        "topk by(job)(2, rate(m[1m]))",
+        RequestedAccuracy::epsilon(0.1),
+    )
+    .unwrap();
     let root = with_series_identity(&logical).unwrap();
     for algorithm in [SketchAlgorithm::CountSketchWithHeap] {
         let candidate = &heap_candidate(Rc::clone(&root), &algorithm);
@@ -559,7 +562,11 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
     };
     let root = Rc::new(
         with_series_identity(
-            &lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap(),
+            &lower_promql(
+                "topk by(job)(2, rate(m[1m]))",
+                RequestedAccuracy::epsilon(0.1),
+            )
+            .unwrap(),
         )
         .unwrap(),
     );

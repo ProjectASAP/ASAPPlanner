@@ -599,7 +599,7 @@ fn materialized_case() -> Run {
     time_range.materialization = Materialization::MatAtQuery(Medium::Memory);
     let selection = select_plan(
         std::slice::from_ref(&p.candidate),
-        &[Some(AccuracyTarget::Exact), Some(AccuracyTarget::Exact)],
+        &[Some(AccuracyTarget::exact()), Some(AccuracyTarget::exact())],
         &[every_10s(), every_10s()],
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),

@@ -116,6 +116,7 @@
             .filter((row) => row.querySelector('.schemaInclude').checked)
             .map(parseSchemaRow),
           epsilon: Number($('plannerEpsilon').value),
+          metric: $('plannerMetric').value,
         }),
       });
       const result = await response.json();

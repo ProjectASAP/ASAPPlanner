@@ -16,7 +16,7 @@ pub(super) fn guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::L2Frequency,
+        ErrorMetric::ABSOLUTE_STREAM_L2,
         (3.0 / f64::from(*width)).sqrt(),
         ProbabilityExpr::Constant {
             value: count_sketch_failure_probability(*width, *depth)?,
@@ -87,13 +87,10 @@ mod tests {
                 },
             )
             .expect("CountSketch has a parameter-derived L2 guarantee");
-        assert_eq!(guarantee.metric, ErrorMetric::L2Frequency);
+        assert_eq!(guarantee.spec.metric, ErrorMetric::ABSOLUTE_STREAM_L2);
         assert!(DefaultAccuracyModel.satisfies(
             &guarantee,
-            &AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            }
+            &AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::ABSOLUTE_STREAM_L2)
         ));
     }
 

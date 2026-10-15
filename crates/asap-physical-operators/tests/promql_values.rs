@@ -99,7 +99,7 @@ fn grouping_preserves_unenumerated_labels_and_empty_label_semantics() {
         run(
             compile_aggregate(
                 &AggIntent::Count {
-                    accuracy: planner_types::types::AccuracyTarget::Exact,
+                    accuracy: planner_types::types::AccuracyTarget::exact(),
                 },
                 &GroupKeys::by(vec![ColumnRef::Named("job".into())]),
             )
