@@ -819,6 +819,32 @@ fn rewrite(
     Ok(rebuilt)
 }
 
+/// `roots` with every node's guarantee composed again
+/// ([`composed_guarantee`]), children first; a sub-DAG shared between roots
+/// stays shared. Pass 2 calls it after re-sizing a shared summary, so each
+/// consumer's guarantee is the shared state's.
+pub(crate) fn with_composed_guarantees(
+    roots: &[QueryRoot],
+) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+    let mut memo = HashMap::new();
+    roots
+        .iter()
+        .map(|root| {
+            Ok(match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(with_guarantees(node, &mut memo)?),
+                QueryRoot::Scalar(expr) => {
+                    for node in expr.operator_refs() {
+                        with_guarantees(node, &mut memo)?;
+                    }
+                    QueryRoot::Scalar(
+                        expr.map_operator_refs(&mut |node| memo[&Rc::as_ptr(node)].clone()),
+                    )
+                }
+            })
+        })
+        .collect()
+}
+
 /// `node` and everything below it, each node with its [`composed_guarantee`].
 fn with_guarantees(
     node: &Rc<OperatorNode>,
