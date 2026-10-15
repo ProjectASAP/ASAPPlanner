@@ -52,9 +52,16 @@
 //! groups. An `AboveOutput` `HAVING` stays a `Filter` above the output.
 //!
 //! Summaries are sized here, each for its own measure's accuracy requirement.
-//! Sizing belongs after Pass 2, where a shared summary takes the strictest
-//! requirement among its consumers; Pass 2 sharing is not implemented yet, so
-//! this is that post-Pass-2 sizing step with no sharing.
+//! When a query's value composes several approximate inputs (every sketch
+//! summary below its root, when its guarantee is not exact), each is sized
+//! for an equal share of that requirement: `ε/n` (a relative error
+//! `(1 + ε)^{1/n} − 1`) and `δ/n` for `n` inputs (#669b). Only the inputs
+//! approximate in this candidate count. Stage 1 sizes for ε and δ per output
+//! value; plan selection enlarges the parameters that depend on δ for a
+//! target over the whole result. Sizing belongs after Pass 2, where a shared
+//! summary takes the strictest requirement among its consumers; Pass 2
+//! sharing is not implemented yet, so this is that post-Pass-2 sizing step
+//! with no sharing.
 //!
 //! Every node of the candidate gets a theoretical guarantee, composed with
 //! the built-in accuracy model through operators (#669): exact over exact
@@ -96,7 +103,7 @@ use crate::accuracy::composition::{
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
 use crate::accuracy::estimators::{hll, univmon};
-use crate::accuracy::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
+use crate::accuracy::{equal_share, AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use crate::function_rules::function_rules;
 use crate::realization::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates,
@@ -718,9 +725,11 @@ fn with_samples_requirement(mut update: SummaryUpdate, metric: Option<&str>) -> 
 /// accumulators divided, and any other measure by its own single-measure
 /// aggregate; several measures are joined back on the group keys. A summary
 /// is sized here for its measure's accuracy requirement; Pass 1 leaves it
-/// unsized. A measure filter becomes `SummaryAgg.filter`; `HAVING` is
-/// applied as its target records. A sub-DAG shared between roots stays shared.
-/// Every node carries the guarantee [`composed_guarantee`] gives it.
+/// unsized; several approximate inputs of one query share its budget
+/// equally ([`budget_shares`]). A measure filter becomes `SummaryAgg.filter`;
+/// `HAVING` is applied as its target records. A sub-DAG shared between roots
+/// stays shared. Every node carries the guarantee [`composed_guarantee`]
+/// gives it.
 pub fn compose_logical_candidate<Id: Clone>(
     inventory: &PerComputationCandidates<Id>,
     choice: &[usize],
@@ -749,12 +758,120 @@ pub fn compose_logical_candidate<Id: Clone>(
         .filter(|entry| entry.placement == HavingPlacement::BelowAggregate)
         .filter_map(|entry| entry.filter.as_ref().map(Rc::as_ptr))
         .collect();
+    // Each summary is first sized for its measure's whole budget. A query
+    // whose value composes several approximate inputs is then composed
+    // again with each sized for an equal share ([`budget_shares`]).
+    let whole = Sizing::default();
+    let roots = compose_roots(inventory, &chosen, &pushed_below, &whole)?;
+    let shares = budget_shares(&roots, &whole.built.into_inner());
+    if shares.is_empty() {
+        return Ok(roots);
+    }
+    let shared = Sizing {
+        shares,
+        ..Sizing::default()
+    };
+    compose_roots(inventory, &chosen, &pushed_below, &shared)
+}
+
+/// One measure of an aggregate: the aggregate and the measure's index.
+type MeasureKey = (*const OperatorNode, usize);
+
+/// How [`compose_logical_candidate`] sizes summaries in one composition.
+#[derive(Default)]
+struct Sizing {
+    /// How many approximate inputs each measure's summary shares its
+    /// query's budget with; a measure not listed has the whole budget.
+    shares: HashMap<MeasureKey, usize>,
+    /// Every sketch summary state built, with the measure it sizes.
+    built: std::cell::RefCell<Vec<(Rc<OperatorNode>, MeasureKey)>>,
+}
+
+/// The equal budget split among the approximate inputs of each query
+/// (#669b): a query whose value carries a guarantee that is not exact
+/// composes every sketch summary state below its root
+/// ([`approximate_inputs`]), so with `n ≥ 2` of them each is sized for one
+/// of `n` equal shares of the query's target. A state several queries read
+/// takes the largest `n`. Only states `built` lists (by the measure they
+/// size) are split. Empty when no query composes two approximate inputs.
+fn budget_shares(
+    roots: &[(impl Sized, QueryRoot)],
+    built: &[(Rc<OperatorNode>, MeasureKey)],
+) -> HashMap<MeasureKey, usize> {
+    let measure: HashMap<_, _> = built
+        .iter()
+        .map(|(state, key)| (Rc::as_ptr(state), *key))
+        .collect();
+    let mut shares = HashMap::new();
+    for (_, root) in roots {
+        let inputs = approximate_inputs(root);
+        if inputs.len() < 2 {
+            continue;
+        }
+        for state in &inputs {
+            if let Some(key) = measure.get(&Rc::as_ptr(state)) {
+                let share = shares.entry(*key).or_insert(1);
+                *share = inputs.len().max(*share);
+            }
+        }
+    }
+    shares
+}
+
+/// The approximate inputs a query's value composes: every sketch summary
+/// state reachable from `root`, each once, when the value carries a
+/// guarantee that is not exact ([`root_guarantee`]). Empty when it carries
+/// none (no rule composes the inputs) or an exact one. Plan selection sizes
+/// each for its share of the query's failure probability too.
+pub(crate) fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
+    if root_guarantee(root).is_none_or(|g| g.is_exact()) {
+        return Vec::new();
+    }
+    let operators = match root {
+        QueryRoot::Operator(node) => vec![node],
+        QueryRoot::Scalar(expr) => expr.operator_refs(),
+    };
+    let mut seen = HashSet::new();
+    operators
+        .into_iter()
+        .flat_map(|node| OperatorNode::reachable(node))
+        .filter(|node| {
+            matches!(
+                node.asap(),
+                Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(..),
+                    ..
+                })
+            )
+        })
+        .filter(|node| seen.insert(Rc::as_ptr(node)))
+        .collect()
+}
+
+/// The theoretical guarantee of a query's output, as composed: the root
+/// node's own, or a scalar root's composed over the operators it reads
+/// ([`scalar_guarantee`]).
+pub(crate) fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
+    match root {
+        QueryRoot::Operator(node) => node.guarantee.clone(),
+        QueryRoot::Scalar(expr) => scalar_guarantee(expr, &|_| None),
+    }
+}
+
+/// Every root of `inventory` with the chosen candidates substituted, each
+/// summary sized as `sizing` says, and every node with its guarantee.
+fn compose_roots<Id: Clone>(
+    inventory: &PerComputationCandidates<Id>,
+    chosen: &Chosen<'_>,
+    pushed_below: &HashSet<*const OperatorNode>,
+    sizing: &Sizing,
+) -> Result<Vec<(Id, QueryRoot)>, PerComputationCandidateError> {
     let (mut memo, mut guaranteed) = (HashMap::new(), HashMap::new());
     let mut rewrite = |node: &Rc<OperatorNode>| {
-        let node = rewrite(node, &chosen, &pushed_below, &mut memo)?;
+        let node = rewrite(node, chosen, pushed_below, sizing, &mut memo)?;
         with_guarantees(&node, &mut guaranteed)
     };
-    inventory
+    let roots = inventory
         .roots
         .iter()
         .map(|(id, root)| {
@@ -775,7 +892,14 @@ pub fn compose_logical_candidate<Id: Clone>(
             root.validate_structure()?;
             Ok((id.clone(), root))
         })
-        .collect()
+        .collect::<Result<Vec<_>, PerComputationCandidateError>>()?;
+    // The built states, as the roots hold them: with their guarantees.
+    for (state, _) in sizing.built.borrow_mut().iter_mut() {
+        if let Some(with_guarantee) = guaranteed.get(&Rc::as_ptr(state)) {
+            *state = with_guarantee.clone();
+        }
+    }
+    Ok(roots)
 }
 
 /// Each aggregate's targets with their chosen candidates.
@@ -795,20 +919,21 @@ fn rewrite(
     node: &Rc<OperatorNode>,
     chosen: &Chosen<'_>,
     pushed_below: &HashSet<*const OperatorNode>,
+    sizing: &Sizing,
     memo: &mut Memo,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     if let Some(done) = memo.get(&Rc::as_ptr(node)) {
         return Ok(done.clone());
     }
     for child in node.children() {
-        rewrite(child, chosen, pushed_below, memo)?;
+        rewrite(child, chosen, pushed_below, sizing, memo)?;
     }
     let changed = node
         .children()
         .iter()
         .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
     let rebuilt = match (chosen.get(&Rc::as_ptr(node)), node.non_asap()) {
-        (Some(targets), _) if substituted(targets) => substitute(node, targets, memo)?,
+        (Some(targets), _) if substituted(targets) => substitute(node, targets, sizing, memo)?,
         (_, Some(NonASAPOp::Filter { child, .. })) if pushed_below.contains(&Rc::as_ptr(node)) => {
             memo[&Rc::as_ptr(child)].clone()
         }
@@ -878,8 +1003,10 @@ fn with_guarantees(
 /// keeps its child's guarantee. A summary state carries none itself.
 ///
 /// A guarantee holds per output point (per series or group), with its
-/// failure probability per point. It is not scaled by the number of
-/// output points (`G·δ` over `G` groups); that is #669 part b.
+/// failure probability per point ([`AccuracyScope::PerValue`]). Plan
+/// selection states it over a whole result of `G` points as `G·δ`.
+///
+/// [`AccuracyScope::PerValue`]: asap_types::types::AccuracyScope::PerValue
 fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     let exact = |node: &OperatorNode| {
         node.guarantee
@@ -1940,8 +2067,9 @@ fn estimate_bound_over_samples(
 /// measure that is no target) by its substitution, with the same output
 /// columns.
 fn substitute(
-    target: &OperatorNode,
+    target: &Rc<OperatorNode>,
     targets: &[(&ComputationTarget, &ComputationCandidate)],
+    sizing: &Sizing,
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(NonASAPOp::Aggregate {
@@ -1990,10 +2118,26 @@ fn substitute(
                     |(target, candidate)| (*candidate, target.samples_of.as_deref()),
                 );
             let filter = filters.get(measure).and_then(Option::as_ref).map(rewritten);
+            let key = (Rc::as_ptr(target), measure);
             if let ComputationCandidate::WholeExpression(algorithm) = candidate {
-                return whole_expression(target, intent, algorithm, samples_of, memo);
+                return whole_expression(
+                    target,
+                    intent,
+                    algorithm,
+                    samples_of,
+                    (sizing, key),
+                    memo,
+                );
             }
-            substitute_measure(target, intent, candidate, filter, &input, samples_of)
+            substitute_measure(
+                target,
+                intent,
+                candidate,
+                filter,
+                &input,
+                samples_of,
+                (sizing, key),
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut output = match <[_; 1]>::try_from(parts) {
@@ -2058,6 +2202,7 @@ fn whole_expression(
     intent: &AggIntent,
     algorithm: &SketchAlgorithm,
     samples_of: Option<&str>,
+    (sizing, key): (&Sizing, MeasureKey),
     memo: &Memo,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let (input, update, partitions) = whole_expression_input(target).ok_or(
@@ -2066,11 +2211,15 @@ fn whole_expression(
     let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: memo[&Rc::as_ptr(&input)].clone(),
         input: with_samples_requirement(update, samples_of),
-        family: FieldDataType::Sketch(sized(algorithm, intent), GroupingStrategy::default()),
+        family: FieldDataType::Sketch(
+            sized(algorithm, intent, sizing.share(key)),
+            GroupingStrategy::default(),
+        ),
         reduction: partitions,
         grouping: GroupingStrategy::default(),
         filter: None,
     }))?;
+    sizing.built.borrow_mut().push((state.clone(), key));
     Ok(OperatorNode::new_shared(Operator::ASAP(
         ASAPOp::SummaryEstimate {
             summary_input: state,
@@ -2087,6 +2236,7 @@ fn substitute_measure(
     filter: Option<Predicate>,
     input: &Rc<OperatorNode>,
     samples_of: Option<&str>,
+    (sizing, key): (&Sizing, MeasureKey),
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(NonASAPOp::Aggregate { reduction, .. }) = target.non_asap() else {
         unreachable!("substitute checked the aggregate")
@@ -2128,14 +2278,18 @@ fn substitute_measure(
             finalized(kind.clone(), params.clone(), intent, read)?
         }
         ComputationCandidate::Summary(algorithm) => {
-            let family =
-                FieldDataType::Sketch(sized(algorithm, intent), GroupingStrategy::default());
+            let family = FieldDataType::Sketch(
+                sized(algorithm, intent, sizing.share(key)),
+                GroupingStrategy::default(),
+            );
+            let summary_input = state(
+                family,
+                intent,
+                measure_input(intent, input, filter.as_ref())?,
+            )?;
+            sizing.built.borrow_mut().push((summary_input.clone(), key));
             OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input: state(
-                    family,
-                    intent,
-                    measure_input(intent, input, filter.as_ref())?,
-                )?,
+                summary_input,
                 query: statistic(intent)?,
             }))?
         }
@@ -2381,14 +2535,42 @@ fn key_items(keys: usize) -> Vec<ProjectItem> {
         .collect()
 }
 
-/// `algorithm` sized for `intent`'s accuracy requirement.
-fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent) -> SketchKind {
-    let (epsilon, delta) =
-        accuracy_budget(accuracy_target(intent).unwrap_or(&AccuracyTarget::exact()));
-    SketchKind::new(
-        algorithm.clone(),
-        default_size_params(algorithm.clone(), intent, epsilon, delta),
-    )
+impl Sizing {
+    /// How many approximate inputs `key`'s summary shares its query's
+    /// budget with.
+    fn share(&self, key: MeasureKey) -> usize {
+        self.shares.get(&key).copied().unwrap_or(1)
+    }
+}
+
+/// `algorithm` sized for one of `share` equal shares of `intent`'s accuracy
+/// requirement ([`equal_share`]), split in the metric of the summary's own
+/// bound: a relative error splits multiplicatively.
+fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> SketchKind {
+    let target = accuracy_target(intent)
+        .cloned()
+        .unwrap_or_else(AccuracyTarget::exact);
+    let size = |target: &AccuracyTarget| {
+        let (epsilon, delta) = accuracy_budget(target);
+        SketchKind::new(
+            algorithm.clone(),
+            default_size_params(algorithm.clone(), intent, epsilon, delta),
+        )
+    };
+    let whole = size(&target);
+    if share <= 1 {
+        return whole;
+    }
+    let metric = statistic(intent)
+        .ok()
+        .and_then(|query| {
+            DefaultAccuracyModel.local_guarantee(
+                &FieldDataType::Sketch(whole.clone(), GroupingStrategy::default()),
+                &query,
+            )
+        })
+        .map_or(target.metric, |guarantee| guarantee.spec.metric);
+    equal_share(&target, metric, share).map_or(whole, |share| size(&share))
 }
 
 /// What a measure's state reads from each row of `input`, resolvable there.
@@ -3528,6 +3710,80 @@ mod tests {
         }
         let stats = fold_stats(&Reduction::by(vec![]), &rate).unwrap();
         assert_eq!(stats.sign_statistic, None);
+    }
+
+    /// The sketch parameters of every summary state below `root`.
+    fn sketch_params(root: &Rc<OperatorNode>) -> Vec<SketchParams> {
+        OperatorNode::reachable(root)
+            .into_iter()
+            .filter_map(|node| match node.asap() {
+                Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) => Some(kind.params().clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `query` composed with target `t` at the candidate `pick(t, its
+    /// candidates)` returns the position of.
+    fn composed_picking(
+        query: &str,
+        pick: impl Fn(usize, &[ComputationCandidate]) -> usize,
+    ) -> Rc<OperatorNode> {
+        let inventory = inventory(query);
+        let choice: Vec<usize> = inventory
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(t, target)| pick(t, &target.choices.candidates))
+            .collect();
+        let composed = compose_logical_candidate(&inventory, &choice).unwrap();
+        let QueryRoot::Operator(root) = &composed[0].1 else {
+            panic!("operator root")
+        };
+        root.clone()
+    }
+
+    fn position_of(candidates: &[ComputationCandidate], candidate: ComputationCandidate) -> usize {
+        candidates
+            .iter()
+            .position(|c| *c == candidate)
+            .expect("the candidate is offered")
+    }
+
+    fn cms(eps: f64, delta: f64) -> SketchParams {
+        SketchParams::Cms {
+            width: crate::accuracy::estimators::cms::cms_width(eps),
+            depth: crate::accuracy::estimators::cms::cms_depth(delta),
+        }
+    }
+
+    /// A combination of approximate values splits the query's budget
+    /// equally among them (#669b): the difference of two Count-Min counts
+    /// sizes each for ε/2 and δ/2 of the query's ε = 0.01, δ = 0.001.
+    #[test]
+    fn approximate_inputs_of_a_combination_share_the_budget_equally() {
+        let both = composed_picking("count by (job) (a) - count by (job) (b)", |_, c| {
+            position_of(c, ComputationCandidate::Summary(SketchAlgorithm::Cms))
+        });
+        assert!(both.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
+        assert_eq!(sketch_params(&both), vec![cms(0.005, 0.0005); 2]);
+    }
+
+    /// Only the inputs that are approximate in the combination share the
+    /// budget: with one count exact, the other gets all of it.
+    #[test]
+    fn an_exact_input_takes_no_share_of_the_budget() {
+        let one = composed_picking("count by (job) (a) - count by (job) (b)", |t, c| {
+            if t == 0 {
+                position_of(c, ComputationCandidate::Summary(SketchAlgorithm::Cms))
+            } else {
+                0
+            }
+        });
+        assert_eq!(sketch_params(&one), vec![cms(0.01, 0.001)]);
     }
 
     /// The first composed candidate of `query`.
