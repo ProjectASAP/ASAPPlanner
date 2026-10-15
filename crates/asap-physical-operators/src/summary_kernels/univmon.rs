@@ -1,41 +1,10 @@
 //! One frequency state shared by count, distinct, L2 and entropy evaluations.
 
 use crate::AggregateCore;
-use asap_sketchlib::sketch_framework::univmon::MAX_LAYER_SIZE;
 use asap_sketchlib::{DataInput, UnivMon};
 use planner_types::{post_asap::SketchStatistic, pre_asap::ColumnRef};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
-
-/// Rows beyond the executor's own limit, and shapes `asap_sketchlib`
-/// rejects because their hashes would not be independent: more than
-/// [`MAX_LAYER_SIZE`] (19) layers, or a layer whose rows read more than
-/// one 128-bit hash holds. Each row reads `⌈log2 cols⌉` column bits and one
-/// sign bit, so `rows · (⌈log2 cols⌉ + 1) ≤ 128`.
-pub(crate) fn check_dimensions(
-    heap_size: usize,
-    rows: usize,
-    cols: usize,
-    layers: usize,
-) -> Result<(), Error> {
-    if heap_size == 0
-        || cols == 0
-        || !(1..=20).contains(&rows)
-        || !(1..=MAX_LAYER_SIZE).contains(&layers)
-    {
-        return Err("invalid UnivMon dimensions".into());
-    }
-    let column_bits = cols
-        .checked_next_power_of_two()
-        .map_or(usize::BITS, usize::trailing_zeros) as usize;
-    if rows * (column_bits + 1) > 128 {
-        return Err("UnivMon rows and columns exceed one 128-bit hash".into());
-    }
-    rows.checked_mul(cols)
-        .and_then(|n| n.checked_mul(layers))
-        .ok_or("UnivMon dimensions overflow")?;
-    Ok(())
-}
 
 #[derive(Debug, Clone)]
 pub struct UnivMonAccumulator {
@@ -60,7 +29,7 @@ impl UnivMonAccumulator {
     }
 
     pub fn new(heap_size: usize, rows: usize, cols: usize, layers: usize) -> Result<Self, Error> {
-        check_dimensions(heap_size, rows, cols, layers)?;
+        UnivMon::check_shape(heap_size, rows, cols, layers)?;
         Ok(Self {
             inner: UnivMon::init_univmon(heap_size, rows, cols, layers),
             max_key_bytes: 0,
@@ -72,7 +41,7 @@ impl UnivMonAccumulator {
     /// bytes. Rejects dimensions [`Self::new`] rejects and terminal-mode
     /// sketches, which do not accept this accumulator's updates.
     pub fn from_sketch(sketch: UnivMon) -> Result<Self, Error> {
-        check_dimensions(
+        UnivMon::check_shape(
             sketch.heap_size,
             sketch.sketch_row,
             sketch.sketch_col,
@@ -299,7 +268,10 @@ mod tests {
         assert!(UnivMonAccumulator::from_sketch(terminal.clone()).is_err());
         terminal.free();
         assert!(UnivMonAccumulator::from_sketch(terminal).is_ok());
-        assert!(UnivMonAccumulator::from_sketch(UnivMon::init_univmon(4, 21, 16, 2)).is_err());
+        // `init_univmon` refuses 21 rows; a state claiming them is refused too.
+        let mut misshapen = UnivMon::init_univmon(4, 3, 16, 2);
+        misshapen.sketch_row = 21;
+        assert!(UnivMonAccumulator::from_sketch(misshapen).is_err());
     }
 
     // Shapes whose hashes are not independent are errors, not library

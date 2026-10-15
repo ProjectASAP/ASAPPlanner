@@ -58,25 +58,22 @@ impl AggregateCore for KmvAccumulator {
             .into());
         }
         let mut merged = self.clone();
-        merged.inner.merge(&mut other.inner.clone());
+        merged.inner.merge(&other.inner);
         Ok(Box::new(merged))
     }
 
     /// Distinct count. A bare `PointCount` over a KMV also reads the distinct count.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            // `KMV::estimate` takes `&mut self` without mutating.
             SketchStatistic::Cardinality | SketchStatistic::PointCount { value: None, .. } => {
-                Ok(self.inner.clone().estimate())
+                Ok(self.inner.estimate())
             }
             other => Err(format!("KMV does not answer {other:?}").into()),
         }
     }
 
     fn approx_memory_bytes(&self) -> usize {
-        // sketchlib reserves all k hash slots at construction.
-        std::mem::size_of::<Self>()
-            .saturating_add(self.inner.k.saturating_mul(std::mem::size_of::<u64>()))
+        self.inner.approx_memory_bytes()
     }
 }
 
@@ -212,16 +209,14 @@ mod tests {
         assert_eq!(cardinality(&kmv), 0.0);
     }
 
-    // sketchlib reserves all k hash slots at construction, so an empty state
-    // already holds k * 8 bytes.
+    // The footprint is the library's: it covers every retained hash and
+    // grows as the state fills toward k.
     #[test]
-    fn memory_counts_the_k_reserved_hashes() {
+    fn memory_covers_the_retained_hashes() {
         let k = 4096;
-        let empty = KmvAccumulator::new(k);
-        assert!(empty.approx_memory_bytes() >= k as usize * 8);
-        assert_eq!(
-            empty.approx_memory_bytes(),
-            build(k, 0..10).approx_memory_bytes()
-        );
+        let (empty, full) = (KmvAccumulator::new(k), build(k, 0..20_000));
+        assert_eq!(full.inner.k_vals.len(), k as usize);
+        assert!(full.approx_memory_bytes() >= k as usize * 8);
+        assert!(full.approx_memory_bytes() > empty.approx_memory_bytes());
     }
 }

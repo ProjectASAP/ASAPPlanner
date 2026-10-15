@@ -373,9 +373,9 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
             alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0
         }
         (SketchAlgorithm::Cms, SketchParams::Cms { width, depth }) => *width > 0 && *depth > 0,
-        // A CountSketch reads the median of its rows: the depth must be odd.
+        // The kernel's shape rules (an odd depth, for the median).
         (SketchAlgorithm::CountSketch, SketchParams::CountSketch { width, depth }) => {
-            *width > 0 && depth % 2 == 1
+            count_sketch_builds(*width, *depth)
         }
         (
             SketchAlgorithm::CmsWithHeap,
@@ -392,9 +392,20 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
                 depth,
                 heap_size,
             },
-        ) => *width > 0 && depth % 2 == 1 && *heap_size > 0,
+        ) => count_sketch_builds(*width, *depth) && *heap_size > 0,
         _ => false,
     }
+}
+
+/// Whether `asap_sketchlib`'s CountSketch kernel builds a `width x depth`
+/// shape, so evidence for it describes an executable shape.
+fn count_sketch_builds(width: u32, depth: u32) -> bool {
+    asap_sketchlib::WeightedFrequency::check_shape(
+        asap_sketchlib::FrequencyAlgorithm::CountSketch,
+        width as usize,
+        depth as usize,
+    )
+    .is_ok()
 }
 
 #[cfg(test)]

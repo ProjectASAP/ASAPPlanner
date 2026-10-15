@@ -62,9 +62,15 @@ pub fn validate_summary_kernel(
                 (A::Hll, P::Hll { precision, .. }) if (4..=18).contains(precision) => false,
                 (A::Kmv, P::Kmv { k, .. }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
                 (A::Cms, P::Cms { width, depth }) if valid_matrix(*width, *depth) => true,
-                // The median needs an odd row count.
+                // The kernel's shape rules (an odd depth, for the median).
                 (A::CountSketch, P::CountSketch { width, depth })
-                    if valid_matrix(*width, *depth) && depth % 2 == 1 =>
+                    if valid_matrix(*width, *depth)
+                        && asap_sketchlib::WeightedFrequency::check_shape(
+                            asap_sketchlib::FrequencyAlgorithm::CountSketch,
+                            *width as usize,
+                            *depth as usize,
+                        )
+                        .is_ok() =>
                 {
                     true
                 }
@@ -93,7 +99,7 @@ pub fn validate_summary_kernel(
                         layers,
                         ..
                     },
-                ) if crate::summary_kernels::univmon::check_dimensions(
+                ) if asap_sketchlib::UnivMon::check_shape(
                     *heap_size as usize,
                     *sketch_rows as usize,
                     *sketch_cols as usize,

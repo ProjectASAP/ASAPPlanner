@@ -319,7 +319,7 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-promql",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=831a5045847010a3a65f5a8e614e0208581d4a05)",
+ "asap_sketchlib",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -394,7 +394,7 @@ dependencies = [
  "asap-physical-operators",
  "asap-planner",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=831a5045847010a3a65f5a8e614e0208581d4a05)",
+ "asap_sketchlib",
  "futures",
  "serde_json",
  "tokio",
@@ -407,7 +407,7 @@ dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=9415c5b161237ad238e101ed9166d4dbaace3031)",
+ "asap_sketchlib",
  "chrono",
  "futures",
  "regex",
@@ -447,24 +447,7 @@ dependencies = [
 [[package]]
 name = "asap_sketchlib"
 version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=831a5045847010a3a65f5a8e614e0208581d4a05#831a5045847010a3a65f5a8e614e0208581d4a05"
-dependencies = [
- "bytes",
- "prost",
- "rand 0.9.5",
- "rmp-serde",
- "serde",
- "serde-big-array",
- "serde_bytes",
- "smallvec",
- "twox-hash",
- "xxhash-rust",
-]
-
-[[package]]
-name = "asap_sketchlib"
-version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=9415c5b161237ad238e101ed9166d4dbaace3031#9415c5b161237ad238e101ed9166d4dbaace3031"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=3f44cf1c2d823b844c17796f24408e03863149ee#3f44cf1c2d823b844c17796f24408e03863149ee"
 dependencies = [
  "bincode",
  "bytes",
