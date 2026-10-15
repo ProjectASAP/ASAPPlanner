@@ -6,10 +6,11 @@
 //! need an unimplemented feature are `#[ignore]`d, naming it and the PR that
 //! delivers it.
 //!
-//! The doc's workload is SQL. The SQL frontend lowers Q1 to a distinct count
-//! but not Q2 and Q3 to `Entropy` and `L2` (the doc's own TODO, #598), so
-//! the planning stages run on a PromQL stand-in with the same structure:
-//! three statistics of one input over the same 1-min window, through the
+//! The doc's workload is SQL; the SQL frontend lowers Q1 to a distinct
+//! count and recognizes Q2 and Q3 as `Entropy` and `L2` (Q3 with a Float64
+//! product). Its time filter stays a scan predicate, so the planning
+//! stages also run on a PromQL stand-in with the same structure: three
+//! statistics of one input over the same 1-min window, through the
 //! frontend's `distinct_over_time`, `entropy_over_time` and `l2_over_time`.
 
 mod planner_layering_common;
@@ -38,7 +39,9 @@ const SQL_Q1: &str =
 const SQL_Q2: &str = "SELECT -SUM(p * LN(p)) FROM (\
     SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows \
     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)";
-const SQL_Q3: &str = "SELECT SQRT(SUM(c * c)) FROM (\
+/// Q3 casts the counts to DOUBLE: the design's Int64 `SUM(c * c)` can
+/// overflow, so the SQL frontend recognizes only the Float64 product.
+const SQL_Q3: &str = "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FROM (\
     SELECT src_ip, COUNT(*) AS c FROM flows \
     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)";
 
@@ -271,7 +274,6 @@ async fn stage0_query_language_frontends_sql_q1_lowers_to_a_distinct_count() {
 
 /// The SQL frontend recognizes Q2 as `Entropy(src_ip)` and Q3 as `L2(src_ip)`.
 #[tokio::test]
-#[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598)"]
 async fn stage0_query_language_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
     let roots = lower_sql(&sql_workload()).await;
     assert!(frontend_operations(&roots[1]).contains(&"aggregate:frequency_entropy".to_string()));
@@ -280,7 +282,6 @@ async fn stage0_query_language_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
 
 /// Once the SQL forms are recognized, the SQL workload has the stand-in's Pass 1 options.
 #[tokio::test]
-#[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598)"]
 async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
     let workload = sql_workload();
     let sql = run_stages(&workload, lower_sql(&workload).await);
