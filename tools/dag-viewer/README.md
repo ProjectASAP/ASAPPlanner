@@ -22,13 +22,14 @@ To run it, see [RUNNING.md](RUNNING.md).
   line that counts the candidates at each stage.
 - **Stage 3 · plans by cost**: every candidate the document shows. First the
   selected plan, then the other valid ones cheapest first, then the
-  rejected ones with their reasons, then the Stage 2 pruned ones and the
+  rejected ones with their reasons (or "not judged" when plan selection
+  failed with an error), then the Stage 2 pruned ones and the
   Stage 1 candidates that did not compose, each with its reason. The header
   says how many candidates Stage 1 enumerated, how many the document shows
   when it caps them, and why Stage 1 or plan selection failed when it did.
   Clicking a row shows it in the lanes.
 - **Three lanes**, stacked top to bottom so each is as wide as the page:
-  Stage 0, the chosen Stage 1 candidate, and the chosen Stage 2 candidate
+  Stage 0, the chosen Stage 1 candidate, and its Stage 2 candidate
   with each node's timing and Stage 3 cost (`× n` when a node that is not
   materialized is computed once per reader). Each lane is the whole
   workload's DAG, so a node shared by several queries appears once. Nodes
@@ -91,7 +92,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   fails, `selected` is null, with the rejections or with `error`.
 
 The viewer checks the document before showing it: one root per query, node,
-edge and root references, `from_logical`, and the Stage 3 ids, costs and
+edge and root references, `scalar_roots` positions, `from_logical`, and the Stage 3 ids, costs and
 `per_node` keys. If a check fails, it shows the problems instead.
 
 ## Files
