@@ -80,9 +80,7 @@ use asap_types::post_asap::{
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 
-use crate::accuracy::{
-    AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
-};
+use crate::accuracy::{AccuracyEvidenceProvider, AccuracyModel, PropagationStats};
 use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::realization::{accuracy_target, summary_candidates};
 use crate::replacement::{
@@ -156,14 +154,12 @@ impl<'a> HydraGroupingStrategy<'a> {
     pub fn new_with_planning_inputs_and_evidence(
         cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
-        allocator: &'a dyn AccuracyBudgetAllocator,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs {
                 cost: cost_model,
                 accuracy: accuracy_model,
-                allocator,
                 evidence,
             },
         }
@@ -496,7 +492,7 @@ fn hydra_guarantee(inner: &AccuracyGuarantee, stats: &PropagationStats) -> Accur
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
+    use crate::accuracy::DefaultAccuracyModel;
     use crate::test_support::{agg, agg_per_entity, metric_scan};
     use asap_types::post_asap::ErrorMetric;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
@@ -648,7 +644,6 @@ mod tests {
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &ZeroSharedGridEvidence,
         );
         let replacements = strategy.replacements(&TargetSubDAG::new(&q));
@@ -685,7 +680,6 @@ mod tests {
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &InvalidEvidence,
         );
         let proposals = strategy.propose(&TargetSubDAG::new(&q));
@@ -732,7 +726,6 @@ mod tests {
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &ExcessiveCollision,
         );
         let proposals = strategy.propose(&TargetSubDAG::new(&q));

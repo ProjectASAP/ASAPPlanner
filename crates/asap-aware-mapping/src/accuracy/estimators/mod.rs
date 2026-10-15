@@ -70,6 +70,52 @@ pub(super) fn local_guarantee(
         }
     }
 }
+/// `params` with the parameters its per-value failure probability depends
+/// on enlarged, never reduced, so that each value it answers fails with
+/// probability at most `delta` and its error bound is unchanged or smaller
+/// (#669b): Count-Min's depth, Count Sketch's depth (the binomial tail of
+/// its median), KLL's failure probability (its δ scale) and a distinct
+/// count UnivMon's heap. Other parameters are returned as they are:
+/// DDSketch never fails; classic HLL's failure probability comes from its
+/// source's distinct bound ([`hll::precision_for`]); KMV and Theta are
+/// calibrated at a fixed 99%; an L2 or entropy UnivMon is not enlarged.
+pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
+    if !(delta > 0.0 && delta < 1.0) {
+        return params.clone();
+    }
+    match params {
+        SketchParams::Cms { width, depth } => SketchParams::Cms {
+            width: *width,
+            depth: (*depth).max(cms::cms_depth(delta)),
+        },
+        SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size,
+        } => SketchParams::CmsWithHeap {
+            width: *width,
+            depth: (*depth).max(cms::cms_depth(delta)),
+            heap_size: *heap_size,
+        },
+        SketchParams::CountSketch { width, depth } => SketchParams::CountSketch {
+            width: *width,
+            depth: (*depth).max(count_sketch::count_sketch_depth(*width, delta)),
+        },
+        SketchParams::CountSketchWithHeap {
+            width,
+            depth,
+            heap_size,
+        } => SketchParams::CountSketchWithHeap {
+            width: *width,
+            depth: (*depth).max(count_sketch::count_sketch_depth(*width, delta)),
+            heap_size: *heap_size,
+        },
+        SketchParams::Kll { .. } => kll::with_failure_probability(params, delta),
+        SketchParams::UnivMon { .. } => univmon::with_failure_probability(params, delta),
+        _ => params.clone(),
+    }
+}
+
 pub(crate) fn size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
@@ -403,5 +449,112 @@ mod shared_size_tests {
             shared_size_params(&[&univmon(1, 12, 512, 1), &univmon(1, 5, 1 << 16, 1)]),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
+
+    fn delta_and_error(params: &SketchParams, query: &SketchStatistic) -> (f64, f64) {
+        let algorithm = match params {
+            SketchParams::Cms { .. } => SketchAlgorithm::Cms,
+            SketchParams::CountSketch { .. } => SketchAlgorithm::CountSketch,
+            SketchParams::Kll { .. } => SketchAlgorithm::Kll,
+            other => panic!("{other:?}"),
+        };
+        let g = sketch_guarantee(&algorithm, params, query).unwrap();
+        (
+            g.spec.failure_probability.evaluate().unwrap(),
+            g.spec.error.evaluate().unwrap(),
+        )
+    }
+
+    /// Enlarging for a smaller failure probability deepens Count-Min and
+    /// Count Sketch and grows KLL until each meets it, at no larger error;
+    /// it never shrinks a sketch that already meets it. (Count Sketch's
+    /// depth is capped at 255 rows, which a non-power-of-two width reaches
+    /// before 1e-6.)
+    #[test]
+    fn enlarging_meets_the_failure_probability_at_no_larger_error() {
+        let point = SketchStatistic::PointCount {
+            key: asap_types::pre_asap::expr_ir::ColumnRef::SampleValue,
+            value: None,
+        };
+        let quantile = SketchStatistic::Quantile { q: 0.99 };
+        for (params, query, delta) in [
+            (
+                size_params(SketchAlgorithm::Cms, &default_cardinality(), 0.01, 0.01),
+                &point,
+                1e-6,
+            ),
+            (
+                size_params(
+                    SketchAlgorithm::CountSketch,
+                    &default_cardinality(),
+                    0.01,
+                    0.01,
+                ),
+                &point,
+                1e-3,
+            ),
+            (
+                size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.01, 0.01),
+                &quantile,
+                1e-6,
+            ),
+        ] {
+            let (_, error) = delta_and_error(&params, query);
+            let enlarged = with_failure_probability(&params, delta);
+            let (new_delta, new_error) = delta_and_error(&enlarged, query);
+            assert!(new_delta <= delta, "{enlarged:?}");
+            assert!(new_error <= error * (1.0 + 1e-9), "{enlarged:?}");
+            assert_ne!(enlarged, params);
+            assert_eq!(with_failure_probability(&enlarged, 0.01), enlarged);
+        }
+        let ddsketch = SketchParams::DDSketch { alpha: 0.01 };
+        assert_eq!(with_failure_probability(&ddsketch, 1e-6), ddsketch);
+    }
+
+    /// A distinct-count UnivMon grows its heap for a smaller failure
+    /// probability at no larger relative error.
+    #[test]
+    fn a_distinct_count_univmon_grows_its_heap() {
+        let params = size_params(SketchAlgorithm::UnivMon, &default_cardinality(), 0.05, 0.01);
+        let enlarged = with_failure_probability(&params, 1e-4);
+        let error = |p: &SketchParams| {
+            univmon::distinct_guarantee(p, "m")
+                .unwrap()
+                .spec
+                .error
+                .evaluate()
+                .unwrap()
+        };
+        let (
+            SketchParams::UnivMon { heap_size: k, .. },
+            SketchParams::UnivMon {
+                heap_size: grown,
+                distinct_failure_probability,
+                ..
+            },
+        ) = (&params, &enlarged)
+        else {
+            panic!("{enlarged:?}")
+        };
+        assert!(grown > k);
+        assert_eq!(*distinct_failure_probability, Some(1e-4));
+        assert!(error(&enlarged) <= error(&params) * (1.0 + 1e-9));
+    }
+
+    /// Classic HLL's precision grows until its failure probability over the
+    /// source's distinct bound meets the target, up to 18.
+    #[test]
+    fn classic_hll_precision_grows_for_its_failure_probability() {
+        let p = hll::precision_for(4, 64, 0.01);
+        assert!(p > 4);
+        assert!(hll::classic_failure_probability(p, 64) <= 0.01);
+        assert!(hll::classic_failure_probability(p - 1, 64) > 0.01);
+        assert_eq!(hll::precision_for(12, 4096, 1e-30), 12);
     }
 }

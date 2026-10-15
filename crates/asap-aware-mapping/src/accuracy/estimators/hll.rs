@@ -192,6 +192,15 @@ impl ClassicHllConfidence {
     }
 }
 
+/// The smallest precision from `precision` up whose classic failure
+/// probability over a source of at most `max_distinct` distinct items is at
+/// most `delta` (#669b); `precision` when none up to 18 is.
+pub(crate) fn precision_for(precision: u8, max_distinct: u64, delta: f64) -> u8 {
+    (precision..=18)
+        .find(|&p| classic_failure_probability(p, max_distinct) <= delta)
+        .unwrap_or(precision)
+}
+
 /// HLL RSE-magnitude inversion: sized from ε alone. Its confidence comes
 /// from the source's distinct bound ([`classic_guarantee`]).
 pub(crate) fn hll_precision(eps: f64) -> u8 {

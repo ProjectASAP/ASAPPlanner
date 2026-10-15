@@ -378,8 +378,7 @@ use std::rc::{Rc, Weak};
 
 use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
-    AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
-    DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
+    equal_shares, AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
 };
 use crate::cost_model::{
     raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
@@ -1105,30 +1104,27 @@ pub fn posterior_aware_size_params(
 /// every caller.
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
-static DEFAULT_ALLOCATOR: EqualSplitAllocator = EqualSplitAllocator;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 
 /// The cost, accuracy, allocation, and evidence inputs consulted during
-/// candidate construction, bundled so the construction path threads one argument. `cost` ranks and sizes; `accuracy` and `allocator` decide
+/// candidate construction, bundled so the construction path threads one argument. `cost` ranks and sizes; `accuracy` decides
 /// legality (issue #172) — see [`crate::accuracy`]'s module docs for why
 /// those are separate from `cost` and run before it.
 #[derive(Clone, Copy)]
 pub(crate) struct CandidatePlanningInputs<'a> {
     pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
-    pub allocator: &'a dyn AccuracyBudgetAllocator,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
 }
 
 impl<'a> CandidatePlanningInputs<'a> {
     /// `cost` with the built-in [`DefaultAccuracyModel`]/
-    /// [`EqualSplitAllocator`] — what every entry point that only takes a
+    /// equal budget split — what every entry point that only takes a
     /// `CostModel` uses.
     pub(crate) fn with_default_accuracy(cost: &'a dyn CostModel) -> Self {
         Self {
             cost,
             accuracy: &DEFAULT_ACCURACY_MODEL,
-            allocator: &DEFAULT_ALLOCATOR,
             evidence: &NO_ACCURACY_EVIDENCE,
         }
     }
@@ -1173,7 +1169,7 @@ impl<'a> ASAPStrategies<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
     /// [`realizations_for_intent`] already offers. Accuracy legality stays
-    /// with the built-in [`DefaultAccuracyModel`]/[`EqualSplitAllocator`].
+    /// with the built-in [`DefaultAccuracyModel`].
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs::with_default_accuracy(cost_model),
@@ -1188,13 +1184,11 @@ impl<'a> ASAPStrategies<'a> {
     pub fn new_with_planning_inputs(
         cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
-        allocator: &'a dyn AccuracyBudgetAllocator,
     ) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs {
                 cost: cost_model,
                 accuracy: accuracy_model,
-                allocator,
                 evidence: &NO_ACCURACY_EVIDENCE,
             },
         }
@@ -1205,14 +1199,12 @@ impl<'a> ASAPStrategies<'a> {
     pub fn new_with_planning_inputs_and_evidence(
         cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
-        allocator: &'a dyn AccuracyBudgetAllocator,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs {
                 cost: cost_model,
                 accuracy: accuracy_model,
-                allocator,
                 evidence,
             },
         }
@@ -1535,64 +1527,59 @@ impl<'a> ASAPStrategies<'a> {
             else {
                 continue;
             };
-            let shape = CompositionShape {
-                metric: local.spec.metric,
-                approximate_layer_count: 1 + child_layers,
-            };
-            let allocations = planning_inputs.allocator.allocations(target, &shape);
-            if allocations.is_empty() {
+            let (metric, layer_count) = (local.spec.metric, 1 + child_layers);
+            let Some(outer_target) = equal_shares(target, metric, layer_count, 1) else {
                 proposals.rejected.push(RejectedCandidate {
                     strategy: "ASAPStrategies",
                     description: rationale.clone(),
                     error: AccuracyError::NoLegalAllocation {
                         target: target.clone(),
-                        layer_count: shape.approximate_layer_count,
+                        layer_count,
                     },
                 });
                 continue;
-            }
+            };
             let declared_child_target = aggregate_child(root)
                 .and_then(|child| bindable_intent(child))
                 .and_then(accuracy_target);
-            for allocation in allocations {
-                let outer_target = &allocation.layers[0];
-                let inner_target = allocation.inner_target(&shape);
-                let (eps, delta) = accuracy_budget(outer_target);
-                let resized = Realization::Sketch(SketchKind::new(
-                    kind.algorithm().clone(),
-                    planning_inputs
-                        .cost
-                        .size_params(kind.algorithm().clone(), intent, eps, delta),
-                ));
-                // Identical to the as-declared composition already recorded
-                // above — nothing new to propose.
-                if resized == realization && inner_target.as_ref() == declared_child_target {
-                    continue;
-                }
-                let note = GuaranteeSource::BudgetAllocation {
-                    allocator: allocation.allocator.to_string(),
-                    layer: 0,
-                    layer_count: shape.approximate_layer_count,
-                    local_target: outer_target.clone(),
-                    end_to_end_target: target.clone(),
-                };
-                proposals.record(
-                    format!(
-                        "{rationale}; sized under {} budget split of {target:?} across \
-                         {} approximate layers (this layer {outer_target:?}, child sub-DAG \
-                         {inner_target:?})",
-                        allocation.allocator, shape.approximate_layer_count
-                    ),
-                    construct_summary_with(
-                        root,
-                        intent,
-                        resized,
-                        planning_inputs,
-                        inner_target.as_ref(),
-                        Some(note),
-                    ),
-                );
+            let inner_target = (layer_count > 1)
+                .then(|| equal_shares(target, metric, layer_count, layer_count - 1))
+                .flatten();
+            let (eps, delta) = accuracy_budget(&outer_target);
+            let resized = Realization::Sketch(SketchKind::new(
+                kind.algorithm().clone(),
+                planning_inputs
+                    .cost
+                    .size_params(kind.algorithm().clone(), intent, eps, delta),
+            ));
+            // Identical to the as-declared composition already recorded
+            // above — nothing new to propose.
+            if resized == realization && inner_target.as_ref() == declared_child_target {
+                continue;
             }
+            let note = GuaranteeSource::BudgetAllocation {
+                allocator: "equal_split".to_string(),
+                layer: 0,
+                layer_count,
+                local_target: outer_target.clone(),
+                end_to_end_target: target.clone(),
+            };
+            proposals.record(
+                format!(
+                    "{rationale}; sized under {} budget split of {target:?} across \
+                     {} approximate layers (this layer {outer_target:?}, child sub-DAG \
+                     {inner_target:?})",
+                    "equal_split", layer_count
+                ),
+                construct_summary_with(
+                    root,
+                    intent,
+                    resized,
+                    planning_inputs,
+                    inner_target.as_ref(),
+                    Some(note),
+                ),
+            );
         }
         if proposals.candidates.is_empty() {
             if let Some(error) = &proposals.domain_error {
@@ -1641,6 +1628,15 @@ impl Proposals {
             ) => {}
         }
     }
+}
+
+/// `target` over each value separately: this search sizes and checks every
+/// node per value; a target over a whole result is checked only at a query
+/// root, by plan selection.
+fn per_value(target: &AccuracyTarget) -> AccuracyTarget {
+    target
+        .clone()
+        .with_scope(asap_types::types::AccuracyScope::PerValue)
 }
 
 /// The `child` of a [`bindable_intent`]-shaped `Aggregate`.
@@ -1795,7 +1791,7 @@ pub(crate) fn realize_child(
 
 /// [`realize_child`] with every model explicit, plus an optional
 /// `end_to_end_target` for `root`'s own value (issue #172): when an
-/// [`AccuracyBudgetAllocator`] hands an approximate child a share of its
+/// equal budget split ([`equal_shares`]) hands an approximate child a share of its
 /// parent's budget, the child is re-enumerated with that share substituted
 /// for its declared `AccuracyTarget` — sizing its sketch (and, recursively,
 /// re-splitting for its own approximate children) under the allocated
@@ -2048,25 +2044,14 @@ fn realize_binary(
             {
                 return Ok(None);
             }
-            let shape = CompositionShape {
-                metric,
-                approximate_layer_count: approximate.len(),
-            };
-            let Some(allocation) = planning_inputs
-                .allocator
-                .allocations(target, &shape)
-                .into_iter()
-                .next()
-            else {
+            let Some(local_target) = equal_shares(target, metric, approximate.len(), 1) else {
                 return Ok(None);
             };
-            for ((operand_index, _), local_target) in
-                approximate.into_iter().zip(allocation.layers.iter())
-            {
+            for (operand_index, _) in approximate {
                 if operand_index == 0 {
-                    lhs_node = realize_binary_operand(lhs, planning_inputs, Some(local_target))?;
+                    lhs_node = realize_binary_operand(lhs, planning_inputs, Some(&local_target))?;
                 } else {
-                    rhs_node = realize_binary_operand(rhs, planning_inputs, Some(local_target))?;
+                    rhs_node = realize_binary_operand(rhs, planning_inputs, Some(&local_target))?;
                 }
             }
         }
@@ -3854,7 +3839,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                             || !requirements.iter().all(|target| {
                                 plan.guarantee
                                     .as_ref()
-                                    .is_some_and(|g| accuracy.satisfies(g, target))
+                                    .is_some_and(|g| accuracy.satisfies(g, &per_value(target)))
                             })
                         {
                             continue;
@@ -6002,14 +5987,12 @@ pub fn default_strategies_with_evidence<'a>(
         Box::new(ASAPStrategies::new_with_planning_inputs_and_evidence(
             cost_model,
             &DEFAULT_ACCURACY_MODEL,
-            &DEFAULT_ALLOCATOR,
             evidence,
         )),
         Box::new(
             HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
                 cost_model,
                 &DEFAULT_ACCURACY_MODEL,
-                &DEFAULT_ALLOCATOR,
                 evidence,
             ),
         ),
@@ -6153,7 +6136,7 @@ pub fn search_workload_with_targets<'s, Id>(
                     Replacement::SubDAG(_) if candidate.is_logical_rewrite() => true,
                     Replacement::SubDAG(node) => node.guarantee.as_ref().map_or_else(
                         || !target.is_exact(),
-                        |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
+                        |g| accuracy_model.satisfies(&g.optimistic_floor(), &per_value(&target)),
                     ),
                     // A composition's guarantee depends on the concrete child;
                     // prepare_compositions checks those pairs after all roots.
@@ -7956,12 +7939,9 @@ mod tests {
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.99), inner);
         let target = TargetSubDAG::new(&outer);
-        let replacements = ASAPStrategies::new_with_planning_inputs(
-            &DefaultCostModel,
-            &RankAdditiveModel,
-            &EqualSplitAllocator,
-        )
-        .replacements(&target);
+        let replacements =
+            ASAPStrategies::new_with_planning_inputs(&DefaultCostModel, &RankAdditiveModel)
+                .replacements(&target);
 
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| {
@@ -10160,7 +10140,6 @@ mod tests {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopKEvidence,
         );
         let replacements = strategy.replacements(&TargetSubDAG::new(&q));
@@ -10194,7 +10173,6 @@ mod tests {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopKEvidence,
         );
         let candidates = strategy.replacements(&TargetSubDAG::new(&outer));
@@ -10261,7 +10239,6 @@ mod tests {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopKEvidence,
         );
         let candidates = strategy.replacements(&TargetSubDAG::new(&outer));
@@ -10336,7 +10313,6 @@ mod tests {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopKEvidence,
         );
         let candidates = strategy.replacements(&TargetSubDAG::new(&outer));
@@ -10388,7 +10364,6 @@ mod tests {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopKEvidence,
         );
 
@@ -10441,7 +10416,6 @@ mod tests {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopKEvidence,
         );
         let (update, reduction) = strategy
@@ -10706,11 +10680,8 @@ mod tests {
         // summary levels explicit while preserving the composed guarantee.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = agg(vec![], quantile_eps(0.99, 0.1), inner);
-        let strategy = ASAPStrategies::new_with_planning_inputs(
-            &DefaultCostModel,
-            &RankAdditiveModel,
-            &EqualSplitAllocator,
-        );
+        let strategy =
+            ASAPStrategies::new_with_planning_inputs(&DefaultCostModel, &RankAdditiveModel);
         let proposals = strategy.propose(&TargetSubDAG::new(&outer));
 
         assert!(!proposals.candidates.is_empty());
@@ -10736,12 +10707,9 @@ mod tests {
         // and global cost ranking.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = agg(vec![], quantile_eps(0.99, 0.1), inner);
-        let strategies: Vec<Box<dyn ReplacementStrategy>> =
-            vec![Box::new(ASAPStrategies::new_with_planning_inputs(
-                &DefaultCostModel,
-                &RankAdditiveModel,
-                &EqualSplitAllocator,
-            ))];
+        let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(
+            ASAPStrategies::new_with_planning_inputs(&DefaultCostModel, &RankAdditiveModel),
+        )];
         let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies).unwrap();
         let root = &space.roots[0].1;
         let group = space.candidates_for_target(root).unwrap();

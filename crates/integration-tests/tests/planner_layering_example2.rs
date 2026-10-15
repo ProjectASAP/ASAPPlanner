@@ -24,7 +24,7 @@ use asap_types::post_asap::{
     Field, ProbabilityExpr, Schema, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::pre_asap::DataType;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::{AccuracyScope, RequestedAccuracy};
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataDistribution, DataWorkload, DurationMs,
     LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -54,14 +54,15 @@ const PROMQL_Q3: &str = "l2_over_time(flows_src_ip[1m])";
 /// (ε, δ) of Q1, Q2, Q3. Q3 is the strictest.
 const ACCURACY: [(f64, f64); 3] = [(0.02, 0.01), (0.05, 0.01), (0.01, 0.01)];
 
-fn panel(query: &str, (epsilon, delta): (f64, f64)) -> RepeatingEntry {
+fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> RepeatingEntry {
     RepeatingEntry {
         query: Query(query.into()),
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
         requirements: QueryRequirements {
-            accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::epsilon_delta(
-                epsilon, delta,
-            )),
+            accuracy: AccuracyRequirement::Explicit(RequestedAccuracy {
+                scope,
+                ..RequestedAccuracy::epsilon_delta(epsilon, delta)
+            }),
             response_latency: LatencyRequirement::Unspecified,
         },
         predictability: Predictability::Predictable { known_at: None },
@@ -92,8 +93,18 @@ fn data_workload(ingestion_interval: bool) -> DataWorkload {
     }
 }
 
+/// The SQL queries' targets cover their whole result, as the doc's do. The
+/// PromQL stand-in states them per value: it reads one series, but the
+/// data workload's input cardinality (the 10M source IPs) is what plan
+/// selection takes as the number of values a PromQL vector returns, so a
+/// whole-result target would be checked over 10M values (#669b).
 fn workload(language: QueryLanguage, queries: [&str; 3]) -> PlanningWorkload {
     let sql = matches!(language, QueryLanguage::SQL(_));
+    let scope = if sql {
+        AccuracyScope::WholeResult
+    } else {
+        AccuracyScope::PerValue
+    };
     PlanningWorkload {
         query_workload: QueryWorkload {
             language,
@@ -102,7 +113,7 @@ fn workload(language: QueryLanguage, queries: [&str; 3]) -> PlanningWorkload {
                 queries
                     .iter()
                     .zip(ACCURACY)
-                    .map(|(q, accuracy)| panel(q, accuracy))
+                    .map(|(q, accuracy)| panel(q, accuracy, scope))
                     .collect(),
             ),
         },
@@ -615,12 +626,20 @@ fn stage3_plan_selection_accepts_hll_given_a_distinct_bound() {
     }
 }
 
-/// A bound too large for the precision Pass 1 chose leaves δ over its
-/// target: one inside classic HLL's certified range gives a failure
-/// probability above 0.01, and one outside it certifies nothing (δ = 1).
+/// A bound too large for the precision Pass 1 chose (12 certifies δ = 0.01
+/// for at most 9 distinct items) is met by a larger precision: plan
+/// selection enlarges HLL until its failure probability over the bound
+/// meets the target, up to precision 18 (#669b): a bound of 10 is met. The
+/// model certifies a bound of 100 at no precision (a larger precision also
+/// shrinks the relative error it certifies), and one outside its range (at
+/// most 4096) certifies nothing.
 #[test]
-fn stage3_plan_selection_rejects_hll_whose_distinct_bound_is_too_large() {
-    for bound in [10, 100, 10_000_000] {
+fn stage3_plan_selection_enlarges_hll_for_a_larger_distinct_bound() {
+    let run = pipeline_with_distinct_bound(Some(10));
+    for id in hll_only_candidates(&run) {
+        assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
+    }
+    for bound in [100, 10_000_000] {
         let run = pipeline_with_distinct_bound(Some(bound));
         let invalid = run.invalid();
         for id in hll_only_candidates(&run) {

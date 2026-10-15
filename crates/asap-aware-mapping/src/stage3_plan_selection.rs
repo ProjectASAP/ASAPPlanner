@@ -68,19 +68,22 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator_properties::BinaryOpKind;
+use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::ir::{
-    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
+    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot,
+    ScalarExpr, SchemaDerivationError,
 };
 use asap_types::post_asap::sketch::KLL_MAX_K;
+use asap_types::post_asap::ExecutionDataStateError;
 use asap_types::post_asap::{
     AccuracyGuarantee, CompositionOperator, ErrorMetric, ExecutionTiming, FieldDataType,
     Materialization, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{DataWorkload, MetricType, QueryRecurrence, RepeatedDemand};
 use thiserror::Error;
 
@@ -88,14 +91,15 @@ use crate::accuracy::composition::{
     parse_samples_sign_statistic, parse_source_norm_statistic, DIVISION_OPERAND_DOMAINS,
     INPUT_ROW_COUNT, PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
+use crate::accuracy::estimators::with_failure_probability;
 use crate::accuracy::estimators::{hll, univmon};
-use crate::accuracy::{OperandDomain, PropagationStats};
+use crate::accuracy::{whole_result_guarantee, OperandDomain, PropagationStats};
 use crate::analytical_cost::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::per_computation_candidates::{
-    operand_domain_statistic, operand_guarantee, operand_of, project_column_guarantee,
-    scalar_guarantee,
+    approximate_inputs, operand_domain_statistic, operand_guarantee, operand_of,
+    project_column_guarantee, root_guarantee, summary_source, with_resized_summaries,
 };
 use crate::physical_operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
@@ -194,6 +198,13 @@ pub enum SelectionError {
     },
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),
+    /// A candidate's summaries could not be rebuilt with the parameters its
+    /// queries' failure probabilities need.
+    #[error("candidate {candidate}: sizing for the failure probability: {error}")]
+    Sizing {
+        candidate: String,
+        error: SizingError,
+    },
     /// A query's requested accuracy cannot be resolved for its root, e.g. a
     /// quantile query's target names no metric.
     #[error("q{query}: {error}")]
@@ -216,7 +227,7 @@ pub fn select_plan(
 ) -> Result<Selection, SelectionError> {
     let mut costs = BTreeMap::new();
     let mut rejected = Vec::new();
-    let mut best: Option<(&str, f64)> = None;
+    let mut best: Option<(String, f64, Vec<QueryRoot>)> = None;
     for candidate in cands {
         if candidate.roots.len() != targets.len() || candidate.roots.len() != recurrence.len() {
             return Err(SelectionError::TargetCount {
@@ -226,6 +237,13 @@ pub fn select_plan(
                 recurrences: recurrence.len(),
             });
         }
+        let candidate =
+            &sized_for_failure_probability(candidate, targets, data).map_err(|error| {
+                SelectionError::Sizing {
+                    candidate: candidate.id.clone(),
+                    error,
+                }
+            })?;
         if let Some(reason) = accuracy_violation(candidate, targets, data, &models) {
             rejected.push(Rejection {
                 id: candidate.id.clone(),
@@ -243,12 +261,15 @@ pub fn select_plan(
                     error,
                 }
             })?;
-        if best.is_none_or(|(_, total)| cheaper(cost.total, total)) {
-            best = Some((&candidate.id, cost.total));
+        if best
+            .as_ref()
+            .is_none_or(|(_, total, _)| cheaper(cost.total, *total))
+        {
+            best = Some((candidate.id.clone(), cost.total, candidate.roots.clone()));
         }
         costs.insert(candidate.id.clone(), cost);
     }
-    let Some((selected, best_total)) = best else {
+    let Some((selected, best_total, selected_roots)) = best else {
         return Err(SelectionError::NoValidCandidate(rejected));
     };
     for candidate in cands {
@@ -269,13 +290,9 @@ pub fn select_plan(
             });
         }
     }
-    let plan = cands
-        .iter()
-        .find(|c| c.id == selected)
-        .map(|c| with_confirmed_weights(&c.roots, data))
-        .unwrap_or_default();
+    let plan = with_confirmed_weights(&selected_roots, data);
     Ok(Selection {
-        selected: selected.to_string(),
+        selected,
         plan,
         costs,
         rejected,
@@ -287,6 +304,181 @@ pub fn select_plan(
 /// tie, and a tie keeps the earlier candidate.
 fn cheaper(cost: f64, best: f64) -> bool {
     cost < best - best.abs() * 1e-9
+}
+
+/// Why a candidate's summaries could not be rebuilt for a failure
+/// probability ([`sized_for_failure_probability`]).
+#[derive(Debug, Error)]
+pub enum SizingError {
+    #[error(transparent)]
+    Structure(#[from] SchemaDerivationError),
+    #[error(transparent)]
+    Export(#[from] ExecutionDataStateError),
+}
+
+/// Without a planning time, only evidence that cannot expire is fresh.
+const ANY_TIME: u64 = u64::MAX;
+
+/// How many values one evaluation of `root` returns at most (`G`): one for
+/// a scalar root and for a root of at most one row ([`at_most_one_row`]),
+/// provable from the query; otherwise, from `data`, at most the input
+/// cardinality (the series) for a PromQL instant vector, whose groups and
+/// series never outnumber its input series. `None` when unbound: any other
+/// SQL result, until a bound on the groups of its source is an input, and a
+/// range vector.
+fn output_values(root: &QueryRoot, data: &DataWorkload) -> Option<f64> {
+    match root {
+        QueryRoot::Scalar(_) => Some(1.0),
+        QueryRoot::Operator(node) if at_most_one_row(node) => Some(1.0),
+        QueryRoot::Operator(node) if node.result_kind == OperatorResultKind::InstantVector => data
+            .input_cardinality
+            .value_at(ANY_TIME)
+            .map(|series| (*series).max(1) as f64),
+        QueryRoot::Operator(_) => None,
+    }
+}
+
+/// Whether `node` returns at most one row whatever its input: a global
+/// aggregate or summary (a reduction with no group keys), and above one
+/// only operators that keep or drop its rows, or join two such inputs
+/// without adding unmatched rows of both sides.
+fn at_most_one_row(node: &OperatorNode) -> bool {
+    let global = |reduction: &asap_types::pre_asap::Reduction| {
+        reduction
+            .group_keys()
+            .is_some_and(|by| !by.is_without() && by.keys().is_empty())
+    };
+    match &node.operator {
+        // A top-k or `count_values` returns several rows per group.
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            ..
+        }) => {
+            global(reduction)
+                && !measures
+                    .iter()
+                    .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. }))
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => global(reduction),
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query,
+        }) => !matches!(query, SketchStatistic::TopK { .. }) && at_most_one_row(summary_input),
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => at_most_one_row(child),
+        Operator::NonASAP(
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. }
+            | NonASAPOp::Dedup { child, .. },
+        ) => at_most_one_row(child),
+        Operator::NonASAP(NonASAPOp::Join {
+            kind, left, right, ..
+        }) => {
+            use asap_types::ir::operator_properties::JoinKind;
+            match kind {
+                JoinKind::Semi | JoinKind::Anti => at_most_one_row(left),
+                JoinKind::Full => false,
+                _ => at_most_one_row(left) && at_most_one_row(right),
+            }
+        }
+        Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. }) => {
+            at_most_one_row(lhs) && at_most_one_row(rhs)
+        }
+        _ => false,
+    }
+}
+
+/// `candidate` with each summary's per-value failure probability enlarged
+/// for its queries' targets (#669b), before pricing, so that cost reflects
+/// the deeper sketch. A query with a target with failure probability `δ`,
+/// over `n` approximate inputs ([`approximate_inputs`]) and `G` values per
+/// evaluation ([`output_values`]; 1 for a per-value target), needs each
+/// input to fail with probability at most `δ / (n · G)`: `n · G` such
+/// failures union-bound to `δ` over the whole result. A summary several
+/// queries read takes the smallest. The parameters that depend on it are
+/// enlarged ([`with_failure_probability`]; classic HLL's precision from its
+/// source's distinct bound), and the guarantees above are composed again.
+/// A query whose `G` is unbound enlarges nothing: its whole-result target
+/// stays unmet. Stage 1 sizes for ε and reads no data workload; only this
+/// stage binds `G`.
+fn sized_for_failure_probability(
+    candidate: &PhysicalCandidate,
+    targets: &[Option<AccuracyTarget>],
+    data: &DataWorkload,
+) -> Result<PhysicalCandidate, SizingError> {
+    let roots = sized_roots(&candidate.roots, targets, data)?;
+    if roots
+        .iter()
+        .zip(&candidate.roots)
+        .all(|(sized, root)| sized == root)
+    {
+        return Ok(candidate.clone());
+    }
+    let mut dag = compile_physical_asap_workload_with_node_ids(&roots)?.dag;
+    // The DAG has the same nodes, so each keeps the placement Stage 2 gave it.
+    if dag.nodes.len() == candidate.dag.nodes.len() {
+        for (node, placed) in dag.nodes.iter_mut().zip(&candidate.dag.nodes) {
+            if node.id == placed.id {
+                node.output_state = placed.output_state;
+                node.materialization = placed.materialization;
+            }
+        }
+    }
+    Ok(PhysicalCandidate {
+        roots,
+        dag,
+        ..candidate.clone()
+    })
+}
+
+/// `roots` with their summaries enlarged as [`sized_for_failure_probability`]
+/// says: the plan plan selection prices and runs, for the logical roots of
+/// the selected candidate too.
+pub fn sized_roots(
+    roots: &[QueryRoot],
+    targets: &[Option<AccuracyTarget>],
+    data: &DataWorkload,
+) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
+    let mut required: HashMap<*const OperatorNode, f64> = HashMap::new();
+    for (root, target) in roots.iter().zip(targets) {
+        let Some((target, delta)) = target
+            .as_ref()
+            .and_then(|t| t.failure_probability.map(|delta| (t, delta)))
+            .filter(|(t, delta)| !t.is_exact() && *delta > 0.0)
+        else {
+            continue;
+        };
+        let values = match target.scope {
+            AccuracyScope::PerValue => Some(1.0),
+            AccuracyScope::WholeResult => output_values(root, data),
+        };
+        let Some(values) = values else { continue };
+        let inputs = approximate_inputs(root);
+        let share = delta / (inputs.len() as f64 * values);
+        for state in &inputs {
+            let entry = required.entry(Rc::as_ptr(state)).or_insert(share);
+            *entry = entry.min(share);
+        }
+    }
+    if required.is_empty() {
+        return Ok(roots.to_vec());
+    }
+    let resize = |state: &OperatorNode, params: &SketchParams| {
+        let delta = *required.get(&std::ptr::from_ref(state))?;
+        Some(match params {
+            SketchParams::Hll { precision } => {
+                let source = summary_source(state)?;
+                let bound = data.max_distinct_per_evaluation.value_at(ANY_TIME)?;
+                SketchParams::Hll {
+                    precision: hll::precision_for(*precision, *bound.get(&source)?, delta),
+                }
+            }
+            params => with_failure_probability(params, delta),
+        })
+    };
+    with_resized_summaries(roots, &resize)
 }
 
 /// The first query whose output is not shown to meet its target, as a
@@ -337,18 +529,40 @@ fn accuracy_violation(
                 ));
             }
         }
-        let guarantee = bound_root_guarantee(root, data, models);
+        // A guarantee per value is stated over the whole result's `G`
+        // values for a whole-result target.
+        let values = output_values(root, data);
+        let over_scope = |g: AccuracyGuarantee| match target.scope {
+            AccuracyScope::WholeResult => whole_result_guarantee(&g, values),
+            AccuracyScope::PerValue => g,
+        };
+        let guarantee = bound_root_guarantee(root, data, models).map(over_scope);
         let meets = |g: &AccuracyGuarantee| models.accuracy.satisfies(g, target);
         if guarantee.as_ref().is_some_and(meets)
             || models
                 .evidence
                 .output_guarantee(root)
+                .map(over_scope)
                 .as_ref()
                 .is_some_and(meets)
         {
             continue;
         }
         return Some(match guarantee {
+            Some(g)
+                if values.is_none()
+                    && target.scope == AccuracyScope::WholeResult
+                    && target.failure_probability.is_some()
+                    && g.spec.failure_probability.evaluate().is_none() =>
+            {
+                format!(
+                    "q{query}: the output's guarantee holds for each value, and the number \
+                     of values one evaluation returns is not bound (no declared input \
+                     cardinality for a PromQL vector; no bound on a SQL result's groups yet), \
+                     so it does not meet whole-result target {target:?}, and the deployment \
+                     has no evidence that it meets it"
+                )
+            }
             Some(g) => format!(
                 "q{query}: the output guarantees a {:?} bound {:?}, failure probability {:?}, \
                  which misses target {target:?}, and the deployment has no evidence that it \
@@ -432,16 +646,6 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     }
 }
 
-/// The theoretical guarantee of a query's output, as Stage 1 composed it:
-/// the root node's own, or a scalar root's composed over the operators it
-/// reads ([`scalar_guarantee`]).
-fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
-    match root {
-        QueryRoot::Operator(node) => node.guarantee.clone(),
-        QueryRoot::Scalar(expr) => scalar_guarantee(expr, &|_| None),
-    }
-}
-
 /// [`root_guarantee`] with the statistics Stage 1 left symbolic bound:
 /// - the input row count, from the data workload's input cardinality;
 /// - each source's stream norm ([`source_norm_statistic`]), from the data
@@ -492,8 +696,6 @@ fn bind_statistics(
 /// bound, from evidence that holds at any planning time, or the sign of
 /// one metric's samples, from its declared type.
 fn workload_statistic(statistic: &str, data: &DataWorkload) -> Option<f64> {
-    // Without a planning time, only evidence that cannot expire is fresh.
-    const ANY_TIME: u64 = u64::MAX;
     // The sign of one metric's samples: proven (1) when the metric is
     // declared a counter; no type is inferred from its name.
     if let Some(metric) = parse_samples_sign_statistic(statistic) {
@@ -1849,6 +2051,168 @@ mod tests {
             .nodes
             .iter()
             .any(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryEstimate { .. })))
+    }
+
+    /// The KLL candidates of `quantile_over_time(0.99, x[5m])`, per series,
+    /// within rank error 0.01 at δ = 0.01 over `scope`.
+    fn per_series_kll(scope: AccuracyScope) -> (Vec<PhysicalCandidate>, AccuracyTarget) {
+        let requested = RequestedAccuracy::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank);
+        let candidates = all_candidates("quantile_over_time(0.99, x[5m])", &requested)
+            .into_iter()
+            .filter(|c| !kll_params(&c.roots).is_empty())
+            .collect::<Vec<_>>();
+        assert!(!candidates.is_empty());
+        let target = requested.target_in(ErrorMetric::Rank).with_scope(scope);
+        (candidates, target)
+    }
+
+    fn kll_params(roots: &[QueryRoot]) -> Vec<SketchParams> {
+        roots
+            .iter()
+            .flat_map(root_operators)
+            .flat_map(OperatorNode::reachable)
+            .filter_map(|node| match node.asap() {
+                Some(ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) if *kind.algorithm() == SketchAlgorithm::Kll => Some(kind.params().clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A whole-result target over `G` = 10 000 series (the declared input
+    /// cardinality) needs each series' KLL to fail with probability at most
+    /// δ / G = 1e-6 (#669b): Stage 3 enlarges it before pricing, and the
+    /// selected plan runs the enlarged sketch. A per-value target keeps the
+    /// Stage 1 size.
+    #[test]
+    fn a_whole_result_target_enlarges_each_sketch_for_g_values() {
+        let (candidates, whole) = per_series_kll(AccuracyScope::WholeResult);
+        let select = |target: &AccuracyTarget| {
+            select_plan(
+                &candidates,
+                &[Some(target.clone())],
+                &every_10s(1),
+                &data(),
+                PlanningModels::builtin(),
+            )
+            .unwrap()
+        };
+        let stage1 = kll_params(&candidates[0].roots);
+        let enlarged = kll_params(&select(&whole).plan);
+        assert_eq!(enlarged.len(), 1);
+        let (
+            SketchParams::Kll { k: k1, .. },
+            SketchParams::Kll {
+                k,
+                failure_probability,
+            },
+        ) = (&stage1[0], &enlarged[0])
+        else {
+            panic!("{stage1:?} {enlarged:?}")
+        };
+        assert_eq!(*failure_probability, Some(0.01 / 10_000.0));
+        assert!(k > k1, "{k} vs {k1}");
+        let per_value = whole.clone().with_scope(AccuracyScope::PerValue);
+        assert_eq!(kll_params(&select(&per_value).plan), stage1);
+    }
+
+    /// Without a bound on the values one evaluation returns, a per-value
+    /// guarantee does not meet a whole-result target: a PromQL vector with
+    /// no declared input cardinality, and a SQL relation (until a bound on
+    /// its groups is an input). A scalar returns one value.
+    #[test]
+    fn an_unbound_number_of_values_leaves_a_whole_result_target_unmet() {
+        let (candidates, whole) = per_series_kll(AccuracyScope::WholeResult);
+        let no_cardinality = DataWorkload {
+            input_cardinality: Evidence::default(),
+            ..data()
+        };
+        let Err(SelectionError::NoValidCandidate(rejected)) = select_plan(
+            &candidates,
+            &[Some(whole)],
+            &every_10s(1),
+            &no_cardinality,
+            PlanningModels::builtin(),
+        ) else {
+            panic!("the KLL candidates are invalid")
+        };
+        assert!(
+            rejected[0].reason.contains("is not bound"),
+            "{}",
+            rejected[0].reason
+        );
+        let table = crate::test_support::scan_from(
+            asap_types::pre_asap::Source::Table {
+                table_ref: "t".into(),
+            },
+            Schema::new(vec![asap_types::pre_asap::schema::Field::plain(
+                "v",
+                DataType::Float64,
+                false,
+            )]),
+        );
+        assert_eq!(output_values(&QueryRoot::Operator(table), &data()), None);
+        assert_eq!(
+            output_values(
+                &QueryRoot::Scalar(ScalarExpr::literal_f64(1.0)),
+                &DataWorkload::default()
+            ),
+            Some(1.0)
+        );
+    }
+
+    /// A root that returns at most one row has `G` = 1, provable from the
+    /// query with no data workload: a global aggregate, PromQL or SQL, and
+    /// what selects, renames or joins single rows above it. A grouped SQL
+    /// aggregate stays unbound, and a grouped PromQL one, or a global top-k
+    /// (k rows), is bound by the input cardinality.
+    #[test]
+    fn a_root_of_at_most_one_row_returns_one_value() {
+        let none = DataWorkload::default();
+        let root = |query: &str| {
+            QueryRoot::Operator(lower_promql(query, RequestedAccuracy::epsilon(0.01)))
+        };
+        assert_eq!(output_values(&root("sum(rate(x[5m]))"), &none), Some(1.0));
+        assert_eq!(output_values(&root("topk(5, rate(x[5m]))"), &none), None);
+        assert_eq!(
+            output_values(&root("sum by (job) (rate(x[5m]))"), &none),
+            None
+        );
+        assert_eq!(
+            output_values(&root("sum by (job) (rate(x[5m]))"), &data()),
+            Some(10_000.0)
+        );
+        let table = || {
+            crate::test_support::scan_from(
+                asap_types::pre_asap::Source::Table {
+                    table_ref: "t".into(),
+                },
+                Schema::new(vec![
+                    asap_types::pre_asap::schema::Field::plain("k", DataType::Utf8, false),
+                    asap_types::pre_asap::schema::Field::plain("v", DataType::Float64, false),
+                ]),
+            )
+        };
+        let count = || AggIntent::Count {
+            accuracy: AccuracyTarget::exact(),
+        };
+        let global = crate::test_support::agg(vec![], count(), table());
+        let grouped = crate::test_support::agg(vec![0], count(), table());
+        assert_eq!(
+            output_values(&QueryRoot::Operator(global.clone()), &none),
+            Some(1.0)
+        );
+        assert_eq!(output_values(&QueryRoot::Operator(grouped), &data()), None);
+        let cross = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Join {
+            kind: asap_types::ir::operator_properties::JoinKind::Cross,
+            pred: asap_types::ir::Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+            left: global.clone(),
+            right: global,
+        }))
+        .unwrap();
+        assert_eq!(output_values(&QueryRoot::Operator(cross), &none), Some(1.0));
     }
 
     /// Deployment evidence that every output was measured exact.

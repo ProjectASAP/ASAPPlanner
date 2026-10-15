@@ -364,7 +364,7 @@ pub enum GuaranteeSource {
         rule: String,
     },
     /// The budget split that produced this layer's local target — present
-    /// only when an `AccuracyBudgetAllocator` re-sized a layer.
+    /// only when an equal budget split re-sized a layer.
     BudgetAllocation {
         allocator: String,
         layer: usize,
@@ -467,8 +467,7 @@ impl AccuracyGuarantee {
     /// How many approximate sketch evaluations contributed to this value —
     /// `1` for a plain evaluation, `0` for an exact value, and the transitive
     /// count through every [`GuaranteeSource::ChildGuarantee`] for a
-    /// composition. An `AccuracyBudgetAllocator` uses this as the number
-    /// of layers a budget must be split across.
+    /// composition.
     pub fn approximate_layer_count(&self) -> usize {
         self.provenance
             .iter()
