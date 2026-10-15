@@ -39,21 +39,31 @@ pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>,
         .collect()
 }
 
-/// Lower a SQL workload over the tables of `catalog`.
+/// Lower a SQL workload over the tables of `catalog`: every entry, batch
+/// and repeating, in workload order, each with its own accuracy target.
 pub fn lower_sql_roots(
     workload: &PlanningWorkload,
     catalog: &asap_frontend_sql::SqlCatalog,
 ) -> Result<Vec<QueryRoot>, String> {
-    tokio::runtime::Builder::new_current_thread()
+    let dialect = match &workload.query_workload.language {
+        asap_types::workload::QueryLanguage::SQL(dialect) => dialect.clone(),
+        _ => asap_types::workload::SqlDialect::DataFusionSQL,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
-        .map_err(|e| e.to_string())?
-        .block_on(asap_frontend_sql::lower_sql_batch(
-            &workload.query_workload,
-            catalog,
-        ))
-        .into_iter()
-        .map(|root| {
-            root.map(QueryRoot::Operator)
+        .map_err(|e| e.to_string())?;
+    workload
+        .query_workload
+        .entries()
+        .map(|entry| {
+            runtime
+                .block_on(asap_frontend_sql::lower_sql_dialect(
+                    &entry.query.0,
+                    catalog,
+                    dialect.clone(),
+                    entry.requirements.accuracy.requested(),
+                ))
+                .map(QueryRoot::Operator)
                 .map_err(|e| format!("lowering: {e}"))
         })
         .collect()

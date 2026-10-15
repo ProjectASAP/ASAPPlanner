@@ -36,8 +36,8 @@ use crate::stage3_plan_selection::{Selection, SelectionError};
 
 pub use stage1_to_stage3::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage2_and_stage3,
-    stage1_logical_asap_optimization, IdenticalExpressionCandidate, LogicalCandidate,
-    PrunedCandidate, Stage1Candidate, Stage1ToStage3Pass, Stage1ToStage3Run,
+    stage1_logical_asap_optimization, LogicalCandidate, Pass2Candidate, Pass2Of, PrunedCandidate,
+    Stage1Candidate, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;

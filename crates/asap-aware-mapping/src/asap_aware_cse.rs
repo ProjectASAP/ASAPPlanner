@@ -2,7 +2,12 @@
 //! common-subexpression elimination, as defined in
 //! `docs/design_docs/proposals/planner-layering.md` (Algorithm 2).
 //!
-//! Only the identical-expression rule is implemented. A *sharing group* of a
+//! Two of its rules are implemented: the identical-expression rule and the
+//! summary-capability rule.
+//!
+//! # Identical-expression rule
+//!
+//! A *sharing group* of a
 //! whole-workload candidate is a set of two or more of its nodes with
 //! identical input and computation semantics that are legal to share: the
 //! `ir::cse` interning merges only ASAP nodes and nodes with a unique key.
@@ -17,7 +22,26 @@
 //! same candidate as the subset with that group; such a candidate is
 //! returned once, under the subset of the groups it actually shares.
 //!
-//! The summary-capability and window-composition rules are not implemented.
+//! # Summary-capability rule
+//!
+//! Composition sizes each consumer's summary build alone, for its own
+//! accuracy target. The *members* of a [`CapabilityGroup`] are summary
+//! builds of one candidate that chose the same family (same
+//! [`SketchAlgorithm`]) over the same input sub-DAG (window, `WHERE` and
+//! time range included), item and weight, grouping and filter, and whose
+//! every reader is an estimate the family answers
+//! ([`FamilyCapability::answers`]); they differ only in their sizes.
+//! [`summary_capability_variants`] returns one candidate per choice, for
+//! each group, of no sharing or one subset of two or more of its members
+//! whose sizes differ (Q1: partial sharing too): the subset becomes one
+//! build serving all its readers, sized with each parameter's largest value
+//! among them ([`shared_size_params`]: each consumer sized alone, the shared
+//! build the per-parameter maximum, a KLL's failure probability the
+//! minimum), and every guarantee above it is composed again, so plan
+//! selection checks each consumer against the shared state. Members of
+//! equal size are the identical-expression rule's; builds that are not
+//! shared are untouched, and a consumer never changes family. The window-
+//! composition rule is not implemented.
 
 use std::collections::HashMap;
 #[cfg(test)]
@@ -25,7 +49,13 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_types::ir::cse::share_common_sub_dags;
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::post_asap::{
+    FamilyCapability, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind,
+};
+
+use crate::accuracy::estimators::shared_size_params;
+use crate::per_computation_candidates::{with_composed_guarantees, PerComputationCandidateError};
 
 /// A Pass 2 candidate: the candidate's roots with the sharing groups
 /// `shared_groups` (indices into [`sharing_groups`]) shared.
@@ -254,6 +284,354 @@ impl Sharing<'_> {
     }
 }
 
+/// One group of the summary-capability rule: summary builds of one family
+/// over the same input data that differ only in size, in the order a
+/// children-first walk of the roots meets them.
+#[derive(Debug, Clone)]
+pub struct CapabilityGroup {
+    pub family: SketchAlgorithm,
+    pub members: Vec<Rc<OperatorNode>>,
+}
+
+/// One shared build of a summary-capability candidate: the members
+/// (indices into the group's [`CapabilityGroup::members`]) of group
+/// `group` that read one state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedSummary {
+    pub group: usize,
+    pub members: Vec<usize>,
+}
+
+/// A Pass 2 candidate of the summary-capability rule: the candidate's
+/// roots with the builds in `shared` made one build each, sized for all
+/// their consumers, and every guarantee composed again; the error when
+/// that composition fails, which leaves the other variants unaffected.
+#[derive(Debug)]
+pub struct SummaryCapabilityVariant {
+    pub shared: Vec<SharedSummary>,
+    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+}
+
+/// The summary-capability groups of the candidate with query roots
+/// `roots`: groups of at least two builds whose sizes are not all equal.
+pub fn capability_groups(roots: &[QueryRoot]) -> Vec<CapabilityGroup> {
+    let mut nodes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node in roots.iter().flat_map(root_operators) {
+        collect_children_first(node, &mut seen, &mut nodes);
+    }
+    // Every node that reads each build, by the build's address.
+    let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
+    for node in &nodes {
+        for child in node.children() {
+            readers.entry(Rc::as_ptr(child)).or_default().push(node);
+        }
+    }
+    let mut groups: Vec<CapabilityGroup> = Vec::new();
+    for node in &nodes {
+        let Some(family) = shareable_family(node, readers.get(&Rc::as_ptr(node))) else {
+            continue;
+        };
+        match groups
+            .iter_mut()
+            .find(|g| g.family == family && same_input_data(&g.members[0], node))
+        {
+            Some(group) => group.members.push(Rc::clone(node)),
+            None => groups.push(CapabilityGroup {
+                family,
+                members: vec![Rc::clone(node)],
+            }),
+        }
+    }
+    groups.retain(|g| !all_equal(g.members.iter()));
+    groups
+}
+
+fn collect_children_first(
+    node: &Rc<OperatorNode>,
+    seen: &mut std::collections::HashSet<*const OperatorNode>,
+    out: &mut Vec<Rc<OperatorNode>>,
+) {
+    if !seen.insert(Rc::as_ptr(node)) {
+        return;
+    }
+    for child in node.children() {
+        collect_children_first(child, seen, out);
+    }
+    out.push(Rc::clone(node));
+}
+
+/// The family of a per-subpopulation sketch build whose every reader is an
+/// estimate the family answers; `None` for any other node.
+fn shareable_family(
+    node: &OperatorNode,
+    readers: Option<&Vec<&Rc<OperatorNode>>>,
+) -> Option<SketchAlgorithm> {
+    let Some(ASAPOp::SummaryAgg {
+        family: family @ FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance),
+        ..
+    }) = node.asap()
+    else {
+        return None;
+    };
+    let capability = FamilyCapability::of(family);
+    let answered = |reader: &&Rc<OperatorNode>| {
+        matches!(
+            reader.asap(),
+            Some(ASAPOp::SummaryEstimate { query, .. }) if capability.answers(query)
+        )
+    };
+    let readers = readers?;
+    readers
+        .iter()
+        .all(answered)
+        .then(|| kind.algorithm().clone())
+}
+
+/// Whether two builds of one family read the same data the same way: the
+/// same input sub-DAG, item and weight, grouping and filter.
+fn same_input_data(a: &OperatorNode, b: &OperatorNode) -> bool {
+    match (a.asap(), b.asap()) {
+        (
+            Some(ASAPOp::SummaryAgg {
+                child,
+                input,
+                reduction,
+                grouping,
+                filter,
+                ..
+            }),
+            Some(ASAPOp::SummaryAgg {
+                child: child_b,
+                input: input_b,
+                reduction: reduction_b,
+                grouping: grouping_b,
+                filter: filter_b,
+                ..
+            }),
+        ) => {
+            (Rc::ptr_eq(child, child_b) || child == child_b)
+                && input == input_b
+                && reduction == reduction_b
+                && grouping == grouping_b
+                && filter == filter_b
+        }
+        _ => false,
+    }
+}
+
+fn all_equal<'a>(mut nodes: impl Iterator<Item = &'a Rc<OperatorNode>>) -> bool {
+    let Some(first) = nodes.next() else {
+        return true;
+    };
+    nodes.all(|node| Rc::ptr_eq(node, first) || **node == **first)
+}
+
+/// The most summary builds one summary-capability group may have: every
+/// subset of two or more is a candidate, about a million at 20.
+pub const MAX_GROUP_MEMBERS: usize = 20;
+
+/// Every Pass 2 candidate of the summary-capability rule for the candidate
+/// with query roots `roots` and groups `groups` ([`capability_groups`]):
+/// one per choice, for each group, of no sharing or one subset of two or
+/// more members whose sizes are not all equal, other than sharing nothing.
+/// An error only for a group of more than [`MAX_GROUP_MEMBERS`] members; a variant whose
+/// composition fails carries its own error.
+/// The first group varies slowest; within a group, subsets come in
+/// binary-counter order (the first member the lowest bit).
+pub fn summary_capability_variants(
+    roots: &[QueryRoot],
+    groups: &[CapabilityGroup],
+) -> Result<Vec<SummaryCapabilityVariant>, PerComputationCandidateError> {
+    // Every subset of a group is a candidate: 2^n of them. Past
+    // MAX_GROUP_MEMBERS that is no longer a list plan selection can price.
+    if groups
+        .iter()
+        .any(|group| group.members.len() > MAX_GROUP_MEMBERS)
+    {
+        return Err(PerComputationCandidateError::Unsupported(
+            "a summary-capability group of more than 20 summary builds (2^n sharing subsets)",
+        ));
+    }
+    // Each group's options: `None` (no sharing), then its subsets.
+    let options: Vec<Vec<Option<Vec<usize>>>> = groups
+        .iter()
+        .map(|group| {
+            let n = group.members.len();
+            let mut options = vec![None];
+            for mask in 1u64..(1u64 << n) {
+                let members: Vec<usize> = (0..n).filter(|&m| mask >> m & 1 == 1).collect();
+                if members.len() >= 2 && !all_equal(members.iter().map(|&m| &group.members[m])) {
+                    options.push(Some(members));
+                }
+            }
+            options
+        })
+        .collect();
+    let mut choice = vec![0usize; groups.len()];
+    let mut variants = Vec::new();
+    loop {
+        // Mixed-radix increment, the last group varying fastest.
+        let mut carried = true;
+        for (digit, group_options) in choice.iter_mut().zip(&options).rev() {
+            *digit += 1;
+            if *digit < group_options.len() {
+                carried = false;
+                break;
+            }
+            *digit = 0;
+        }
+        if carried {
+            break;
+        }
+        let shared: Vec<SharedSummary> = choice
+            .iter()
+            .enumerate()
+            .filter_map(|(group, &option)| {
+                options[group][option]
+                    .clone()
+                    .map(|members| SharedSummary { group, members })
+            })
+            .collect();
+        match share_summaries(roots, groups, &shared) {
+            Ok(None) => {}
+            Ok(Some(roots)) => variants.push(SummaryCapabilityVariant {
+                shared,
+                roots: Ok(roots),
+            }),
+            Err(error) => variants.push(SummaryCapabilityVariant {
+                shared,
+                roots: Err(error),
+            }),
+        }
+    }
+    Ok(variants)
+}
+
+/// `roots` with each of `shared` made one build sized for all its members,
+/// and every guarantee composed again; `None` when the members' sizes have
+/// no shared size.
+fn share_summaries(
+    roots: &[QueryRoot],
+    groups: &[CapabilityGroup],
+    shared: &[SharedSummary],
+) -> Result<Option<Vec<QueryRoot>>, PerComputationCandidateError> {
+    let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    for summary in shared {
+        let members: Vec<&Rc<OperatorNode>> = summary
+            .members
+            .iter()
+            .map(|&m| &groups[summary.group].members[m])
+            .collect();
+        let Some(build) = sized_for_all(&members)? else {
+            return Ok(None);
+        };
+        for member in members {
+            replaced.insert(Rc::as_ptr(member), Rc::clone(&build));
+        }
+    }
+    let mut rebuilt: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    let mut rebuild = |node: &Rc<OperatorNode>| rebuild(node, &replaced, &mut rebuilt);
+    let mut out = Vec::new();
+    for root in roots {
+        out.push(match root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(rebuild(node)?),
+            QueryRoot::Scalar(expr) => {
+                let mut nodes = HashMap::new();
+                for node in expr.operator_refs() {
+                    nodes.insert(Rc::as_ptr(node), rebuild(node)?);
+                }
+                QueryRoot::Scalar(
+                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
+                )
+            }
+        });
+    }
+    Ok(Some(with_composed_guarantees(&out)?))
+}
+
+/// One build serving every member: the first member with the members'
+/// shared size ([`shared_size_params`]).
+fn sized_for_all(
+    members: &[&Rc<OperatorNode>],
+) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+    let kinds: Vec<&SketchKind> = members
+        .iter()
+        .filter_map(|member| match member.asap() {
+            Some(ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _),
+                ..
+            }) => Some(kind),
+            _ => None,
+        })
+        .collect();
+    let params: Vec<_> = kinds.iter().map(|kind| kind.params()).collect();
+    let Some(params) = shared_size_params(&params) else {
+        return Ok(None);
+    };
+    let first = members[0];
+    let Some(ASAPOp::SummaryAgg {
+        child,
+        family: FieldDataType::Sketch(kind, grouping_strategy),
+        input,
+        reduction,
+        grouping,
+        filter,
+    }) = first.asap()
+    else {
+        return Ok(None);
+    };
+    let operator = Operator::ASAP(ASAPOp::SummaryAgg {
+        child: Rc::clone(child),
+        family: FieldDataType::Sketch(
+            SketchKind::new(kind.algorithm().clone(), params),
+            grouping_strategy.clone(),
+        ),
+        input: input.clone(),
+        reduction: reduction.clone(),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+    });
+    let mut build = OperatorNode::new(operator)?;
+    // Keep the member's explicit output names.
+    for (field, retained) in build.schema.fields.iter_mut().zip(&first.schema.fields) {
+        field.name = retained.name.clone();
+        field.table = retained.table.clone();
+    }
+    Ok(Some(Rc::new(build)))
+}
+
+/// `node` with every replaced build below it swapped for its shared build;
+/// the same `Rc` when nothing below changed.
+fn rebuild(
+    node: &Rc<OperatorNode>,
+    replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    if let Some(done) = rebuilt.get(&Rc::as_ptr(node)) {
+        return Ok(Rc::clone(done));
+    }
+    let out = match replaced.get(&Rc::as_ptr(node)) {
+        Some(build) => Rc::clone(build),
+        None => {
+            let mut changed = false;
+            let mut children = HashMap::new();
+            for child in node.children() {
+                let new = rebuild(child, replaced, rebuilt)?;
+                changed |= !Rc::ptr_eq(&new, child);
+                children.insert(Rc::as_ptr(child), new);
+            }
+            if changed {
+                Rc::new(node.with_new_children(|child| children[&Rc::as_ptr(child)].clone())?)
+            } else {
+                Rc::clone(node)
+            }
+        }
+    };
+    rebuilt.insert(Rc::as_ptr(node), Rc::clone(&out));
+    Ok(out)
+}
+
 fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     match root {
         QueryRoot::Operator(node) => vec![node],
@@ -451,6 +829,206 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(5),
             "{:?}",
             start.elapsed()
+        );
+    }
+
+    /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
+    /// in which every target chose `family`.
+    fn chose(queries: &[(&str, f64)], family: SketchAlgorithm) -> Vec<QueryRoot> {
+        use crate::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        };
+        let roots = queries
+            .iter()
+            .enumerate()
+            .map(|(i, (q, epsilon))| {
+                let root = lower_promql(
+                    q,
+                    asap_types::types::RequestedAccuracy::epsilon_delta(*epsilon, 0.01)
+                        .with_metric(asap_types::types::ErrorMetric::Rank),
+                );
+                (
+                    i,
+                    QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
+                )
+            })
+            .collect();
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let choice: Vec<usize> = inventory
+            .targets
+            .iter()
+            .map(|t| {
+                t.choices
+                    .candidates
+                    .iter()
+                    .position(|c| *c == ComputationCandidate::Summary(family.clone()))
+                    .expect("the family is a candidate")
+            })
+            .collect();
+        compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect()
+    }
+
+    /// The summary builds `roots` read, by address, with each one's KLL `k`.
+    fn kll_builds(roots: &[QueryRoot]) -> Vec<(*const OperatorNode, u32)> {
+        let mut out: Vec<(*const OperatorNode, u32)> = Vec::new();
+        for node in roots
+            .iter()
+            .flat_map(root_operators)
+            .flat_map(OperatorNode::reachable)
+        {
+            if let Some(ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _),
+                ..
+            }) = node.asap()
+            {
+                let asap_types::post_asap::SketchParams::Kll { k, .. } = kind.params() else {
+                    panic!("{kind:?}")
+                };
+                if !out.iter().any(|(p, _)| *p == Rc::as_ptr(&node)) {
+                    out.push((Rc::as_ptr(&node), *k));
+                }
+            }
+        }
+        out
+    }
+
+    fn root_bound(root: &QueryRoot) -> f64 {
+        let QueryRoot::Operator(node) = root else {
+            panic!("operator root")
+        };
+        node.guarantee
+            .as_ref()
+            .and_then(|g| g.spec.error.evaluate())
+            .expect("a constant bound")
+    }
+
+    /// p50 at ε = 0.01 and p99 at ε = 0.001 over one window, each with its
+    /// own KLL: the rule shares one KLL with the larger `k`, and p50's
+    /// guarantee is the shared KLL's, tighter than its own.
+    #[test]
+    fn quantiles_at_different_targets_share_one_kll_with_the_larger_k() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, lat[5m])", 0.01),
+                ("quantile_over_time(0.99, lat[5m])", 0.001),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let own = kll_builds(&roots);
+        assert_eq!(own.len(), 2);
+        assert!(own[0].1 < own[1].1);
+        let groups = capability_groups(&roots);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].family, SketchAlgorithm::Kll);
+        let variants = summary_capability_variants(&roots, &groups).unwrap();
+        assert_eq!(variants.len(), 1);
+        assert_eq!(
+            variants[0].shared,
+            [SharedSummary {
+                group: 0,
+                members: vec![0, 1]
+            }]
+        );
+        let shared = kll_builds(variants[0].roots.as_ref().unwrap());
+        assert_eq!(shared.len(), 1, "one KLL serves both");
+        assert_eq!(shared[0].1, own[1].1);
+        assert!(root_bound(&variants[0].roots.as_ref().unwrap()[0]) < root_bound(&roots[0]));
+        assert_eq!(
+            root_bound(&variants[0].roots.as_ref().unwrap()[1]),
+            root_bound(&roots[1])
+        );
+    }
+
+    /// Three consumers at three targets: every subset of two or more of
+    /// them shares one build (three pairs and all three), the others keep
+    /// their own.
+    #[test]
+    fn every_subset_of_two_or_more_consumers_shares_one_build() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, lat[5m])", 0.05),
+                ("quantile_over_time(0.9, lat[5m])", 0.01),
+                ("quantile_over_time(0.99, lat[5m])", 0.001),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let groups = capability_groups(&roots);
+        let variants = summary_capability_variants(&roots, &groups).unwrap();
+        assert_eq!(
+            variants
+                .iter()
+                .map(|v| v.shared[0].members.clone())
+                .collect::<Vec<_>>(),
+            [vec![0, 1], vec![0, 2], vec![1, 2], vec![0, 1, 2]]
+        );
+        for variant in &variants {
+            let builds = kll_builds(variant.roots.as_ref().unwrap());
+            assert_eq!(builds.len(), 4 - variant.shared[0].members.len());
+        }
+    }
+
+    /// A group of more than 20 members (over a million sharing subsets)
+    /// is an error, not a silent skip or an endless enumeration.
+    #[test]
+    fn a_group_past_20_members_is_an_error() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, lat[5m])", 0.01),
+                ("quantile_over_time(0.99, lat[5m])", 0.001),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let mut groups = capability_groups(&roots);
+        let members = groups[0].members.clone();
+        groups[0].members = members
+            .iter()
+            .cycle()
+            .take(MAX_GROUP_MEMBERS + 1)
+            .cloned()
+            .collect();
+        assert!(matches!(
+            summary_capability_variants(&roots, &groups),
+            Err(PerComputationCandidateError::Unsupported(_))
+        ));
+    }
+
+    /// Equal targets give identical builds, which are the
+    /// identical-expression rule's; a different window or family is a
+    /// different input or capability, never shared.
+    #[test]
+    fn equal_sizes_other_windows_and_other_families_are_not_capability_groups() {
+        let equal = chose(
+            &[
+                ("quantile_over_time(0.5, lat[5m])", 0.01),
+                ("quantile_over_time(0.99, lat[5m])", 0.01),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        assert!(capability_groups(&equal).is_empty());
+        assert!(!identical_expression_variants(&equal, &sharing_groups(&equal)).is_empty());
+        let windows = chose(
+            &[
+                ("quantile_over_time(0.5, lat[5m])", 0.01),
+                ("quantile_over_time(0.99, lat[10m])", 0.001),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        assert!(capability_groups(&windows).is_empty());
+        let families = chose(
+            &[
+                ("quantile_over_time(0.5, lat[5m])", 0.01),
+                ("quantile_over_time(0.99, lat[5m])", 0.001),
+            ],
+            SketchAlgorithm::DDSketch,
+        );
+        assert_eq!(capability_groups(&families).len(), 1);
+        assert_eq!(
+            capability_groups(&families)[0].family,
+            SketchAlgorithm::DDSketch
         );
     }
 

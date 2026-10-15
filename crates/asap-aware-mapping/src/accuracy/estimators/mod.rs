@@ -128,6 +128,7 @@ pub(crate) fn size_params(
         }
     }
 }
+
 /// `P(Binomial(n, p) ≥ k)`, summed term by term in log space and rounded
 /// up by a relative 1e-12 so rounding never certifies a smaller tail.
 pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
@@ -165,6 +166,135 @@ pub(crate) fn column_collision(cols: u32) -> f64 {
     }
 }
 
+/// The parameters of one state shared by consumers of the same algorithm,
+/// each sized alone with one of `params` (Pass 2's summary-capability
+/// rule): each parameter's largest value, except where a smaller value is
+/// stricter, where it takes the smallest (a KLL's failure probability,
+/// DDSketch's α). Not every bound is monotone in its parameters (a Count
+/// Sketch's collision bound is tighter at a power-of-two width than one
+/// column wider), so the shared state is not assumed to meet each
+/// consumer's target: the summary-capability rule composes every guarantee
+/// above it again, and plan selection checks each consumer against the
+/// shared state. `None` for no parameters,
+/// parameters of different algorithms, or a shared UnivMon the library
+/// would not build ([`univmon::hash_independent`]).
+pub(crate) fn shared_size_params(params: &[&SketchParams]) -> Option<SketchParams> {
+    use SketchParams as P;
+    let (first, rest) = params.split_first()?;
+    let shared = rest.iter().try_fold((*first).clone(), |a, b| {
+        Some(match (a, *b) {
+            (
+                P::UnivMon {
+                    heap_size,
+                    sketch_rows,
+                    sketch_cols,
+                    layers,
+                    distinct_failure_probability,
+                },
+                P::UnivMon {
+                    heap_size: h,
+                    sketch_rows: r,
+                    sketch_cols: c,
+                    layers: l,
+                    distinct_failure_probability: f,
+                },
+            ) => P::UnivMon {
+                heap_size: heap_size.max(*h),
+                sketch_rows: sketch_rows.max(*r),
+                sketch_cols: sketch_cols.max(*c),
+                layers: layers.max(*l),
+                // `None`: not sized for a distinct count.
+                distinct_failure_probability: min_recorded(distinct_failure_probability, *f),
+            },
+            (
+                P::Kll {
+                    k,
+                    failure_probability,
+                },
+                P::Kll {
+                    k: k2,
+                    failure_probability: f2,
+                },
+            ) => P::Kll {
+                k: k.max(*k2),
+                // `None` is the calibration's δ, above any recorded one.
+                failure_probability: min_recorded(failure_probability, *f2),
+            },
+            (P::Cms { width, depth }, P::Cms { width: w, depth: d }) => P::Cms {
+                width: width.max(*w),
+                depth: depth.max(*d),
+            },
+            (P::CountSketch { width, depth }, P::CountSketch { width: w, depth: d }) => {
+                P::CountSketch {
+                    width: width.max(*w),
+                    depth: depth.max(*d),
+                }
+            }
+            (
+                P::CmsWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+                P::CmsWithHeap {
+                    width: w,
+                    depth: d,
+                    heap_size: h,
+                },
+            ) => P::CmsWithHeap {
+                width: width.max(*w),
+                depth: depth.max(*d),
+                heap_size: heap_size.max(*h),
+            },
+            (
+                P::CountSketchWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+                P::CountSketchWithHeap {
+                    width: w,
+                    depth: d,
+                    heap_size: h,
+                },
+            ) => P::CountSketchWithHeap {
+                width: width.max(*w),
+                depth: depth.max(*d),
+                heap_size: heap_size.max(*h),
+            },
+            (P::Hll { precision }, P::Hll { precision: p }) => P::Hll {
+                precision: precision.max(*p),
+            },
+            (P::DDSketch { alpha }, P::DDSketch { alpha: a }) => P::DDSketch {
+                alpha: alpha.min(*a),
+            },
+            (P::Kmv { k }, P::Kmv { k: k2 }) => P::Kmv { k: k.max(*k2) },
+            (P::Theta { k }, P::Theta { k: k2 }) => P::Theta { k: k.max(*k2) },
+            _ => return None,
+        })
+    })?;
+    // The largest rows of one UnivMon with the largest columns of another
+    // can pass the hash budget `asap_sketchlib` builds within.
+    match shared {
+        P::UnivMon {
+            sketch_rows,
+            sketch_cols,
+            layers,
+            ..
+        } if !univmon::hash_independent(sketch_rows, sketch_cols, layers) => None,
+        shared => Some(shared),
+    }
+}
+
+/// The smaller of two recorded failure probabilities; an unrecorded one
+/// (`None`) yields to a recorded one.
+fn min_recorded(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Accuracy-dependent candidate budget, not a completeness theorem. The
 /// membership model must still certify the selected set independently.
 pub(crate) fn topk_capacity(k: usize, eps: f64) -> u32 {
@@ -180,4 +310,98 @@ pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
         return hi;
     }
     (x.ceil() as u32).clamp(lo, hi)
+}
+
+#[cfg(test)]
+mod shared_size_tests {
+    use super::*;
+
+    /// The shared size takes each parameter's largest value, and the
+    /// smallest where smaller is stricter (KLL δ, DDSketch α); sizes of
+    /// different algorithms have none.
+    #[test]
+    fn shared_size_takes_each_parameters_strictest_value() {
+        assert_eq!(
+            shared_size_params(&[&univmon(256, 5, 1024, 16), &univmon(1, 7, 4096, 1)]),
+            Some(univmon(256, 7, 4096, 16))
+        );
+        // The distinct count's failure probability, where one was sized
+        // for, takes the smallest.
+        let distinct = |heap_size, delta| SketchParams::UnivMon {
+            heap_size,
+            sketch_rows: 1,
+            sketch_cols: 1,
+            layers: 19,
+            distinct_failure_probability: Some(delta),
+        };
+        let Some(SketchParams::UnivMon {
+            heap_size,
+            distinct_failure_probability,
+            ..
+        }) = shared_size_params(&[
+            &univmon(256, 5, 1024, 16),
+            &distinct(4096, 0.01),
+            &distinct(2048, 0.001),
+        ])
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (heap_size, distinct_failure_probability),
+            (4096, Some(0.001))
+        );
+        let kll = |k, failure_probability| SketchParams::Kll {
+            k,
+            failure_probability,
+        };
+        let SketchParams::Kll {
+            k,
+            failure_probability,
+        } = shared_size_params(&[
+            &kll(200, None),
+            &kll(100, Some(0.001)),
+            &kll(150, Some(0.005)),
+        ])
+        .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!((k, failure_probability), (200, Some(0.001)));
+        assert_eq!(
+            shared_size_params(&[
+                &SketchParams::DDSketch { alpha: 0.01 },
+                &SketchParams::DDSketch { alpha: 0.001 }
+            ]),
+            Some(SketchParams::DDSketch { alpha: 0.001 })
+        );
+        assert_eq!(
+            shared_size_params(&[&kll(200, None), &SketchParams::Hll { precision: 12 }]),
+            None
+        );
+        assert_eq!(shared_size_params(&[]), None);
+    }
+
+    fn univmon(heap_size: u32, sketch_rows: u32, sketch_cols: u32, layers: u8) -> SketchParams {
+        SketchParams::UnivMon {
+            heap_size,
+            sketch_rows,
+            sketch_cols,
+            layers,
+            distinct_failure_probability: None,
+        }
+    }
+
+    /// Each UnivMon fits `asap_sketchlib`'s hash budget, but the largest
+    /// rows of one with the largest columns of the other do not
+    /// (`12 · (⌈log2 2^16⌉ + 1) = 204 > 128`): the library would not build
+    /// the shared shape, so there is none.
+    #[test]
+    fn no_shared_univmon_past_the_hash_budget() {
+        assert!(univmon::hash_independent(12, 512, 1));
+        assert!(univmon::hash_independent(5, 1 << 16, 1));
+        assert_eq!(
+            shared_size_params(&[&univmon(1, 12, 512, 1), &univmon(1, 5, 1 << 16, 1)]),
+            None
+        );
+    }
 }

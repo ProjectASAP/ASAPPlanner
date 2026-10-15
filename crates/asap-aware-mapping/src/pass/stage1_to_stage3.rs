@@ -10,16 +10,19 @@
 //!    generation, then composition of one whole-workload candidate per choice
 //!    of a per-computation candidate for every target (the Cartesian product,
 //!    in mixed-radix order, the last target varying fastest), each followed
-//!    by its Pass 2 candidates from the identical-expression rule
+//!    by its Pass 2 candidates: those of the identical-expression rule
 //!    ([`identical_expression_variants`]: one per subset of its sharing
-//!    groups; the independent candidate is kept);
+//!    groups), then those of the summary-capability rule
+//!    ([`summary_capability_variants`]: one per choice of shared summary
+//!    builds), each followed by its own identical-expression candidates,
+//!    every distinct candidate once; the independent candidate is kept;
 //! 2. Stage 2, physical ASAP-aware optimization of every Stage 1 candidate
 //!    ([`optimize_physical_asap`]);
 //! 3. Stage 3, plan selection over the physical candidates ([`select_plan`]).
 //!
 //! Stage 0, the query-language frontends, runs before it (the `asap-planner`
-//! facade lowers the workload). Pass 2's summary-capability and
-//! window-composition rules are not planned yet.
+//! facade lowers the workload). Pass 2's window-composition rule is not
+//! planned yet.
 //!
 //! Every combination is enumerated and plan selection prices every
 //! candidate; nothing is capped. A search that avoids building every
@@ -27,6 +30,7 @@
 
 use std::rc::Rc;
 
+use asap_types::ir::flat::flatten;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::post_asap::SketchAlgorithm;
@@ -34,7 +38,9 @@ use asap_types::types::{AccuracyTarget, RequestedAccuracy};
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
-use crate::asap_aware_cse::identical_expression_variants;
+use crate::asap_aware_cse::{
+    capability_groups, identical_expression_variants, sharing_groups, summary_capability_variants,
+};
 use crate::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     PerComputationCandidateError, PerComputationCandidates,
@@ -57,14 +63,17 @@ pub struct LogicalCandidate {
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
 
-/// A Stage 1 candidate Pass 2's identical-expression rule added: `id` is
-/// `from_logical` with the nodes of each group in `shared` (named by
-/// operator kind, children first) made one node. It has `from_logical`'s
-/// `choice`.
+/// A Stage 1 candidate Pass 2 added: `id` is `from_logical` with each
+/// summary build set in `summaries` made one build sized for all its
+/// consumers (the summary-capability rule, e.g. "UnivMon for Q1, Q3"),
+/// then the nodes of each group in `shared` (named by operator kind,
+/// children first) made one node (the identical-expression rule). It has
+/// `from_logical`'s `choice`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct IdenticalExpressionCandidate {
+pub struct Pass2Candidate {
     pub id: String,
     pub from_logical: String,
+    pub summaries: Vec<String>,
     pub shared: Vec<String>,
 }
 
@@ -90,9 +99,9 @@ pub struct Stage1ToStage3Run<Id> {
     /// the size of the Cartesian product of the targets' candidates,
     /// saturating at `usize::MAX`. Pass 2 adds to them.
     pub combinations: usize,
-    /// Stage 1, Pass 2: the candidates the identical-expression rule added,
-    /// in enumeration order.
-    pub stage1_pass2_identical_expression: Vec<IdenticalExpressionCandidate>,
+    /// Stage 1, Pass 2: the candidates the identical-expression and
+    /// summary-capability rules added, in enumeration order.
+    pub stage1_pass2: Vec<Pass2Candidate>,
     /// Stage 1: every whole-workload logical candidate, in enumeration
     /// order: each composed Pass 1 candidate, followed by its Pass 2
     /// candidates.
@@ -159,17 +168,30 @@ pub struct Stage1Candidate {
     /// Pass 2 candidate has its Pass 1 candidate's.
     pub choice: Vec<usize>,
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
-    /// For a Pass 2 candidate: the position, in the enumeration, of the
-    /// Pass 1 candidate it shares the identical sub-DAGs of, and the shared
-    /// groups (operator kinds, children first).
-    pub pass2_of: Option<(usize, Vec<String>)>,
+    /// For a Pass 2 candidate: what it shares of which Pass 1 candidate.
+    pub pass2_of: Option<Pass2Of>,
+}
+
+/// What a Pass 2 candidate shares of a Pass 1 candidate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pass2Of {
+    /// The position, in the enumeration, of the Pass 1 candidate.
+    pub from: usize,
+    /// The summary builds made one build each (summary-capability rule).
+    pub summaries: Vec<String>,
+    /// The identical groups shared (operator kinds, children first).
+    pub shared: Vec<String>,
 }
 
 /// Stage 1 (logical ASAP-aware optimization) over the Pass 1 inventory, one
 /// candidate at a time: each composed Pass 1 candidate (every choice of a
 /// per-computation candidate for every target, the last target varying
-/// fastest), followed by its Pass 2 identical-expression candidates. Lazy
-/// and uncapped: a caller that limits the candidates stops consuming it.
+/// fastest), followed by its Pass 2 candidates: the identical-expression
+/// rule's, then each summary-capability candidate followed by its own
+/// identical-expression candidates. A Pass 2 candidate equal to an earlier
+/// one of the same Pass 1 candidate (same nodes, same sharing) is listed
+/// once. Lazy and uncapped: a caller that limits the candidates stops
+/// consuming it.
 pub fn stage1_logical_asap_optimization<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
 ) -> impl Iterator<Item = Stage1Candidate> + '_ {
@@ -191,38 +213,143 @@ pub fn stage1_logical_asap_optimization<Id: Clone>(
             let display_name = display_name(per_computation, &query_of_target, &this);
             let roots = compose_logical_candidate(per_computation, &this)
                 .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
-            let (groups, variants) = match &roots {
-                Ok(roots) => {
-                    let groups = crate::asap_aware_cse::sharing_groups(roots);
-                    let variants = identical_expression_variants(roots, &groups);
-                    (groups, variants)
-                }
-                Err(_) => (Vec::new(), Vec::new()),
-            };
             let from = position + queue.len();
+            let pass2 = match &roots {
+                Ok(roots) => pass2_candidates(roots),
+                Err(_) => Vec::new(),
+            };
             queue.push_back(Stage1Candidate {
                 display_name: display_name.clone(),
                 choice: this.clone(),
                 roots,
                 pass2_of: None,
             });
-            for variant in variants {
-                let shared: Vec<String> = variant
-                    .shared_groups
-                    .iter()
-                    .map(|&g| format!("{} #{}", groups[g].nodes[0].operator.kind_name(), g + 1))
-                    .collect();
+            for (summaries, shared, roots) in pass2 {
+                let mut name = display_name.clone();
+                if !summaries.is_empty() {
+                    name += &format!(" · one {}", summaries.join(", one "));
+                }
+                if !shared.is_empty() {
+                    name += &format!(" · shared {}", shared.join(", "));
+                }
                 queue.push_back(Stage1Candidate {
-                    display_name: format!("{display_name} · shared {}", shared.join(", ")),
+                    display_name: name,
                     choice: this.clone(),
-                    roots: Ok(variant.roots),
-                    pass2_of: Some((from, shared)),
+                    roots,
+                    pass2_of: Some(Pass2Of {
+                        from,
+                        summaries,
+                        shared,
+                    }),
                 });
             }
         }
         position += 1;
         queue.pop_front()
     })
+}
+
+/// A Pass 2 candidate: the summary builds it shares (summary-capability
+/// rule), the identical groups it shares, and its roots.
+type Pass2 = (
+    Vec<String>,
+    Vec<String>,
+    Result<Vec<QueryRoot>, PerComputationCandidateError>,
+);
+
+/// The Pass 2 candidates of the composed candidate with roots `roots`, in
+/// enumeration order, each distinct candidate once.
+fn pass2_candidates(roots: &[QueryRoot]) -> Vec<Pass2> {
+    let mut found = Pass2List {
+        seen: vec![flatten(roots).0],
+        out: Vec::new(),
+    };
+    found.identical_variants(&[], roots);
+    let groups = capability_groups(roots);
+    let variants = match summary_capability_variants(roots, &groups) {
+        Ok(variants) => variants,
+        Err(error) => {
+            found.out.push((Vec::new(), Vec::new(), Err(error)));
+            return found.out;
+        }
+    };
+    for variant in variants {
+        let summaries: Vec<String> = variant
+            .shared
+            .iter()
+            .map(|summary| {
+                let group = &groups[summary.group];
+                let mut queries: Vec<usize> = summary
+                    .members
+                    .iter()
+                    .flat_map(|&m| readers_of(roots, &group.members[m]))
+                    .collect();
+                queries.sort_unstable();
+                queries.dedup();
+                let queries: Vec<String> = queries.iter().map(|q| format!("Q{}", q + 1)).collect();
+                format!("{:?} for {}", group.family, queries.join(", "))
+            })
+            .collect();
+        match variant.roots {
+            Ok(roots) => {
+                found.push(&summaries, Vec::new(), &roots);
+                found.identical_variants(&summaries, &roots);
+            }
+            // Listed as a candidate that cannot be composed; the other
+            // variants go on.
+            Err(error) => found.out.push((summaries, Vec::new(), Err(error))),
+        }
+    }
+    found.out
+}
+
+/// Pass 2 candidates found so far, and the flattened DAG of every candidate
+/// listed (the Pass 1 candidate's included), so each is listed once.
+struct Pass2List {
+    seen: Vec<asap_types::ir::flat::FlatDag>,
+    out: Vec<Pass2>,
+}
+
+impl Pass2List {
+    fn push(&mut self, summaries: &[String], shared: Vec<String>, roots: &[QueryRoot]) {
+        let flat = flatten(roots).0;
+        if self.seen.contains(&flat) {
+            return;
+        }
+        self.seen.push(flat);
+        self.out
+            .push((summaries.to_vec(), shared, Ok(roots.to_vec())));
+    }
+
+    /// The identical-expression candidates of `roots`, which shares
+    /// `summaries`.
+    fn identical_variants(&mut self, summaries: &[String], roots: &[QueryRoot]) {
+        let groups = sharing_groups(roots);
+        for variant in identical_expression_variants(roots, &groups) {
+            let shared = variant
+                .shared_groups
+                .iter()
+                .map(|&g| format!("{} #{}", groups[g].nodes[0].operator.kind_name(), g + 1))
+                .collect();
+            self.push(summaries, shared, &variant.roots);
+        }
+    }
+}
+
+/// The query roots (indices) from which `node` is reachable.
+fn readers_of(roots: &[QueryRoot], node: &Rc<OperatorNode>) -> Vec<usize> {
+    roots
+        .iter()
+        .enumerate()
+        .filter(|(_, root)| {
+            root_operators(root).into_iter().any(|op| {
+                OperatorNode::reachable(op)
+                    .iter()
+                    .any(|n| Rc::ptr_eq(n, node))
+            })
+        })
+        .map(|(q, _)| q)
+        .collect()
 }
 
 /// [`run_stage1_to_stage3`] after Pass 1: enumerates every Stage 1
@@ -275,11 +402,12 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
                 }),
             }
         }
-        if let Some((from, shared)) = candidate.pass2_of {
-            pass2.push(IdenticalExpressionCandidate {
+        if let Some(of) = candidate.pass2_of {
+            pass2.push(Pass2Candidate {
                 id: id.clone(),
-                from_logical: format!("L{}", from + 1),
-                shared,
+                from_logical: format!("L{}", of.from + 1),
+                summaries: of.summaries,
+                shared: of.shared,
             });
         }
         logical.push(LogicalCandidate {
@@ -310,7 +438,7 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         stage3_selected_logical: selected_logical,
         stage1_pass1_per_computation: per_computation,
         combinations,
-        stage1_pass2_identical_expression: pass2,
+        stage1_pass2: pass2,
         stage1_logical_asap_optimization: logical,
         stage2_physical_asap_optimization: physical,
         stage2_pruned: pruned,

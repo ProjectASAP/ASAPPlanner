@@ -819,6 +819,32 @@ fn rewrite(
     Ok(rebuilt)
 }
 
+/// `roots` with every node's guarantee composed again
+/// ([`composed_guarantee`]), children first; a sub-DAG shared between roots
+/// stays shared. Pass 2 calls it after re-sizing a shared summary, so each
+/// consumer's guarantee is the shared state's.
+pub(crate) fn with_composed_guarantees(
+    roots: &[QueryRoot],
+) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+    let mut memo = HashMap::new();
+    roots
+        .iter()
+        .map(|root| {
+            Ok(match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(with_guarantees(node, &mut memo)?),
+                QueryRoot::Scalar(expr) => {
+                    for node in expr.operator_refs() {
+                        with_guarantees(node, &mut memo)?;
+                    }
+                    QueryRoot::Scalar(
+                        expr.map_operator_refs(&mut |node| memo[&Rc::as_ptr(node)].clone()),
+                    )
+                }
+            })
+        })
+        .collect()
+}
+
 /// `node` and everything below it, each node with its [`composed_guarantee`].
 fn with_guarantees(
     node: &Rc<OperatorNode>,
@@ -952,7 +978,13 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
         Operator::NonASAP(_) if node.children().into_iter().all(|child| exact(child)) => {
             Some(AccuracyGuarantee::exact("exact over exact inputs"))
         }
+        // Over a join, the child's sample value may be an exact input's
+        // column, so each column's own guarantee is read instead.
+        Operator::NonASAP(NonASAPOp::Project { cols, child, .. }) if derives_from_join(child) => {
+            relational_project_guarantee(cols, child)
+        }
         Operator::NonASAP(NonASAPOp::Project { cols, child, .. }) => project_guarantee(cols, child),
+        Operator::NonASAP(NonASAPOp::Join { .. }) => join_guarantee(node),
         // A measure filter or `HAVING` over approximate values changes
         // which rows or groups count: no rule.
         Operator::NonASAP(NonASAPOp::Aggregate {
@@ -1195,14 +1227,189 @@ fn project_guarantee(cols: &[ProjectItem], child: &Rc<OperatorNode>) -> Option<A
     })
 }
 
-/// The guarantee of `column` of a projection's `child`: the child's sample
-/// value has the child's as an operand ([`operand_guarantee`]); other
+/// Whether `node` is a join, or reads one only through operators that keep
+/// its columns (projections, filters, sorts, limits, deduplication). The
+/// columns of such a node come from different inputs, so its sample value
+/// says nothing about where the error lies.
+fn derives_from_join(node: &OperatorNode) -> bool {
+    match node.non_asap() {
+        Some(NonASAPOp::Join { .. }) => true,
+        Some(
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. }
+            | NonASAPOp::Dedup { child, .. },
+        ) => derives_from_join(child),
+        _ => false,
+    }
+}
+
+/// The guarantee of each output column of `node`, where it is known: every
+/// column of an exact node is exact; a join beside exact inputs
+/// ([`join_guarantee`]) gives the exact inputs' columns exact and the
+/// approximate input's columns its guarantee; a projection of columns maps
+/// its child's. `None` anywhere else, a computed projection included.
+/// Guarantees are per node, so every column of an approximate input counts
+/// as approximate; column-level tracking is #689.
+///
+/// This assumes every approximate node of Stage 1 has an exact row set:
+/// its guarantee bounds each row's values, never which rows exist (a
+/// top-k estimate, whose rows are approximate, has no bound;
+/// `estimate_has_bound`). A guarantee on row membership would need these
+/// rules revisited.
+fn column_guarantees(node: &OperatorNode) -> Option<Vec<AccuracyGuarantee>> {
+    let width = node.schema.fields.len();
+    if let Some(guarantee) = node.guarantee.as_ref().filter(|g| g.is_exact()) {
+        return Some(vec![guarantee.clone(); width]);
+    }
+    match &node.operator {
+        Operator::NonASAP(NonASAPOp::Join {
+            kind:
+                JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full | JoinKind::Cross,
+            left,
+            right,
+            ..
+        }) => {
+            let input = join_input_guarantees(left, right)?;
+            (input.len() == width).then_some(input)
+        }
+        Operator::NonASAP(NonASAPOp::Project { cols, child, .. }) => {
+            let child = column_guarantees(child)?;
+            cols.iter()
+                .map(|item| match item.expr {
+                    ScalarExpr::Column(id) => child.get(id).cloned(),
+                    _ => None,
+                })
+                .collect()
+        }
+        _ => None,
+    }
+}
+
+/// The guarantees of a join's input columns (`left ++ right`) when at most
+/// one input is approximate and the others are exact: the exact input's
+/// columns exact, the approximate input's columns its guarantee.
+fn join_input_guarantees(
+    left: &OperatorNode,
+    right: &OperatorNode,
+) -> Option<Vec<AccuracyGuarantee>> {
+    let exact = |node: &OperatorNode| node.guarantee.as_ref().is_some_and(|g| g.is_exact());
+    if !exact(left) && !exact(right) {
+        return None;
+    }
+    let side = |node: &OperatorNode| {
+        let guarantee = node.guarantee.clone()?;
+        Some(vec![guarantee; node.schema.fields.len()])
+    };
+    let mut columns = side(left)?;
+    columns.extend(side(right)?);
+    Some(columns)
+}
+
+/// A join whose inputs are exact but one keeps that input's guarantee when
+/// its predicate reads only exact columns (a cross join, or a key equality
+/// on the exact inputs' columns): which rows match, and how often, then
+/// does not depend on an estimate, and each output row carries one row of
+/// the approximate input unchanged. Outer joins pad on the same exact
+/// decision. A semi- or anti-join, a key on an approximate input's column
+/// (per-node guarantees count all its columns approximate; #689), or two
+/// approximate inputs have none. An exact join is composed before this.
+/// Like [`column_guarantees`], this assumes the approximate input's row set
+/// is exact: only its values carry error.
+fn join_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+    let Operator::NonASAP(NonASAPOp::Join {
+        kind: JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full | JoinKind::Cross,
+        pred,
+        left,
+        right,
+    }) = &node.operator
+    else {
+        return None;
+    };
+    let columns = join_input_guarantees(left, right)?;
+    let pred_exact =
+        scalar_guarantee(&pred.0, &|id| columns.get(id).cloned()).is_some_and(|g| g.is_exact());
+    if !pred_exact {
+        return None;
+    }
+    [left, right]
+        .into_iter()
+        .find_map(|input| input.guarantee.clone().filter(|g| !g.is_exact()))
+}
+
+/// The guarantee of a projection over relational columns
+/// ([`column_guarantees`]): each output column's as [`scalar_guarantee`]
+/// (a `CASE` as [`case_guarantee`]), and the node's the weakest of them.
+/// `None` when the child's column guarantees are unknown or any output
+/// column has none.
+fn relational_project_guarantee(
+    cols: &[ProjectItem],
+    child: &Rc<OperatorNode>,
+) -> Option<AccuracyGuarantee> {
+    let columns = column_guarantees(child)?;
+    let column = |id: usize| columns.get(id).cloned();
+    weakest(
+        cols.iter()
+            .map(|item| scalar_guarantee(&item.expr, &column))
+            .collect::<Option<Vec<_>>>()?,
+    )
+}
+
+/// The weakest of `guarantees`: exact when all are, the approximate one
+/// when there is one (or all approximate ones are equal), and otherwise
+/// as an extremum of them ([`lipschitz_guarantee`]).
+fn weakest(guarantees: Vec<AccuracyGuarantee>) -> Option<AccuracyGuarantee> {
+    let mut approximate: Vec<AccuracyGuarantee> = Vec::new();
+    for guarantee in guarantees.into_iter().filter(|g| !g.is_exact()) {
+        if !approximate.contains(&guarantee) {
+            approximate.push(guarantee);
+        }
+    }
+    match approximate.len() {
+        0 => Some(AccuracyGuarantee::exact("exact over exact operands")),
+        1 => approximate.pop(),
+        _ => lipschitz_guarantee(approximate),
+    }
+}
+
+/// A `CASE` whose operand and conditions are exact picks its branch by an
+/// exact decision, so it keeps the weakest branch's guarantee (a literal or
+/// NULL branch, or a missing `ELSE`, is exact). A condition over an
+/// approximate value has none.
+fn case_guarantee(
+    operand: Option<&ScalarExpr>,
+    branches: &[(ScalarExpr, ScalarExpr)],
+    else_expr: Option<&ScalarExpr>,
+    column: &dyn Fn(usize) -> Option<AccuracyGuarantee>,
+) -> Option<AccuracyGuarantee> {
+    let exact = |expr: &ScalarExpr| scalar_guarantee(expr, column).is_some_and(|g| g.is_exact());
+    if !operand.is_none_or(exact) || !branches.iter().all(|(when, _)| exact(when)) {
+        return None;
+    }
+    weakest(
+        branches
+            .iter()
+            .map(|(_, then)| then)
+            .chain(else_expr)
+            .map(|expr| scalar_guarantee(expr, column))
+            .collect::<Option<Vec<_>>>()?,
+    )
+}
+
+/// The guarantee of `column` of a projection's `child`: over a join, the
+/// column's own ([`column_guarantees`]); otherwise the child's sample
+/// value has the child's as an operand ([`operand_guarantee`]) and other
 /// columns (labels, timestamps) are exact. `None` when the child has no
-/// sample value.
+/// sample value or the column's guarantee is unknown.
 pub(crate) fn project_column_guarantee(
     child: &Rc<OperatorNode>,
     column: usize,
 ) -> Option<AccuracyGuarantee> {
+    // Over a join, each column's own guarantee ([`column_guarantees`]).
+    if derives_from_join(child) {
+        return column_guarantees(child)?.get(column).cloned();
+    }
     let value = resolve_column_ref(&ColumnRef::SampleValue, &child.schema).ok()?;
     if column == value {
         operand_guarantee(child)
@@ -1241,6 +1448,11 @@ pub(crate) fn scalar_guarantee(
         ScalarExpr::Negative { expr, .. } => {
             lipschitz_guarantee(vec![scalar_guarantee(expr, column)?])
         }
+        ScalarExpr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => case_guarantee(operand.as_deref(), branches, else_expr.as_deref(), column),
         ScalarExpr::Arithmetic {
             op, left, right, ..
         } => arithmetic_guarantee(
@@ -2733,6 +2945,212 @@ mod tests {
             };
             assert!(close(delta(&vector(&shared, &shared)), 0.001));
             assert!(close(delta(&vector(&shared, &other)), 0.002));
+        }
+
+        /// `left JOIN right ON pred`, composed.
+        fn join(
+            kind: JoinKind,
+            left: &Rc<OperatorNode>,
+            right: &Rc<OperatorNode>,
+            pred: ScalarExpr,
+        ) -> OperatorNode {
+            let mut node = OperatorNode::new(Operator::NonASAP(NonASAPOp::Join {
+                kind,
+                pred: Predicate(pred),
+                left: left.clone(),
+                right: right.clone(),
+            }))
+            .unwrap();
+            node.guarantee = composed_guarantee(&node);
+            node
+        }
+        fn column(id: usize) -> ScalarExpr {
+            ScalarExpr::Column(id)
+        }
+        fn equals(left: ScalarExpr, right: ScalarExpr) -> ScalarExpr {
+            ScalarExpr::Compare {
+                left: Box::new(left),
+                op: CompareOpKind::Eq,
+                right: Box::new(right),
+                semantics: ExprSemantics::Sql,
+            }
+        }
+        /// `CASE WHEN condition THEN NULL ELSE otherwise END` over `child`,
+        /// composed.
+        fn case_over(
+            child: &OperatorNode,
+            condition: ScalarExpr,
+            otherwise: ScalarExpr,
+        ) -> Option<AccuracyGuarantee> {
+            let node = OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
+                cols: vec![ProjectItem {
+                    alias: Some("v".into()),
+                    expr: ScalarExpr::Case {
+                        operand: None,
+                        branches: vec![(condition, ScalarExpr::Literal(ScalarValue::Null))],
+                        else_expr: Some(Box::new(otherwise)),
+                    },
+                }],
+                qualifier: None,
+                child: Rc::new(child.clone()),
+            }))
+            .unwrap();
+            composed_guarantee(&node)
+        }
+        /// An approximate node and an exact one, and the approximate one's
+        /// column count (its columns come first in a join).
+        fn approximate_and_exact() -> (Rc<OperatorNode>, Rc<OperatorNode>, usize) {
+            let approximate = node(rel(0.01));
+            let exact = node_over("count(m)", AccuracyGuarantee::exact("test"));
+            let width = approximate.schema.fields.len();
+            (approximate, exact, width)
+        }
+
+        /// A join whose other input is exact and whose predicate reads only
+        /// exact columns keeps the approximate input's guarantee: a cross
+        /// join, or a key equality on the exact input's columns.
+        #[test]
+        fn join_beside_an_exact_input_on_exact_columns_keeps_the_guarantee() {
+            let (approximate, exact, width) = approximate_and_exact();
+            for (kind, pred) in [
+                (
+                    JoinKind::Cross,
+                    ScalarExpr::Literal(ScalarValue::Boolean(true)),
+                ),
+                (JoinKind::Inner, equals(column(width), lit(0.0))),
+                (JoinKind::Left, equals(column(width), lit(0.0))),
+            ] {
+                assert_eq!(
+                    join(kind.clone(), &approximate, &exact, pred).guarantee,
+                    Some(rel(0.01)),
+                    "{kind:?}"
+                );
+            }
+            // Either side.
+            assert_eq!(
+                join(
+                    JoinKind::Cross,
+                    &exact,
+                    &approximate,
+                    ScalarExpr::Literal(ScalarValue::Boolean(true))
+                )
+                .guarantee,
+                Some(rel(0.01))
+            );
+        }
+
+        /// A join keyed on an approximate input's column, a semi-join, or
+        /// two approximate inputs have no guarantee (column-level tracking
+        /// is #689).
+        #[test]
+        fn join_on_an_approximate_key_has_no_guarantee() {
+            let (approximate, exact, width) = approximate_and_exact();
+            assert_eq!(
+                join(
+                    JoinKind::Inner,
+                    &approximate,
+                    &exact,
+                    equals(column(0), column(width))
+                )
+                .guarantee,
+                None
+            );
+            assert_eq!(
+                join(
+                    JoinKind::Semi,
+                    &exact,
+                    &approximate,
+                    ScalarExpr::Literal(ScalarValue::Boolean(true))
+                )
+                .guarantee,
+                None
+            );
+            assert_eq!(
+                join(
+                    JoinKind::Cross,
+                    &approximate,
+                    &approximate,
+                    ScalarExpr::Literal(ScalarValue::Boolean(true))
+                )
+                .guarantee,
+                None
+            );
+        }
+
+        /// A `CASE` whose condition reads only exact columns keeps each
+        /// branch's guarantee (a NULL branch is exact); one testing an
+        /// approximate column has none.
+        #[test]
+        fn case_on_exact_columns_keeps_the_branch_guarantee() {
+            let (approximate, exact, width) = approximate_and_exact();
+            let joined = join(
+                JoinKind::Cross,
+                &approximate,
+                &exact,
+                ScalarExpr::Literal(ScalarValue::Boolean(true)),
+            );
+            let value = approximate.schema.fields.len() - 1;
+            assert_eq!(
+                case_over(&joined, equals(column(width), lit(0.0)), column(value)),
+                Some(rel(0.01))
+            );
+            assert_eq!(
+                case_over(&joined, equals(column(value), lit(0.0)), column(value)),
+                None
+            );
+        }
+
+        /// `node` projecting `cols` over `child`, composed.
+        fn project(child: &OperatorNode, cols: Vec<ScalarExpr>) -> OperatorNode {
+            let mut node = OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
+                cols: cols
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, expr)| ProjectItem {
+                        alias: Some(format!("c{i}")),
+                        expr,
+                    })
+                    .collect(),
+                qualifier: None,
+                child: Rc::new(child.clone()),
+            }))
+            .unwrap();
+            node.guarantee = composed_guarantee(&node);
+            node
+        }
+
+        /// Over a join, a projection reads each column's own guarantee,
+        /// not the child's sample value (which may be an exact input's
+        /// column): `sum(m) * 1000` beside the exact side's `value` has
+        /// the scaled error 1000, not the approximate side's 1. A
+        /// projection over that computed projection has no per-column
+        /// guarantees, so it has none (#689).
+        #[test]
+        fn projection_over_a_join_reads_each_columns_guarantee() {
+            let approximate = node(abs(1.0, 0.01));
+            let exact = node_over("m", AccuracyGuarantee::exact("test"));
+            let joined = join(
+                JoinKind::Cross,
+                &approximate,
+                &exact,
+                ScalarExpr::Literal(ScalarValue::Boolean(true)),
+            );
+            assert_eq!(joined.guarantee, Some(abs(1.0, 0.01)));
+            let sum = approximate.schema.fields.len() - 1;
+            let value = approximate.schema.fields.len() + exact.schema.fields.len() - 1;
+            let scaled = project(
+                &joined,
+                vec![
+                    arith(ArithmeticOpKind::Mul, column(sum), lit(1000.0)),
+                    column(value),
+                ],
+            );
+            assert_eq!(scaled.guarantee.as_ref().map(bound), Some(1000.0));
+            let stacked = project(
+                &scaled,
+                vec![arith(ArithmeticOpKind::Add, column(1), lit(1.0)), column(0)],
+            );
+            assert_eq!(stacked.guarantee, None);
         }
     }
 

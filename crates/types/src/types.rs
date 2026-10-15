@@ -394,6 +394,16 @@ fn node_metric(node: &OperatorNode) -> Result<ErrorMetric, AccuracyRequestError>
         {
             node_metric(child)
         }
+        // A `CASE` choosing between columns and literals, e.g. SQL's
+        // empty-input NULL guard over a statistic cross-joined with an exact
+        // count: the metric of the columns its value branches read.
+        NonASAPOp::Project { .. } => (0..node.schema.fields.len())
+            .map(|column| column_metric(node, column))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|metrics| match metrics.split_first() {
+                Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
+                _ => ErrorMetric::ABSOLUTE,
+            }),
         NonASAPOp::Aggregate { measures, .. } => {
             let mut metrics = Vec::new();
             for intent in measures {
@@ -417,6 +427,83 @@ fn node_metric(node: &OperatorNode) -> Result<ErrorMetric, AccuracyRequestError>
                 Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
                 _ => ErrorMetric::ABSOLUTE,
             })
+        }
+        _ => Ok(ErrorMetric::ABSOLUTE),
+    }
+}
+
+/// The metric of `node`'s output `column`, following columns through
+/// projections, `CASE` value branches, joins and operators that only
+/// select, order or rename rows, down to an aggregate's measure. A group
+/// key or any other expression is absolute.
+fn column_metric(node: &OperatorNode, column: usize) -> Result<ErrorMetric, AccuracyRequestError> {
+    use crate::ir::operator_properties::JoinKind;
+    let Operator::NonASAP(op) = &node.operator else {
+        return Ok(ErrorMetric::ABSOLUTE);
+    };
+    match op {
+        NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::Dedup { child, .. } => column_metric(child, column),
+        NonASAPOp::Project { cols, child, .. } => match cols.get(column).map(|item| &item.expr) {
+            Some(ScalarExpr::Column(id)) => column_metric(child, *id),
+            Some(ScalarExpr::Case {
+                branches,
+                else_expr,
+                ..
+            }) => {
+                let mut metrics = Vec::new();
+                for value in branches
+                    .iter()
+                    .map(|(_, then)| then)
+                    .chain(else_expr.as_deref())
+                {
+                    match value {
+                        // A literal, possibly cast (SQL's typed NULL).
+                        ScalarExpr::Literal(_) => {}
+                        ScalarExpr::Cast { expr, .. }
+                            if matches!(**expr, ScalarExpr::Literal(_)) => {}
+                        ScalarExpr::Column(id) => metrics.push(column_metric(child, *id)?),
+                        _ => return Ok(ErrorMetric::ABSOLUTE),
+                    }
+                }
+                Ok(match metrics.split_first() {
+                    Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
+                    _ => ErrorMetric::ABSOLUTE,
+                })
+            }
+            _ => Ok(ErrorMetric::ABSOLUTE),
+        },
+        NonASAPOp::Join {
+            kind:
+                JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full | JoinKind::Cross,
+            left,
+            right,
+            ..
+        } => {
+            let width = left.schema.fields.len();
+            if column < width {
+                column_metric(left, column)
+            } else {
+                column_metric(right, column - width)
+            }
+        }
+        NonASAPOp::Aggregate { measures, .. } => {
+            // Group keys first, then one column per measure.
+            let keys = node.schema.fields.len().saturating_sub(measures.len());
+            match column.checked_sub(keys).and_then(|m| measures.get(m)) {
+                Some(AggIntent::Quantile { .. }) => {
+                    Err(AccuracyRequestError::MissingQuantileMetric { intent: "quantile" })
+                }
+                Some(AggIntent::HistogramQuantile { .. }) => {
+                    Err(AccuracyRequestError::MissingQuantileMetric {
+                        intent: "histogram_quantile",
+                    })
+                }
+                Some(intent) => Ok(intent_metric(intent).unwrap_or(ErrorMetric::ABSOLUTE)),
+                None => Ok(ErrorMetric::ABSOLUTE),
+            }
         }
         _ => Ok(ErrorMetric::ABSOLUTE),
     }
@@ -568,6 +655,80 @@ mod tests {
                 .for_root(&QueryRoot::Scalar(ScalarExpr::literal_f64(1.0)))
                 .unwrap()
                 .metric,
+            ErrorMetric::ABSOLUTE
+        );
+    }
+
+    /// SQL's empty-input NULL guard (a statistic cross-joined with an exact
+    /// row count, and `CASE WHEN count = 0 THEN NULL ELSE statistic END`)
+    /// keeps the statistic's metric: the root's value is the statistic's
+    /// column. A `CASE` whose value branches read columns of different
+    /// metrics, or any other expression, is absolute.
+    #[test]
+    fn root_metric_looks_through_a_null_guard_to_its_statistic() {
+        use crate::ir::operator_properties::JoinKind;
+        use crate::ir::{Predicate, ProjectItem};
+        use crate::pre_asap::{CompareOpKind, ScalarValue};
+        let exact = AccuracyTarget::exact();
+        let QueryRoot::Operator(l2) = aggregate(vec![AggIntent::FrequencyL2 {
+            col: None,
+            accuracy: exact.clone(),
+        }]) else {
+            unreachable!()
+        };
+        let QueryRoot::Operator(count) = aggregate(vec![AggIntent::Count { accuracy: exact }])
+        else {
+            unreachable!()
+        };
+        let joined = node(NonASAPOp::Join {
+            kind: JoinKind::Cross,
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+            left: l2,
+            right: count,
+        });
+        let guard = |otherwise: ScalarExpr| {
+            QueryRoot::Operator(node(NonASAPOp::Project {
+                cols: vec![ProjectItem {
+                    alias: Some("v".into()),
+                    expr: ScalarExpr::Case {
+                        operand: None,
+                        branches: vec![(
+                            ScalarExpr::Compare {
+                                left: Box::new(ScalarExpr::Column(1)),
+                                op: CompareOpKind::Eq,
+                                right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(0))),
+                                semantics: crate::ir::ExprSemantics::Sql,
+                            },
+                            ScalarExpr::Cast {
+                                expr: Box::new(ScalarExpr::Literal(ScalarValue::Null)),
+                                to: DataType::Float64,
+                                try_cast: false,
+                            },
+                        )],
+                        else_expr: Some(Box::new(otherwise)),
+                    },
+                }],
+                qualifier: None,
+                child: joined.clone(),
+            }))
+        };
+        let metric = |root: QueryRoot| {
+            RequestedAccuracy::epsilon(0.01)
+                .for_root(&root)
+                .unwrap()
+                .metric
+        };
+        assert_eq!(metric(guard(ScalarExpr::Column(0))), ErrorMetric::Relative);
+        // The count's column, or arithmetic over the statistic.
+        assert_eq!(
+            metric(guard(ScalarExpr::Column(1))),
+            ErrorMetric::ABSOLUTE_STREAM_L1
+        );
+        assert_eq!(
+            metric(guard(ScalarExpr::Negative {
+                expr: Box::new(ScalarExpr::Column(0)),
+                semantics: crate::ir::ExprSemantics::Sql,
+            })),
             ErrorMetric::ABSOLUTE
         );
     }

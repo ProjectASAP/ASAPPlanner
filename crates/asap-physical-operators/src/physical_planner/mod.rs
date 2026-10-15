@@ -315,6 +315,90 @@ fn compile_internal(
                 )?;
                 continue;
             }
+            // An exact per-series range reduction with no exact accumulator
+            // form (`distinct_over_time`, `l2_over_time`, `entropy_over_time`)
+            // reduces each series' raw samples in the window natively.
+            if let Payload::NonASAP(NonASAPOp::Aggregate {
+                reduction: PlannerReduction::PerEntity,
+                measures,
+                filters,
+                having: None,
+                ..
+            }) = &node.payload
+            {
+                let [measure] = measures.as_slice() else {
+                    return Err(invalid("per-entity aggregate has one measure"));
+                };
+                if filters.iter().any(Option::is_some) {
+                    return Err(invalid("filtered aggregate has no native implementation"));
+                }
+                let [input] = schemas.as_slice() else {
+                    return Err(invalid("per-entity aggregate requires one input"));
+                };
+                let value = match measure.input_cols().first() {
+                    Some(column) => *column,
+                    None => named_column(input, &ColumnRef::SampleValue)?,
+                };
+                let reduction = match measure {
+                    AggIntent::Cardinality { .. } => Reduction::Cardinality(vec![value]),
+                    AggIntent::FrequencyL2 { .. } => Reduction::FrequencyL2(value),
+                    AggIntent::FrequencyEntropy { .. } => Reduction::FrequencyEntropy(value),
+                    _ => {
+                        return Err(invalid(format!(
+                            "node {id}: per-entity aggregate requires an explicit entity binding"
+                        )))
+                    }
+                };
+                let coordinate = input
+                    .time_index
+                    .ok_or_else(|| invalid("temporal input lacks time"))?;
+                let groups = (0..input.fields.len())
+                    .filter(|&column| column != value && column != coordinate)
+                    .collect();
+                let aggregate =
+                    Operator::aggregate(input.clone(), groups, vec![("value".into(), reduction)])?;
+                // A PromQL sample is Float64; the distinct count is Int64.
+                let reduced = aggregate.schema();
+                let project = Operator::project(
+                    reduced.clone(),
+                    reduced
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            let expression = if field.dtype == FieldDataType::Plain(DataType::Int64)
+                                && i + 1 == reduced.fields.len()
+                            {
+                                Expression::ExactFloat64(i)
+                            } else {
+                                Expression::Column(i)
+                            };
+                            (field.name.clone(), expression)
+                        })
+                        .collect(),
+                )?;
+                let projected = project.schema();
+                physical_dag.add(auxiliary, inputs, aggregate)?;
+                physical_dag.add(helper_id(id, 1)?, vec![auxiliary], project)?;
+                let stamped = Operator::scope_timestamp(projected, output.clone())?;
+                if output
+                    .fields
+                    .iter()
+                    .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN)
+                {
+                    // Range functions drop the metric name, as their
+                    // summary evaluations do.
+                    physical_dag.add(helper_id(id, 2)?, vec![helper_id(id, 1)?], stamped)?;
+                    physical_dag.add(
+                        id,
+                        vec![helper_id(id, 2)?],
+                        Operator::series_without_name(output)?,
+                    )?;
+                } else {
+                    physical_dag.add(id, vec![helper_id(id, 1)?], stamped)?;
+                }
+                continue;
+            }
             // A closed row must include either all source labels or the explicit
             // complete-label identity. Projected labels alone are insufficient.
             if let Payload::ASAP(ASAPOp::SummaryAgg {
@@ -343,17 +427,25 @@ fn compile_internal(
                 let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
-                if !schema.closed || update.item.is_some() {
+                // An unkeyed frequency family (UnivMon) counts each value of
+                // its one item column once, as a value-frequency build.
+                let frequency_item = crate::capability::unit_frequency_column(update)
+                    .filter(|_| unkeyed_frequency_family(family));
+                if !schema.closed || (update.item.is_some() && frequency_item.is_none()) {
                     return Err(invalid(
                         "per-entity summary requires complete source identity",
                     ));
                 }
                 crate::capability::validate_summary_kernel(family, update, grouping)
                     .map_err(Error::Invalid)?;
-                let SummaryInputExpr::Column(value) = &update.weight else {
-                    return Err(invalid(
-                        "per-entity update requires a projected value column",
-                    ));
+                let value = match (frequency_item, &update.weight) {
+                    (Some(item), _) => item,
+                    (None, SummaryInputExpr::Column(value)) => value,
+                    (None, _) => {
+                        return Err(invalid(
+                            "per-entity update requires a projected value column",
+                        ))
+                    }
                 };
                 let input = schemas[0].clone();
                 let value = named_column(&input, value)?;
@@ -766,6 +858,19 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                         };
                         let m = match m {
                             AggIntent::Count { .. } => Reduction::Count,
+                            AggIntent::Cardinality { cols, .. } => {
+                                Reduction::Cardinality(if cols.is_empty() {
+                                    vec![column(None)?]
+                                } else {
+                                    cols.clone()
+                                })
+                            }
+                            AggIntent::FrequencyL2 { col, .. } => {
+                                Reduction::FrequencyL2(column(*col)?)
+                            }
+                            AggIntent::FrequencyEntropy { col, .. } => {
+                                Reduction::FrequencyEntropy(column(*col)?)
+                            }
                             AggIntent::Sum { col } => Reduction::Sum(column(*col)?),
                             AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
                             AggIntent::Min { col } => Reduction::Min(column(*col)?),
@@ -869,6 +974,27 @@ fn summary_build(
             groups(input, keys)?,
         );
     }
+    // An unkeyed frequency family (UnivMon) counts each value of its
+    // one item column once: a value-frequency build over that column.
+    if let (Some(item), true) = (
+        crate::capability::unit_frequency_column(update),
+        unkeyed_frequency_family(family),
+    ) {
+        crate::capability::validate_summary_kernel(family, update, grouping)
+            .map_err(Error::Invalid)?;
+        let PlannerReduction::Reduce(keys) = reduction else {
+            return Err(invalid(
+                "summary construction requires explicit grouping columns",
+            ));
+        };
+        return Operator::summary_build(
+            input.clone(),
+            family.clone(),
+            named_column(input, item)?,
+            input.time_index,
+            groups(input, keys)?,
+        );
+    }
     if let Some(item) = &update.item {
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
@@ -930,6 +1056,15 @@ fn summary_build(
         input.time_index,
         groups(input, keys)?,
     )
+}
+/// Families whose state counts values of one column without keyed items:
+/// their unit-frequency update builds over that column.
+fn unkeyed_frequency_family(family: &FieldDataType) -> bool {
+    matches!(family, FieldDataType::Sketch(kind, _) if matches!(
+        kind.algorithm(),
+        planner_types::post_asap::SketchAlgorithm::UnivMon
+            | planner_types::post_asap::SketchAlgorithm::Hll
+    ))
 }
 fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
     let columns = input

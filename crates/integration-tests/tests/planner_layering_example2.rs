@@ -6,10 +6,11 @@
 //! need an unimplemented feature are `#[ignore]`d, naming it and the PR that
 //! delivers it.
 //!
-//! The doc's workload is SQL. The SQL frontend lowers Q1 to a distinct count
-//! but not Q2 and Q3 to `Entropy` and `L2` (the doc's own TODO, #598), so
-//! the planning stages run on a PromQL stand-in with the same structure:
-//! three statistics of one input over the same 1-min window, through the
+//! The doc's workload is SQL; the SQL frontend lowers Q1 to a distinct
+//! count and recognizes Q2 and Q3 as `Entropy` and `L2` (Q3 with a Float64
+//! product). Its time filter stays a scan predicate, so the planning
+//! stages also run on a PromQL stand-in with the same structure: three
+//! statistics of one input over the same 1-min window, through the
 //! frontend's `distinct_over_time`, `entropy_over_time` and `l2_over_time`.
 
 mod physical_common;
@@ -39,7 +40,9 @@ const SQL_Q1: &str =
 const SQL_Q2: &str = "SELECT -SUM(p * LN(p)) FROM (\
     SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows \
     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)";
-const SQL_Q3: &str = "SELECT SQRT(SUM(c * c)) FROM (\
+/// Q3 casts the counts to DOUBLE: the design's Int64 `SUM(c * c)` can
+/// overflow, so the SQL frontend recognizes only the Float64 product.
+const SQL_Q3: &str = "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FROM (\
     SELECT src_ip, COUNT(*) AS c FROM flows \
     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)";
 
@@ -271,7 +274,6 @@ async fn stage0_query_language_frontends_sql_q1_lowers_to_a_distinct_count() {
 
 /// The SQL frontend recognizes Q2 as `Entropy(src_ip)` and Q3 as `L2(src_ip)`.
 #[tokio::test]
-#[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598)"]
 async fn stage0_query_language_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
     let roots = lower_sql(&sql_workload()).await;
     assert!(frontend_operations(&roots[1]).contains(&"aggregate:frequency_entropy".to_string()));
@@ -280,7 +282,6 @@ async fn stage0_query_language_frontends_sql_q2_q3_lower_to_entropy_and_l2() {
 
 /// Once the SQL forms are recognized, the SQL workload has the stand-in's Pass 1 options.
 #[tokio::test]
-#[ignore = "needs SQL frontend recognition of the Entropy and L2 idioms (#598)"]
 async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
     let workload = sql_workload();
     let sql = run_stages(&workload, lower_sql(&workload).await);
@@ -382,7 +383,6 @@ fn stage1_logical_asap_optimization_keeps_every_independent_combination() {
 
 /// The summary-capability rule adds one UnivMon build feeding a distinct-count, an entropy and an L2 estimate.
 #[test]
-#[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
 fn stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three() {
     let run = pipeline();
     let shared = run.logical.iter().find(|c| {
@@ -402,7 +402,6 @@ fn stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_
 
 /// For each pair, a candidate shares one UnivMon between the two while the third keeps each of its own options.
 #[test]
-#[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
 fn stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons() {
     let run = pipeline();
     for (pair, third) in [([0, 1], 2), ([0, 2], 1), ([1, 2], 0)] {
@@ -416,23 +415,42 @@ fn stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univ
     }
 }
 
-/// A UnivMon shared by several statistics is sized for the strictest consumer.
+/// A UnivMon shared by several statistics is sized for every consumer:
+/// each consumer is sized alone, and the shared build takes each
+/// parameter's largest value among them.
 #[test]
-#[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
-fn stage1_logical_asap_optimization_shared_univmon_is_sized_for_the_strictest_consumer() {
+fn stage1_logical_asap_optimization_shared_univmon_takes_each_parameters_largest_own_size() {
     let run = pipeline();
-    let strictest = |queries: &[usize]| {
-        *queries
-            .iter()
-            .min_by(|a, b| ACCURACY[**a].0.total_cmp(&ACCURACY[**b].0))
-            .unwrap()
+    let own = |q| match own_univmon(&run, q) {
+        SketchParams::UnivMon {
+            heap_size,
+            sketch_rows,
+            sketch_cols,
+            layers,
+            ..
+        } => [heap_size, sketch_rows, sketch_cols, u32::from(layers)],
+        other => panic!("{other:?}"),
     };
     let mut seen = 0;
     for queries in [vec![0, 1, 2], vec![0, 1], vec![0, 2], vec![1, 2]] {
+        let mut want = [0u32; 4];
+        for &q in &queries {
+            for (w, p) in want.iter_mut().zip(own(q)) {
+                *w = (*w).max(p);
+            }
+        }
+        let want = SketchParams::UnivMon {
+            heap_size: want[0],
+            sketch_rows: want[1],
+            sketch_cols: want[2],
+            layers: want[3] as u8,
+            // Ignored by equality.
+            distinct_failure_probability: None,
+        };
         for c in &run.logical {
             if let Some(params) = shared_univmon(c, &queries) {
                 seen += 1;
-                assert_eq!(params, own_univmon(&run, strictest(&queries)), "{}", c.id);
+                assert_eq!(params, want, "{} {queries:?}", c.id);
             }
         }
     }
@@ -475,7 +493,6 @@ fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
 
 /// Physical ASAP-aware optimization keeps the shared UnivMon as one build node read by all three queries.
 #[test]
-#[ignore = "needs the Pass 2 summary-capability rule for frequency moments (#595, #596)"]
 fn stage2_physical_asap_optimization_keeps_the_shared_univmon_as_one_build() {
     let run = pipeline();
     let mut seen = 0;
@@ -741,9 +758,22 @@ fn stage3_plan_selection_accepts_univmon_l2() {
     }
 }
 
+/// SQL Q3's L2 through UnivMon keeps its guarantee: the exact population
+/// count joined beside it (a cross join, no key) and the `CASE` deciding the
+/// empty-input NULL on that exact count keep the estimate's guarantee, so
+/// plan selection accepts it.
+#[tokio::test]
+async fn stage3_plan_selection_accepts_sql_univmon_l2_beside_its_exact_population_count() {
+    let workload = sql_workload();
+    let run = run_stages(&workload, lower_sql(&workload).await);
+    for id in univmon_only_candidates(&run, 2) {
+        assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
+    }
+}
+
 /// One materialized UnivMon for all three costs no more than three separate UnivMons.
 #[test]
-#[ignore = "needs one UnivMon for all three (#595, #596), a UnivMon accuracy model (#621) and materializing it (#604): not materialized, it is charged once per consuming query"]
+#[ignore = "needs a UnivMon entropy accuracy model and materializing the shared UnivMon (#604): not materialized, it is charged once per consuming query"]
 fn stage3_plan_selection_shared_univmon_costs_no_more_than_three() {
     let run = pipeline();
     let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);
