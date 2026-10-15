@@ -12,6 +12,8 @@
 //! - Each target has exactly one exact option: the exact accumulator
 //!   (`ExactAccumulator`, or `AvgAsSumCount` for `avg`) when it can be built,
 //!   otherwise plain `Exact`. Whether it is materialized is decided in Stage 2.
+//!   A grouped `sum` over a `sum` beneath it also gets the nested-sum merge
+//!   (`NestedSumMerge`, #680), one exact accumulator absorbing the inner sum.
 //! - Summary candidates are unsized; they are sized after Pass 2 sharing.
 //! - Candidates are pruned only when provably unable to meet the accuracy
 //!   requirement, and each pruned candidate keeps its [`PruneReason`].
@@ -40,6 +42,9 @@
 //! - `AvgAsSumCount`: the finalized `sum` and `count` accumulators divided:
 //!   a PromQL `BinaryOp`, or for SQL rows a join on the group keys (NULL keys
 //!   match) and a SQL division, NULL where the count is 0.
+//! - `NestedSumMerge`: `SummaryAgg` with the exact `Sum` family over the
+//!   absorbed inner sum's input, grouped by the outer keys →
+//!   `FinalizeExactAccumulator`.
 //! - `Exact` (or a measure that is no target): a single-measure `Aggregate`.
 //!
 //! The substituted output keeps the aggregate's column names. The measures
@@ -138,6 +143,22 @@ pub enum ComputationCandidate {
     /// the same family over the exact per-item result. Unsized, like
     /// `Summary`.
     WholeExpression(SketchAlgorithm),
+    /// A nested sum merged (#680): a grouped `sum` over the value of a
+    /// `sum` beneath it (`sum by (job) (sum_over_time(m[5m]))`) as one exact
+    /// `Sum` accumulator over the inner sum's input, grouped by the outer
+    /// keys: the sum of the inner groups' sums is the sum of their rows. It
+    /// absorbs the inner target ([`ComputationTarget::absorbs`]), which is
+    /// not computed, and is offered beside the outer sum's own accumulator.
+    NestedSumMerge,
+}
+
+impl ComputationCandidate {
+    /// Whether the candidate absorbs the target beneath its own
+    /// ([`ComputationTarget::absorbs`]): a whole-expression top-k or a
+    /// nested-sum merge.
+    pub fn absorbs_inner(&self) -> bool {
+        matches!(self, Self::WholeExpression(_) | Self::NestedSumMerge)
+    }
 }
 
 /// Why Pass 1 proved a candidate unable to realize its target.
@@ -224,8 +245,8 @@ pub struct ComputationTarget {
     /// The aggregate's own `having`, then one entry per consumer `Filter`
     /// directly above the aggregate.
     pub having: Vec<HavingEntry>,
-    /// The target directly beneath this one that its
-    /// [`ComputationCandidate::WholeExpression`] candidates absorb. A
+    /// The target directly beneath this one that its absorbing candidates
+    /// ([`ComputationCandidate::absorbs_inner`]) absorb. A
     /// whole-workload choice of such a candidate takes the absorbed target's
     /// first candidate: the target is not computed, so its own choice does
     /// not matter.
@@ -246,13 +267,13 @@ pub struct PerComputationCandidates<Id> {
 
 impl<Id> PerComputationCandidates<Id> {
     /// The number of whole-workload candidates: the size of the Cartesian
-    /// product of the targets' candidates, without the choices that pick a
-    /// whole-expression candidate and anything but the first candidate of
-    /// the target it absorbs (the same candidate as with the first),
+    /// product of the targets' candidates, without the choices that pick an
+    /// absorbing candidate and anything but the first candidate of the
+    /// target it absorbs (the same candidate as with the first),
     /// saturating at `usize::MAX`. An absorbed target has one absorber, and
     /// an absorbing target is never absorbed, so each pair counts as
     /// `(n − w) · m + w` for an absorber with `n` candidates, `w` of them
-    /// whole-expression, over an absorbed target with `m`.
+    /// absorbing, over an absorbed target with `m`.
     pub fn combinations(&self) -> usize {
         let absorbed: HashSet<usize> = self.targets.iter().filter_map(|t| t.absorbs).collect();
         self.targets
@@ -268,7 +289,7 @@ impl<Id> PerComputationCandidates<Id> {
                     .choices
                     .candidates
                     .iter()
-                    .filter(|c| matches!(c, ComputationCandidate::WholeExpression(_)))
+                    .filter(|c| c.absorbs_inner())
                     .count();
                 (n - whole)
                     .saturating_mul(self.targets[inner].choices.candidates.len())
@@ -277,16 +298,13 @@ impl<Id> PerComputationCandidates<Id> {
             .fold(1usize, usize::saturating_mul)
     }
 
-    /// Whether `choice` picks a whole-expression candidate and a candidate
-    /// other than the first for the target it absorbs: the same
-    /// whole-workload candidate as the one with the first, so enumeration
-    /// skips it.
+    /// Whether `choice` picks an absorbing candidate and a candidate other
+    /// than the first for the target it absorbs: the same whole-workload
+    /// candidate as the one with the first, so enumeration skips it.
     pub fn absorbed_choice_varies(&self, choice: &[usize]) -> bool {
         self.targets.iter().zip(choice).any(|(target, &index)| {
-            matches!(
-                target.choices.candidates[index],
-                ComputationCandidate::WholeExpression(_)
-            ) && target.absorbs.is_some_and(|inner| choice[inner] != 0)
+            target.choices.candidates[index].absorbs_inner()
+                && target.absorbs.is_some_and(|inner| choice[inner] != 0)
         })
     }
 }
@@ -533,7 +551,105 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
         }
     }
     add_whole_expression_candidates(&mut targets, &consumers);
+    add_nested_sum_candidates(&mut targets, &consumers);
     Ok(PerComputationCandidates { roots, targets })
+}
+
+/// Nested-sum merge (#680): a grouped `sum` over the value of a `sum`
+/// target beneath it gets [`ComputationCandidate::NestedSumMerge`] beside
+/// its own candidates, absorbing the inner target. Applied only when the
+/// inner sum has no other consumer, so absorbing it removes its work, when
+/// neither has a filter or `HAVING` ([`nested_sum_input`]), and when the
+/// outer sum is not itself absorbed (by a whole-expression top-k above
+/// it), so an absorbing target is never absorbed.
+fn add_nested_sum_candidates(
+    targets: &mut [ComputationTarget],
+    consumers: &HashMap<*const OperatorNode, Vec<Option<Rc<OperatorNode>>>>,
+) {
+    let absorbed: HashSet<usize> = targets.iter().filter_map(|t| t.absorbs).collect();
+    for t in 0..targets.len() {
+        let target = &targets[t];
+        if absorbed.contains(&t) || target.absorbs.is_some() || !target.having.is_empty() {
+            continue;
+        }
+        let Some(NonASAPOp::Aggregate { child, .. }) = target.target.non_asap() else {
+            continue;
+        };
+        let Some(inner) = targets
+            .iter()
+            .position(|other| Rc::ptr_eq(&other.target, child))
+        else {
+            continue;
+        };
+        if consumers.get(&Rc::as_ptr(child)).map(Vec::len) != Some(1)
+            || !targets[inner].having.is_empty()
+            || nested_sum_input(&target.target).is_none()
+        {
+            continue;
+        }
+        let target = &mut targets[t];
+        target
+            .choices
+            .candidates
+            .push(ComputationCandidate::NestedSumMerge);
+        target.absorbs = Some(inner);
+    }
+}
+
+/// The input rows, the inner sum and the outer grouping (moved onto the
+/// input rows by column, [`partitions_over`]) of a nested-sum merge of
+/// `target`, or `None` when it does not apply: `target` is a grouped `sum`
+/// (not by `without`) of the value column of a per-series or grouped `sum`
+/// directly beneath it, neither filtered nor with `HAVING`.
+fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggIntent, Reduction)> {
+    use asap_types::ir::non_asap::any_measure_filtered;
+    let Some(NonASAPOp::Aggregate {
+        child: inner,
+        reduction: reduction @ Reduction::Reduce(by),
+        measures,
+        filters,
+        having: None,
+        ..
+    }) = target.non_asap()
+    else {
+        return None;
+    };
+    let [AggIntent::Sum { col }] = measures.as_slice() else {
+        return None;
+    };
+    let Some(NonASAPOp::Aggregate {
+        child: rows,
+        reduction: inner_reduction,
+        measures: inner_measures,
+        filters: inner_filters,
+        having: None,
+        ..
+    }) = inner.non_asap()
+    else {
+        return None;
+    };
+    let [inner_sum @ AggIntent::Sum { .. }] = inner_measures.as_slice() else {
+        return None;
+    };
+    if by.is_without() || any_measure_filtered(filters) || any_measure_filtered(inner_filters) {
+        return None;
+    }
+    // The inner sum's value column: a per-series sum keeps its labels and
+    // carries the value as the sample value; a grouped one ends with it.
+    let value = match inner_reduction {
+        Reduction::PerEntity => resolve_column_ref(&ColumnRef::SampleValue, &inner.schema).ok()?,
+        Reduction::Reduce(keys) if !keys.is_without() => keys.len(),
+        Reduction::Reduce(_) => return None,
+    };
+    let summed = match col {
+        None => resolve_column_ref(&ColumnRef::SampleValue, &inner.schema).ok()?,
+        Some(column) => *column,
+    };
+    if summed != value || by.keys().contains(&value) {
+        return None;
+    }
+    let partitions = partitions_over(reduction, &inner.schema, &rows.schema)?;
+    Some((Rc::clone(rows), inner_sum.clone(), partitions))
 }
 
 /// Whole-expression top-k (#509 Example 1's Q2): a top-k over a per-item
@@ -657,7 +773,11 @@ fn whole_expression_input(
 /// output), as indices into `input` (the rows the heap reads), matched by
 /// column. `None` when a key is missing or ambiguous in `input`, or the keys
 /// are given by `without`: `input` carries columns `inner` dropped.
-fn partitions_over(reduction: &Reduction, inner: &Schema, input: &Schema) -> Option<Reduction> {
+pub(crate) fn partitions_over(
+    reduction: &Reduction,
+    inner: &Schema,
+    input: &Schema,
+) -> Option<Reduction> {
     let Reduction::Reduce(keys) = reduction else {
         return Some(Reduction::PerEntity);
     };
@@ -2288,6 +2408,9 @@ fn substitute(
                 );
             let filter = filters.get(measure).and_then(Option::as_ref).map(rewritten);
             let key = (Rc::as_ptr(target), measure);
+            if *candidate == ComputationCandidate::NestedSumMerge {
+                return nested_sum(target, memo);
+            }
             if let ComputationCandidate::WholeExpression(algorithm) = candidate {
                 return whole_expression(
                     target,
@@ -2397,6 +2520,58 @@ fn whole_expression(
     ))?)
 }
 
+/// A nested-sum merge for `target` ([`nested_sum_input`]): one exact `Sum`
+/// accumulator over the absorbed sum's rewritten input, grouped as
+/// `target`, finalized.
+fn nested_sum(
+    target: &OperatorNode,
+    memo: &Memo,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let (rows, intent, reduction) = nested_sum_input(target).ok_or(
+        PerComputationCandidateError::Unsupported("nested-sum merge input"),
+    )?;
+    let state = exact_accumulator(
+        ExactKind::Sum,
+        &intent,
+        &memo[&Rc::as_ptr(&rows)],
+        reduction,
+    )?;
+    Ok(OperatorNode::new_shared(Operator::ASAP(
+        ASAPOp::FinalizeExactAccumulator { child: state },
+    ))?)
+}
+
+/// An unfiltered exact accumulator of `kind` for `intent` over `input`,
+/// grouped by `reduction`.
+pub(crate) fn exact_accumulator(
+    kind: ExactKind,
+    intent: &AggIntent,
+    input: &Rc<OperatorNode>,
+    reduction: Reduction,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let params = match kind {
+        ExactKind::Sum => ExactParams::Sum,
+        ExactKind::Count => ExactParams::Count,
+        ExactKind::Min => ExactParams::Min,
+        ExactKind::Max => ExactParams::Max,
+        ExactKind::Rate => ExactParams::Rate,
+        ExactKind::IRate => ExactParams::IRate,
+        ExactKind::Increase => ExactParams::Increase,
+    };
+    let family = FieldDataType::ExactAggregate(kind, params);
+    let read = measure_input(intent, input, None)?;
+    Ok(OperatorNode::new_shared(Operator::ASAP(
+        ASAPOp::SummaryAgg {
+            input: summary_update(intent, &family, &reduction, &input.schema, read)?,
+            child: Rc::clone(input),
+            family,
+            reduction,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        },
+    ))?)
+}
+
 /// One measure of `target` over `input`: its group keys, then its value.
 fn substitute_measure(
     target: &OperatorNode,
@@ -2462,9 +2637,9 @@ fn substitute_measure(
                 query: statistic(intent)?,
             }))?
         }
-        ComputationCandidate::WholeExpression(_) => {
+        ComputationCandidate::WholeExpression(_) | ComputationCandidate::NestedSumMerge => {
             return Err(PerComputationCandidateError::Unsupported(
-                "whole-expression top-k is substituted with its aggregate",
+                "an absorbing candidate is substituted with its aggregate",
             ))
         }
         ComputationCandidate::AvgAsSumCount => {
@@ -3800,6 +3975,102 @@ mod tests {
         ] {
             let root = crate::test_support::lower_promql(query, AccuracyTarget::exact());
             assert_eq!(samples_of_metric(&root).as_deref(), metric, "{query}");
+        }
+    }
+
+    fn nested_sum_target(inventory: &PerComputationCandidates<usize>) -> Option<usize> {
+        inventory.targets.iter().position(|t| {
+            t.choices
+                .candidates
+                .contains(&ComputationCandidate::NestedSumMerge)
+        })
+    }
+
+    /// `sum by (job) (sum_over_time(m[5m]))` gets a nested-sum merge beside
+    /// its own accumulator: one exact Sum accumulator over the range's raw
+    /// samples, grouped by `job`, which absorbs the inner per-series sum.
+    /// Composed, no per-series state is built, the value is exact and the
+    /// output columns are the outer sum's.
+    #[test]
+    fn nested_sum_merges_into_one_exact_accumulator() {
+        let inventory = inventory("sum by (job) (sum_over_time(m[5m]))");
+        let outer = nested_sum_target(&inventory).expect("a nested-sum merge");
+        let target = &inventory.targets[outer];
+        assert_eq!(
+            target.choices.candidates,
+            [
+                ComputationCandidate::ExactAccumulator {
+                    kind: ExactKind::Sum,
+                    params: ExactParams::Sum
+                },
+                ComputationCandidate::NestedSumMerge,
+            ]
+        );
+        let inner = target.absorbs.expect("absorbs the inner sum");
+        assert_eq!(inventory.targets[inner].choices.candidates.len(), 1);
+        assert_eq!(inventory.combinations(), 2);
+        let composed = composed_with(&inventory, outer);
+        let (_, separate) = &composed[0];
+        let (_, merged) = &composed[1];
+        let states: Vec<_> = OperatorNode::reachable(merged)
+            .into_iter()
+            .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            .collect();
+        let [state] = states.as_slice() else {
+            panic!("one accumulator: {states:?}")
+        };
+        let Some(ASAPOp::SummaryAgg {
+            child,
+            family,
+            reduction,
+            ..
+        }) = state.asap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            *family,
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
+        assert!(matches!(
+            child.non_asap(),
+            Some(NonASAPOp::TimeRange { .. })
+        ));
+        let Reduction::Reduce(keys) = reduction else {
+            panic!("grouped by job: {reduction:?}")
+        };
+        assert_eq!(
+            keys.keys()
+                .iter()
+                .map(|&k| child.schema.fields[k].name.as_str())
+                .collect::<Vec<_>>(),
+            ["job"]
+        );
+        assert!(merged
+            .guarantee
+            .as_ref()
+            .is_some_and(AccuracyGuarantee::is_exact));
+        let names = |node: &OperatorNode| {
+            node.schema
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(merged), names(separate));
+        merged.validate_structure().unwrap();
+    }
+
+    /// The merge needs a sum over a sum's value: an outer sum over a rate,
+    /// an outer count, or an outer sum over an inner `max` gets none.
+    #[test]
+    fn nested_sum_merge_needs_a_sum_of_sums() {
+        for query in [
+            "sum by (job) (rate(m[5m]))",
+            "count by (job) (sum_over_time(m[5m]))",
+            "sum by (job) (max_over_time(m[5m]))",
+        ] {
+            assert_eq!(nested_sum_target(&inventory(query)), None, "{query}");
         }
     }
 

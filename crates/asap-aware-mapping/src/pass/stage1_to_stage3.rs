@@ -631,12 +631,7 @@ fn display_name<Id>(
         .targets
         .iter()
         .zip(choice)
-        .filter(|(target, &index)| {
-            matches!(
-                target.choices.candidates[index],
-                ComputationCandidate::WholeExpression(_)
-            )
-        })
+        .filter(|(target, &index)| target.choices.candidates[index].absorbs_inner())
         .filter_map(|(target, _)| target.absorbs)
         .collect();
     (0..inventory.roots.len())
@@ -659,6 +654,9 @@ fn display_name<Id>(
                     }
                     ComputationCandidate::AvgAsSumCount => {
                         accumulators.push("Sum/Count acc".into())
+                    }
+                    ComputationCandidate::NestedSumMerge => {
+                        accumulators.push("nested Sum acc".into())
                     }
                     ComputationCandidate::Summary(algorithm)
                     | ComputationCandidate::WholeExpression(algorithm) => {
