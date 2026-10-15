@@ -4,6 +4,7 @@ AGENTS.md
 .agents/skills/asap-documentation
 .agents/skills/asap-design-review
 .agents/skills/asap-pr-authoring
+.agents/skills/asap-issue-authoring
 .agents/skills/asap-start-work
 .agents/skills/asap-performance-investigation
 .agents/skills/asap-implement-existing-design
