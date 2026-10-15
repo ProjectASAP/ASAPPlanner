@@ -133,9 +133,8 @@
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 //!
-//! - [`accuracy`] — the [`AccuracyModel`](accuracy::AccuracyModel) /
-//!   [`AccuracyBudgetAllocator`](accuracy::AccuracyBudgetAllocator)
-//!   extension points (issue #172): the planning-time algebra that derives
+//! - [`accuracy`] — the [`AccuracyModel`](accuracy::AccuracyModel)
+//!   extension point (issue #172): the planning-time algebra that derives
 //!   a machine-readable [`AccuracyGuarantee`](asap_types::post_asap::AccuracyGuarantee)
 //!   for every finalized post-ASAP value, propagates it through
 //!   approximate-over-approximate compositions under conservative rules
@@ -172,8 +171,7 @@ pub mod topk_reuse;
 
 pub use accuracy::reconciliation::AccuracyReconciliationStrategy;
 pub use accuracy::{
-    AccuracyAllocation, AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel,
-    CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
+    AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
     PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use cost_model::{

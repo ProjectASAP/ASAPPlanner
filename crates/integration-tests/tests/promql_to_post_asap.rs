@@ -9,8 +9,7 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::accuracy::{
-    AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, OperandDomain,
-    PropagationStats,
+    AccuracyEvidenceProvider, DefaultAccuracyModel, OperandDomain, PropagationStats,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{retain_exact, RealizationError};
@@ -274,7 +273,6 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
-        &EqualSplitAllocator,
         &SeparatedTopK,
     );
     let plan = strategy
@@ -338,7 +336,6 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
-        &EqualSplitAllocator,
         &NoPopulationBound,
     );
     let candidates = strategy.replacements(&TargetSubDAG::new(&root));
@@ -389,7 +386,6 @@ fn weighted_topk_rejects_invalid_population_evidence() {
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
-        &EqualSplitAllocator,
         &InvalidPopulation,
     );
     assert!(strategy.replacements(&TargetSubDAG::new(&root)).is_empty());
@@ -407,7 +403,6 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopK,
         );
         let plan = strategy
@@ -642,7 +637,6 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopK,
         );
         let candidate = strategy
@@ -804,7 +798,6 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &SeparatedTopK,
         );
         // This reference executor consumes keyed heap updates. The inventory
@@ -1237,7 +1230,6 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &evidence,
         );
         let replacements = strategy.replacements(&TargetSubDAG::new(&pre));
@@ -1278,7 +1270,6 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
-        &EqualSplitAllocator,
         &PartialUnsafeDomain,
     );
     assert!(strategy.replacements(&TargetSubDAG::new(&pre)).is_empty());
@@ -1300,7 +1291,6 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &evidence,
         );
         let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
@@ -1383,7 +1373,6 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
-            &EqualSplitAllocator,
             &evidence,
         );
         assert!(strategy.replacements(&TargetSubDAG::new(&pre)).is_empty());

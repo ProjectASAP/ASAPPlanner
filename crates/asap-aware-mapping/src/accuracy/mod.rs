@@ -1,19 +1,18 @@
 //! Planner accuracy interfaces and model dispatch.
 //!
 //! Estimator models derive local guarantees, composition propagates them,
-//! allocation proposes local budgets, and evidence supplies scoped contracts.
+//! the budget split sizes each approximate input of a composition for an
+//! equal share of its target, and evidence supplies scoped contracts.
 //! Unknown evidence may retain a candidate but does not authorize selection.
 //! See `docs/design_docs/concepts/accuracy-models.md` for the design.
 
-pub mod allocation;
+pub mod budget;
 pub mod composition;
 pub mod estimators;
 pub mod evidence;
 pub mod reconciliation;
 
-pub use allocation::{
-    AccuracyAllocation, AccuracyBudgetAllocator, CompositionShape, EqualSplitAllocator,
-};
+pub use budget::{equal_share, equal_shares};
 pub use evidence::{
     AccuracyEvidenceProvider, NoAccuracyEvidence, OperandDomain, PropagationStats,
     WorkloadAccuracyEvidence,
