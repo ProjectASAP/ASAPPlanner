@@ -151,6 +151,12 @@ footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
         <div id="plannerRows"></div>
         <div class="row">
           <label>ε <input id="plannerEpsilon" type="number" min="0.000001" max="0.999999" step="0.001" value="0.01" /></label>
+          <label title="The error metric ε is stated in. Default: the query's own metric; a quantile query must name one.">metric <select id="plannerMetric">
+            <option value="">default</option>
+            <option value="absolute">Absolute</option>
+            <option value="relative">Relative</option>
+            <option value="rank">Rank</option>
+          </select></label>
           <button class="btn" id="plannerRun" type="button">Plan</button>
           <span class="status" id="plannerStatus">Plans the checked queries as one workload.</span>
         </div>
