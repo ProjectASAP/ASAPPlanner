@@ -234,7 +234,7 @@ Finalized post-ASAP values may carry a `ResultGuarantee`:
 
 ```rust
 struct ResultGuarantee {
-    metric: ErrorMetric,
+    metric: AccuracyMetric,
     bound: BoundExpr,
     failure_probability: ProbabilityExpr,
     provenance: Vec<GuaranteeSource>,

@@ -5,7 +5,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog, SqlLowerer};
 use asap_types::{
     ir::{NonASAPOp, OperatorNode},
     pre_asap::{AggIntent, DataType, Field, Schema},
-    types::{AccuracyTarget, ErrorMetric},
+    types::AccuracyTarget,
 };
 
 fn catalog(nullable: bool) -> SqlCatalog {
@@ -71,7 +71,7 @@ async fn declines_non_equivalent_entropy_shapes() {
 /// is an exact count.
 #[tokio::test]
 async fn entropy_accuracy_and_population_guard_are_separate() {
-    let target = AccuracyTarget::epsilon_delta(0.05, 0.01);
+    let target = AccuracyTarget::max_error(0.05).failure_probability(0.01);
     let node = lower_sql("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f", &catalog(false), target.clone()).await.unwrap();
     let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
         panic!("project");
@@ -83,7 +83,7 @@ async fn entropy_accuracy_and_population_guard_are_separate() {
         panic!("entropy");
     };
     assert!(
-        matches!(&measures[0], AggIntent::FrequencyEntropy { accuracy, .. } if *accuracy == target.target_in(ErrorMetric::ABSOLUTE))
+        matches!(&measures[0], AggIntent::FrequencyEntropy { accuracy, .. } if *accuracy == target)
     );
     let NonASAPOp::Aggregate { measures, .. } = right.expect_non_asap() else {
         panic!("count");

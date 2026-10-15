@@ -69,7 +69,7 @@ use asap_types::pre_asap::{
     resolve_column_ref, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue,
     WindowFuncKind,
 };
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
 use crate::error::SqlError as LoweringError;
@@ -1784,11 +1784,11 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                     }
                     args => AggIntent::Cardinality {
                         cols: args.iter().map(distinct_col).collect::<Result<_, _>>()?,
-                        accuracy: current_accuracy().target_in(ErrorMetric::Relative),
+                        accuracy: current_accuracy(),
                     },
                 },
                 AggSemantic::Count => AggIntent::Count {
-                    accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                    accuracy: current_accuracy(),
                 },
                 AggSemantic::Sum => AggIntent::Sum {
                     col: col(&agg_fn.params.args)?,
@@ -1829,11 +1829,11 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                             _ => extract_percentile_q(&agg_fn.params.args)?,
                         },
                     },
-                    accuracy: current_accuracy().for_quantile(),
+                    accuracy: current_accuracy(),
                 },
                 AggSemantic::Cardinality => AggIntent::Cardinality {
                     cols: vec![reducer_col(&name, &agg_fn.params.args)?],
-                    accuracy: current_accuracy().target_in(ErrorMetric::Relative),
+                    accuracy: current_accuracy(),
                 },
             })
         }

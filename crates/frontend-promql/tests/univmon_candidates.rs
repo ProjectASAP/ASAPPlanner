@@ -5,7 +5,7 @@ mod support;
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
-    ErrorMetric, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
+    AccuracyMetric, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
 };
 use asap_types::types::AccuracyTarget;
 use support::{logical_candidates, lower_promql, post_asap_dag, run_stage1_to_stage3};
@@ -36,7 +36,7 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
     // own shapes, while the total and entropy keep the baseline shape and so
     // share one state. Sharing across readouts is the summary-capability
     // rule's job.
-    let accuracy = AccuracyTarget::epsilon(0.02);
+    let accuracy = AccuracyTarget::max_error(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
         ("count_over_time(m[5m])", accuracy.clone()),
@@ -83,7 +83,7 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
             // source's distinct bound, which Stage 1 does not read.
             0 => {
                 let guarantee = guarantee.expect("a distinct-count guarantee");
-                assert_eq!(guarantee.spec.metric, ErrorMetric::Relative);
+                assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
                 assert_eq!(
                     guarantee.spec.error.evaluate().map(|e| e <= 0.02),
                     Some(true)
@@ -102,10 +102,10 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
             }
             2 => {
                 let guarantee = guarantee.expect("an L2 guarantee");
-                assert_eq!(guarantee.spec.metric, ErrorMetric::Relative);
+                assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
                 assert!(DefaultAccuracyModel.satisfies(
                     guarantee,
-                    &AccuracyTarget::epsilon(0.02).with_metric(ErrorMetric::Relative)
+                    &AccuracyTarget::max_error(0.02).accuracy_metric(AccuracyMetric::Relative)
                 ));
                 assert!(guarantee.spec.failure_probability.evaluate().unwrap() <= 0.01);
             }
@@ -129,8 +129,8 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     for query in ["entropy_over_time(m[5m])"] {
         for target in [
             AccuracyTarget::exact(),
-            AccuracyTarget::epsilon(0.02),
-            AccuracyTarget::epsilon_delta(0.02, 0.01),
+            AccuracyTarget::max_error(0.02),
+            AccuracyTarget::max_error(0.02).failure_probability(0.01),
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
             let run = run_stage1_to_stage3(root, target.clone());

@@ -216,7 +216,7 @@ pub(crate) fn time_and_export(
 pub(crate) fn cms_summary(query: &str) -> OperatorNode {
     use asap_types::ir::{ASAPOp, QueryRoot};
     use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_promql(query, target.clone());
     let run = crate::pass::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],

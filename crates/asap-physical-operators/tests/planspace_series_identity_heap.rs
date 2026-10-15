@@ -62,7 +62,7 @@ const CURRENT_SERIES_TOPK: &str = "topk by(job)(1, m)";
 
 #[test]
 fn selection_never_commits_a_series_identity_heap() {
-    let accuracy = AccuracyTarget::epsilon(0.1);
+    let accuracy = AccuracyTarget::max_error(0.1);
     let root = lower(CURRENT_SERIES_TOPK, &accuracy);
     assert!(!carries_identity(&selected_dag(root, accuracy)));
 }

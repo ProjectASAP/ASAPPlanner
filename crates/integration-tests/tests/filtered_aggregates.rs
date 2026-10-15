@@ -222,7 +222,7 @@ async fn hand_filtered(
     family: impl Fn(&FieldDataType) -> bool,
     filter: &(Predicate, Schema),
 ) -> Vec<Rc<OperatorNode>> {
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let mut result = vec![];
     for root in logical_candidates(lower(sql, target.clone()).await, target) {
         let builds: Vec<_> = OperatorNode::reachable(&root)
@@ -290,7 +290,7 @@ async fn hand_filtered_kll_compiles_and_executes() {
 
 /// The KLL candidates of `sql`, unchanged.
 async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let roots: Vec<_> = logical_candidates(lower(sql, target.clone()).await, target)
         .into_iter()
         .filter(|root| {

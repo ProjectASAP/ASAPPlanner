@@ -77,7 +77,7 @@ pub(super) fn guarantee(
                 algorithm,
                 params,
                 query,
-                ErrorMetric::Relative,
+                AccuracyMetric::Relative,
                 l2_relative_error(*sketch_cols)?,
                 ProbabilityExpr::Constant {
                     value: l2_failure_probability(*sketch_rows),
@@ -264,7 +264,7 @@ pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<
     let relative_error = (DISTINCT_VARIANCE / (f64::from(*heap_size) * chebyshev)).sqrt();
     let statistic = incomplete_top_layer_statistic(*heap_size, *layers, source);
     Some(AccuracyGuarantee::new(
-        ErrorMetric::Relative,
+        AccuracyMetric::Relative,
         BoundExpr::Constant {
             value: relative_error,
         },
@@ -391,7 +391,7 @@ mod tests {
         DefaultAccuracyModel.satisfies(
             guarantee,
             &crate::accuracy::native_target(
-                &AccuracyTarget::epsilon_delta(epsilon, delta),
+                &AccuracyTarget::max_error(epsilon).failure_probability(delta),
                 guarantee,
             ),
         )
@@ -428,7 +428,7 @@ mod tests {
         for (eps, delta) in TARGETS {
             let params = size_params(&l2_intent(), eps, delta);
             let guarantee = l2(&params).expect("an L2 guarantee");
-            assert_eq!(guarantee.spec.metric, ErrorMetric::Relative);
+            assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
             assert!(
                 meets(&guarantee, eps, delta),
                 "({eps}, {delta}): {params:?}"
@@ -511,7 +511,7 @@ mod tests {
             };
             for max_distinct in [9, 10_000_000] {
                 let guarantee = bind(&params, max_distinct);
-                assert_eq!(guarantee.spec.metric, ErrorMetric::Relative);
+                assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
                 assert!(
                     meets(&guarantee, eps, delta),
                     "({eps}, {delta}): {params:?}"

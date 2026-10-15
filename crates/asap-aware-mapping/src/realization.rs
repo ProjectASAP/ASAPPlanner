@@ -17,7 +17,7 @@ use asap_types::pre_asap::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::schema::ColumnId;
 use asap_types::pre_asap::Reduction;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -66,22 +66,40 @@ pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
     }
 }
 
-/// The [`AccuracyTarget`] threaded onto an approximate-capable intent
-/// (`Quantile`/`Cardinality`/`Count`/`TopK`), or `None` for every other
-/// intent (no sketch candidate applies — [`realizations_for_intent`]'s own
-/// match routes those elsewhere). Exposed so callers resolve the exact same
-/// accuracy target [`realizations_for_intent`] does, without re-deriving it
-/// from scratch.
-pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
-    match intent {
-        AggIntent::Quantile { accuracy, .. }
-        | AggIntent::Cardinality { accuracy, .. }
-        | AggIntent::FrequencyL2 { accuracy, .. }
-        | AggIntent::FrequencyEntropy { accuracy, .. }
-        | AggIntent::Count { accuracy }
-        | AggIntent::TopK { accuracy, .. } => Some(accuracy),
-        _ => None,
+/// The [`AccuracyTarget`] an approximate-capable intent's summary is sized
+/// and checked against, or `None` for every other intent (no sketch
+/// candidate applies — [`realizations_for_intent`]'s own match routes those
+/// elsewhere). It is the query's target restated in the intent's own metric
+/// (#690 §4): an L1-scaled absolute error for counts and top-k frequencies,
+/// a relative error for distinct counts and L2 frequency moments, an
+/// absolute error for entropy, and for a quantile the query's metric or a
+/// rank error when none is set. The query's own metric, set or not, is
+/// checked at its root in Stage 3.
+pub fn accuracy_target(intent: &AggIntent) -> Option<AccuracyTarget> {
+    let (target, metric) = match intent {
+        AggIntent::Quantile { accuracy, .. } => (
+            accuracy,
+            accuracy.accuracy_metric.unwrap_or(AccuracyMetric::Rank),
+        ),
+        AggIntent::Cardinality { accuracy, .. } | AggIntent::FrequencyL2 { accuracy, .. } => {
+            (accuracy, AccuracyMetric::Relative)
+        }
+        AggIntent::FrequencyEntropy { accuracy, .. } => (accuracy, AccuracyMetric::ABSOLUTE),
+        AggIntent::Count { accuracy } | AggIntent::TopK { accuracy, .. } => {
+            (accuracy, AccuracyMetric::ABSOLUTE_STREAM_L1)
+        }
+        _ => return None,
+    };
+    Some(target_in(target, metric))
+}
+
+/// `target`'s ε, δ and scope stated in `metric`. An exact target stays
+/// exact with no metric: exact is exact in every metric.
+pub(crate) fn target_in(target: &AccuracyTarget, metric: AccuracyMetric) -> AccuracyTarget {
+    if target.is_exact() {
+        return AccuracyTarget::exact().accuracy_scope(target.accuracy_scope);
     }
+    target.clone().accuracy_metric(metric)
 }
 
 /// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget

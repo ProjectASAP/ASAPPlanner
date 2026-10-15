@@ -26,7 +26,7 @@ fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
 #[test]
 #[ignore = "Pass 1 offers no Hydra state for a grouped count yet (#605)"]
 fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     // Hydra hashes a non-null item per row: the series identity (PromQL
     // labels are nullable).
     let root = asap_types::ir::schema_support::with_promql_series_identity(
@@ -64,7 +64,7 @@ fn exact_counts_select_count_accumulators() {
 #[test]
 fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
-        let accuracy = AccuracyTarget::epsilon(0.02);
+        let accuracy = AccuracyTarget::max_error(0.02);
         let root = lower_promql(query, accuracy.clone()).unwrap();
         let candidates = logical_candidates(root, accuracy);
         let mut algorithms = Vec::new();
@@ -227,7 +227,7 @@ fn count_over_time_counts_scrapes_not_sample_values() {
 #[test]
 fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     use asap_types::pre_asap::ColumnRef;
-    let accuracy = AccuracyTarget::epsilon(0.02);
+    let accuracy = AccuracyTarget::max_error(0.02);
     let root = lower_promql("count_over_time(up[5m])", accuracy.clone()).unwrap();
     let candidates = logical_candidates(root, accuracy);
     let dag = candidates
@@ -281,7 +281,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    let accuracy = AccuracyTarget::epsilon(0.01);
+    let accuracy = AccuracyTarget::max_error(0.01);
     let root = lower_promql(
         "sum by (job) (topk by (job, instance) (1, rate(m[5m])))",
         accuracy.clone(),

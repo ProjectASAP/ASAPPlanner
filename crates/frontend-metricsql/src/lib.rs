@@ -10,7 +10,7 @@ use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, CompareOpKind, GroupKeys,
     PromQLVectorSetOpKind, Reduction, ScalarValue, Source,
 };
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
 use metricsql_parser::functions::{AggregateFunction, BuiltinFunction, RollupFunction};
@@ -221,7 +221,7 @@ impl Lowerer {
             RollupFunction::MaxOverTime => AggIntent::Max { col: None },
             RollupFunction::SumOverTime => AggIntent::Sum { col: None },
             RollupFunction::CountOverTime => AggIntent::Count {
-                accuracy: self.accuracy.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                accuracy: self.accuracy.clone(),
             },
             RollupFunction::StddevOverTime => AggIntent::StdDev {
                 col: None,
@@ -245,7 +245,7 @@ impl Lowerer {
             RollupFunction::QuantileOverTime => AggIntent::Quantile {
                 col: None,
                 q: number_arg(&function.args, 0)?,
-                accuracy: self.accuracy.for_quantile(),
+                accuracy: self.accuracy.clone(),
             },
             _ => {
                 return Err(unsupported(format!(
@@ -295,7 +295,7 @@ impl Lowerer {
             AggregateFunction::Max => AggIntent::Max { col: None },
             // `count(v)` counts series, not distinct sample values.
             AggregateFunction::Count => AggIntent::Count {
-                accuracy: self.accuracy.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                accuracy: self.accuracy.clone(),
             },
             AggregateFunction::StdDev => AggIntent::StdDev {
                 col: None,
@@ -309,7 +309,7 @@ impl Lowerer {
             AggregateFunction::Quantile => AggIntent::Quantile {
                 col: None,
                 q: number_arg(&expr.args, 0)?,
-                accuracy: self.accuracy.for_quantile(),
+                accuracy: self.accuracy.clone(),
             },
             _ => return Err(unsupported(format!("aggregate `{}`", expr.name()))),
         };

@@ -20,7 +20,7 @@ use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn accuracy() -> AccuracyTarget {
-    AccuracyTarget::epsilon_delta(0.01, 0.01)
+    AccuracyTarget::max_error(0.01).failure_probability(0.01)
 }
 
 /// The single KLL `SummaryAgg` among the logical candidates for `pre`.

@@ -9,7 +9,7 @@ use asap_types::ir::{
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, Reduction, ScalarValue, Source,
 };
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
@@ -59,13 +59,13 @@ fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
         "distinct_over_time((cpu_usage + 1)[5m:1m])",
         "sum by(job)(distinct_over_time(cpu_usage[5m]))",
     ] {
-        for accuracy in [AccuracyTarget::exact(), AccuracyTarget::epsilon(0.02)] {
+        for accuracy in [AccuracyTarget::exact(), AccuracyTarget::max_error(0.02)] {
             let dag = lower_promql(query, accuracy.clone()).unwrap();
             let mut intents = Vec::new();
             collect_intents(&dag, &mut intents);
             assert!(
                 intents.iter().any(|intent| matches!(
-                    intent, AggIntent::Cardinality { accuracy: actual, .. } if *actual == accuracy.target_in(ErrorMetric::Relative)
+                    intent, AggIntent::Cardinality { accuracy: actual, .. } if *actual == accuracy
                 )),
                 "{query}: {dag:?}"
             );
@@ -1102,7 +1102,7 @@ fn fill_modifiers_are_rejected_not_ignored() {
 fn accuracy_target_flows_into_quantile_intent() {
     let qe = lower_promql(
         "quantile_over_time(0.9, m[5m])",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .unwrap();
     let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
@@ -1179,7 +1179,7 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
                 BatchEntry {
                     query: Query("quantile_over_time(0.9, b[5m])".into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyTarget::epsilon(0.02),
+                        accuracy: AccuracyTarget::max_error(0.02),
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,

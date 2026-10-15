@@ -21,7 +21,7 @@ async fn targets(sql: &str) -> Vec<ComputationTarget> {
             Field::plain("bytes", DataType::Float64, false),
         ]),
     );
-    let accuracy = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(sql, &catalog, accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
@@ -96,7 +96,7 @@ async fn a_filter_or_group_key_over_an_estimate_has_no_guarantee() {
             Field::plain("bytes", DataType::Float64, false),
         ]),
     );
-    let accuracy = AccuracyTarget::epsilon(0.01);
+    let accuracy = AccuracyTarget::max_error(0.01);
     for sql in [
         "SELECT count(*) FILTER (WHERE p > 5) FROM \
          (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
@@ -163,7 +163,7 @@ async fn a_sql_fold_over_estimates_leaves_its_row_count_unbound() {
             Field::plain("bytes", DataType::Float64, false),
         ]),
     );
-    let accuracy = AccuracyTarget::epsilon(0.01);
+    let accuracy = AccuracyTarget::max_error(0.01);
     let sql = "SELECT max(p) FROM \
                (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s";
     let root = lower_sql(sql, &catalog, accuracy.clone()).await.unwrap();
@@ -191,7 +191,7 @@ async fn heap_updates(key: &str, key_type: DataType, sql: &str) -> Vec<(String, 
             Field::plain("bytes", DataType::Float64, false),
         ]),
     );
-    let accuracy = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(sql, &catalog, accuracy).await.unwrap();
     let inventory =
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();

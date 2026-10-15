@@ -14,7 +14,7 @@ use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 
 fn approximate() -> AccuracyTarget {
-    AccuracyTarget::epsilon_delta(0.01, 0.001)
+    AccuracyTarget::max_error(0.01).failure_probability(0.001)
 }
 
 fn names(node: &OperatorNode) -> Vec<String> {

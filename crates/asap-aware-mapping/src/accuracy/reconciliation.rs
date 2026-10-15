@@ -169,7 +169,7 @@ use crate::replacement::{
 type BindableAccuracyAggregate<'a> = (
     &'a Reduction,
     &'a AggIntent,
-    &'a AccuracyTarget,
+    AccuracyTarget,
     &'a [String],
     &'a Rc<OperatorNode>,
 );
@@ -336,7 +336,7 @@ impl AccuracyReconciliationStrategy {
                     && names == target_names
                     && (Rc::ptr_eq(child, target_child) || child == target_child)
                     && same_intent_except_accuracy(intent, target_intent)
-                    && strictly_tighter(accuracy, target_accuracy)
+                    && strictly_tighter(&accuracy, &target_accuracy)
                     && candidate.schema.has_unique_key()
             })
             .collect();
@@ -345,8 +345,8 @@ impl AccuracyReconciliationStrategy {
                 bindable_accuracy_aggregate(a).expect("filter above already confirmed this shape");
             let (.., b_accuracy, _, _) =
                 bindable_accuracy_aggregate(b).expect("filter above already confirmed this shape");
-            accuracy_budget(a_accuracy)
-                .partial_cmp(&accuracy_budget(b_accuracy))
+            accuracy_budget(&a_accuracy)
+                .partial_cmp(&accuracy_budget(&b_accuracy))
                 .unwrap_or(Ordering::Equal)
         });
         sources
@@ -491,20 +491,20 @@ mod tests {
     #[test]
     fn a_smaller_epsilon_dominates_a_larger_one() {
         assert!(dominates(
-            &AccuracyTarget::epsilon(0.01),
-            &AccuracyTarget::epsilon(0.05)
+            &AccuracyTarget::max_error(0.01),
+            &AccuracyTarget::max_error(0.05)
         ));
         assert!(!dominates(
-            &AccuracyTarget::epsilon(0.05),
-            &AccuracyTarget::epsilon(0.01)
+            &AccuracyTarget::max_error(0.05),
+            &AccuracyTarget::max_error(0.01)
         ));
     }
 
     #[test]
     fn epsilon_delta_needs_both_dimensions_at_least_as_tight() {
         // Smaller epsilon but larger delta: neither Pareto-dominates.
-        let a = AccuracyTarget::epsilon_delta(0.01, 0.1);
-        let b = AccuracyTarget::epsilon_delta(0.05, 0.01);
+        let a = AccuracyTarget::max_error(0.01).failure_probability(0.1);
+        let b = AccuracyTarget::max_error(0.05).failure_probability(0.01);
         assert!(!dominates(&a, &b));
         assert!(!dominates(&b, &a));
     }
@@ -513,10 +513,10 @@ mod tests {
     fn exact_never_dominates_or_is_dominated() {
         assert!(!dominates(
             &AccuracyTarget::exact(),
-            &AccuracyTarget::epsilon(0.5)
+            &AccuracyTarget::max_error(0.5)
         ));
         assert!(!dominates(
-            &AccuracyTarget::epsilon(0.5),
+            &AccuracyTarget::max_error(0.5),
             &AccuracyTarget::exact()
         ));
         assert!(!dominates(
@@ -528,9 +528,9 @@ mod tests {
     #[test]
     fn equal_resolved_budgets_are_not_strictly_tighter_either_way() {
         // Same numeric (eps, delta) budget, different AccuracyTarget spelling.
-        let epsilon_only = AccuracyTarget::epsilon(0.01);
+        let epsilon_only = AccuracyTarget::max_error(0.01);
         let equivalent_epsilon_delta =
-            AccuracyTarget::epsilon_delta(0.01, crate::realization::DEFAULT_DELTA);
+            AccuracyTarget::max_error(0.01).failure_probability(crate::realization::DEFAULT_DELTA);
         assert!(dominates(&epsilon_only, &equivalent_epsilon_delta));
         assert!(dominates(&equivalent_epsilon_delta, &epsilon_only));
         assert!(!strictly_tighter(&epsilon_only, &equivalent_epsilon_delta));
@@ -542,8 +542,8 @@ mod tests {
     #[test]
     fn looser_quantile_proposes_reading_the_tighter_sibling() {
         let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let tight = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let loose = quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
 
         let strategy = AccuracyReconciliationStrategy::new(&[Rc::clone(&tight), Rc::clone(&loose)]);
 
@@ -570,8 +570,8 @@ mod tests {
         // isolation — proves this is actually wired into the round loop
         // alongside RollupStrategy/TopKLimitReuseStrategy.
         let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let tight = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let loose = quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
 
         let space =
             crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]).unwrap();
@@ -603,7 +603,7 @@ mod tests {
             AggIntent::Quantile {
                 col: Some(1),
                 q: 0.99,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             &scan,
         );
@@ -612,7 +612,7 @@ mod tests {
             AggIntent::Quantile {
                 col: Some(0),
                 q: 0.99,
-                accuracy: AccuracyTarget::epsilon(0.05),
+                accuracy: AccuracyTarget::max_error(0.05),
             },
             &scan,
         );
@@ -624,11 +624,11 @@ mod tests {
     fn topk_intents_differing_only_in_accuracy_are_near_duplicates() {
         let tight = AggIntent::TopK {
             k: 10,
-            accuracy: AccuracyTarget::epsilon(0.01),
+            accuracy: AccuracyTarget::max_error(0.01),
         };
         let loose = AggIntent::TopK {
             k: 10,
-            accuracy: AccuracyTarget::epsilon(0.02),
+            accuracy: AccuracyTarget::max_error(0.02),
         };
         assert!(same_intent_except_accuracy(&tight, &loose));
     }
@@ -636,13 +636,13 @@ mod tests {
     #[test]
     fn different_grouping_is_not_a_near_duplicate() {
         let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
+        let tight = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
         let loose = agg(
             vec![],
             AggIntent::Quantile {
                 col: None,
                 q: 0.99,
-                accuracy: AccuracyTarget::epsilon(0.05),
+                accuracy: AccuracyTarget::max_error(0.05),
             },
             &scan,
         );
@@ -654,7 +654,7 @@ mod tests {
     fn exact_accuracy_is_never_reconciled() {
         let scan = metric_scan();
         let exact = quantile(0.99, AccuracyTarget::exact(), &scan);
-        let approx = quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let approx = quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
         let strategy =
             AccuracyReconciliationStrategy::new(&[Rc::clone(&exact), Rc::clone(&approx)]);
         assert!(!strategy.matches(&TargetSubDAG::new(&approx)));
@@ -672,8 +672,8 @@ mod tests {
         // is the *only* place cross-accuracy sharing gets proposed, never
         // `share_common_sub_dags` itself.
         let scan = metric_scan();
-        let a = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let b = quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let a = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let b = quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
 
         let roots = share_common_sub_dags(vec![("a", a), ("b", b)]);
         assert!(
@@ -703,8 +703,8 @@ mod tests {
         // exact equality — unrelated to this module, but pins the contrast
         // with the test above.
         let scan = metric_scan();
-        let a = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let b = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
+        let a = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let b = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
 
         let roots = share_common_sub_dags(vec![("a", a), ("b", b)]);
         assert!(Rc::ptr_eq(&roots[0].1, &roots[1].1));
@@ -720,8 +720,8 @@ mod tests {
         // `share_common_sub_dags`/`RollupStrategy` apply, which this
         // strategy must not bypass (module docs, point 5).
         let scan = metric_scan();
-        let tight = ungrouped_quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let loose = ungrouped_quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let tight = ungrouped_quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let loose = ungrouped_quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
 
         assert!(
             !tight.schema.clone().has_unique_key(),
@@ -740,8 +740,8 @@ mod tests {
         // `without(...)` grouping never carries a provable unique key,
         // regardless of the excluded set.
         let scan = metric_scan();
-        let tight = without_quantile(0.99, AccuracyTarget::epsilon(0.01), vec![2], &scan);
-        let loose = without_quantile(0.99, AccuracyTarget::epsilon(0.05), vec![2], &scan);
+        let tight = without_quantile(0.99, AccuracyTarget::max_error(0.01), vec![2], &scan);
+        let loose = without_quantile(0.99, AccuracyTarget::max_error(0.05), vec![2], &scan);
 
         assert!(
             !tight.schema.clone().has_unique_key(),
@@ -767,8 +767,8 @@ mod tests {
         // `rc`'s own build," which must not scale with `target`'s own
         // `consumer_count`.
         let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let tight = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let loose = quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
         let strategy = AccuracyReconciliationStrategy::new(&[Rc::clone(&tight), Rc::clone(&loose)]);
         let candidate = strategy
             .replacements(&TargetSubDAG::new(&loose))
@@ -801,8 +801,8 @@ mod tests {
     #[test]
     fn cost_sorted_and_global_selection_handle_a_single_consumer_looser_target() {
         let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let tight = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let loose = quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
         let space =
             crate::replacement::search_workload(vec![("tight", tight), ("loose", loose)]).unwrap();
         let loose_root = &space.roots[1].1;
@@ -857,9 +857,9 @@ mod tests {
         // own 2 consumers at the same time as this strategy's "read the
         // tight sibling instead" candidate.
         let scan = metric_scan();
-        let loose_a = (*quantile(0.99, AccuracyTarget::epsilon(0.05), &scan)).clone();
-        let loose_b = (*quantile(0.99, AccuracyTarget::epsilon(0.05), &scan)).clone();
-        let tight = (*quantile(0.99, AccuracyTarget::epsilon(0.01), &scan)).clone();
+        let loose_a = (*quantile(0.99, AccuracyTarget::max_error(0.05), &scan)).clone();
+        let loose_b = (*quantile(0.99, AccuracyTarget::max_error(0.05), &scan)).clone();
+        let tight = (*quantile(0.99, AccuracyTarget::max_error(0.01), &scan)).clone();
 
         let space = crate::replacement::search_workload(vec![
             ("loose_a", Rc::new(loose_a)),
@@ -952,8 +952,8 @@ mod tests {
         }
 
         let scan = metric_scan();
-        let tight = quantile(0.99, AccuracyTarget::epsilon(0.01), &scan);
-        let loose = quantile(0.99, AccuracyTarget::epsilon(0.05), &scan);
+        let tight = quantile(0.99, AccuracyTarget::max_error(0.01), &scan);
+        let loose = quantile(0.99, AccuracyTarget::max_error(0.05), &scan);
         let space = crate::replacement::search_workload(vec![
             ("tight", Rc::clone(&tight)),
             ("loose", Rc::clone(&loose)),

@@ -283,7 +283,7 @@ accuracy-targeted candidate. Never copy the inner guarantee onto Hydra alone.
 `Exact`, `Epsilon`, and `EpsilonDelta` are the current vocabulary, not a closed
 set. If a new summary has a final-result requirement they cannot express:
 
-1. Define the target's result semantics and compatible `ErrorMetric`.
+1. Define the target's result semantics and compatible `AccuracyMetric`.
 2. Define the parameters and evidence needed to prove satisfaction.
 3. Add the satisfaction rule, including invalid, unknown, and unsupported
    behavior.

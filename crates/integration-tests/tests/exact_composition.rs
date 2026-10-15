@@ -808,7 +808,7 @@ fn physical_export_carries_explicit_timing_for_a_composed_plan() {
 fn promql_max_by_zone_over_quantile_over_time_composes() {
     let expr = lower_promql(
         "max by (zone) (quantile_over_time(0.99, latency[5m]))",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .unwrap();
     let space = plan(vec![("q", expr)], &StatsModel);

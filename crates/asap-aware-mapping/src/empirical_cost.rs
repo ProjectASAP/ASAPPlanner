@@ -229,7 +229,7 @@ impl CostModel for EmpiricalCostModel {
         let Some(accuracy) = accuracy_target(intent) else {
             return candidates.to_vec();
         };
-        let (eps, delta) = accuracy_budget(accuracy);
+        let (eps, delta) = accuracy_budget(&accuracy);
         self.provider
             .rank_candidates(intent, candidates, eps, delta)
     }
@@ -468,7 +468,7 @@ mod tests {
             implementation_version: "test-v1".into(),
         };
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
+            accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.01),
         };
         let records = [
             (SketchAlgorithm::Cms, 20.0),

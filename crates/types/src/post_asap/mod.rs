@@ -41,8 +41,8 @@ pub use family_capability::{
     FamilyCapability, MergeCapability, MergedError, Readout, SelectionRelation,
 };
 pub use guarantee::{
-    AccuracyError, AccuracyGuarantee, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource,
-    ProbabilityExpr,
+    AccuracyError, AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator,
+    GuaranteeSource, ProbabilityExpr,
 };
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,

@@ -25,7 +25,7 @@
 //! ```
 //!
 //! for each output value separately ([`AccuracyScope::PerValue`]), where
-//! `err_metric` is fixed by [`ErrorMetric`]: an absolute error (in value
+//! `err_metric` is fixed by [`AccuracyMetric`]: an absolute error (in value
 //! units or in multiples of a stream norm), a relative error, or a rank
 //! error. Metrics are **not** interchangeable: converting between them
 //! needs an explicit rule with evidence, never an implicit "compare the
@@ -53,7 +53,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::AccuracyTarget;
-pub use crate::types::{AccuracyScope, AccuracySpec, ErrorMetric, NormScale};
+pub use crate::types::{AccuracyMetric, AccuracyScope, AccuracySpec, NormScale};
 
 /// A symbolic, serializable error-bound expression. Non-negative real
 /// arithmetic only — there is no subtraction, so a bound can never be
@@ -269,7 +269,7 @@ impl ProbabilityExpr {
 
 /// How a parent operator consumes its inputs' values — the shape an
 /// `AccuracyModel::propagate` rule is registered against. `#[non_exhaustive]`
-/// for the same reason [`ErrorMetric`] is.
+/// for the same reason [`AccuracyMetric`] is.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -402,17 +402,17 @@ impl AccuracyGuarantee {
     /// A per-value guarantee: error at most `error` in `metric`, failing
     /// with probability at most `failure_probability`.
     pub fn new(
-        metric: ErrorMetric,
+        metric: AccuracyMetric,
         error: BoundExpr,
         failure_probability: ProbabilityExpr,
         provenance: Vec<GuaranteeSource>,
     ) -> Self {
         Self {
             spec: AccuracySpec {
-                metric,
+                accuracy_metric: metric,
                 error,
                 failure_probability,
-                scope: AccuracyScope::PerValue,
+                accuracy_scope: AccuracyScope::PerValue,
             },
             provenance,
         }
@@ -445,12 +445,12 @@ impl AccuracyGuarantee {
     }
 
     /// The zero-error, zero-failure guarantee of a deterministic exact
-    /// computation. `metric` is [`ErrorMetric::ABSOLUTE`]: an exact value
+    /// computation. `metric` is [`AccuracyMetric::ABSOLUTE`]: an exact value
     /// is exact under every metric, and absolute error is the one every
     /// same-metric rule accepts as a zero input.
     pub fn exact(reason: impl Into<String>) -> Self {
         Self::new(
-            ErrorMetric::ABSOLUTE,
+            AccuracyMetric::ABSOLUTE,
             BoundExpr::Zero,
             ProbabilityExpr::Zero,
             vec![GuaranteeSource::Exact {
@@ -496,8 +496,8 @@ pub enum AccuracyError {
     )]
     UnsupportedComposition {
         operator: CompositionOperator,
-        input_metrics: Vec<ErrorMetric>,
-        local_metric: Option<ErrorMetric>,
+        input_metrics: Vec<AccuracyMetric>,
+        local_metric: Option<AccuracyMetric>,
         reason: String,
     },
     /// An approximate input carries no guarantee at all, so nothing can be
@@ -515,7 +515,7 @@ pub enum AccuracyError {
          {failure_probability:?}) does not satisfy {target:?}"
     )]
     TargetNotSatisfied {
-        metric: ErrorMetric,
+        metric: AccuracyMetric,
         bound: Option<f64>,
         failure_probability: Option<f64>,
         target: AccuracyTarget,
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn optimistic_floor_preserves_known_contributions_without_certifying() {
         let guarantee = AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE_STREAM_L1,
+            AccuracyMetric::ABSOLUTE_STREAM_L1,
             BoundExpr::Sum {
                 terms: vec![
                     BoundExpr::Constant { value: 0.1 },
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn guarantee_round_trips_through_json() {
         let g = AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE_STREAM_L1,
+            AccuracyMetric::ABSOLUTE_STREAM_L1,
             BoundExpr::Sum {
                 terms: vec![
                     BoundExpr::Constant { value: 0.01 },
@@ -640,8 +640,8 @@ mod tests {
             }],
         );
         let json = serde_json::to_value(&g).unwrap();
-        assert_eq!(json["spec"]["metric"], "absolute_stream_l1");
-        assert_eq!(json["spec"]["scope"], "per_value");
+        assert_eq!(json["spec"]["accuracy_metric"], "absolute_stream_l1");
+        assert_eq!(json["spec"]["accuracy_scope"], "per_value");
         assert_eq!(json["spec"]["error"]["op"], "sum");
         let back: AccuracyGuarantee = serde_json::from_value(json).unwrap();
         assert_eq!(back, g);
@@ -655,7 +655,7 @@ mod tests {
             statistic: "input_row_count".into(),
         };
         let g = AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE,
+            AccuracyMetric::ABSOLUTE,
             BoundExpr::Product {
                 factors: vec![BoundExpr::Constant { value: 0.01 }, rows()],
             },

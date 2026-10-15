@@ -886,7 +886,7 @@ mod tests {
     fn everything_runs_at_query_time() {
         let root = lower_promql(
             "topk by (job) (10, sum_over_time(m[1m]))",
-            AccuracyTarget::epsilon_delta(0.01, 0.001),
+            AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -928,8 +928,9 @@ mod tests {
     fn summary_root(query: &str) -> QueryRoot {
         let root = lower_promql(
             query,
-            AccuracyTarget::epsilon_delta(0.01, 0.001)
-                .with_metric(asap_types::types::ErrorMetric::Rank),
+            AccuracyTarget::max_error(0.01)
+                .failure_probability(0.001)
+                .accuracy_metric(asap_types::types::AccuracyMetric::Rank),
         );
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],

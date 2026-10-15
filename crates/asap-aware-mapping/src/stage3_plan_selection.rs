@@ -111,7 +111,7 @@ use asap_types::ir::{
 use asap_types::post_asap::sketch::KLL_MAX_K;
 use asap_types::post_asap::ExecutionDataStateError;
 use asap_types::post_asap::{
-    AccuracyGuarantee, CompositionOperator, ErrorMetric, ExecutionTiming, FieldDataType,
+    AccuracyGuarantee, AccuracyMetric, CompositionOperator, ExecutionTiming, FieldDataType,
     Materialization, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
@@ -265,10 +265,10 @@ pub struct Rejection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcceptedAccuracy {
     /// The target's metric; `None` when the user did not set one.
-    pub target_metric: Option<ErrorMetric>,
+    pub target_metric: Option<AccuracyMetric>,
     /// The metric the accepted guarantee is stated in; `None` for an exact
     /// output, which meets every metric.
-    pub accepted_metric: Option<ErrorMetric>,
+    pub accepted_metric: Option<AccuracyMetric>,
     /// The sketch algorithms the query's output reads, in plan order
     /// (e.g. `["Kll"]`); empty for an exact plan.
     pub sketches: Vec<String>,
@@ -278,7 +278,7 @@ impl std::fmt::Display for AcceptedAccuracy {
     /// E.g. `metric not set; accepted rank (Kll)`, or
     /// `metric relative; accepted relative (DDSketch)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = |metric: ErrorMetric| {
+        let name = |metric: AccuracyMetric| {
             serde_json::to_value(metric)
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_owned))
@@ -599,7 +599,7 @@ pub fn sized_roots(
         else {
             continue;
         };
-        let values = match target.scope {
+        let values = match target.accuracy_scope {
             AccuracyScope::PerValue => Some(1.0),
             AccuracyScope::WholeResult => output_values(root, data),
         };
@@ -706,7 +706,7 @@ fn accuracy_check(
         // A guarantee per value is stated over the whole result's `G`
         // values for a whole-result target.
         let values = output_values(root, data);
-        let over_scope = |g: AccuracyGuarantee| match target.scope {
+        let over_scope = |g: AccuracyGuarantee| match target.accuracy_scope {
             AccuracyScope::WholeResult => whole_result_guarantee(&g, values),
             AccuracyScope::PerValue => g,
         };
@@ -721,8 +721,8 @@ fn accuracy_check(
         });
         if let Some(met) = met {
             accepted.push(Some(AcceptedAccuracy {
-                target_metric: target.metric,
-                accepted_metric: (!met.is_exact()).then_some(met.spec.metric),
+                target_metric: target.accuracy_metric,
+                accepted_metric: (!met.is_exact()).then_some(met.spec.accuracy_metric),
                 sketches,
             }));
             continue;
@@ -730,7 +730,7 @@ fn accuracy_check(
         return Err(match guarantee {
             Some(g)
                 if values.is_none()
-                    && target.scope == AccuracyScope::WholeResult
+                    && target.accuracy_scope == AccuracyScope::WholeResult
                     && target.failure_probability.is_some()
                     && g.spec.failure_probability.evaluate().is_none() =>
             {
@@ -746,7 +746,7 @@ fn accuracy_check(
                 "q{query}: the output guarantees a {:?} bound {:?}, failure probability {:?}, \
                  which misses target {target:?}, and the deployment has no evidence that it \
                  meets it",
-                g.spec.metric,
+                g.spec.accuracy_metric,
                 g.spec.error.evaluate(),
                 g.spec.failure_probability.evaluate(),
             ),
@@ -1087,10 +1087,10 @@ fn domain_bound(
     let (mx, my) = (magnitude(&dx), magnitude(&dy));
     let error = |g: &AccuracyGuarantee, m: f64| {
         let bound = g.spec.error.evaluate()?;
-        match g.spec.metric {
+        match g.spec.accuracy_metric {
             _ if g.is_exact() => Some(0.0),
-            ErrorMetric::ABSOLUTE => Some(bound),
-            ErrorMetric::Relative => Some(bound * m),
+            AccuracyMetric::ABSOLUTE => Some(bound),
+            AccuracyMetric::Relative => Some(bound * m),
             _ => None,
         }
     };
@@ -1974,7 +1974,7 @@ mod tests {
     use crate::test_support::{entry, entry_with, lower_promql};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
     use asap_types::post_asap::{
-        BoundExpr, ErrorMetric, GroupingStrategy, ProbabilityExpr, SketchKind,
+        AccuracyMetric, BoundExpr, GroupingStrategy, ProbabilityExpr, SketchKind,
     };
     use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
     use asap_types::types::AccuracyTarget;
@@ -2032,7 +2032,7 @@ mod tests {
     fn candidates() -> Vec<PhysicalCandidate> {
         let root = lower_promql(
             "topk by (job) (10, sum_over_time(m[1m]))",
-            AccuracyTarget::epsilon_delta(0.01, 0.001),
+            AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -2069,9 +2069,9 @@ mod tests {
     /// estimates carry no guarantee since #575, so a quantile summary is used.)
     #[test]
     fn accuracy_failing_candidate_is_rejected_as_invalid() {
-        let planned = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let planned = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let candidates = all_candidates("quantile_over_time(0.99, m[1m])", &planned);
-        let strict = AccuracyTarget::epsilon_delta(1e-6, 1e-9);
+        let strict = AccuracyTarget::max_error(1e-6).failure_probability(1e-9);
         let summaries: Vec<_> = candidates
             .iter()
             .filter(|c| has_summary_estimate(c))
@@ -2116,11 +2116,13 @@ mod tests {
     /// non-negative is invalid.
     #[test]
     fn count_min_over_signed_weights_is_rejected_as_invalid() {
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let selection = select_plan(
             &candidates(),
             &[entry_with(
-                target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                target
+                    .clone()
+                    .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1),
                 repeating(10_000),
             )],
             &data(),
@@ -2139,7 +2141,7 @@ mod tests {
     #[test]
     fn count_min_over_samples_needs_a_declared_counter() {
         use asap_types::workload::MetricType;
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let with_types = |types: &[(&str, MetricType)]| DataWorkload {
             metric_types: types.iter().map(|(m, t)| (m.to_string(), *t)).collect(),
             ..data()
@@ -2154,7 +2156,9 @@ mod tests {
             let selection = select_plan(
                 &candidates(),
                 &[entry_with(
-                    target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                    target
+                        .clone()
+                        .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1),
                     repeating(10_000),
                 )],
                 &data,
@@ -2188,7 +2192,7 @@ mod tests {
     fn the_sign_gate_opens_only_at_one() {
         use crate::accuracy::composition::samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             BoundExpr::Product {
                 factors: vec![
                     BoundExpr::Constant { value: 0.01 },
@@ -2235,7 +2239,7 @@ mod tests {
     fn sign_of_counter_samples_is_bound_from_the_declared_type() {
         use crate::accuracy::composition::samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             BoundExpr::Product {
                 factors: vec![
                     BoundExpr::Constant { value: 0.01 },
@@ -2277,7 +2281,7 @@ mod tests {
     #[test]
     fn the_selected_plan_carries_confirmed_weights() {
         use asap_types::workload::MetricType;
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
         let root = asap_types::ir::schema_support::with_promql_series_identity(&root).unwrap();
         let data = DataWorkload {
@@ -2375,11 +2379,13 @@ mod tests {
     #[test]
     fn per_node_costs_cover_the_dag_and_sum_to_the_total() {
         let candidates = candidates();
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let selection = select_plan(
             &candidates,
             &[entry_with(
-                target.target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                target
+                    .clone()
+                    .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1),
                 repeating(10_000),
             )],
             &data(),
@@ -2510,13 +2516,18 @@ mod tests {
     /// The KLL candidates of `quantile_over_time(0.99, x[5m])`, per series,
     /// within rank error 0.01 at δ = 0.01 over `scope`.
     fn per_series_kll(scope: AccuracyScope) -> (Vec<PhysicalCandidate>, AccuracyTarget) {
-        let requested = AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank);
+        let requested = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.01)
+            .accuracy_metric(AccuracyMetric::Rank);
         let candidates = all_candidates("quantile_over_time(0.99, x[5m])", &requested)
             .into_iter()
             .filter(|c| !kll_params(&c.roots).is_empty())
             .collect::<Vec<_>>();
         assert!(!candidates.is_empty());
-        let target = requested.target_in(ErrorMetric::Rank).with_scope(scope);
+        let target = requested
+            .clone()
+            .accuracy_metric(AccuracyMetric::Rank)
+            .accuracy_scope(scope);
         (candidates, target)
     }
 
@@ -2567,7 +2578,7 @@ mod tests {
         };
         assert_eq!(*failure_probability, Some(0.01 / 10_000.0));
         assert!(k > k1, "{k} vs {k1}");
-        let per_value = whole.clone().with_scope(AccuracyScope::PerValue);
+        let per_value = whole.clone().accuracy_scope(AccuracyScope::PerValue);
         assert_eq!(kll_params(&select(&per_value).plan), stage1);
     }
 
@@ -2624,7 +2635,7 @@ mod tests {
     fn a_root_of_at_most_one_row_returns_one_value() {
         let none = DataWorkload::default();
         let root =
-            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::epsilon(0.01)));
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
         assert_eq!(output_values(&root("sum(rate(x[5m]))"), &none), Some(1.0));
         assert_eq!(output_values(&root("topk(5, rate(x[5m]))"), &none), None);
         assert_eq!(
@@ -2677,7 +2688,7 @@ mod tests {
 
     /// Deployment evidence of a small error in a fixed metric for every
     /// output that is not exact.
-    struct EveryOutputMeasuredIn(ErrorMetric);
+    struct EveryOutputMeasuredIn(AccuracyMetric);
 
     impl AccuracyEvidenceProvider for EveryOutputMeasuredIn {
         fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
@@ -2700,8 +2711,9 @@ mod tests {
             metric_types: [("m".to_string(), asap_types::workload::MetricType::Counter)].into(),
             ..data()
         };
-        let target =
-            AccuracyTarget::epsilon_delta(0.5, 0.5).target_in(ErrorMetric::ABSOLUTE_STREAM_L1);
+        let target = AccuracyTarget::max_error(0.5)
+            .failure_probability(0.5)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
         let select = |metric| {
             select_plan(
                 &candidates(),
@@ -2711,7 +2723,7 @@ mod tests {
             )
             .unwrap()
         };
-        let relative = select(ErrorMetric::Relative);
+        let relative = select(AccuracyMetric::Relative);
         assert_eq!(relative.selected, "P1");
         let mut invalid: Vec<_> = relative.rejected.iter().filter(|r| !r.valid).collect();
         invalid.sort_by(|a, b| a.id.cmp(&b.id));
@@ -2726,7 +2738,7 @@ mod tests {
                 rejected.reason
             );
         }
-        let l1 = select(ErrorMetric::ABSOLUTE_STREAM_L1);
+        let l1 = select(AccuracyMetric::ABSOLUTE_STREAM_L1);
         assert!(l1.rejected.iter().all(|r| r.valid), "{:?}", l1.rejected);
     }
 
@@ -2736,7 +2748,7 @@ mod tests {
     /// output admits them.
     #[test]
     fn combined_estimates_need_evidence_about_the_output() {
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let candidates = all_candidates(
             "quantile_over_time(0.99, m[1m]) - quantile_over_time(0.5, m[1m])",
             &target,
@@ -2751,7 +2763,7 @@ mod tests {
         let builtin = select_plan(
             &candidates,
             &[entry_with(
-                target.target_in(ErrorMetric::ABSOLUTE),
+                target.clone().accuracy_metric(AccuracyMetric::ABSOLUTE),
                 repeating(10_000),
             )],
             &data(),
@@ -2772,7 +2784,7 @@ mod tests {
         let measured = select_plan(
             &candidates,
             &[entry_with(
-                target.target_in(ErrorMetric::ABSOLUTE),
+                target.clone().accuracy_metric(AccuracyMetric::ABSOLUTE),
                 repeating(10_000),
             )],
             &data(),
@@ -2811,7 +2823,7 @@ mod tests {
     /// query runs is not charged.)
     #[test]
     fn exact_quantile_state_costs_more_than_a_sketch_over_large_groups() {
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
         for (query, sketch_wins) in [
             ("quantile(0.99, rate(x[5m]))", true),
             ("quantile by (job) (0.99, rate(x[5m]))", false),
@@ -2820,7 +2832,7 @@ mod tests {
             let selection = select_plan(
                 &candidates,
                 &[entry_with(
-                    target.target_in(ErrorMetric::Rank),
+                    target.clone().accuracy_metric(AccuracyMetric::Rank),
                     repeating(10_000),
                 )],
                 &data(),
@@ -3012,7 +3024,7 @@ mod tests {
     /// sketch is.
     #[test]
     fn exact_distinct_count_beats_a_sketch_over_small_groups() {
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
         let one_series = DataWorkload {
             input_cardinality: Evidence {
                 value: Some(1),
@@ -3025,7 +3037,7 @@ mod tests {
             let selection = select_plan(
                 &candidates,
                 &[entry_with(
-                    target.target_in(ErrorMetric::Relative),
+                    target.clone().accuracy_metric(AccuracyMetric::Relative),
                     repeating(10_000),
                 )],
                 &data,
@@ -3068,12 +3080,12 @@ mod tests {
     /// At δ = 0.001 a KLL candidate meets the target and is valid.
     #[test]
     fn kll_candidate_meets_a_failure_probability_below_one_percent() {
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let candidates = all_candidates("quantile(0.99, rate(x[5m]))", &target);
         let selection = select_plan(
             &candidates,
             &[entry_with(
-                target.target_in(ErrorMetric::Rank),
+                target.clone().accuracy_metric(AccuracyMetric::Rank),
                 repeating(10_000),
             )],
             &data(),
@@ -3101,7 +3113,7 @@ mod tests {
     fn scalar_root_guarantees_compose_through_arithmetic() {
         let node = lower_promql("sum(m)", AccuracyTarget::exact());
         let approximate = AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE,
+            AccuracyMetric::ABSOLUTE,
             BoundExpr::Constant { value: 0.01 },
             ProbabilityExpr::Constant { value: 0.001 },
             vec![],
@@ -3122,7 +3134,7 @@ mod tests {
             Some(approximate.clone())
         );
         let scaled = root_guarantee(&doubled(with(Some(approximate.clone())))).unwrap();
-        assert_eq!(scaled.spec.metric, ErrorMetric::ABSOLUTE);
+        assert_eq!(scaled.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert!((scaled.spec.error.evaluate().unwrap() - 0.02).abs() < 1e-12);
         assert_eq!(scaled.spec.failure_probability.evaluate(), Some(0.001));
         let difference = QueryRoot::Scalar(ScalarExpr::Arithmetic {
@@ -3134,7 +3146,7 @@ mod tests {
         let sum = root_guarantee(&difference).unwrap();
         assert!((sum.spec.error.evaluate().unwrap() - 0.02).abs() < 1e-12);
         let mut rank = approximate;
-        rank.spec.metric = ErrorMetric::Rank;
+        rank.spec.accuracy_metric = AccuracyMetric::Rank;
         assert_eq!(root_guarantee(&doubled(with(Some(rank)))), None);
         assert!(
             root_guarantee(&doubled(with(Some(AccuracyGuarantee::exact("exact")))))
@@ -3205,7 +3217,7 @@ mod tests {
     /// result is a rank interval: no guarantee in the MVP.
     #[test]
     fn extremum_and_scaling_over_per_series_estimates_compose() {
-        let target = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         for query in [
             "max by (job) (quantile_over_time(0.99, m[1m]))",
             "2 * max by (job) (quantile_over_time(0.99, m[1m]))",
@@ -3218,7 +3230,7 @@ mod tests {
             assert!(!ddsketch.is_empty(), "{query}");
             for candidate in ddsketch {
                 let g = output_guarantee(candidate).expect(query);
-                assert_eq!(g.spec.metric, ErrorMetric::Relative, "{query}");
+                assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative, "{query}");
                 assert!(g.spec.error.evaluate().unwrap() <= 0.01, "{query}");
                 assert!(selection.costs.contains_key(&candidate.id), "{query}");
             }
@@ -3237,7 +3249,7 @@ mod tests {
     /// guarantee in the MVP, so those are not.
     #[test]
     fn lipschitz_functions_keep_and_shifts_and_comparisons_drop_a_relative_bound() {
-        let target = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let q = "quantile_over_time(0.99, m[1m])";
         for (query, kept) in [
             (format!("-{q}"), true),
@@ -3258,7 +3270,7 @@ mod tests {
                 let g = output_guarantee(candidate);
                 if kept {
                     let g = g.expect(&query);
-                    assert_eq!(g.spec.metric, ErrorMetric::Relative, "{query}");
+                    assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative, "{query}");
                     assert!(g.spec.error.evaluate().unwrap() <= 0.01, "{query}");
                     assert!(selection.costs.contains_key(&candidate.id), "{query}");
                 } else {
@@ -3276,7 +3288,7 @@ mod tests {
     /// the query, and the fold has no guarantee.
     #[test]
     fn a_fold_over_subquery_estimates_counts_its_steps() {
-        let target = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let q = "quantile_over_time(0.99, m[1m])";
         let (candidates, selection) = run(
             &format!("max_over_time({q}[10m:1m])"),
@@ -3291,7 +3303,7 @@ mod tests {
         assert!(!ddsketch.is_empty());
         for candidate in ddsketch {
             let g = output_guarantee(candidate).expect("a guarantee");
-            assert_eq!(g.spec.metric, ErrorMetric::Relative);
+            assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
             assert!(g.spec.error.evaluate().unwrap() <= 0.01);
             let ProbabilityExpr::Scaled { count, .. } = &g.spec.failure_probability else {
                 panic!("{g:?}");
@@ -3317,7 +3329,7 @@ mod tests {
     /// are labels, not the estimates (#669).
     #[test]
     fn counting_estimates_by_a_label_stays_exact() {
-        let target = AccuracyTarget::epsilon(0.01);
+        let target = AccuracyTarget::max_error(0.01);
         let (candidates, _) = run(
             "count by (le) (quantile_over_time(0.99, m[1m]))",
             &target,
@@ -3350,7 +3362,7 @@ mod tests {
     /// symbolic and plan selection treats it as unmet.
     #[test]
     fn average_over_relative_estimates_needs_the_sign() {
-        let target = AccuracyTarget::epsilon(0.01);
+        let target = AccuracyTarget::max_error(0.01);
         let (candidates, selection) = run(
             "avg by (job) (quantile_over_time(0.99, m[1m]))",
             &target,
@@ -3374,7 +3386,9 @@ mod tests {
     /// workload's input cardinality; without one, the target is unmet.
     #[test]
     fn stage3_binds_the_input_row_count_from_the_data_workload() {
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Relative);
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::Relative);
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
         let ddsketch = |candidates: &[PhysicalCandidate]| -> Vec<String> {
             candidates
@@ -3420,8 +3434,8 @@ mod tests {
     /// twice that, is checked against a looser one.
     #[test]
     fn ddsketch_ratio_meets_its_target_only_with_operand_domains() {
-        let planned = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
-        let target = AccuracyTarget::epsilon(0.05).with_metric(ErrorMetric::Relative);
+        let planned = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
+        let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
         let run = |models| run_selecting(query, &planned, &target, &data(), models);
         let (candidates, without) = run(PlanningModels::builtin());
@@ -3443,7 +3457,7 @@ mod tests {
         ScalarExpr::PromqlScalarFromVector(Rc::new((*node).clone().with_guarantee(Some(guarantee))))
     }
 
-    fn guarantee(metric: ErrorMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
+    fn guarantee(metric: AccuracyMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
         AccuracyGuarantee::new(
             metric,
             BoundExpr::Constant { value: bound },
@@ -3507,11 +3521,11 @@ mod tests {
             ArithmeticOpKind::Sub,
             raw(
                 "count by (job) (a)",
-                guarantee(ErrorMetric::ABSOLUTE_STREAM_L1, 0.01, 0.001),
+                guarantee(AccuracyMetric::ABSOLUTE_STREAM_L1, 0.01, 0.001),
             ),
             raw(
                 "count by (job) (b)",
-                guarantee(ErrorMetric::ABSOLUTE_STREAM_L1, 0.02, 0.001),
+                guarantee(AccuracyMetric::ABSOLUTE_STREAM_L1, 0.02, 0.001),
             ),
         );
         let models = PlanningModels::builtin();
@@ -3533,7 +3547,7 @@ mod tests {
     fn stage3_binds_a_stream_norm_only_for_the_raw_value_column() {
         use asap_types::post_asap::SummaryInputExpr;
         use asap_types::pre_asap::ColumnRef;
-        let frequency = guarantee(ErrorMetric::ABSOLUTE_STREAM_L1, 0.01, 0.001);
+        let frequency = guarantee(AccuracyMetric::ABSOLUTE_STREAM_L1, 0.01, 0.001);
         let doubled = |summary: Rc<OperatorNode>| {
             scalar_root(
                 ArithmeticOpKind::Mul,
@@ -3578,8 +3592,8 @@ mod tests {
     #[test]
     fn stage3_binds_products_and_quotients_from_operand_domains() {
         let (x, y) = (
-            scalar_of("sum(a)", guarantee(ErrorMetric::ABSOLUTE, 0.01, 0.001)),
-            scalar_of("sum(b)", guarantee(ErrorMetric::ABSOLUTE, 0.02, 0.001)),
+            scalar_of("sum(a)", guarantee(AccuracyMetric::ABSOLUTE, 0.01, 0.001)),
+            scalar_of("sum(b)", guarantee(AccuracyMetric::ABSOLUTE, 0.02, 0.001)),
         );
         let product = scalar_root(ArithmeticOpKind::Mul, x.clone(), y.clone());
         let quotient = scalar_root(ArithmeticOpKind::Div, x, y);
@@ -3599,8 +3613,8 @@ mod tests {
         }
         let ratio = scalar_root(
             ArithmeticOpKind::Div,
-            scalar_of("sum(a)", guarantee(ErrorMetric::Relative, 0.01, 0.0)),
-            scalar_of("sum(b)", guarantee(ErrorMetric::Relative, 0.01, 0.0)),
+            scalar_of("sum(a)", guarantee(AccuracyMetric::Relative, 0.01, 0.0)),
+            scalar_of("sum(b)", guarantee(AccuracyMetric::Relative, 0.01, 0.0)),
         );
         let g = bound_root_guarantee(&ratio, &data(), &PlanningModels::builtin()).unwrap();
         assert!(g.spec.error.has_unknown(), "{g:?}");
@@ -3612,8 +3626,8 @@ mod tests {
     /// inherited it, so the candidate is selectable.
     #[test]
     fn a_scaled_ratio_binds_at_its_division() {
-        let planned = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative);
-        let target = AccuracyTarget::epsilon(0.05).with_metric(ErrorMetric::Relative);
+        let planned = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
+        let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
         let query = "(quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])) \
                      / max_over_time(m[1m])";
         let (candidates, selection) = run_selecting(
@@ -3640,7 +3654,7 @@ mod tests {
     /// have expired) is not used; timeless declared evidence is.
     #[test]
     fn stage3_binds_only_fresh_input_cardinality() {
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.001);
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
         let expiring = DataWorkload {
             input_cardinality: Evidence {
@@ -3670,7 +3684,7 @@ mod tests {
         };
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
-            AccuracyTarget::epsilon_delta(0.01, 0.01),
+            AccuracyTarget::max_error(0.01).failure_probability(0.01),
         );
         let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -4021,7 +4035,9 @@ mod tests {
 
     /// The p99 target [`pane_candidates`] are sized for.
     fn p99_target() -> AccuracyTarget {
-        AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank)
+        AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::Rank)
     }
 
     /// A predictable p99 query evaluated every minute, with no latency bound.

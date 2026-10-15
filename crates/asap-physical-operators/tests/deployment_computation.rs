@@ -614,7 +614,7 @@ fn population_sums_and_averages_are_compensated() {
 #[test]
 fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
-    let accuracy = AccuracyTarget::epsilon(0.02);
+    let accuracy = AccuracyTarget::max_error(0.02);
     let root = lower_with("count(up)", accuracy.clone());
     let dag = logical_candidates(root, accuracy)
         .into_iter()

@@ -45,7 +45,6 @@ use asap_types::pre_asap::{
     Reduction, SampleKind, ScalarValue, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
-use asap_types::types::ErrorMetric;
 use support::{lower_promql, promql_scalar};
 
 // ── harness helpers ─────────────────────────────────────────────────────────────
@@ -703,12 +702,12 @@ fn count_maps_to_count_and_inherits_accuracy() {
         intents(&exact)
     );
 
-    let approx = lower_promql("count by (job) (up)", AccuracyTarget::epsilon(0.01)).unwrap();
+    let approx = lower_promql("count by (job) (up)", AccuracyTarget::max_error(0.01)).unwrap();
     assert!(
         has(&approx, |i| matches!(
             i,
             AggIntent::Count { accuracy } if (accuracy.error - 0.01).abs() < 1e-9
-                && accuracy.metric == Some(ErrorMetric::ABSOLUTE_STREAM_L1)
+                && accuracy.accuracy_metric.is_none()
         )),
         "Count must carry the approximate target, got {:?}",
         intents(&approx)

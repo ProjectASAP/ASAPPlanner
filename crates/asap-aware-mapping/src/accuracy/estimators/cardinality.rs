@@ -49,7 +49,7 @@ pub(super) fn guarantee(
                 algorithm,
                 params,
                 query,
-                ErrorMetric::Relative,
+                AccuracyMetric::Relative,
                 eps,
                 ProbabilityExpr::Constant {
                     value: kmv_failure_probability(*k, eps),
@@ -61,7 +61,7 @@ pub(super) fn guarantee(
             algorithm,
             params,
             query,
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             10.0 / f64::from(k.saturating_sub(2).max(1)).sqrt(),
             ProbabilityExpr::Constant { value: 0.01 },
             "theta_variance_chebyshev_99_v1",
