@@ -1,4 +1,4 @@
-//! `stage_pipeline` writes a valid four-stage viewer document for #509 Example 1.
+//! `stage_pipeline` writes valid four-stage viewer documents for #509's examples.
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
@@ -208,6 +208,42 @@ fn example3a_selects_the_cheapest_of_all_candidates() {
         .as_array()
         .unwrap();
     assert!(physical.iter().any(|p| p["id"] == expected.as_str()));
+}
+
+/// Example 2 plans its three SQL queries: Stage 1 lists a candidate in
+/// which one UnivMon build serves all three, and plan selection selects a
+/// plan.
+#[test]
+fn example2_plans_the_sql_workload_with_one_univmon_for_all_three() {
+    let document = generate_example("planner-layering-2", &["--max-displayed", "100000"]);
+    let queries = document["workload"]["queries"].as_array().unwrap();
+    assert_eq!(queries.len(), 3);
+    assert!(queries.iter().all(|q| q["language"] == "sql"));
+    validated_dag(&document["stage0_query_language_frontends"]["dag"], 3);
+    let univmon_builds = |candidate: &Value| {
+        candidate["dag"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| {
+                n["operator"]["ASAP"]["SummaryAgg"]["family"]["Sketch"][0]["algorithm"] == "UnivMon"
+            })
+            .count()
+    };
+    let candidates = document["stage1_logical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert!(
+        candidates.iter().any(|c| {
+            c["display_name"]
+                .as_str()
+                .unwrap()
+                .starts_with("Q1 UnivMon · Q2 UnivMon (Count acc) · Q3 UnivMon (Count acc)")
+                && univmon_builds(c) == 1
+        }),
+        "no candidate reads one UnivMon for all three"
+    );
+    assert!(document["stage3_plan_selection"]["selected"].is_string());
 }
 
 /// SQL queries over tables declared with `--table` are planned through the
