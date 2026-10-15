@@ -892,7 +892,11 @@ fn rebuild(
 /// that replaces the coarse build's finalized value.
 #[derive(Debug, Clone)]
 pub struct RollupSite {
+    /// The coarse exact accumulator build (`SummaryAgg`); every reader of
+    /// it is a `FinalizeExactAccumulator`, which the rollup replaces.
     pub coarse: Rc<OperatorNode>,
+    /// The finer build's `FinalizeExactAccumulator`, already in the
+    /// candidate, whose values the rollup reads.
     pub finer: Rc<OperatorNode>,
     /// The finalized exact accumulator over `finer`'s values, grouped by
     /// the coarse keys, with the coarse value's column names.
@@ -905,7 +909,11 @@ pub struct RollupSite {
 /// fails.
 #[derive(Debug)]
 pub struct RollupVariant {
+    /// The sites rolled up (indices into [`rollup_sites`]), ascending.
     pub sites: Vec<usize>,
+    /// The candidate's roots with those sites rolled up and every guarantee
+    /// composed again; `Err` when the rebuilt DAG does not derive or
+    /// compose, which drops only this candidate.
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
 
@@ -1108,7 +1116,9 @@ fn same_rows(a: &Rc<OperatorNode>, b: &Rc<OperatorNode>) -> bool {
 /// The finalized value of `coarse` (`coarse_value`) as an exact
 /// accumulator over `finer` (the finer build's finalized values), grouped by
 /// the coarse keys, finalized, with `coarse_value`'s column names; `None`
-/// when it cannot be built or differs from `coarse_value` in type.
+/// when it cannot be built, the finer values are not Float64 (the only
+/// update type exact accumulators execute), or it differs from
+/// `coarse_value` in type.
 fn rolled_up(
     coarse: &OperatorNode,
     finer: &Rc<OperatorNode>,
@@ -1136,6 +1146,15 @@ fn rolled_up(
     };
     // A grouped accumulator outputs its keys, then its value.
     let value = fine_by.len();
+    // Exact accumulators update on Float64 values only: an integer count is
+    // not summed again.
+    if finer.schema.fields.get(value).map(|f| &f.dtype)
+        != Some(&FieldDataType::Plain(
+            asap_types::pre_asap::DataType::Float64,
+        ))
+    {
+        return None;
+    }
     let regrouped = partitions_over(reduction, &child.schema, &finer.schema)?;
     if regrouped
         .group_keys()
@@ -1295,7 +1314,11 @@ fn replace_all(
 /// of the input, partitioned as they are.
 #[derive(Debug, Clone)]
 pub struct TopKReuseSite {
+    /// The plain `Aggregate` top-k nodes of one input and partition, in
+    /// children-first order; at least two different `k`.
     pub members: Vec<Rc<OperatorNode>>,
+    /// `Limit(k_max)` over a descending `Sort` of their input, partitioned
+    /// as they are: what every member reads in a reuse candidate.
     pub ranking: Rc<OperatorNode>,
 }
 
@@ -1305,7 +1328,11 @@ pub struct TopKReuseSite {
 /// composed again; the error when that fails.
 #[derive(Debug)]
 pub struct TopKReuseVariant {
+    /// The sites reused (indices into [`topk_reuse_sites`]), ascending.
     pub sites: Vec<usize>,
+    /// The candidate's roots with every member of those sites reading its
+    /// ranking and every guarantee composed again; `Err` when the rebuilt
+    /// DAG does not derive or compose, which drops only this candidate.
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
 
@@ -2086,11 +2113,16 @@ mod tests {
         }
     }
 
-    /// Counts roll up as the sum of the finer counts; minima as minima.
+    /// Minima roll up as minima, maxima as maxima. Integer counts do not
+    /// roll up: exact accumulators execute only Float64 updates.
     #[test]
-    fn counts_and_extrema_roll_up() {
+    fn extrema_roll_up_and_integer_counts_do_not() {
+        assert!(rollup_sites(&exact(&[
+            "count by (job) (m)",
+            "count by (job, instance) (m)"
+        ]))
+        .is_empty());
         for (query, kind) in [
-            ("count by (job) (m)", ExactKind::Sum),
             ("min by (job) (m)", ExactKind::Min),
             ("max by (job) (m)", ExactKind::Max),
         ] {

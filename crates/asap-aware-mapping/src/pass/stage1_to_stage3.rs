@@ -51,7 +51,7 @@ use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, Quer
 use crate::asap_aware_cse::{
     capability_groups, identical_expression_variants, pane_sites, rollup_sites, rollup_variants,
     sharing_groups, summary_capability_variants, topk_reuse_sites, topk_reuse_variants,
-    window_composition_variants,
+    window_composition_variants, MAX_REUSE_SITES,
 };
 use crate::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
@@ -485,9 +485,22 @@ impl Pass2List {
     /// The reuse candidates of `roots`: the exact top-k reuse rule's, then
     /// each rollup candidate followed by its own exact top-k reuse
     /// candidates; each followed by its identical-expression candidates.
+    /// They are listed eagerly, like every Pass 2 rule's: more than
+    /// [`MAX_REUSE_SITES`] rollup and top-k sites together list one error.
     fn reuse_variants(&mut self, rules: &Rules, roots: &[QueryRoot]) {
-        self.topk_variants(rules, roots);
         let sites = rollup_sites(roots);
+        // Every rollup subset is combined with every top-k subset: cap the
+        // product, not each factor.
+        if sites.len() + topk_reuse_sites(roots).len() > MAX_REUSE_SITES {
+            self.out.push(Pass2::failed(
+                rules,
+                PerComputationCandidateError::Unsupported(
+                    "more than 20 rollup and top-k reuse sites together (2^n candidates)",
+                ),
+            ));
+            return;
+        }
+        self.topk_variants(rules, roots);
         let variants = match rollup_variants(roots, &sites) {
             Ok(variants) => variants,
             Err(error) => {
@@ -898,5 +911,64 @@ impl OptimizationPass for Stage1ToStage3Pass {
         }
         output.selection = Some(selection);
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::lower_promql;
+
+    /// The composed candidate of `queries`, every target at its first
+    /// (exact) candidate.
+    fn exact(queries: &[String]) -> Vec<QueryRoot> {
+        let roots = queries
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let root = lower_promql(q, asap_types::types::AccuracyTarget::exact());
+                (
+                    i,
+                    QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
+                )
+            })
+            .collect();
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        compose_logical_candidate(&inventory, &vec![0; inventory.targets.len()])
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect()
+    }
+
+    /// Rollup and exact top-k reuse sites multiply (every subset of one
+    /// with every subset of the other): past 20 sites together the
+    /// candidate lists one error instead of enumerating 2^21 candidates.
+    #[test]
+    fn reuse_sites_past_20_together_are_an_error() {
+        let mut queries = Vec::new();
+        for i in 0..11 {
+            queries.push(format!("sum by (job) (m{i})"));
+            queries.push(format!("sum by (job, instance) (m{i})"));
+        }
+        for i in 0..10 {
+            queries.push(format!("topk by (job) (5, sum by (job, instance) (t{i}))"));
+            queries.push(format!("topk by (job) (10, sum by (job, instance) (t{i}))"));
+        }
+        let roots = exact(&queries);
+        assert_eq!(rollup_sites(&roots).len(), 11);
+        assert_eq!(topk_reuse_sites(&roots).len(), 10);
+        let mut found = Pass2List {
+            seen: vec![flatten(&roots).0],
+            out: Vec::new(),
+        };
+        found.reuse_variants(&Rules::default(), &roots);
+        let [failed] = found.out.as_slice() else {
+            panic!("one error, {} candidates", found.out.len())
+        };
+        assert!(matches!(
+            failed.roots,
+            Err(PerComputationCandidateError::Unsupported(_))
+        ));
     }
 }
