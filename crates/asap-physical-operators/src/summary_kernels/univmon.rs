@@ -45,6 +45,10 @@ pub struct UnivMonAccumulator {
     /// one this long, so it never walks the heaps (a build charges memory
     /// after every row).
     max_key_bytes: usize,
+    /// The bytes of every variable-length key inserted (or merged in),
+    /// counted once per insertion: each layer's heap keeps at most one copy
+    /// of a key, so the heaps retain at most `layers` times this.
+    inserted_key_bytes: usize,
 }
 
 impl UnivMonAccumulator {
@@ -52,6 +56,7 @@ impl UnivMonAccumulator {
     pub(crate) fn clear(&mut self) {
         self.inner.free();
         self.max_key_bytes = 0;
+        self.inserted_key_bytes = 0;
     }
 
     pub fn new(heap_size: usize, rows: usize, cols: usize, layers: usize) -> Result<Self, Error> {
@@ -59,6 +64,7 @@ impl UnivMonAccumulator {
         Ok(Self {
             inner: UnivMon::init_univmon(heap_size, rows, cols, layers),
             max_key_bytes: 0,
+            inserted_key_bytes: 0,
         })
     }
 
@@ -76,18 +82,19 @@ impl UnivMonAccumulator {
             return Err("terminal-mode UnivMon state cannot accept standard updates".into());
         }
         // One walk of the decoded heaps, not one per charge.
-        let max_key_bytes = (0..sketch.layer_size)
+        let keys: Vec<usize> = (0..sketch.layer_size)
             .flat_map(|layer| sketch.hh_layers[layer].heap())
             .map(|item| match &item.key {
                 asap_sketchlib::HeapItem::String(key) => key.capacity(),
                 asap_sketchlib::HeapItem::Bytes(key) => key.capacity(),
                 _ => 0,
             })
-            .max()
-            .unwrap_or(0);
+            .collect();
         Ok(Self {
             inner: sketch,
-            max_key_bytes,
+            max_key_bytes: keys.iter().copied().max().unwrap_or(0),
+            // The retained keys themselves (already counted per layer).
+            inserted_key_bytes: keys.iter().fold(0, |a, &b| a.saturating_add(b)),
         })
     }
 
@@ -129,6 +136,7 @@ impl UnivMonAccumulator {
             .ok_or("UnivMon count overflow")?;
         self.inner.insert(&DataInput::Bytes(&key), 1);
         self.max_key_bytes = self.max_key_bytes.max(key.len());
+        self.inserted_key_bytes = self.inserted_key_bytes.saturating_add(key.len());
         Ok(())
     }
 
@@ -165,21 +173,26 @@ impl UnivMonAccumulator {
             .ok_or("UnivMon count overflow")?;
         self.inner.merge(&other.inner);
         self.max_key_bytes = self.max_key_bytes.max(other.max_key_bytes);
+        self.inserted_key_bytes = self
+            .inserted_key_bytes
+            .saturating_add(other.inserted_key_bytes);
         Ok(())
     }
 }
 
 impl AggregateCore for UnivMonAccumulator {
     /// Counters and heap slots of every layer, plus an upper bound on the
-    /// variable-length keys the heaps retain: every slot holding the
-    /// longest key seen. Constant time, since a build charges memory after
-    /// every row.
+    /// variable-length keys the heaps retain: the smaller of every slot
+    /// holding the longest key seen and every layer holding a copy of every
+    /// key inserted. Constant time, since a build charges memory after
+    /// every row; the library exposes no eviction hook for an exact running
+    /// total, so a stream of long keys is still overcounted.
     fn approx_memory_bytes(&self) -> usize {
-        let key_bytes = self
-            .inner
-            .layer_size
+        let layers = self.inner.layer_size;
+        let key_bytes = layers
             .saturating_mul(self.inner.heap_size)
-            .saturating_mul(self.max_key_bytes);
+            .saturating_mul(self.max_key_bytes)
+            .min(layers.saturating_mul(self.inserted_key_bytes));
         key_bytes
             .saturating_add(std::mem::size_of::<Self>())
             .saturating_add(
@@ -365,18 +378,34 @@ mod tests {
     }
 
     // A build charges memory after every row, so the charge must not walk
-    // the heaps: with keys of one length it stays the same however many
-    // keys the heaps hold.
+    // the heaps: once the keys inserted outnumber the heap slots, keys of
+    // one length are charged the same however many keys the heaps hold.
     #[test]
     fn memory_charge_does_not_grow_with_heap_occupancy() {
         let mut state = UnivMonAccumulator::new(512, 3, 64, 4).unwrap();
         let key = |i: i64| crate::values::Value::Utf8(format!("{i:08}").into());
-        state.insert_value(&key(0)).unwrap();
-        let one = state.approx_memory_bytes();
-        for i in 1..2000 {
+        for i in 0..1000 {
             state.insert_value(&key(i)).unwrap();
         }
-        assert_eq!(state.approx_memory_bytes(), one);
+        let full = state.approx_memory_bytes();
+        for i in 1000..4000 {
+            state.insert_value(&key(i)).unwrap();
+        }
+        assert_eq!(state.approx_memory_bytes(), full);
+    }
+
+    // One long key in a large sketch is charged at most once per layer (a
+    // key's heap copies), not once per heap slot (19 layers of 20,000
+    // slots of 1 KB would be 380 MB).
+    #[test]
+    fn one_long_key_is_charged_about_once() {
+        let mut state = UnivMonAccumulator::new(20_000, 3, 64, 19).unwrap();
+        let empty = state.approx_memory_bytes();
+        state
+            .insert_value(&crate::values::Value::Utf8("x".repeat(1024).into()))
+            .unwrap();
+        let charged = state.approx_memory_bytes() - empty;
+        assert!((1024..=19 * 1100).contains(&charged), "{charged}");
     }
 
     // Charging memory after every row of a large build stays linear in the
