@@ -7394,13 +7394,18 @@ mod tests {
         );
     }
 
+    /// HLL is sized from (ε, δ) (#694): ε = 0.008125 at δ = 0.01 needs
+    /// `m ≥ 1/(2ε²δ)`, past precision 18, the largest.
     #[test]
-    fn default_cardinality_sizes_hll_to_its_rse_magnitude() {
+    fn default_cardinality_sizes_hll_from_epsilon_and_delta() {
         assert_eq!(
             preferred(&default_cardinality()),
             Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Hll,
-                SketchParams::Hll { precision: 14 },
+                SketchParams::Hll {
+                    precision: 18,
+                    relative_error: Some(0.008125)
+                },
             ))
         );
     }

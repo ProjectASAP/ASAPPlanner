@@ -116,7 +116,13 @@ fn kll() -> FieldDataType {
     )
 }
 fn hll() -> FieldDataType {
-    sketch(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 })
+    sketch(
+        SketchAlgorithm::Hll,
+        SketchParams::Hll {
+            precision: 12,
+            relative_error: None,
+        },
+    )
 }
 fn cms_with_heap() -> FieldDataType {
     sketch(
@@ -214,7 +220,13 @@ fn family_capability_table() {
         // KMV keeps the k smallest hashes under one shared seed: the merge
         // is the k smallest of the union and ignores repeated hashes.
         (
-            sketch(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 1024 }),
+            sketch(
+                SketchAlgorithm::Kmv,
+                SketchParams::Kmv {
+                    k: 1024,
+                    relative_error: None,
+                },
+            ),
             Some((OverlapAllowed, SameAsUnionBuild)),
             false,
         ),

@@ -581,9 +581,9 @@ fn stage3_plan_selection_judges_univmon_with_an_accuracy_model() {
     }
 }
 
-/// The physical candidates that answer Q1 with HLL and Q2 and Q3 exactly:
-/// their validity depends only on Q1's HLL estimate.
-fn hll_only_candidates(run: &Run) -> Vec<&str> {
+/// The physical candidates that answer Q1 with `algorithm` and Q2 and Q3
+/// exactly: their validity depends only on Q1's estimate.
+fn q1_only_candidates<'a>(run: &'a Run, algorithm: &str) -> Vec<&'a str> {
     let ids: Vec<_> = run
         .logical
         .iter()
@@ -591,28 +591,38 @@ fn hll_only_candidates(run: &Run) -> Vec<&str> {
             !shares_a_summary(c)
                 && (0..3)
                     .map(|q| query_option(&c.dag, &c.query_roots, q))
-                    .eq(["Hll", "exact", "exact"])
+                    .eq([algorithm, "exact", "exact"])
         })
         .flat_map(|c| run.physical_of(c).map(|p| p.id.as_str()))
         .collect();
-    assert!(!ids.is_empty(), "a candidate answers Q1 with HLL alone");
+    assert!(
+        !ids.is_empty(),
+        "a candidate answers Q1 with {algorithm} alone"
+    );
     ids
+}
+
+fn hll_only_candidates(run: &Run) -> Vec<&str> {
+    q1_only_candidates(run, "Hll")
 }
 
 /// With the deployment's bound on distinct items per evaluation, plan
 /// selection binds classic HLL's failure probability and accepts Q1's HLL
 /// estimate; without a bound it stays unknown and the target unmet. Pass 1
-/// sizes HLL from ε = 0.02 alone (precision 12), which certifies δ = 0.01
-/// for at most 9 distinct items.
+/// sizes HLL from ε = 0.02 and δ = 0.01 (#694): `m ≥ 1/(2ε²δ)` gives
+/// precision 17, which certifies δ = 0.01 at ε = 0.02 for bounds up to
+/// 1,842 distinct items.
 #[test]
 fn stage3_plan_selection_accepts_hll_given_a_distinct_bound() {
-    let bounded = pipeline_with_distinct_bound(Some(9));
-    for id in hll_only_candidates(&bounded) {
-        assert!(
-            bounded.cost(id).is_some(),
-            "{id}: {:?}",
-            bounded.invalid().get(id)
-        );
+    for bound in [9, 1_842] {
+        let bounded = pipeline_with_distinct_bound(Some(bound));
+        for id in hll_only_candidates(&bounded) {
+            assert!(
+                bounded.cost(id).is_some(),
+                "bound {bound}: {id}: {:?}",
+                bounded.invalid().get(id)
+            );
+        }
     }
     let unbounded = pipeline_with_distinct_bound(None);
     let invalid = unbounded.invalid();
@@ -626,20 +636,19 @@ fn stage3_plan_selection_accepts_hll_given_a_distinct_bound() {
     }
 }
 
-/// A bound too large for the precision Pass 1 chose (12 certifies δ = 0.01
-/// for at most 9 distinct items) is met by a larger precision: plan
-/// selection enlarges HLL until its failure probability over the bound
-/// meets the target, up to precision 18 (#669b): a bound of 10 is met. The
-/// model certifies a bound of 100 at no precision (a larger precision also
-/// shrinks the relative error it certifies), and one outside its range (at
-/// most 4096) certifies nothing.
+/// A bound too large for the precision Pass 1 chose (17 certifies at most
+/// 1,842 distinct items) is met by a larger precision: plan selection
+/// enlarges HLL until its failure probability over the bound at ε = 0.02
+/// meets the target, up to precision 18 (#669b), which certifies up to
+/// 3,791. Past that, up to Example 2's 10M source IPs, classic HLL's
+/// linear-counting contract certifies nothing.
 #[test]
 fn stage3_plan_selection_enlarges_hll_for_a_larger_distinct_bound() {
-    let run = pipeline_with_distinct_bound(Some(10));
+    let run = pipeline_with_distinct_bound(Some(3_000));
     for id in hll_only_candidates(&run) {
         assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
     }
-    for bound in [100, 10_000_000] {
+    for bound in [10_000, 10_000_000] {
         let run = pipeline_with_distinct_bound(Some(bound));
         let invalid = run.invalid();
         for id in hll_only_candidates(&run) {
@@ -652,6 +661,79 @@ fn stage3_plan_selection_enlarges_hll_for_a_larger_distinct_bound() {
                 "{id}: {reason}"
             );
         }
+    }
+}
+
+/// KMV certifies Q1 over the 10M source IPs without a distinct bound
+/// (#694): its bound holds for any number of distinct items, and Pass 1
+/// sizes `k` for the requested δ (#700), so a stricter δ = 10⁻⁴ is met
+/// too, by a larger `k`.
+#[test]
+fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound() {
+    let mut ks = Vec::new();
+    for delta in [0.01, 1e-4] {
+        let mut workload = standin_workload();
+        let q1 = &mut workload
+            .query_workload
+            .repeating_queries
+            .as_mut()
+            .expect("repeating queries")[0];
+        q1.requirements.accuracy = AccuracyRequirement::Explicit(RequestedAccuracy {
+            scope: AccuracyScope::PerValue,
+            ..RequestedAccuracy::epsilon_delta(0.02, delta)
+        });
+        let run = run_stages(&workload, lower_promql(&workload));
+        for id in q1_only_candidates(&run, "Kmv") {
+            assert!(
+                run.cost(id).is_some(),
+                "δ = {delta}: {id}: {:?}",
+                run.invalid().get(id)
+            );
+            let k: BTreeSet<_> = sketch_builds(run.physical(id).dag())
+                .into_iter()
+                .filter_map(|(_, _, params)| match params {
+                    SketchParams::Kmv { k, .. } => Some(k),
+                    _ => None,
+                })
+                .collect();
+            ks.push((delta, k));
+        }
+    }
+    assert!(
+        ks.iter().any(|(d, k)| *d == 0.01 && k.contains(&26_656)),
+        "{ks:?}"
+    );
+    assert!(
+        ks.iter()
+            .any(|(d, k)| *d == 1e-4 && k.iter().all(|k| *k > 26_656)),
+        "{ks:?}"
+    );
+}
+
+/// The physical candidates among `ids` that build their sketch as a
+/// tumbling-pane `PaneChain`.
+fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
+    ids.into_iter()
+        .filter(|id| {
+            let dag = run.physical(id).dag();
+            sketch_builds(dag).iter().any(|(build, _, _)| {
+                matches!(window_form(dag, *build), WindowForm::Tumbling { .. })
+            })
+        })
+        .collect()
+}
+
+/// Plan selection's enlargement reaches a sketch carried by a tumbling-pane
+/// `PaneChain` too (#713): Q1's HLL over a bound of 3,000 is valid only at
+/// precision 18, above Pass 1's 17, so a valid tumbling-pane HLL candidate
+/// had its chain's precision enlarged.
+#[test]
+fn stage3_plan_selection_enlarges_tumbling_pane_hll() {
+    let run = pipeline_with_distinct_bound(Some(3_000));
+    let hll = tumbling(&run, hll_only_candidates(&run));
+    assert!(!hll.is_empty(), "a tumbling-pane HLL candidate answers Q1");
+    for id in hll {
+        assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
     }
 }
 
@@ -682,8 +764,9 @@ fn stage1_logical_asap_optimization_leaves_the_hll_failure_probability_symbolic(
         assert_eq!(
             guarantee.spec.failure_probability,
             ProbabilityExpr::Unknown {
-                statistic: "classic_hll_failure_probability[p=12](max_distinct[flows_src_ip])"
-                    .into()
+                statistic:
+                    "classic_hll_failure_probability[p=17,eps=0.02](max_distinct[flows_src_ip])"
+                        .into()
             },
             "{}",
             c.id

@@ -1340,7 +1340,10 @@ fn source_distinct_guarantee(
     }
     source_scan(input)?;
     match kind.params() {
-        SketchParams::Hll { precision } => hll::classic_guarantee(*precision, &source(input)?),
+        SketchParams::Hll {
+            precision,
+            relative_error,
+        } => hll::classic_guarantee(*precision, *relative_error, &source(input)?),
         params @ SketchParams::UnivMon { .. } => {
             univmon::distinct_guarantee(params, &source(input)?)
         }
@@ -4043,5 +4046,54 @@ mod tests {
             .error
             .evaluate();
         assert_eq!(unconfirmed, None);
+    }
+
+    /// Classic HLL's failure probability is left symbolic in a source's
+    /// distinct bound only for one instance per group over that source's
+    /// own rows (#693's scope condition): not over a join of two sources,
+    /// not over computed rows, and not for one Hydra structure shared by
+    /// every group, whose distinct items the source's bound does not bound.
+    #[test]
+    fn classic_hll_confidence_needs_one_instance_over_a_sources_own_rows() {
+        use asap_types::post_asap::{HydraKind, HydraParams};
+        let hll = |grouping| {
+            FieldDataType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::Hll,
+                    SketchParams::Hll {
+                        precision: 15,
+                        relative_error: Some(0.05),
+                    },
+                ),
+                grouping,
+            )
+        };
+        let input = |query| crate::test_support::lower_promql(query, RequestedAccuracy::exact());
+        let guarantee = |family: &FieldDataType, query| {
+            source_distinct_guarantee(family, &SketchStatistic::Cardinality, &input(query))
+        };
+        let own = hll(GroupingStrategy::PerSubpopulationInstance);
+        let symbolic = guarantee(&own, "a").expect("a source's own rows");
+        assert_eq!(
+            symbolic.spec.failure_probability,
+            ProbabilityExpr::Unknown {
+                statistic: crate::accuracy::estimators::hll::classic_failure_statistic(
+                    15, 0.05, "a"
+                )
+            }
+        );
+        for (query, over) in [("a * on() b", "a join"), ("a * 2", "computed rows")] {
+            assert!(guarantee(&own, query).is_none(), "{over}: {query}");
+        }
+        let hydra = hll(GroupingStrategy::SharedMultiSubpopulation {
+            kind: HydraKind::HydraCms,
+            params: HydraParams::HydraCms {
+                width: 8,
+                depth: 2,
+                shared_rows: 2,
+                shared_columns: 8,
+            },
+        });
+        assert!(guarantee(&hydra, "a").is_none());
     }
 }
