@@ -604,6 +604,9 @@ pub fn create_planner_accumulator(
                 u32::from(*precision),
             ),
         }),
+        (SketchAlgorithm::Kmv, SketchParams::Kmv { k }) => {
+            Box::new(crate::summary_kernels::kmv::KmvAccumulator::new(*k))
+        }
         (
             SketchAlgorithm::UnivMon,
             SketchParams::UnivMon {

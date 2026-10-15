@@ -7,7 +7,7 @@ edition = "2021"
 chrono = { version = "0.4.39", default-features = false, features = ["std"] }
 futures = "0.3"
 planner-types = { package = "asap-types", path = "../types" }
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "e6b03142628a3109b6482ebe8512bff7e75f5b35" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "e6b03142628a3109b6482ebe8512bff7e75f5b35", features = ["experimental"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tracing = "0.1"

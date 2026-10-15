@@ -9,6 +9,7 @@ pub mod exact;
 pub mod hll_sketch;
 pub mod hydra_kll;
 pub mod increase;
+pub mod kmv;
 pub mod univmon;
 
 pub use count_min_sketch::*;
@@ -20,6 +21,7 @@ pub use dd_sketch::*;
 pub use hll_sketch::*;
 pub use hydra_kll::*;
 pub use increase::*;
+pub use kmv::*;
 
 pub mod factory;
 pub mod traits;
