@@ -2,12 +2,12 @@
 //
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
 // corpus list exactly, so the two reports are directly comparable) with an
-// *approximate* `AccuracyTarget`, runs Pass 1 of logical ASAP-aware
+// *approximate* `RequestedAccuracy`, runs Pass 1 of logical ASAP-aware
 // optimization (`generate_per_computation_candidates`) over each query, and
 // reports which summary candidates Pass 1 offers for it, plus the fraction of
 // lowered queries with at least one.
 //
-// `--epsilon <f64>` (default 0.01) sets the `AccuracyTarget` every query in
+// `--epsilon <f64>` (default 0.01) sets the `RequestedAccuracy` every query in
 // every corpus lowers with. Without an approximate target, Pass 1 offers no
 // summary candidate.
 
@@ -18,7 +18,7 @@ use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -219,7 +219,7 @@ fn parse_ingestion_interval() -> u64 {
 async fn main() {
     let epsilon = parse_epsilon();
     let interval_ms = parse_ingestion_interval();
-    let accuracy = AccuracyTarget::Epsilon(epsilon);
+    let accuracy = RequestedAccuracy::epsilon(epsilon);
     let mut results = Vec::new();
 
     // ── PromQL corpora — same set as `variant_coverage` ──

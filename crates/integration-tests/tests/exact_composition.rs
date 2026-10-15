@@ -37,6 +37,7 @@ use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 
 use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
@@ -135,7 +136,7 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
     }
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = asap_aware_mapping::replacement::search_workload_with_targets(
-        vec![("q", root, Some(AccuracyTarget::Exact))],
+        vec![("q", root, Some(AccuracyTarget::exact()))],
         &default_strategies_with(&StatsModel),
         &Model,
     )
@@ -160,7 +161,7 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
 fn root_target_rejects_unproven_composition() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = asap_aware_mapping::replacement::search_workload_with_targets(
-        vec![("q", root, Some(AccuracyTarget::Exact))],
+        vec![("q", root, Some(AccuracyTarget::exact()))],
         &default_strategies_with(&StatsModel),
         &asap_aware_mapping::DefaultAccuracyModel,
     )
@@ -334,7 +335,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
             agg(
                 vec![2],
                 AggIntent::Count {
-                    accuracy: AccuracyTarget::Exact,
+                    accuracy: AccuracyTarget::exact(),
                 },
                 metric_scan(&["zone"]),
             ),
@@ -808,7 +809,7 @@ fn physical_export_carries_explicit_timing_for_a_composed_plan() {
 fn promql_max_by_zone_over_quantile_over_time_composes() {
     let expr = lower_promql(
         "max by (zone) (quantile_over_time(0.99, latency[5m]))",
-        AccuracyTarget::Epsilon(0.01),
+        RequestedAccuracy::epsilon(0.01),
     )
     .unwrap();
     let space = plan(vec![("q", expr)], &StatsModel);

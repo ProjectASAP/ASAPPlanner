@@ -41,17 +41,17 @@ fn bounded_guarantee(
     delta: ProbabilityExpr,
     contract: &str,
 ) -> AccuracyGuarantee {
-    AccuracyGuarantee {
+    AccuracyGuarantee::new(
         metric,
-        bound: BoundExpr::Constant { value: bound },
-        failure_probability: delta,
-        provenance: vec![GuaranteeSource::SketchEvaluation {
+        BoundExpr::Constant { value: bound },
+        delta,
+        vec![GuaranteeSource::SketchEvaluation {
             algorithm: format!("{algorithm:?}"),
             contract: contract.into(),
             params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
             query: format!("{query:?}"),
         }],
-    }
+    )
 }
 
 pub(super) fn local_guarantee(

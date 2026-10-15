@@ -267,7 +267,7 @@ impl<'a> HydraGroupingStrategy<'a> {
                     input_metrics: node
                         .guarantee
                         .as_ref()
-                        .map_or_else(Vec::new, |g| vec![g.metric]),
+                        .map_or_else(Vec::new, |g| vec![g.spec.metric]),
                     local_metric: None,
                     reason: "invalid Hydra shared-grid collision or failure-probability evidence"
                         .into(),
@@ -277,18 +277,17 @@ impl<'a> HydraGroupingStrategy<'a> {
         }
         let patched = with_grouping(node, grouping, &stats);
         if let (Some(target), Some(guarantee)) = (accuracy_target(intent), &patched.guarantee) {
-            if !self
-                .planning_inputs
-                .accuracy
-                .satisfies(&guarantee.optimistic_floor(), target)
-            {
+            if !self.planning_inputs.accuracy.satisfies(
+                &guarantee.optimistic_floor(),
+                &crate::accuracy::native_target(target, guarantee),
+            ) {
                 rejected.push(RejectedCandidate {
                     strategy: "HydraGroupingStrategy",
                     description: format!("{hydra_kind:?} over {sketch_kind:?}"),
                     error: AccuracyError::TargetNotSatisfied {
-                        metric: guarantee.metric,
-                        bound: guarantee.bound.evaluate(),
-                        failure_probability: guarantee.failure_probability.evaluate(),
+                        metric: guarantee.spec.metric,
+                        bound: guarantee.spec.error.evaluate(),
+                        failure_probability: guarantee.spec.failure_probability.evaluate(),
                         target: target.clone(),
                     },
                 });
@@ -466,11 +465,11 @@ fn hydra_guarantee(inner: &AccuracyGuarantee, stats: &PropagationStats) -> Accur
         operator: CompositionOperator::ApproximateAggregate,
         rule: "hydra_shared_grid_union_bound".into(),
     });
-    AccuracyGuarantee {
-        metric: inner.metric,
-        bound: BoundExpr::Sum {
+    AccuracyGuarantee::new(
+        inner.spec.metric,
+        BoundExpr::Sum {
             terms: vec![
-                inner.bound.clone(),
+                inner.spec.error.clone(),
                 stats.hydra_shared_grid_collision_bound.map_or_else(
                     || BoundExpr::Unknown {
                         statistic: "hydra_shared_grid_collision_bound".into(),
@@ -479,9 +478,9 @@ fn hydra_guarantee(inner: &AccuracyGuarantee, stats: &PropagationStats) -> Accur
                 ),
             ],
         },
-        failure_probability: ProbabilityExpr::UnionBound {
+        ProbabilityExpr::UnionBound {
             terms: vec![
-                inner.failure_probability.clone(),
+                inner.spec.failure_probability.clone(),
                 stats.hydra_shared_grid_failure_probability.map_or_else(
                     || ProbabilityExpr::Unknown {
                         statistic: "hydra_shared_grid_failure_probability".into(),
@@ -491,7 +490,7 @@ fn hydra_guarantee(inner: &AccuracyGuarantee, stats: &PropagationStats) -> Accur
             ],
         },
         provenance,
-    }
+    )
 }
 
 #[cfg(test)]
@@ -532,17 +531,17 @@ mod tests {
 
     #[test]
     fn hydra_composes_inner_and_shared_grid_error_symbolically() {
-        let inner = AccuracyGuarantee {
-            metric: ErrorMetric::Frequency,
-            bound: BoundExpr::Constant { value: 0.01 },
-            failure_probability: ProbabilityExpr::Constant { value: 0.02 },
-            provenance: vec![],
-        };
+        let inner = AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE_STREAM_L1,
+            BoundExpr::Constant { value: 0.01 },
+            ProbabilityExpr::Constant { value: 0.02 },
+            vec![],
+        );
         let composed = hydra_guarantee(&inner, &PropagationStats::default());
 
-        assert_eq!(composed.metric, ErrorMetric::Frequency);
+        assert_eq!(composed.spec.metric, ErrorMetric::ABSOLUTE_STREAM_L1);
         assert!(matches!(
-            composed.bound,
+            composed.spec.error,
             BoundExpr::Sum { ref terms }
                 if matches!(terms.as_slice(), [
                     BoundExpr::Constant { value },
@@ -550,7 +549,7 @@ mod tests {
                 ] if *value == 0.01 && statistic == "hydra_shared_grid_collision_bound")
         ));
         assert!(matches!(
-            composed.failure_probability,
+            composed.spec.failure_probability,
             ProbabilityExpr::UnionBound { ref terms }
                 if matches!(terms.as_slice(), [
                     ProbabilityExpr::Constant { value },
@@ -564,10 +563,7 @@ mod tests {
     #[test]
     fn matches_a_grouped_count_with_an_unprovable_accuracy_target() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            },
+            accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
@@ -611,10 +607,7 @@ mod tests {
     #[test]
     fn count_with_an_accuracy_target_keeps_uncertified_hydra_candidates() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            },
+            accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
@@ -624,8 +617,8 @@ mod tests {
             &candidate.replacement,
             Replacement::SubDAG(node)
                 if node.guarantee.as_ref().is_some_and(|guarantee|
-                    guarantee.bound.evaluate().is_none()
-                        && guarantee.failure_probability.evaluate().is_none())
+                    guarantee.spec.error.evaluate().is_none()
+                        && guarantee.spec.failure_probability.evaluate().is_none())
         )));
     }
 
@@ -649,10 +642,7 @@ mod tests {
     #[test]
     fn hydra_shared_grid_evidence_is_consumed_by_candidate_construction() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            },
+            accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
@@ -667,8 +657,8 @@ mod tests {
             &candidate.replacement,
             Replacement::SubDAG(node)
                 if node.guarantee.as_ref().is_some_and(|g|
-                    g.bound.evaluate().is_some()
-                        && g.failure_probability.evaluate().is_some())
+                    g.spec.error.evaluate().is_some()
+                        && g.spec.failure_probability.evaluate().is_some())
         )));
     }
 
@@ -689,10 +679,7 @@ mod tests {
             }
         }
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            },
+            accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
@@ -738,10 +725,7 @@ mod tests {
         let q = agg(
             vec![2],
             AggIntent::Count {
-                accuracy: AccuracyTarget::EpsilonDelta {
-                    epsilon: 0.01,
-                    delta: 0.01,
-                },
+                accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
             },
             metric_scan(&["job"]),
         );
@@ -774,12 +758,12 @@ mod tests {
 
     #[test]
     fn exact_accuracy_target_has_no_hydra_candidate() {
-        // AccuracyTarget::Exact never binds a sketch at all — nothing for
+        // AccuracyTarget::exact() never binds a sketch at all — nothing for
         // this axis to offer a shared-structure alternative to.
         let intent = AggIntent::Quantile {
             col: None,
             q: 0.99,
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);

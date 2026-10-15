@@ -959,11 +959,11 @@ fn measure_filters_keep_groups_without_matching_rows() {
             reduction: Plan::Reduce(GroupKeys::by(vec![0])),
             measures: vec![
                 AggIntent::Count {
-                    accuracy: AccuracyTarget::Exact,
+                    accuracy: AccuracyTarget::exact(),
                 },
                 AggIntent::Sum { col: Some(1) },
                 AggIntent::Count {
-                    accuracy: AccuracyTarget::Exact,
+                    accuracy: AccuracyTarget::exact(),
                 },
             ],
             output_names: vec!["c".into(), "s".into(), "all".into()],

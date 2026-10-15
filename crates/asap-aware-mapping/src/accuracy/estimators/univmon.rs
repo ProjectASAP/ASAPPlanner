@@ -77,7 +77,7 @@ pub(super) fn guarantee(
                 algorithm,
                 params,
                 query,
-                ErrorMetric::RelativeValue,
+                ErrorMetric::Relative,
                 l2_relative_error(*sketch_cols)?,
                 ProbabilityExpr::Constant {
                     value: l2_failure_probability(*sketch_rows),
@@ -263,18 +263,18 @@ pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<
     }
     let relative_error = (DISTINCT_VARIANCE / (f64::from(*heap_size) * chebyshev)).sqrt();
     let statistic = incomplete_top_layer_statistic(*heap_size, *layers, source);
-    Some(AccuracyGuarantee {
-        metric: ErrorMetric::Cardinality,
-        bound: BoundExpr::Constant {
+    Some(AccuracyGuarantee::new(
+        ErrorMetric::Relative,
+        BoundExpr::Constant {
             value: relative_error,
         },
-        failure_probability: ProbabilityExpr::UnionBound {
+        ProbabilityExpr::UnionBound {
             terms: vec![
                 ProbabilityExpr::Constant { value: chebyshev },
                 ProbabilityExpr::Unknown { statistic },
             ],
         },
-        provenance: vec![GuaranteeSource::SketchEvaluation {
+        vec![GuaranteeSource::SketchEvaluation {
             algorithm: "UnivMon".into(),
             contract: DISTINCT_CONTRACT.into(),
             params: serde_json::json!({"heap_size": heap_size, "layers": layers,
@@ -286,7 +286,7 @@ pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<
                 "population_scope": "complete_evaluation_including_merged_panes"}),
             query: "Cardinality".into(),
         }],
-    })
+    ))
 }
 
 /// Size a UnivMon for one readout's `(eps, delta)`:
@@ -330,7 +330,7 @@ mod tests {
     fn l2_intent() -> AggIntent {
         AggIntent::FrequencyL2 {
             col: None,
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         }
     }
 
@@ -359,7 +359,13 @@ mod tests {
     }
 
     fn meets(guarantee: &AccuracyGuarantee, epsilon: f64, delta: f64) -> bool {
-        DefaultAccuracyModel.satisfies(guarantee, &AccuracyTarget::EpsilonDelta { epsilon, delta })
+        DefaultAccuracyModel.satisfies(
+            guarantee,
+            &crate::accuracy::native_target(
+                &AccuracyTarget::epsilon_delta(epsilon, delta),
+                guarantee,
+            ),
+        )
     }
 
     fn with(params: &SketchParams, f: impl FnOnce(&mut u32, &mut u32, &mut u32)) -> SketchParams {
@@ -393,7 +399,7 @@ mod tests {
         for (eps, delta) in TARGETS {
             let params = size_params(&l2_intent(), eps, delta);
             let guarantee = l2(&params).expect("an L2 guarantee");
-            assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
+            assert_eq!(guarantee.spec.metric, ErrorMetric::Relative);
             assert!(
                 meets(&guarantee, eps, delta),
                 "({eps}, {delta}): {params:?}"
@@ -476,7 +482,7 @@ mod tests {
             };
             for max_distinct in [9, 10_000_000] {
                 let guarantee = bind(&params, max_distinct);
-                assert_eq!(guarantee.metric, ErrorMetric::Cardinality);
+                assert_eq!(guarantee.spec.metric, ErrorMetric::Relative);
                 assert!(
                     meets(&guarantee, eps, delta),
                     "({eps}, {delta}): {params:?}"
@@ -507,7 +513,7 @@ mod tests {
     fn distinct_guarantee_needs_the_source_bound_and_enough_layers() {
         let params = size_params(&default_cardinality(), 0.05, 0.01);
         let guarantee = distinct_guarantee(&params, "m").unwrap();
-        assert_eq!(guarantee.failure_probability.evaluate(), None);
+        assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
         assert!(!meets(&guarantee, 0.05, 0.01));
         let SketchParams::UnivMon { heap_size: k, .. } = params else {
             unreachable!()

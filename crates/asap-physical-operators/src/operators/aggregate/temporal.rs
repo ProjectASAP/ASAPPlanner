@@ -352,7 +352,7 @@ mod tests {
                 (AggIntent::Increase, Value::Float64(4.)),
                 (
                     AggIntent::Count {
-                        accuracy: AccuracyTarget::Exact,
+                        accuracy: AccuracyTarget::exact(),
                     },
                     Value::Int64(3),
                 ),

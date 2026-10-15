@@ -4,13 +4,13 @@
 use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
-pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+pub(crate) fn lower_promql(query: &str, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -216,10 +216,7 @@ pub(crate) fn time_and_export(
 pub(crate) fn cms_summary(query: &str) -> OperatorNode {
     use asap_types::ir::{ASAPOp, QueryRoot};
     use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-    let target = AccuracyTarget::EpsilonDelta {
-        epsilon: 0.01,
-        delta: 0.01,
-    };
+    let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
     let root = lower_promql(query, target.clone());
     let run = crate::pass::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],

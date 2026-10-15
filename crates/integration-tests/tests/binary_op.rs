@@ -16,10 +16,11 @@ use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, GroupSide, Reduction, Source,
     VectorGrouping, VectorMatch, VectorMatchKind,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
-    lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
+    lower_promql(q, RequestedAccuracy::exact())
+        .unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
 fn node(op: NonASAPOp) -> Rc<OperatorNode> {

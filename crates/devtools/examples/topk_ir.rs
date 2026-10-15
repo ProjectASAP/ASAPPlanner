@@ -5,7 +5,7 @@
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 fn col(name: &str, dtype: DataType) -> Field {
     Field::plain(name, dtype, false)
@@ -39,7 +39,7 @@ fn catalog() -> SqlCatalog {
 async fn show_sql(label: &str, query: &str) {
     println!("━━━ {label} ━━━");
     println!("{query}");
-    match lower_sql(query, &catalog(), AccuracyTarget::Exact).await {
+    match lower_sql(query, &catalog(), RequestedAccuracy::exact()).await {
         Ok(qe) => println!("{qe:#?}"),
         Err(e) => println!("ERR: {e}"),
     }
@@ -49,7 +49,7 @@ async fn show_sql(label: &str, query: &str) {
 fn show_promql(label: &str, query: &str) {
     println!("━━━ {label} ━━━");
     println!("{query}");
-    match lower_promql_with_data_ingestion_interval(query, AccuracyTarget::Exact, 1_000) {
+    match lower_promql_with_data_ingestion_interval(query, RequestedAccuracy::exact(), 1_000) {
         Ok(qe) => println!("{qe:#?}"),
         Err(e) => println!("ERR: {e}"),
     }

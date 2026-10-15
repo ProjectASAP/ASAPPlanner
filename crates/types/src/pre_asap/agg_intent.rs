@@ -710,11 +710,7 @@ pub fn agg_accuracy(op: &AggIntent) -> f64 {
 }
 
 fn accuracy_target_to_f64(t: &AccuracyTarget) -> f64 {
-    match t {
-        AccuracyTarget::Exact => 0.0,
-        AccuracyTarget::Epsilon(eps) => *eps,
-        AccuracyTarget::EpsilonDelta { epsilon, .. } => *epsilon,
-    }
+    t.error
 }
 
 /// Default `Cardinality` intent over the sample value — HLL standard error at
@@ -722,7 +718,7 @@ fn accuracy_target_to_f64(t: &AccuracyTarget) -> f64 {
 pub fn default_cardinality() -> AggIntent {
     AggIntent::Cardinality {
         cols: vec![],
-        accuracy: AccuracyTarget::Epsilon(1.04 / ((1u64 << 14) as f64).sqrt()),
+        accuracy: AccuracyTarget::epsilon(1.04 / ((1u64 << 14) as f64).sqrt()),
     }
 }
 
@@ -731,7 +727,7 @@ pub fn default_quantile(q: f64) -> AggIntent {
     AggIntent::Quantile {
         col: None,
         q,
-        accuracy: AccuracyTarget::Epsilon(0.01),
+        accuracy: AccuracyTarget::epsilon(0.01),
     }
 }
 
@@ -765,7 +761,7 @@ mod tests {
     fn distinct_tuple_cardinality_contract() {
         let intent = AggIntent::Cardinality {
             cols: vec![2, 5],
-            accuracy: AccuracyTarget::Epsilon(0.01),
+            accuracy: AccuracyTarget::epsilon(0.01),
         };
         assert_eq!(intent.input_cols(), vec![2, 5]);
         assert!(!agg_is_exact(&intent));
@@ -782,7 +778,7 @@ mod tests {
         let v = c("value", DataType::Float64);
         assert_eq!(
             AggIntent::<ColumnId>::Count {
-                accuracy: AccuracyTarget::Exact
+                accuracy: AccuracyTarget::exact()
             }
             .output_column(&v)
             .name,
@@ -798,7 +794,7 @@ mod tests {
             AggIntent::<ColumnId>::Quantile {
                 col: None,
                 q: 0.99,
-                accuracy: AccuracyTarget::Epsilon(0.01)
+                accuracy: AccuracyTarget::epsilon(0.01)
             }
             .output_column(&v)
             .name,
@@ -844,7 +840,7 @@ mod tests {
         use topk::Ranking::*;
         assert_eq!(
             topk::Ranking::from_aggregate(&AggIntent::Count {
-                accuracy: AccuracyTarget::Exact
+                accuracy: AccuracyTarget::exact()
             }),
             Frequency
         );
@@ -876,7 +872,7 @@ mod tests {
             "empty = PromQL sample value"
         );
         assert!(AggIntent::<ColumnId>::Count {
-            accuracy: AccuracyTarget::Exact
+            accuracy: AccuracyTarget::exact()
         }
         .input_cols()
         .is_empty());
@@ -888,24 +884,24 @@ mod tests {
             AggIntent::Quantile {
                 col: None,
                 q: 0.99,
-                accuracy: AccuracyTarget::Epsilon(0.01),
+                accuracy: AccuracyTarget::epsilon(0.01),
             },
             AggIntent::Quantile {
                 col: Some(3),
                 q: 0.99,
-                accuracy: AccuracyTarget::Epsilon(0.01),
+                accuracy: AccuracyTarget::epsilon(0.01),
             },
             AggIntent::Cardinality {
                 cols: vec![2],
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
             AggIntent::Cardinality {
                 cols: vec![2, 3],
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
             AggIntent::TopK {
                 k: 10,
-                accuracy: AccuracyTarget::Epsilon(0.01),
+                accuracy: AccuracyTarget::epsilon(0.01),
             },
         ] {
             let json = serde_json::to_string(&v).unwrap();
@@ -918,9 +914,9 @@ mod tests {
     #[test]
     fn cardinality_rejects_legacy_col_payloads() {
         for payload in [
-            r#"{"kind":"cardinality","col":2,"accuracy":"Exact"}"#,
-            r#"{"kind":"cardinality","col":null,"accuracy":"Exact"}"#,
-            r#"{"kind":"cardinality","col":2,"cols":[1],"accuracy":"Exact"}"#,
+            r#"{"kind":"cardinality","col":2,"accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#,
+            r#"{"kind":"cardinality","col":null,"accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#,
+            r#"{"kind":"cardinality","col":2,"cols":[1],"accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#,
         ] {
             assert!(
                 serde_json::from_str::<AggIntent>(payload).is_err(),
@@ -933,31 +929,31 @@ mod tests {
     /// with no `col` key — still deserializes, as the sample-value convention `None`.
     #[test]
     fn agg_intent_serde_reads_pre_115_payloads() {
-        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":"Exact"}"#;
+        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::Quantile {
                 col: None,
                 q: 0.99,
-                accuracy: AccuracyTarget::Exact
+                accuracy: AccuracyTarget::exact()
             }
         );
 
-        let legacy = r#"{"kind":"top_k","k":5,"accuracy":"Exact"}"#;
+        let legacy = r#"{"kind":"top_k","k":5,"accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::TopK {
                 k: 5,
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             }
         );
 
-        let legacy = r#"{"kind":"cardinality","accuracy":"Exact"}"#;
+        let legacy = r#"{"kind":"cardinality","accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::Cardinality {
                 cols: vec![],
-                accuracy: AccuracyTarget::Exact
+                accuracy: AccuracyTarget::exact()
             }
         );
     }

@@ -170,15 +170,15 @@ mod tests {
                 &SketchStatistic::Quantile { q: 0.99 },
             )
             .unwrap();
-        assert_eq!(g.metric, ErrorMetric::Rank);
-        assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
-        assert_eq!(g.failure_probability.evaluate(), Some(0.01));
+        assert_eq!(g.spec.metric, ErrorMetric::Rank);
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            }
+            &AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank)
+        ));
+        assert_eq!(g.spec.failure_probability.evaluate(), Some(0.01));
+        assert!(DefaultAccuracyModel.satisfies(
+            &g,
+            &AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank)
         ));
         assert_eq!(g.approximate_layer_count(), 1);
         assert!(g.provenance.iter().any(|source| matches!(
@@ -209,12 +209,9 @@ mod tests {
         .unwrap();
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.001,
-            }
+            &AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank)
         ));
-        assert_eq!(g.failure_probability.evaluate(), Some(0.001));
+        assert_eq!(g.spec.failure_probability.evaluate(), Some(0.001));
     }
 
     /// A KLL sized below δ = 0.01 names its own contract, not the empirical

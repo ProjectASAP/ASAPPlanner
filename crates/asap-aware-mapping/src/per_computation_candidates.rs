@@ -335,7 +335,7 @@ pub fn computation_candidates_for_intent(
         pruned: vec![],
     };
     if let Some(target) = accuracy_target(intent) {
-        if *target != AccuracyTarget::Exact {
+        if !target.is_exact() {
             let (epsilon, delta) = accuracy_budget(target);
             let unit = |value: f64| value > 0.0 && value < 1.0;
             if !unit(epsilon) || !unit(delta) {
@@ -346,7 +346,7 @@ pub fn computation_candidates_for_intent(
             }
         }
         let summaries = summary_candidates(intent).iter().cloned();
-        if *target == AccuracyTarget::Exact {
+        if target.is_exact() {
             choices.pruned.extend(summaries.map(|algorithm| {
                 (
                     ComputationCandidate::Summary(algorithm),
@@ -1480,7 +1480,7 @@ pub(crate) fn arithmetic_guarantee(
         additive_as_absolute(left.0?, None),
         additive_as_absolute(right.0?, None),
     );
-    let once = same_operand.then(|| l.failure_probability.clone());
+    let once = same_operand.then(|| l.spec.failure_probability.clone());
     let statistic = operand_domain_statistic(&op, &l, &r);
     let composed = match (op, l.is_exact(), r.is_exact()) {
         (_, true, true) => return Some(AccuracyGuarantee::exact("arithmetic over exact operands")),
@@ -1501,13 +1501,11 @@ pub(crate) fn arithmetic_guarantee(
         (ArithmeticOpKind::Mul | ArithmeticOpKind::Div, _, _) => symbolic(l, r, statistic?),
         _ => None,
     }?;
-    Some(match once {
-        Some(failure_probability) => AccuracyGuarantee {
-            failure_probability,
-            ..composed
-        },
-        None => composed,
-    })
+    let mut composed = composed;
+    if let Some(failure_probability) = once {
+        composed.spec.failure_probability = failure_probability;
+    }
+    Some(composed)
 }
 
 /// The statistic a product or quotient of `l` and `r` leaves symbolic on
@@ -1525,13 +1523,9 @@ pub(crate) fn operand_domain_statistic(
     r: &AccuracyGuarantee,
 ) -> Option<&'static str> {
     let valued = |g: &AccuracyGuarantee| {
-        g.is_exact()
-            || matches!(
-                g.metric,
-                ErrorMetric::AbsoluteValue | ErrorMetric::RelativeValue | ErrorMetric::Cardinality
-            )
+        g.is_exact() || matches!(g.spec.metric, ErrorMetric::ABSOLUTE | ErrorMetric::Relative)
     };
-    let relative = |g: &AccuracyGuarantee| g.is_exact() || g.metric == ErrorMetric::RelativeValue;
+    let relative = |g: &AccuracyGuarantee| g.is_exact() || g.spec.metric == ErrorMetric::Relative;
     if !(valued(l) && valued(r)) {
         return None;
     }
@@ -1539,8 +1533,8 @@ pub(crate) fn operand_domain_statistic(
         ArithmeticOpKind::Mul
             if !l.is_exact()
                 && !r.is_exact()
-                && !(l.metric == ErrorMetric::RelativeValue
-                    && r.metric == ErrorMetric::RelativeValue) =>
+                && !(l.spec.metric == ErrorMetric::Relative
+                    && r.spec.metric == ErrorMetric::Relative) =>
         {
             Some(PRODUCT_OPERAND_DOMAINS)
         }
@@ -1557,20 +1551,20 @@ pub(crate) fn operand_domain_statistic(
 /// `(1 + a)(1 + b) − 1 = a + b + a·b`, whatever the signs. `None` for any
 /// other pair.
 fn relative_product(l: AccuracyGuarantee, r: AccuracyGuarantee) -> Option<AccuracyGuarantee> {
-    if l.metric != ErrorMetric::RelativeValue || r.metric != ErrorMetric::RelativeValue {
+    if l.spec.metric != ErrorMetric::Relative || r.spec.metric != ErrorMetric::Relative {
         return None;
     }
     let bound = BoundExpr::Sum {
         terms: vec![
-            l.bound.clone(),
-            r.bound.clone(),
+            l.spec.error.clone(),
+            r.spec.error.clone(),
             BoundExpr::Product {
-                factors: vec![l.bound.clone(), r.bound.clone()],
+                factors: vec![l.spec.error.clone(), r.spec.error.clone()],
             },
         ],
     };
     Some(binary_guarantee(
-        ErrorMetric::RelativeValue,
+        ErrorMetric::Relative,
         bound,
         l,
         r,
@@ -1583,8 +1577,8 @@ fn relative_product(l: AccuracyGuarantee, r: AccuracyGuarantee) -> Option<Accura
 /// `x` times an exact factor (`Some(|c|)` when it is a literal): a
 /// relative error is kept; an absolute error scales by `|c|`.
 fn scaled(input: AccuracyGuarantee, factor: Option<f64>) -> Option<AccuracyGuarantee> {
-    match (input.metric, factor) {
-        (ErrorMetric::RelativeValue, _) => Some(input),
+    match (input.spec.metric, factor) {
+        (ErrorMetric::Relative, _) => Some(input),
         (_, Some(constant)) => compose(
             &CompositionOperator::Lipschitz { constant },
             vec![input],
@@ -1614,17 +1608,17 @@ fn symbolic(
 ) -> Option<AccuracyGuarantee> {
     let (metric, operator, rule) = match statistic {
         DIVISION_OPERAND_DOMAINS => (
-            ErrorMetric::RelativeValue,
+            ErrorMetric::Relative,
             CompositionOperator::ExactDivision,
             "relative_division_needs_operand_domains",
         ),
         QUOTIENT_OPERAND_DOMAINS => (
-            ErrorMetric::AbsoluteValue,
+            ErrorMetric::ABSOLUTE,
             CompositionOperator::ExactDivision,
             "absolute_division_needs_operand_domains",
         ),
         _ => (
-            ErrorMetric::AbsoluteValue,
+            ErrorMetric::ABSOLUTE,
             CompositionOperator::ExactProduct,
             "absolute_product_needs_operand_domains",
         ),
@@ -1654,7 +1648,10 @@ fn binary_guarantee(
     rule: &str,
 ) -> AccuracyGuarantee {
     let failure_probability = ProbabilityExpr::UnionBound {
-        terms: vec![l.failure_probability.clone(), r.failure_probability.clone()],
+        terms: vec![
+            l.spec.failure_probability.clone(),
+            r.spec.failure_probability.clone(),
+        ],
     };
     let provenance = [l, r]
         .into_iter()
@@ -1673,12 +1670,7 @@ fn binary_guarantee(
             rule: rule.into(),
         }])
         .collect();
-    AccuracyGuarantee {
-        metric,
-        bound,
-        failure_probability,
-        provenance,
-    }
+    AccuracyGuarantee::new(metric, bound, failure_probability, provenance)
 }
 
 /// Whether the default accuracy model's bound for `family` answers `query`
@@ -1720,18 +1712,16 @@ fn estimate_bound_over_samples(
     if !estimate_has_bound(family, &proven, query) {
         return None;
     }
-    let local = DefaultAccuracyModel.local_guarantee(family, query)?;
-    Some(AccuracyGuarantee {
-        bound: asap_types::post_asap::BoundExpr::Product {
-            factors: vec![
-                local.bound,
-                asap_types::post_asap::BoundExpr::Unknown {
-                    statistic: samples_sign_statistic(metric),
-                },
-            ],
-        },
-        ..local
-    })
+    let mut local = DefaultAccuracyModel.local_guarantee(family, query)?;
+    local.spec.error = asap_types::post_asap::BoundExpr::Product {
+        factors: vec![
+            local.spec.error,
+            asap_types::post_asap::BoundExpr::Unknown {
+                statistic: samples_sign_statistic(metric),
+            },
+        ],
+    };
+    Some(local)
 }
 
 /// Replace an aggregate whose measures are `targets`' (or exact, for a
@@ -1958,7 +1948,7 @@ fn substitute_measure(
                 ExactKind::Count,
                 ExactParams::Count,
                 &AggIntent::Count {
-                    accuracy: AccuracyTarget::Exact,
+                    accuracy: AccuracyTarget::exact(),
                 },
                 read,
             )?;
@@ -2182,7 +2172,7 @@ fn key_items(keys: usize) -> Vec<ProjectItem> {
 /// `algorithm` sized for `intent`'s accuracy requirement.
 fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent) -> SketchKind {
     let (epsilon, delta) =
-        accuracy_budget(accuracy_target(intent).unwrap_or(&AccuracyTarget::Exact));
+        accuracy_budget(accuracy_target(intent).unwrap_or(&AccuracyTarget::exact()));
     SketchKind::new(
         algorithm.clone(),
         default_size_params(algorithm.clone(), intent, epsilon, delta),
@@ -2383,15 +2373,13 @@ fn statistic(intent: &AggIntent) -> Result<SketchStatistic, PerComputationCandid
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::types::RequestedAccuracy;
     /// Approximate count keeps one exact option, its accumulator, beside the
     /// universal summary; plain exact execution is not offered.
     #[test]
     fn approximate_count_keeps_one_exact_accumulator_and_universal_choices() {
         let choices = computation_candidates_for_intent(&AggIntent::Count {
-            accuracy: AccuracyTarget::EpsilonDelta {
-                epsilon: 0.05,
-                delta: 0.01,
-            },
+            accuracy: AccuracyTarget::epsilon_delta(0.05, 0.01),
         })
         .unwrap()
         .candidates;
@@ -2410,20 +2398,21 @@ mod tests {
     mod guarantee_composition {
         use super::*;
         use crate::test_support::lower_promql;
+        use asap_types::types::RequestedAccuracy;
 
         fn with_bound(metric: ErrorMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
-            AccuracyGuarantee {
+            AccuracyGuarantee::new(
                 metric,
-                bound: BoundExpr::Constant { value: bound },
-                failure_probability: ProbabilityExpr::Constant { value: delta },
-                provenance: vec![],
-            }
+                BoundExpr::Constant { value: bound },
+                ProbabilityExpr::Constant { value: delta },
+                vec![],
+            )
         }
         fn abs(bound: f64, delta: f64) -> AccuracyGuarantee {
-            with_bound(ErrorMetric::AbsoluteValue, bound, delta)
+            with_bound(ErrorMetric::ABSOLUTE, bound, delta)
         }
         fn rel(bound: f64) -> AccuracyGuarantee {
-            with_bound(ErrorMetric::RelativeValue, bound, 0.0)
+            with_bound(ErrorMetric::Relative, bound, 0.0)
         }
         /// `sum(m)` carrying `guarantee`.
         fn node(guarantee: AccuracyGuarantee) -> Rc<OperatorNode> {
@@ -2431,7 +2420,7 @@ mod tests {
         }
         /// `query` carrying `guarantee`.
         fn node_over(query: &str, guarantee: AccuracyGuarantee) -> Rc<OperatorNode> {
-            let node = lower_promql(query, AccuracyTarget::Exact);
+            let node = lower_promql(query, RequestedAccuracy::exact());
             Rc::new((*node).clone().with_guarantee(Some(guarantee)))
         }
         fn scalar(guarantee: AccuracyGuarantee) -> ScalarExpr {
@@ -2458,10 +2447,11 @@ mod tests {
             scalar_guarantee(expr, &|_| None)
         }
         fn bound(g: &AccuracyGuarantee) -> f64 {
-            g.bound.evaluate().expect("a resolved bound")
+            g.spec.error.evaluate().expect("a resolved bound")
         }
         fn delta(g: &AccuracyGuarantee) -> f64 {
-            g.failure_probability
+            g.spec
+                .failure_probability
                 .evaluate()
                 .expect("a resolved probability")
         }
@@ -2479,7 +2469,7 @@ mod tests {
             let (x, y) = (scalar(abs(0.01, 0.001)), scalar(abs(0.02, 0.002)));
             for op in [Add, Sub] {
                 let g = of(&arith(op.clone(), x.clone(), y.clone())).unwrap();
-                assert_eq!(g.metric, ErrorMetric::AbsoluteValue, "{op:?}");
+                assert_eq!(g.spec.metric, ErrorMetric::ABSOLUTE, "{op:?}");
                 assert!(close(bound(&g), 0.03) && close(delta(&g), 0.003), "{op:?}");
                 for shifted in [
                     arith(op.clone(), x.clone(), lit(5.0)),
@@ -2521,8 +2511,8 @@ mod tests {
         /// over each source's raw value column, for plan selection to bind.
         #[test]
         fn normalized_additive_errors_compose_as_absolute_errors() {
-            let cms = with_bound(ErrorMetric::Frequency, 0.01, 0.001);
-            let count_sketch = with_bound(ErrorMetric::L2Frequency, 0.02, 0.002);
+            let cms = with_bound(ErrorMetric::ABSOLUTE_STREAM_L1, 0.01, 0.001);
+            let count_sketch = with_bound(ErrorMetric::ABSOLUTE_STREAM_L2, 0.02, 0.002);
             // Summaries of each source's raw value column.
             let raw = |query: &str, guarantee: AccuracyGuarantee| {
                 ScalarExpr::PromqlScalarFromVector(crate::test_support::estimate_over(
@@ -2539,22 +2529,25 @@ mod tests {
                 raw("count by (job) (n)", count_sketch),
             ))
             .unwrap();
-            assert_eq!(g.metric, ErrorMetric::AbsoluteValue);
+            assert_eq!(g.spec.metric, ErrorMetric::ABSOLUTE);
             assert!(close(delta(&g), 0.003));
             let norms = |statistic: &str| match statistic {
                 "stream_l1_norm[m]" => Some(100.0),
                 "stream_l2_norm[n]" => Some(10.0),
                 _ => None,
             };
-            assert!(g.bound.has_unknown());
-            assert!(close(g.bind(&norms).bound.evaluate().unwrap(), 1.2));
+            assert!(g.spec.error.has_unknown());
+            assert!(close(g.bind(&norms).spec.error.evaluate().unwrap(), 1.2));
             let doubled = of(&arith(
                 ArithmeticOpKind::Mul,
                 lit(2.0),
                 raw("count by (job) (m)", cms),
             ))
             .unwrap();
-            assert!(close(doubled.bind(&norms).bound.evaluate().unwrap(), 2.0));
+            assert!(close(
+                doubled.bind(&norms).spec.error.evaluate().unwrap(),
+                2.0
+            ));
         }
 
         /// A product of two estimates has an absolute bound
@@ -2573,8 +2566,8 @@ mod tests {
             };
             let (x, y) = (scalar(abs(0.01, 0.001)), scalar(abs(0.02, 0.002)));
             let product = of(&arith(Mul, x.clone(), y.clone())).unwrap();
-            assert_eq!(product.metric, ErrorMetric::AbsoluteValue);
-            assert_eq!(product.bound, unknown(PRODUCT_OPERAND_DOMAINS));
+            assert_eq!(product.spec.metric, ErrorMetric::ABSOLUTE);
+            assert_eq!(product.spec.error, unknown(PRODUCT_OPERAND_DOMAINS));
             assert!(close(delta(&product), 0.003));
             for quotient in [
                 arith(Div, x.clone(), y.clone()),
@@ -2582,14 +2575,18 @@ mod tests {
                 arith(Div, x.clone(), scalar(rel(0.01))),
             ] {
                 let g = of(&quotient).unwrap();
-                assert_eq!(g.metric, ErrorMetric::AbsoluteValue, "{quotient:?}");
-                assert_eq!(g.bound, unknown(QUOTIENT_OPERAND_DOMAINS), "{quotient:?}");
+                assert_eq!(g.spec.metric, ErrorMetric::ABSOLUTE, "{quotient:?}");
+                assert_eq!(
+                    g.spec.error,
+                    unknown(QUOTIENT_OPERAND_DOMAINS),
+                    "{quotient:?}"
+                );
             }
             let ratio = of(&arith(Div, scalar(rel(0.01)), scalar(rel(0.02)))).unwrap();
-            assert_eq!(ratio.metric, ErrorMetric::RelativeValue);
-            assert_eq!(ratio.bound, unknown(DIVISION_OPERAND_DOMAINS));
+            assert_eq!(ratio.spec.metric, ErrorMetric::Relative);
+            assert_eq!(ratio.spec.error, unknown(DIVISION_OPERAND_DOMAINS));
             let relative = of(&arith(Mul, scalar(rel(0.01)), scalar(rel(0.02)))).unwrap();
-            assert_eq!(relative.metric, ErrorMetric::RelativeValue);
+            assert_eq!(relative.spec.metric, ErrorMetric::Relative);
             assert!(close(bound(&relative), 0.01 + 0.02 + 0.0002));
             let rank = scalar(with_bound(ErrorMetric::Rank, 0.01, 0.001));
             assert_eq!(of(&arith(Mul, rank.clone(), x.clone())), None);
@@ -2613,7 +2610,7 @@ mod tests {
                 arith(Div, x.clone(), ScalarExpr::EvalTimestamp),
             ] {
                 let g = of(&kept).unwrap();
-                assert_eq!(g.metric, ErrorMetric::RelativeValue, "{kept:?}");
+                assert_eq!(g.spec.metric, ErrorMetric::Relative, "{kept:?}");
                 assert!(close(bound(&g), 0.01), "{kept:?}");
             }
             for none in [
@@ -2647,7 +2644,7 @@ mod tests {
                 call("abs", vec![x.clone()]),
             ] {
                 let g = of(&expr).unwrap();
-                assert_eq!(g.metric, ErrorMetric::AbsoluteValue, "{expr:?}");
+                assert_eq!(g.spec.metric, ErrorMetric::ABSOLUTE, "{expr:?}");
                 assert!(
                     close(bound(&g), 0.01) && close(delta(&g), 0.001),
                     "{expr:?}"
@@ -2664,7 +2661,7 @@ mod tests {
                 vec![scalar(rel(0.01)), scalar(rel(0.02)), lit(10.0)],
             ))
             .unwrap();
-            assert_eq!(relative.metric, ErrorMetric::RelativeValue);
+            assert_eq!(relative.spec.metric, ErrorMetric::Relative);
             assert!(close(bound(&relative), 0.02));
             let mixed = call("promql_clamp_min", vec![x, scalar(rel(0.02))]);
             assert_eq!(of(&mixed), None);
@@ -2780,12 +2777,12 @@ mod tests {
         /// column, the weight times the source's row count for a count.
         #[test]
         fn the_absolute_bound_names_the_weighted_norm() {
-            let frequency = AccuracyGuarantee {
-                metric: ErrorMetric::Frequency,
-                bound: BoundExpr::Constant { value: 0.01 },
-                failure_probability: ProbabilityExpr::Constant { value: 0.001 },
-                provenance: vec![],
-            };
+            let frequency = AccuracyGuarantee::new(
+                ErrorMetric::ABSOLUTE_STREAM_L1,
+                BoundExpr::Constant { value: 0.01 },
+                ProbabilityExpr::Constant { value: 0.001 },
+                vec![],
+            );
             let estimate = |summary: Rc<OperatorNode>| {
                 operand_guarantee(&crate::test_support::estimate_over(
                     summary,
@@ -2799,19 +2796,24 @@ mod tests {
             ));
             let l1 = source_norm_statistic(STREAM_L1_NORM, "m");
             assert_eq!(
-                raw.bind(&|s| (s == l1).then_some(100.0)).bound.evaluate(),
+                raw.bind(&|s| (s == l1).then_some(100.0))
+                    .spec
+                    .error
+                    .evaluate(),
                 Some(1.0)
             );
             let count = estimate(Rc::new(cms_summary("count by (job) (m)")));
             assert!(count
                 .bind(&|s| (s == l1).then_some(100.0))
-                .bound
+                .spec
+                .error
                 .has_unknown());
             let rows = source_norm_statistic(STREAM_ROW_COUNT, "m");
             assert_eq!(
                 count
                     .bind(&|s| (s == rows).then_some(100.0))
-                    .bound
+                    .spec
+                    .error
                     .evaluate(),
                 Some(1.0)
             );
@@ -2819,13 +2821,8 @@ mod tests {
     }
 
     fn inventory(query: &str) -> PerComputationCandidates<usize> {
-        let root = crate::test_support::lower_promql(
-            query,
-            AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.001,
-            },
-        );
+        let root =
+            crate::test_support::lower_promql(query, RequestedAccuracy::epsilon_delta(0.01, 0.001));
         // Per-series state ranks each series' identity, which the rows carry
         // as a column; a query over aggregated rows is planned over labels.
         let root =
@@ -2938,7 +2935,7 @@ mod tests {
     fn whole_expression_topk_partitions_index_the_heap_input() {
         let root = crate::test_support::lower_promql(
             "topk by (job) (2, sum by (service, job) (rate(m[1m])))",
-            AccuracyTarget::Epsilon(0.1),
+            RequestedAccuracy::epsilon(0.1),
         );
         let inventory =
             generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
@@ -3020,7 +3017,7 @@ mod tests {
             ("rate(m[1m])", None),
             ("max_over_time(m[1m])", None),
         ] {
-            let root = crate::test_support::lower_promql(query, AccuracyTarget::Exact);
+            let root = crate::test_support::lower_promql(query, RequestedAccuracy::exact());
             assert_eq!(samples_of_metric(&root).as_deref(), metric, "{query}");
         }
     }
@@ -3190,19 +3187,20 @@ mod tests {
             weight_domain: WeightDomain::SamplesOfMetric { metric: "m".into() },
         };
         let gated = estimate_bound_over_samples(&family, &update, &query).expect("gated");
-        assert_eq!(gated.bound.evaluate(), None);
+        assert_eq!(gated.spec.error.evaluate(), None);
         let local = DefaultAccuracyModel
             .local_guarantee(&family, &query)
             .unwrap();
         let statistic = samples_sign_statistic("m");
         // Every other statistic (a stream norm) bound alike.
         let others = |s: &str| Some(if s == statistic { 1.0 } else { 1_000.0 });
-        let bound = gated.bind(&others).bound.evaluate();
+        let bound = gated.bind(&others).spec.error.evaluate();
         assert!(bound.is_some());
-        assert_eq!(bound, local.bind(&others).bound.evaluate());
+        assert_eq!(bound, local.bind(&others).spec.error.evaluate());
         let unconfirmed = gated
             .bind(&|s| (s != statistic).then_some(1_000.0))
-            .bound
+            .spec
+            .error
             .evaluate();
         assert_eq!(unconfirmed, None);
     }

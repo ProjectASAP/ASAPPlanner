@@ -13,7 +13,7 @@ pub(super) fn guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::Cardinality,
+        ErrorMetric::Relative,
         10.0 / f64::from(k.saturating_sub(2).max(1)).sqrt(),
         ProbabilityExpr::Constant { value: 0.01 },
         match params {

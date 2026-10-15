@@ -199,7 +199,7 @@ pub(crate) fn temporal_average_components(root: &Rc<OperatorNode>) -> Option<Rc<
         ArithmeticOpKind::Div,
         aggregate(AggIntent::Sum { col: *col })?,
         aggregate(AggIntent::Count {
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         })?,
     )?;
     (root.schema == rewritten.schema).then_some(rewritten)
@@ -245,7 +245,7 @@ fn build_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
         OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: reduction.clone(),
             measures: vec![AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             }],
             output_names: Vec::new(),
             filters: vec![],
@@ -437,6 +437,7 @@ mod tests {
     use asap_types::ir::operator_properties::Source;
     use asap_types::pre_asap::schema::{Field, Schema};
     use asap_types::types::AccuracyTarget;
+    use asap_types::types::RequestedAccuracy;
     use std::time::Duration;
 
     use crate::test_support::metric_scan;
@@ -471,7 +472,10 @@ mod tests {
     // Temporal averages expose two single-measure children without closing labels.
     #[test]
     fn temporal_average_components_preserves_schema_and_exposes_sum_count() {
-        let root = lower_promql("avg_over_time(a{job=\"api\"}[5m])", AccuracyTarget::Exact);
+        let root = lower_promql(
+            "avg_over_time(a{job=\"api\"}[5m])",
+            RequestedAccuracy::exact(),
+        );
         assert!(SemanticEquivalentRewriteStrategy
             .replacements(&TargetSubDAG::new(&root))
             .is_empty());
@@ -537,7 +541,7 @@ mod tests {
         for intent in [
             AggIntent::Sum { col: None },
             AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
             AggIntent::Min { col: None },
         ] {
@@ -632,7 +636,7 @@ mod tests {
         ));
         assert!(matches!(rhs.non_asap(),
             Some(NonASAPOp::Aggregate { measures, .. })
-                if matches!(measures.as_slice(), [AggIntent::Count { accuracy: AccuracyTarget::Exact }])
+                if matches!(measures.as_slice(), [AggIntent::Count { accuracy }] if accuracy.is_exact())
         ));
 
         let original_schema = original.schema.clone();
@@ -708,9 +712,7 @@ mod tests {
             let expected = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
                 || matches!(
                     measures.as_slice(),
-                    [AggIntent::Count {
-                        accuracy: AccuracyTarget::Exact
-                    }]
+                    [AggIntent::Count { accuracy }] if accuracy.is_exact()
                 );
             if !expected {
                 continue;
@@ -726,9 +728,7 @@ mod tests {
             found_sum |= matches!(measures.as_slice(), [AggIntent::Sum { .. }]);
             found_count |= matches!(
                 measures.as_slice(),
-                [AggIntent::Count {
-                    accuracy: AccuracyTarget::Exact
-                }]
+                [AggIntent::Count { accuracy }] if accuracy.is_exact()
             );
         }
         assert!(found_sum && found_count);
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn semantic_rewrite_composes_every_supported_aggregate_pair() {
         let exact_count = AggIntent::Count {
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         };
         for (outer, inner) in [
             (AggIntent::Sum { col: None }, AggIntent::Sum { col: None }),
@@ -905,7 +905,7 @@ mod tests {
         let root = nested_aggregate(
             AggIntent::Sum { col: None },
             AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
         );
         let space = crate::replacement::search_workload(vec![("sum-count", root)]).unwrap();

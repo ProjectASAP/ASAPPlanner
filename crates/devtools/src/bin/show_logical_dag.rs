@@ -19,7 +19,7 @@
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use std::io::Read;
 
 fn col(name: &str, dtype: DataType) -> Field {
@@ -77,14 +77,14 @@ async fn main() {
         }
         println!("━━━ {line} ━━━");
         if let Some(q) = line.strip_prefix("sql>") {
-            match lower_sql(q.trim(), &catalog, AccuracyTarget::Exact).await {
+            match lower_sql(q.trim(), &catalog, RequestedAccuracy::exact()).await {
                 Ok(qe) => println!("{qe:#?}"),
                 Err(e) => println!("ERR: {e}"),
             }
         } else if let Some(q) = line.strip_prefix("promql>") {
             match lower_promql_with_data_ingestion_interval(
                 q.trim(),
-                AccuracyTarget::Exact,
+                RequestedAccuracy::exact(),
                 interval_ms,
             ) {
                 Ok(qe) => println!("{qe:#?}"),

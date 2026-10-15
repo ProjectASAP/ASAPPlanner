@@ -13,7 +13,7 @@ use asap_integration_tests::planning::selected_dag;
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 fn col(name: &str, dtype: DataType) -> Field {
     Field::plain(name, dtype, false)
@@ -46,7 +46,7 @@ fn catalog() -> SqlCatalog {
 }
 
 /// Lower `sql` and take the logical DAG the planner pipeline selects.
-async fn plan(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+async fn plan(sql: &str, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
     let pre = lower_sql(sql, &catalog(), accuracy.clone())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
@@ -97,7 +97,7 @@ async fn project_above_and_scan_below_a_summary_are_both_non_asap_nodes() {
     let root = plan(
         "WITH metric AS (SELECT avg(CASE WHEN l_quantity BETWEEN 1 AND 50 THEN 1.0 ELSE 0.0 END) \
          AS in_range FROM lineitem) SELECT in_range, in_range = 1.0 AS ok FROM metric",
-        AccuracyTarget::Exact,
+        RequestedAccuracy::exact(),
     )
     .await;
     // The root is the outer SELECT list: a NonASAP Project.
@@ -128,7 +128,7 @@ async fn project_above_and_scan_below_a_summary_are_both_non_asap_nodes() {
 async fn exact_aggregate_and_sketch_share_one_scan() {
     let root = plan(
         "SELECT avg(l_extendedprice), approx_percentile_cont(l_discount, 0.99) FROM lineitem",
-        AccuracyTarget::Epsilon(0.01),
+        RequestedAccuracy::epsilon(0.01),
     )
     .await;
     let exact = find_all(&root, |node| {
@@ -162,7 +162,7 @@ async fn each_side_of_union_all_holds_a_summary_estimate() {
     let root = plan(
         "SELECT approx_distinct(l_partkey) FROM lineitem \
          UNION ALL SELECT approx_distinct(l_suppkey) FROM lineitem",
-        AccuracyTarget::Epsilon(0.01),
+        RequestedAccuracy::epsilon(0.01),
     )
     .await;
     // The SQL front end lowers UNION ALL to `SetOp { all: true }`.

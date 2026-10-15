@@ -69,7 +69,7 @@ use asap_types::pre_asap::{
     resolve_column_ref, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue,
     WindowFuncKind,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{ErrorMetric, RequestedAccuracy};
 use asap_types::workload::SqlDialect;
 
 use crate::error::SqlError as LoweringError;
@@ -84,8 +84,8 @@ pub use types::SqlCatalog;
 use self::types::{arrow_to_dtype, scalar_value_to_asap, schema_to_arrow};
 
 std::thread_local! {
-    static ACCURACY: std::cell::RefCell<AccuracyTarget> =
-        const { std::cell::RefCell::new(AccuracyTarget::Exact) };
+    static ACCURACY: std::cell::RefCell<RequestedAccuracy> =
+        const { std::cell::RefCell::new(RequestedAccuracy::exact()) };
 }
 
 /// RAII guard installing `accuracy` as the ambient accuracy target for the
@@ -95,10 +95,10 @@ std::thread_local! {
 /// `lower_plan` recursion without a parameter on every one of its
 /// signatures, consulted only at the couple of sites that build an
 /// accuracy-bearing `AggIntent`.
-struct AccuracyGuard(AccuracyTarget);
+struct AccuracyGuard(RequestedAccuracy);
 
 impl AccuracyGuard {
-    fn install(accuracy: AccuracyTarget) -> Self {
+    fn install(accuracy: RequestedAccuracy) -> Self {
         let prev = ACCURACY.with(|a| a.replace(accuracy));
         AccuracyGuard(prev)
     }
@@ -106,11 +106,12 @@ impl AccuracyGuard {
 
 impl Drop for AccuracyGuard {
     fn drop(&mut self) {
-        ACCURACY.with(|a| *a.borrow_mut() = std::mem::replace(&mut self.0, AccuracyTarget::Exact));
+        ACCURACY
+            .with(|a| *a.borrow_mut() = std::mem::replace(&mut self.0, RequestedAccuracy::exact()));
     }
 }
 
-fn current_accuracy() -> AccuracyTarget {
+fn current_accuracy() -> RequestedAccuracy {
     ACCURACY.with(|a| a.borrow().clone())
 }
 
@@ -175,7 +176,7 @@ impl<'a> SqlLowerer<'a> {
     pub async fn lower(
         &self,
         sql: &str,
-        accuracy: &AccuracyTarget,
+        accuracy: &RequestedAccuracy,
     ) -> Result<Unresolved, LoweringError> {
         let ctx = self.build_context()?;
         let state = ctx.state();
@@ -1783,11 +1784,11 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                     }
                     args => AggIntent::Cardinality {
                         cols: args.iter().map(distinct_col).collect::<Result<_, _>>()?,
-                        accuracy: current_accuracy(),
+                        accuracy: current_accuracy().target_in(ErrorMetric::Relative),
                     },
                 },
                 AggSemantic::Count => AggIntent::Count {
-                    accuracy: current_accuracy(),
+                    accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
                 },
                 AggSemantic::Sum => AggIntent::Sum {
                     col: col(&agg_fn.params.args)?,
@@ -1828,11 +1829,11 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                             _ => extract_percentile_q(&agg_fn.params.args)?,
                         },
                     },
-                    accuracy: current_accuracy(),
+                    accuracy: current_accuracy().for_quantile(),
                 },
                 AggSemantic::Cardinality => AggIntent::Cardinality {
                     cols: vec![reducer_col(&name, &agg_fn.params.args)?],
-                    accuracy: current_accuracy(),
+                    accuracy: current_accuracy().target_in(ErrorMetric::Relative),
                 },
             })
         }

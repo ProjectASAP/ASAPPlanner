@@ -106,8 +106,6 @@ use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::schema::{ColumnId, Schema};
 
-use asap_types::types::AccuracyTarget;
-
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
 
 /// The `(by, intent, child)` shape this strategy operates on: a single
@@ -171,10 +169,10 @@ fn rollup_combinator(intent: &AggIntent, finer_measure_col: ColumnId) -> Option<
         }),
         // Not self-combining — see the module docs. Both merge by addition
         // over the finer side's own output column instead.
-        AggIntent::Count {
-            accuracy: AccuracyTarget::Exact,
-        }
-        | AggIntent::Increase => Some(AggIntent::Sum {
+        AggIntent::Count { accuracy } if accuracy.is_exact() => Some(AggIntent::Sum {
+            col: Some(finer_measure_col),
+        }),
+        AggIntent::Increase => Some(AggIntent::Sum {
             col: Some(finer_measure_col),
         }),
         _ => None,
@@ -629,14 +627,14 @@ mod tests {
         let fine = agg(
             vec![2, 3],
             AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
             &scan,
         );
         let coarse = agg(
             vec![2],
             AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
             &scan,
         );
@@ -664,7 +662,7 @@ mod tests {
     fn approximate_count_does_not_roll_up_via_sum() {
         let scan = metric_scan();
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::Epsilon(0.01),
+            accuracy: AccuracyTarget::epsilon(0.01),
         };
         let fine = agg(vec![2, 3], intent.clone(), &scan);
         let coarse = agg(vec![2], intent, &scan);
@@ -720,7 +718,7 @@ mod tests {
     #[test]
     fn workload_search_does_not_roll_up_approximate_count() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::Epsilon(0.01),
+            accuracy: AccuracyTarget::epsilon(0.01),
         };
         let fine = agg(vec![2, 3], intent.clone(), &metric_scan());
         let coarse = agg(vec![2], intent, &metric_scan());
@@ -873,7 +871,7 @@ mod tests {
                 measures: vec![
                     AggIntent::Sum { col: Some(1) },
                     AggIntent::Count {
-                        accuracy: AccuracyTarget::Exact,
+                        accuracy: AccuracyTarget::exact(),
                     },
                 ],
                 output_names: vec![],

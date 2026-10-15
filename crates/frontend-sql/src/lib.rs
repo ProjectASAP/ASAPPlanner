@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use asap_frontend_common::resolve_root;
 use asap_types::ir::OperatorNode;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 
 pub use error::SqlError;
@@ -30,7 +30,7 @@ pub use sql::{SqlCatalog, SqlLowerer};
 pub async fn lower_sql(
     query: &str,
     catalog: &SqlCatalog,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
 ) -> Result<Rc<OperatorNode>, SqlError> {
     lower_sql_dialect(query, catalog, SqlDialect::DataFusionSQL, accuracy).await
 }
@@ -47,7 +47,7 @@ pub async fn lower_sql_dialect(
     query: &str,
     catalog: &SqlCatalog,
     dialect: SqlDialect,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
 ) -> Result<Rc<OperatorNode>, SqlError> {
     let unresolved = SqlLowerer::with_dialect(catalog, dialect)
         .lower(query, &accuracy)
@@ -96,7 +96,7 @@ pub async fn lower_sql_batch(
 
     let mut results = Vec::with_capacity(entries.len());
     for entry in entries {
-        let accuracy = entry.requirements.accuracy.target();
+        let accuracy = entry.requirements.accuracy.requested();
         results.push(lower_sql_dialect(&entry.query.0, catalog, dialect.clone(), accuracy).await);
     }
     results

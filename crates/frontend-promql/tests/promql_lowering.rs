@@ -9,7 +9,7 @@ use asap_types::ir::{
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, Reduction, ScalarValue, Source,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
@@ -17,10 +17,12 @@ use asap_types::workload::{
 
 use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
 mod support;
+use asap_types::types::RequestedAccuracy;
 use support::lower_promql;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
-    lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
+    lower_promql(q, RequestedAccuracy::exact())
+        .unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
 #[test]
@@ -32,14 +34,14 @@ fn frequency_extensions_lower_to_explicit_frequency_statistics() {
             "entropy_over_time(cpu_usage[5m])",
             AggIntent::FrequencyEntropy {
                 col: None,
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
         ),
         (
             "l2_over_time(cpu_usage[5m])",
             AggIntent::FrequencyL2 {
                 col: None,
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
         ),
     ] {
@@ -58,13 +60,13 @@ fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
         "distinct_over_time((cpu_usage + 1)[5m:1m])",
         "sum by(job)(distinct_over_time(cpu_usage[5m]))",
     ] {
-        for accuracy in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.02)] {
+        for accuracy in [RequestedAccuracy::exact(), RequestedAccuracy::epsilon(0.02)] {
             let dag = lower_promql(query, accuracy.clone()).unwrap();
             let mut intents = Vec::new();
             collect_intents(&dag, &mut intents);
             assert!(
                 intents.iter().any(|intent| matches!(
-                    intent, AggIntent::Cardinality { accuracy: actual, .. } if actual == &accuracy
+                    intent, AggIntent::Cardinality { accuracy: actual, .. } if *actual == accuracy.target_in(ErrorMetric::Relative)
                 )),
                 "{query}: {dag:?}"
             );
@@ -382,7 +384,7 @@ fn classic_histogram_quantile_keeps_out_of_range_quantiles() {
 fn classic_histogram_quantile_rejects_an_argument_without_le() {
     let error = lower_promql(
         "histogram_quantile(0.9, sum by (job) (rate(x_bucket[5m])))",
-        AccuracyTarget::Exact,
+        RequestedAccuracy::exact(),
     )
     .unwrap_err();
     assert!(error.to_string().contains("le"), "{error}");
@@ -1029,7 +1031,7 @@ fn nan_or_overflowing_topk_k_is_rejected() {
         "limitk(Inf, http_requests)",
     ] {
         assert!(
-            lower_promql(q, AccuracyTarget::Exact).is_err(),
+            lower_promql(q, RequestedAccuracy::exact()).is_err(),
             "{q} should be rejected"
         );
     }
@@ -1044,7 +1046,7 @@ fn out_of_range_quantile_phi_is_accepted() {
         "histogram_quantile(2.0, rate(b_bucket[5m]))",
     ] {
         assert!(
-            lower_promql(query, AccuracyTarget::Exact).is_ok(),
+            lower_promql(query, RequestedAccuracy::exact()).is_ok(),
             "{query}"
         );
     }
@@ -1055,7 +1057,11 @@ fn function_wrapped_range_vector_is_rejected_not_stripped() {
     // `rate(abs(m[5m]))` must NOT silently lower as `rate(m[5m])` — the wrapper
     // is rejected (here, at parse or in extract_matrix), never stripped.
     assert!(
-        lower_promql("rate(abs(http_requests_total[5m]))", AccuracyTarget::Exact).is_err(),
+        lower_promql(
+            "rate(abs(http_requests_total[5m]))",
+            RequestedAccuracy::exact()
+        )
+        .is_err(),
         "function-wrapped range vector should be rejected"
     );
 }
@@ -1065,7 +1071,7 @@ fn pathologically_nested_query_is_rejected_not_stack_overflow() {
     // 300 nested parens parse fine but exceed the walker's depth limit (256);
     // it must return an error, not overflow the stack.
     let q = format!("{}m{}", "(".repeat(300), ")".repeat(300));
-    let err = lower_promql(&q, AccuracyTarget::Exact).unwrap_err();
+    let err = lower_promql(&q, RequestedAccuracy::exact()).unwrap_err();
     assert!(format!("{err}").contains("nesting"), "got {err}");
 }
 
@@ -1084,7 +1090,7 @@ fn fill_modifiers_are_rejected_not_ignored() {
         "a > bool on(job) fill(0) b",
         "sum(a - on(job) group_right fill_left(0) b)",
     ] {
-        match lower_promql(q, AccuracyTarget::Exact) {
+        match lower_promql(q, RequestedAccuracy::exact()) {
             Err(LoweringError::UnsupportedFeature(m)) if m.contains("`fill`") => {}
             other => panic!("expected fill rejection for {q:?}, got {other:?}"),
         }
@@ -1097,7 +1103,7 @@ fn fill_modifiers_are_rejected_not_ignored() {
 fn accuracy_target_flows_into_quantile_intent() {
     let qe = lower_promql(
         "quantile_over_time(0.9, m[5m])",
-        AccuracyTarget::Epsilon(0.01),
+        RequestedAccuracy::epsilon(0.01),
     )
     .unwrap();
     let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
@@ -1105,7 +1111,7 @@ fn accuracy_target_flows_into_quantile_intent() {
     };
     assert!(matches!(
         &measures[0],
-        AggIntent::Quantile { accuracy: AccuracyTarget::Epsilon(e), .. } if (*e - 0.01).abs() < 1e-12
+        AggIntent::Quantile { accuracy, .. } if (accuracy.error - 0.01).abs() < 1e-12
     ));
 }
 
@@ -1174,7 +1180,7 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
                 BatchEntry {
                     query: Query("quantile_over_time(0.9, b[5m])".into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.02)),
+                        accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::epsilon(0.02)),
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,
@@ -1383,7 +1389,7 @@ fn quantile_branches(q: &OperatorNode) -> Vec<(String, AggIntent)> {
 fn histogram_quantiles_rejects_unrepresented_native_histograms() {
     assert!(lower_promql(
         r#"histogram_quantiles(testhistogram3, "q", 0, 0.25, 1)"#,
-        AccuracyTarget::Exact
+        RequestedAccuracy::exact()
     )
     .is_err());
 }
@@ -1655,7 +1661,7 @@ fn scalar_comparison_without_bool_is_rejected() {
     // PromQL has no scalar filter: a scalar/scalar comparison needs `bool`.
     for q in ["1 < 2", "time() > 0", "(1 + 1) == 2"] {
         assert!(
-            lower_promql(q, AccuracyTarget::Exact).is_err(),
+            lower_promql(q, RequestedAccuracy::exact()).is_err(),
             "{q} must be rejected without `bool`"
         );
     }

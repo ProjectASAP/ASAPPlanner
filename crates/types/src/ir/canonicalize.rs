@@ -250,7 +250,7 @@ fn try_promote_additive_top_ranking(
     // Count ranks unit updates; a direct Sum ranks weighted updates.
     let accuracy = match ranked_agg {
         AggIntent::Count { accuracy } => accuracy.clone(),
-        AggIntent::Sum { .. } => AccuracyTarget::Exact,
+        AggIntent::Sum { .. } => AccuracyTarget::exact(),
         _ => unreachable!("additive ranking gate admitted a non-additive measure"),
     };
 
@@ -418,7 +418,7 @@ mod tests {
 
     fn count() -> AggIntent {
         AggIntent::Count {
-            accuracy: AccuracyTarget::Exact,
+            accuracy: AccuracyTarget::exact(),
         }
     }
 

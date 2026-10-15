@@ -75,7 +75,6 @@ use asap_types::post_asap::{
     ExecutionDataStateError, Schema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
 use crate::replacement::{
@@ -278,18 +277,16 @@ impl ExactComposition {
 /// `Count` only at `Exact` accuracy (an approximate count is a sketch
 /// target, not an exact fold).
 fn is_query_time_reducer(intent: &AggIntent) -> bool {
-    matches!(
-        intent,
+    match intent {
         AggIntent::Sum { .. }
-            | AggIntent::Min { .. }
-            | AggIntent::Max { .. }
-            | AggIntent::Avg { .. }
-            | AggIntent::StdDev { .. }
-            | AggIntent::Variance { .. }
-            | AggIntent::Count {
-                accuracy: AccuracyTarget::Exact
-            }
-    )
+        | AggIntent::Min { .. }
+        | AggIntent::Max { .. }
+        | AggIntent::Avg { .. }
+        | AggIntent::StdDev { .. }
+        | AggIntent::Variance { .. } => true,
+        AggIntent::Count { accuracy } => accuracy.is_exact(),
+        _ => false,
+    }
 }
 
 /// Does `implementation` need a `SummaryEstimate` evaluation to yield a value
