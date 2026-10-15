@@ -1,201 +1,131 @@
-# ASAP Pre/Post-ASAP DAG viewer
+# ASAPPlanner Stage Viewer
 
-The viewer has one visualization mode: **Pre/Post-ASAP**.
+A browser view of what the planner does with one workload, read from an
+`asap-stage-pipeline/v1` document written by the `stage_pipeline` devtool:
 
-- Select one query to see that query's complete pre-ASAP and post-ASAP DAGs.
-- Select multiple queries to see two workload-union DAGs: one pre-ASAP union
-  and one post-ASAP union. Nodes with the same exporter-assigned workload
-  identity are collapsed while query roots and ownership are retained.
-- The **All** checkbox left of the query strip selects or deselects every
-  query at once, and shows an indeterminate state while only some are
-  selected. It changes the selection only; **Clear all** in the header is a
-  different operation and discards the loaded workload itself.
-- Drag anywhere on the canvas to pan, including on a lane's own background.
-- Pre-ASAP nodes show only their original IR content.
-- Post-ASAP nodes show their translated IR content and the explicit planner
-  decision carried by that node.
-- Click any edge to inspect its schema, source and target nodes, and how the
-  target operation derives its output schema in the details panel.
-- The details panel shows the selected workload's bound table/metric schemas
-  and can be resized by dragging its left edge.
-- A post-ASAP node whose winning decision carries a cost/benefit annotation
-  shows a concise `▼NN%`/`▲NN%` badge next to its label; the sidebar and the
-  workload-scope summary show the full baseline/selected/benefit breakdown,
-  with units and provenance, wherever the export provides one — see "Cost/
-  benefit annotations" below.
+- **Stage 0**, the DAG the query-language frontends lower the queries into,
+  one root per query;
+- **Stage 1**, the logical ASAP candidates: Pass 1's per-computation
+  choices, each followed by its Pass 2 identical-expression candidates;
+- **Stage 2**, the physical candidate of each composed Stage 1 candidate,
+  or the reason Stage 2 pruned it;
+- **Stage 3**, which checks every physical candidate, prices the valid ones
+  per second and selects the cheapest.
 
-There are no separate Single, Compare, or Union modes.
+To run it, see [RUNNING.md](RUNNING.md).
 
-## Interactive query editor
+## The page
 
-From the repository root:
+- **Examples**: one tab per entry of `examples.json` (#509 Examples 1, 3a
+  and 3b). `#example3b` in the URL opens that example.
+- **Workload queries** with their accuracy, latency and recurrence, and a
+  line that counts the candidates at each stage.
+- **Stage 3 · plans by cost**: every candidate the document shows. First the
+  selected plan, then the other valid ones cheapest first, then the
+  rejected ones with their reasons (or "not judged" when plan selection
+  failed with an error), then the Stage 2 pruned ones and the
+  Stage 1 candidates that did not compose, each with its reason. The header
+  says how many candidates Stage 1 enumerated, how many the document shows
+  when it caps them, and why Stage 1 or plan selection failed when it did.
+  Clicking a row shows it in the lanes.
+- **Three lanes**, stacked top to bottom so each is as wide as the page:
+  Stage 0, the chosen Stage 1 candidate, and its Stage 2 candidate
+  with each node's timing and Stage 3 cost (`× n` when a node that is not
+  materialized is computed once per reader). Each lane is the whole
+  workload's DAG, so a node shared by several queries appears once. Nodes
+  are data sources, relational operators or summary operators; summary
+  builds print their configuration (for example `CmsWithHeap · depth 7 ·
+  heap 100 · width 272`) and whether there is one per group, one per
+  series, or one shared instance. A standalone scalar query (`time()`,
+  `scalar(v)`, `1 + 2`) is a dashed `Scalar` node over the nodes it reads.
+  Query roots have a thick border.
+- **Details**: click a node for its operator, timing, materialization,
+  output schema, guarantee and Stage 3 cost; click an edge for its schema
+  and data state.
 
-```sh
-python3 tools/dag-viewer/server.py
-```
+Other documents open with **Open stage document…**, by dropping a file on
+the page, or with `?doc=<path>` for a file served next to `index.html`.
 
-Open <http://127.0.0.1:8000>, expand **Query editor**, add SQL or PromQL
-queries, choose an epsilon, and click **Plan selected workload**. The backend
-runs the real pipeline:
+## Query editor
 
-1. SQL/PromQL parsing and lowering
-2. pre-ASAP DAG generation
-3. ASAP-aware mapping
-4. post-ASAP DAG generation
+With the local server running, **Query editor** plans SQL and PromQL
+queries with one ε for every query. SQL queries read the tables declared in
+the editor (one column per line, `name TYPE [NOT NULL]`, and an optional
+time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
+`--name` and `--table` and the page shows the result.
 
-The editor includes built-in `metrics` and `hosts` table schemas. Enable the
-schemas each SQL query uses with its checkboxes, or add a table with custom
-columns using one readable `name TYPE [NOT NULL]` declaration per line and
-an optional time-index column. The compact `name:type!` form remains accepted
-for compatibility. These definitions are passed to `dag_export` and used by the SQL
-schema_resolver; they are not display-only metadata. PromQL keeps its open metric
-model and shows an inferred schema based on the labels and values used by the
-query. The sidebar groups identical input schemas and lists every selected
-query that uses each one.
+## Document format
 
-The Python terminal streams those stages while they run. The server binds to
-localhost by default and invokes `dag_export` with an argv array, not a
-shell command.
-
-## Export JSON directly
-
-```sh
-cargo run -p asap-devtools --bin dag_export -- \
-  --post-asap --epsilon 0.01 \
-  --planner-cost-json "$PLANNER_PHYSICAL_EVIDENCE" \
-  --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
-  > /tmp/dag.json
-```
-
-Load the JSON with the page's file picker. `--planner-cost-json` is a complete
-physical-evidence document: an immutable `evidence_version`, calibration, and
-target records containing the exact target node (a serialized pre-ASAP
-`OperatorNode`) and comparison scope.
-Each exact replacement candidate owns its complete logical-node
-`PhysicalNodeEvidence`; summary candidates additionally own their bound
-`PhysicalDAG`. Candidate-local evidence prevents statistics for one physical
-alternative from satisfying another. Candidate matching includes the complete
-exported plan, including accuracy guarantees, and never uses a hash or strategy
-name; derived floating constants allow only a one-ULP JSON round-trip tolerance.
-Duplicate, conflicting, unused, or missing records fail closed. The old
-`--analytical-cost-json` spelling accepts the new document as an alias; its old
-compact aggregation payload is rejected with a migration error.
-
-`--default-cost` is the alternative cost source for a workload with no
-deployment to measure yet, and is mutually exclusive with
-`--planner-cost-json`:
-
-```sh
-cargo run -p asap-devtools --bin dag_export -- \
-  --post-asap --default-cost --epsilon 0.01 \
-  --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
-  > /tmp/dag.json
-```
-
-It ranks candidates with the planner's structural `DefaultCostModel`, so the
-structure of the export is real — which replacements the search found, which
-one won per group, and the merged post-ASAP DAG — while no cost is exported
-at all. Every `CostAnnotation` stays `Unavailable` with no `value` and renders
-as **Not estimated**; the structural ranking number is never serialized. Use
-it to see what ASAPPlanner does with a workload before there is a deployment
-to calibrate against, and `--planner-cost-json` once there is.
-
-Without either flag, `--post-asap` exports the raw DAG only.
-
-## Standalone HTML
-
-```sh
-python3 tools/dag-viewer/render.py /tmp/dag.json -o /tmp/dag.html
-```
-
-The renderer embeds the workload and vendored JavaScript into one file. It
-always opens in Pre/Post-ASAP mode; there is no `--mode` option.
-
-## JSON contract
-
-`NamedDAG.dag` is the original pre-ASAP DAG. `NamedDAG.post_dag`
-is the complete translated DAG. Every post-ASAP node produced or carried by
-a selected replacement directly contains:
+`stage_pipeline` writes:
 
 ```json
 {
-  "decision": {
-    "id": 7,
-    "strategy": "ASAPStrategies",
-    "rationale": "count realizes as a Cms sketch",
-    "rank": 0,
-    "cost": 1.14001088,
-    "role": "replacement_root",
-    "baseline_cost": { "value": 104.0032, "unit": "CostUnits", "source": "Modeled", "model_version": "analytical-cost-v1+example-calibration-v1", "evidence_version": "example-evidence-v1" },
-    "selected_cost": { "value": 1.14001088, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "delta": 102.86318912, "benefit_ratio": 0.9890386941940248 },
-    "benefit": { "value": 102.86318912, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "benefit_ratio": 0.9890386941940248 }
+  "format": "asap-stage-pipeline/v1",
+  "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
+                "requirements": { "accuracy": "exact", "repeat_interval_ms": 10000 } }] },
+  "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
+  "stage1_logical_asap_optimization": {
+    "combinations": 9, "capped": false,
+    "candidates": [{ "id": "L1", "display_name": "...", "dag": "<flat logical DAG>" },
+                   { "id": "L2", "display_name": "...", "error": "..." }]
+  },
+  "stage2_physical_asap_optimization": {
+    "candidates": [{ "id": "P1", "from_logical": "L1", "display_name": "...", "dag": "<PhysicalASAPDAG>" }],
+    "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }]
+  },
+  "stage3_plan_selection": {
+    "costs": { "P1": { "total": 7.9, "unit": "cost_per_second", "source": "...",
+                       "per_node": { "<node id>": { "cost": 2.3, "multiplier": 1, "detail": "..." } } } },
+    "selected": "P1",
+    "rejected": [{ "id": "P2", "valid": true, "reason": "..." }]
   }
 }
 ```
 
-The viewer reads this explicit metadata. It never guesses a strategy or
-workload-sharing identity from a node label, hash, or client-side signature.
-The exporter assigns `workload_node_id`; union rendering reads that mapping
-directly.
+- A flat logical DAG lists its nodes in id order; an operator names its
+  inputs by node id. `roots` has one root per query: `{"Operator": id}`, or
+  `{"Scalar": expr}` for a standalone scalar query.
+- A `PhysicalASAPDAG` has node ids, an edge list, operator roots in `roots`,
+  and standalone scalar queries in `scalar_roots` as `[query position,
+  expr]`.
+- When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
+  fails, `selected` is null, with the rejections or with `error`.
 
-Node boxes use concrete IR fields: aggregate measures/grouping, sort keys,
-filter predicates, projections, sources, summary families, and evaluation
-queries. A node's `kind` is the operator variant name (`Operator::kind_name`):
-a `NonASAPOp` such as `Aggregate` or `Values`, or an `ASAPOp` such as
-`SummaryAgg` or `EvaluatePopulation`. `node-style.js` maps each kind to a color
-category. Scalar expressions are not nodes; an operator a scalar expression
-reads (`scalar(v)`, `EXISTS (subquery)`) is a child node, shown in `detail`
-as `{"scalar_ref": <node id>}`. Schemas list their entries under `fields`. Category icons are deliberately omitted so they cannot be confused
-with IR text.
+The viewer checks the document before showing it: one root per query, node,
+edge and root references, `scalar_roots` positions, `from_logical`, and the Stage 3 ids, costs and
+`per_node` keys. If a check fails, it shows the problems instead.
 
-### Cost/benefit annotations (issue #286)
+## Files
 
-`decision.baseline_cost` / `.selected_cost` / `.benefit` are structured
-[`CostAnnotation`](../../crates/types/src/cost.rs)s: `value` + `unit` +
-`source` (`Modeled` / `Measured` / `Unavailable`), optionally `baseline` +
-`delta` + `benefit_ratio`, and `model_version`/`evidence_version`/
-`benchmark_id`/`inputs` for provenance. `model_version` identifies the
-analytical formulas and calibration; `evidence_version` independently
-identifies the immutable catalog/runtime generation. A missing `value`
-(`source: "Unavailable"`) always renders as
-**Not estimated** — the viewer never fabricates a number. A complete physical
-planner export keeps CPU operations, peak memory, scan bytes, coefficients,
-and workload statistics in `inputs`. Without complete physical evidence, the
-annotation is `Unavailable`; structural node counts are never substituted,
-including under `--default-cost`, where they rank the candidates and are then
-discarded.
-See the [analytical model design](../../docs/design_docs/asap-aware-mapping/analytical-resource-cost.md).
-
-
-The checked-in viewer fixture makes its illustrative comparison reproducible.
-It models 100 evaluations of 100 million 64-byte rows with 100,000 groups.
-The raw path charges one scan plus three hash/key/accumulator operations per
-row, so CPU is `100 × 100,000,000 × 4 = 40 billion` operations; it reads
-`100 × 6.4 GB = 640 GB` and retains
-`100,000 × (8-byte key + 8-byte accumulator + 16-byte hash metadata) = 3.2 MB`.
-One incrementally built depth-5 CMS charges
-`100,000,000 × 5 = 500 million` counter updates, reads the 6.4 GB source once,
-and retains `272 × 5 × 8 = 10,880` bytes. With coefficients `1e-9` per CPU
-operation, `1e-10` per scan byte, and `1e-9` per peak-memory byte, the displayed totals are
-`104.0032` and `1.14001088` cost units. These are explicit fixture assumptions,
-not statistics inferred by the viewer.
-
-The same three fields also appear on `TargetReplacement`
-(replacement-region baseline/selected/benefit), `NamedDAG.workload_cost` /
-`WorkloadDAG.workload_cost` (whole selected-workload cost/benefit, shared
-decisions counted once via `decision.id` dedup). `ExportDAG.edge_annotations`
-is reserved for a higher layer that has physical evidence for a particular
-edge; DAG sharing alone never creates an edge cost. The sidebar shows the full breakdown
-(value, unit, provenance, baseline, ratio, inputs) on node/edge click and in
-the workload-scope summary; a post-ASAP node with a costed decision also
-gets a concise on-DAG `▼NN%`/`▲NN%` badge next to its label.
-
-All of this is additive and optional: an export with none of these fields
-(anything produced before issue #286) renders exactly as before.
+- `index.html`, `app.js`: the page.
+- `stages.js`: document checks, the candidate list, lane elements and node
+  labels; no DOM.
+- `node-style.js`: the operator-kind table (`KIND_CATEGORY_JSON`, checked
+  against the IR by `crates/devtools/tests/viewer_contract.rs`) and the
+  node groups.
+- `editor.js`: the query editor.
+- `server.py`: serves the page, writes missing example documents into
+  `out/` (git-ignored), and plans editor queries.
+- `examples.json`: the example tabs. `examples/planner-layering-example1.json`
+  is the one committed document: `crates/devtools/tests/stage_pipeline.rs`
+  checks that it is current.
+- `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
+  page works offline.
 
 ## Tests
 
-```sh
-python3 -m unittest discover -s tools/dag-viewer -p test_render.py
-cargo test -p asap-devtools --bin dag_export
+From `tools/dag-viewer`:
+
+```bash
+python3 -m unittest test_viewer test_server
+```
+
+The JavaScript runs in V8 through `py_mini_racer` (`pip install
+py-mini-racer==0.6.0`) against a stub DOM, so no browser is needed; without
+it those tests are skipped. The scalar-query and `/api/plan` tests need a
+built `stage_pipeline` (`cargo build -p asap-devtools --bin
+stage_pipeline`). The Rust side:
+
+```bash
+cargo test -p asap-devtools --test viewer_contract --test stage_pipeline
 ```
