@@ -1319,9 +1319,7 @@ mod tests {
     };
     use asap_types::ir::{BinaryOperator, ExprSemantics, Predicate, SortKey, TimeRangeKind};
     use asap_types::types::AccuracyTarget;
-    use asap_types::workload::{
-        DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
-    };
+    use asap_types::workload::{DataArrival, DurationMs, QueryRecurrence, TimestampMs};
     use std::collections::HashMap;
 
     fn edge(rows: u64, bytes: u64) -> EdgeStatistics {
@@ -1450,11 +1448,6 @@ mod tests {
             recurrence: QueryRecurrence::OneTime {
                 invocations: 1,
                 execute_at: None,
-            },
-            time_selection: TimeSelection {
-                scope: QueryTimeScope::Longitudinal,
-                lookback: Some(DurationMs(1_000)),
-                as_of: Some(TimestampMs(1_000)),
             },
             sources,
         }
@@ -2891,7 +2884,6 @@ mod tests {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
-                    time_selection: TimeSelection::default(),
                 }]),
                 repeating_queries: None,
             },

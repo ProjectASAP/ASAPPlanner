@@ -26,9 +26,9 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::DataType;
 use asap_types::types::{AccuracyScope, AccuracyTarget};
 use asap_types::workload::{
-    DataArrival, DataDistribution, DataWorkload, DurationMs, PlanningWorkload, Predictability,
-    Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
-    RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection,
+    DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
+    QueryRequirements, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    SqlDialect,
 };
 use planner_layering_common::*;
 
@@ -65,11 +65,6 @@ fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> Rep
             max_latency_ms: None,
         },
         predictability: Predictability::Predictable { known_at: None },
-        time_selection: TimeSelection {
-            scope: QueryTimeScope::RealTime,
-            lookback: Some(DurationMs(60_000)),
-            as_of: None,
-        },
     }
 }
 
@@ -82,10 +77,8 @@ fn data_workload(ingestion_interval: bool) -> DataWorkload {
         } else {
             Default::default()
         },
-        ingestion_volume: Default::default(),
         ingestion_rate: declared(Rate(1_000_000.0 / 15.0)),
         input_cardinality: declared(10_000_000),
-        distribution: declared(DataDistribution::Zipf),
         stream_norms: Default::default(),
         max_distinct_per_evaluation: Default::default(),
         metric_types: Default::default(),

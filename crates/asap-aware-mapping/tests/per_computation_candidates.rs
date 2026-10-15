@@ -198,7 +198,6 @@ fn exact_promql(query: &str) -> Vec<QueryRoot> {
                 predictability: Default::default(),
                 invocations: 1,
                 execute_at: None,
-                time_selection: Default::default(),
             }]),
             repeating_queries: None,
         },

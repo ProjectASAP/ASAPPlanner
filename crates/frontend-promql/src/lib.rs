@@ -159,7 +159,7 @@ mod tests {
     use asap_types::ir::{NonASAPOp, TimeRangeKind};
     use asap_types::workload::{
         BatchEntry, DataWorkload, Evidence, PlanningWorkload, Query, QueryRequirements,
-        QueryWorkload, TimeSelection,
+        QueryWorkload,
     };
 
     use super::*;
@@ -174,7 +174,6 @@ mod tests {
                     predictability: Default::default(),
                     invocations: 1,
                     execute_at: None,
-                    time_selection: TimeSelection::default(),
                 }]),
                 repeating_queries: None,
             },

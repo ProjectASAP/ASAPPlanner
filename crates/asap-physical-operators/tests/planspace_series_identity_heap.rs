@@ -10,7 +10,7 @@ use planner_types::{
     types::AccuracyTarget,
     workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence, PlanningWorkload,
-        Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+        Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
     },
 };
 use std::rc::Rc;
@@ -28,7 +28,6 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },

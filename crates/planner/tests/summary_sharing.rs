@@ -21,7 +21,7 @@ use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, SqlDialect, TimeSelection,
+    RepetitionInterval, SqlDialect,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -51,7 +51,6 @@ fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(600_000)),
         requirements: requirements(query, epsilon),
         predictability: Predictability::Unknown,
-        time_selection: TimeSelection::default(),
     }
 }
 

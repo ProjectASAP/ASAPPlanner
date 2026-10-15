@@ -565,7 +565,6 @@ fn query_batch(
                         predictability: Default::default(),
                         invocations: 1,
                         execute_at: None,
-                        time_selection: Default::default(),
                     })
                     .collect(),
             ),

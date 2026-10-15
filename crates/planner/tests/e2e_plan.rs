@@ -14,7 +14,7 @@ use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability,
     Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, SqlDialect, TimeSelection,
+    RepetitionInterval, SqlDialect,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -44,7 +44,6 @@ fn batch(sql: &str) -> BatchEntry {
         predictability: Predictability::AdHoc,
         invocations: 1,
         execute_at: None,
-        time_selection: TimeSelection::default(),
     }
 }
 
@@ -176,7 +175,6 @@ async fn lowers_repeating_sql_entries_too() {
             demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
             requirements: approximate_for("approx_percentile_cont"),
             predictability: Predictability::Unknown,
-            time_selection: TimeSelection::default(),
         }]),
     );
     let catalog = lineitem_catalog();
@@ -317,7 +315,6 @@ async fn each_plan_carries_its_selected_root() {
                 demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
                 requirements: approximate(),
                 predictability: Predictability::Unknown,
-                time_selection: TimeSelection::default(),
             }]),
         },
         data_workload: Some(DataWorkload {

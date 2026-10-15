@@ -125,7 +125,7 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
 async fn batch_lowering_recognizes_frequency_l2() {
     use asap_types::workload::{
         BatchEntry, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
-        SqlDialect, TimeSelection,
+        SqlDialect,
     };
     let workload = QueryWorkload {
         language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
@@ -138,7 +138,6 @@ async fn batch_lowering_recognizes_frequency_l2() {
             predictability: Predictability::Unknown,
             invocations: 1,
             execute_at: None,
-            time_selection: TimeSelection::default(),
         }]),
         repeating_queries: None,
     };

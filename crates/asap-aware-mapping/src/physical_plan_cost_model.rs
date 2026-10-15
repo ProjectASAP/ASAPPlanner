@@ -362,9 +362,7 @@ mod tests {
     use asap_types::ir::{NonASAPOp, OperatorNode};
     use asap_types::pre_asap::{DataType, Field, Reduction, Schema, Source};
     use asap_types::types::AccuracyTarget;
-    use asap_types::workload::{
-        DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
-    };
+    use asap_types::workload::{DataArrival, DurationMs, QueryRecurrence, TimestampMs};
 
     use crate::analytical_cost::{ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator};
     use crate::physical_operator_statistics::{
@@ -436,11 +434,6 @@ mod tests {
             recurrence: QueryRecurrence::OneTime {
                 invocations: 10,
                 execute_at: None,
-            },
-            time_selection: TimeSelection {
-                scope: QueryTimeScope::Longitudinal,
-                lookback: Some(DurationMs(10_000)),
-                as_of: Some(TimestampMs(1_000)),
             },
             sources: vec![ScanSelection {
                 source: Source::Table {

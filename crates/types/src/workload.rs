@@ -112,61 +112,6 @@ pub enum Predictability {
     Unknown,
 }
 
-/// Semantic relationship between a query and event time. This is supplied by
-/// the workload author rather than inferred from issue time or range bounds:
-/// those values do not distinguish, for example, a historical replay from a
-/// live query with the same lookback.
-///
-/// `RealTime` follows the newest data, `Longitudinal` analyzes a fixed or
-/// historical interval, and `Mixed` combines both (for example, comparing
-/// the current hour with the same hour last week).
-///
-/// # Example
-///
-/// ```
-/// use asap_types::workload::QueryTimeScope;
-///
-/// let live_dashboard = QueryTimeScope::RealTime;
-/// let historical_report = QueryTimeScope::Longitudinal;
-/// let week_over_week_dashboard = QueryTimeScope::Mixed;
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryTimeScope {
-    RealTime,
-    Longitudinal,
-    Mixed,
-    #[default]
-    Unknown,
-}
-
-/// Concrete event-time interval selected by a query, kept separate from its
-/// semantic real-time/longitudinal classification.
-///
-/// # Example
-///
-/// A live dashboard evaluated at `200_000` ms with a five-minute lookback
-/// selects events from the preceding five minutes. `as_of: None` makes its
-/// upper bound the evaluation time rather than a fixed historical timestamp.
-///
-/// ```
-/// use asap_types::workload::{DurationMs, QueryTimeScope, TimeSelection};
-///
-/// let last_five_minutes = TimeSelection {
-///     scope: QueryTimeScope::RealTime,
-///     lookback: Some(DurationMs(5 * 60 * 1_000)),
-///     as_of: None,
-/// };
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TimeSelection {
-    pub scope: QueryTimeScope,
-    pub lookback: Option<DurationMs>,
-    /// Fixed upper bound. `None` means the planning/evaluation time.
-    pub as_of: Option<TimestampMs>,
-}
-
 /// Confidence assigned to an estimated demand value, expressed in `[0, 1]`.
 /// Validation rejects values outside that range.
 ///
@@ -302,11 +247,6 @@ pub enum QueryRecurrence {
 ///     },
 ///     invocations: 1,
 ///     execute_at: Some(TimestampMs(10_000)),
-///     time_selection: TimeSelection {
-///         scope: QueryTimeScope::Longitudinal,
-///         lookback: Some(DurationMs(24 * 60 * 60 * 1_000)),
-///         as_of: Some(TimestampMs(10_000)),
-///     },
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -317,7 +257,6 @@ pub struct BatchEntry {
     pub predictability: Predictability,
     pub invocations: u64,
     pub execute_at: Option<TimestampMs>,
-    pub time_selection: TimeSelection,
 }
 
 /// One query with repeated demand. Its recurrence does not imply that the
@@ -334,11 +273,6 @@ pub struct BatchEntry {
 ///     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
 ///     requirements: QueryRequirements::default(),
 ///     predictability: Predictability::Predictable { known_at: None },
-///     time_selection: TimeSelection {
-///         scope: QueryTimeScope::RealTime,
-///         lookback: Some(DurationMs(5 * 60 * 1_000)),
-///         as_of: None,
-///     },
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -348,12 +282,11 @@ pub struct RepeatingEntry {
     pub demand: RepeatedDemand,
     pub requirements: QueryRequirements,
     pub predictability: Predictability,
-    pub time_selection: TimeSelection,
 }
 
 /// Planner-facing normalized form of either [`BatchEntry`] or
-/// [`RepeatingEntry`]. It keeps requirements, predictability, recurrence, and
-/// event-time selection as separate axes. Planning takes one per query, in
+/// [`RepeatingEntry`]. It keeps requirements, predictability and recurrence
+/// as separate axes; the event time a query reads is in its text. Planning takes one per query, in
 /// root order: Stage 2 (physical ASAP-aware optimization) reads the
 /// recurrence and predictability, Stage 3 (plan selection) the accuracy
 /// target, the latency bound and the recurrence. The default is an empty
@@ -372,11 +305,6 @@ pub struct RepeatingEntry {
 ///     recurrence: QueryRecurrence::Repeated(
 ///         RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
 ///     ),
-///     time_selection: TimeSelection {
-///         scope: QueryTimeScope::RealTime,
-///         lookback: Some(DurationMs(5 * 60 * 1_000)),
-///         as_of: None,
-///     },
 /// };
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -392,8 +320,6 @@ pub struct QueryWorkloadEntry {
     /// How often it runs: sets how often each node is priced, and only
     /// repeated queries may keep state from ingestion time (default: unknown).
     pub recurrence: QueryRecurrence,
-    /// The event time it reads (default: unknown scope, no lookback).
-    pub time_selection: TimeSelection,
 }
 
 impl From<&BatchEntry> for QueryWorkloadEntry {
@@ -406,7 +332,6 @@ impl From<&BatchEntry> for QueryWorkloadEntry {
                 invocations: entry.invocations,
                 execute_at: entry.execute_at,
             },
-            time_selection: entry.time_selection.clone(),
         }
     }
 }
@@ -418,7 +343,6 @@ impl From<&RepeatingEntry> for QueryWorkloadEntry {
             requirements: entry.requirements.clone(),
             predictability: entry.predictability.clone(),
             recurrence: QueryRecurrence::Repeated(entry.demand.clone()),
-            time_selection: entry.time_selection.clone(),
         }
     }
 }
@@ -435,23 +359,6 @@ pub enum DataArrival {
     Mixed,
     #[default]
     Unknown,
-}
-
-/// Statistical distribution of keys in the incoming data stream.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DataDistribution {
-    /// Zipf-distributed keys (s ≈ 1.1). A small number of keys dominate,
-    /// so only a fraction of sketch cells are touched per window. Typical
-    /// production case.
-    #[default]
-    Zipf,
-    /// All keys are equally probable. Every window fills the sketch more
-    /// uniformly; delta-compression benefit is lower.
-    Uniform,
-    /// Traffic arrives in bursts with a concentrated key set. Effective
-    /// fill rate is lower on average but spikes can reach Uniform levels.
-    Bursty,
 }
 
 /// Where an empirical workload value came from.
@@ -533,10 +440,8 @@ pub struct DataWorkload {
     /// selectors use this as their explicit selection horizon.
     #[serde(default)]
     pub data_ingestion_interval: Evidence<DurationMs>,
-    pub ingestion_volume: Evidence<u64>,
     pub ingestion_rate: Evidence<Rate>,
     pub input_cardinality: Evidence<u64>,
-    pub distribution: Evidence<DataDistribution>,
     /// Stream norms per source (PromQL metric or SQL table name): the
     /// inputs Count-Min and Count Sketch additive error bounds are
     /// normalized by. Plan selection binds them to turn those bounds into
@@ -849,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn entries_preserve_recurrence_and_time_scope_as_independent_axes() {
+    fn entries_keep_each_entrys_recurrence() {
         let mut workload = base_workload();
         workload.query_batch = Some(vec![BatchEntry {
             query: Query("historical".into()),
@@ -857,22 +762,12 @@ mod tests {
             predictability: Predictability::AdHoc,
             invocations: 1,
             execute_at: None,
-            time_selection: TimeSelection {
-                scope: QueryTimeScope::Longitudinal,
-                lookback: Some(DurationMs(300_000)),
-                as_of: Some(TimestampMs(1_000_000)),
-            },
         }]);
         workload.repeating_queries = Some(vec![RepeatingEntry {
             query: Query("dashboard".into()),
             demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
             requirements: QueryRequirements::default(),
             predictability: Predictability::Predictable { known_at: None },
-            time_selection: TimeSelection {
-                scope: QueryTimeScope::RealTime,
-                lookback: Some(DurationMs(300_000)),
-                as_of: None,
-            },
         }]);
 
         let entries: Vec<_> = workload.entries().collect();
@@ -885,11 +780,6 @@ mod tests {
             entries[1].recurrence,
             QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(_))
         ));
-        assert_eq!(
-            entries[0].time_selection.scope,
-            QueryTimeScope::Longitudinal
-        );
-        assert_eq!(entries[1].time_selection.scope, QueryTimeScope::RealTime);
         workload.validate().unwrap();
     }
 
@@ -966,11 +856,6 @@ mod tests {
                         max_latency_ms: Some(100.0),
                     },
                     predictability: Predictability::Predictable { known_at: None },
-                    time_selection: TimeSelection {
-                        scope: QueryTimeScope::RealTime,
-                        lookback: Some(DurationMs(300_000)),
-                        as_of: None,
-                    },
                 }]),
             },
             data_workload: Some(DataWorkload {
@@ -1058,7 +943,6 @@ mod tests {
             }),
             requirements: QueryRequirements::default(),
             predictability: Predictability::Unknown,
-            time_selection: TimeSelection::default(),
         }]);
         assert_eq!(
             workload.validate(),
