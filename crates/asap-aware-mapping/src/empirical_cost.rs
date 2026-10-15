@@ -372,9 +372,10 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
         (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }) => {
             alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0
         }
-        (SketchAlgorithm::Cms, SketchParams::Cms { width, depth })
-        | (SketchAlgorithm::CountSketch, SketchParams::CountSketch { width, depth }) => {
-            *width > 0 && *depth > 0
+        (SketchAlgorithm::Cms, SketchParams::Cms { width, depth }) => *width > 0 && *depth > 0,
+        // A CountSketch reads the median of its rows: the depth must be odd.
+        (SketchAlgorithm::CountSketch, SketchParams::CountSketch { width, depth }) => {
+            *width > 0 && depth % 2 == 1
         }
         (
             SketchAlgorithm::CmsWithHeap,
@@ -383,15 +384,15 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
                 depth,
                 heap_size,
             },
-        )
-        | (
+        ) => *width > 0 && *depth > 0 && *heap_size > 0,
+        (
             SketchAlgorithm::CountSketchWithHeap,
             SketchParams::CountSketchWithHeap {
                 width,
                 depth,
                 heap_size,
             },
-        ) => *width > 0 && *depth > 0 && *heap_size > 0,
+        ) => *width > 0 && depth % 2 == 1 && *heap_size > 0,
         _ => false,
     }
 }
@@ -691,5 +692,38 @@ mod tests {
             provider.lookup(&artifact.records[0].algorithm, &artifact.records[0].params),
             Err(EvidenceError::Ambiguous)
         );
+    }
+
+    /// A CountSketch reads the median of its rows, so evidence for an even
+    /// depth describes no executable shape.
+    #[test]
+    fn count_sketch_evidence_requires_an_odd_depth() {
+        for (depth, valid) in [(5, true), (4, false)] {
+            assert_eq!(
+                valid_params(
+                    &SketchAlgorithm::CountSketch,
+                    &SketchParams::CountSketch { width: 64, depth }
+                ),
+                valid
+            );
+            assert_eq!(
+                valid_params(
+                    &SketchAlgorithm::CountSketchWithHeap,
+                    &SketchParams::CountSketchWithHeap {
+                        width: 64,
+                        depth,
+                        heap_size: 8
+                    }
+                ),
+                valid
+            );
+        }
+        assert!(valid_params(
+            &SketchAlgorithm::Cms,
+            &SketchParams::Cms {
+                width: 64,
+                depth: 4
+            }
+        ));
     }
 }

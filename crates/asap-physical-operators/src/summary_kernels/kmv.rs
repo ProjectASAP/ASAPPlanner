@@ -74,8 +74,9 @@ impl AggregateCore for KmvAccumulator {
     }
 
     fn approx_memory_bytes(&self) -> usize {
+        // sketchlib reserves all k hash slots at construction.
         std::mem::size_of::<Self>()
-            .saturating_add(self.inner.k_vals.len() * std::mem::size_of::<u64>())
+            .saturating_add(self.inner.k.saturating_mul(std::mem::size_of::<u64>()))
     }
 }
 
@@ -194,5 +195,18 @@ mod tests {
         assert_eq!(cardinality(&kmv), 2.0);
         assert_eq!(cardinality(kmv.take_accumulator().as_ref()), 2.0);
         assert_eq!(cardinality(&kmv), 0.0);
+    }
+
+    // sketchlib reserves all k hash slots at construction, so an empty state
+    // already holds k * 8 bytes.
+    #[test]
+    fn memory_counts_the_k_reserved_hashes() {
+        let k = 4096;
+        let empty = KmvAccumulator::new(k);
+        assert!(empty.approx_memory_bytes() >= k as usize * 8);
+        assert_eq!(
+            empty.approx_memory_bytes(),
+            build(k, 0..10).approx_memory_bytes()
+        );
     }
 }

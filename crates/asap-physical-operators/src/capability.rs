@@ -61,9 +61,10 @@ pub fn validate_summary_kernel(
                 }
                 (A::Hll, P::Hll { precision }) if (4..=18).contains(precision) => false,
                 (A::Kmv, P::Kmv { k }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
-                (A::Cms, P::Cms { width, depth })
-                | (A::CountSketch, P::CountSketch { width, depth })
-                    if valid_matrix(*width, *depth) =>
+                (A::Cms, P::Cms { width, depth }) if valid_matrix(*width, *depth) => true,
+                // The median needs an odd row count.
+                (A::CountSketch, P::CountSketch { width, depth })
+                    if valid_matrix(*width, *depth) && depth % 2 == 1 =>
                 {
                     true
                 }
