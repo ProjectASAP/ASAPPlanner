@@ -18,8 +18,9 @@ function stageOperatorParts(operator) {
 }
 
 // Node ids a logical operator reads: its inputs, then the operators its
-// scalar expressions read.
-const STAGE_CHILD_FIELDS = ['child', 'children', 'left', 'right', 'summary_input', 'outer', 'inner'];
+// scalar expressions read. These are the operator fields of the IR's
+// `NonASAPOp` and `ASAPOp` that hold an input (crates/types/src/ir).
+const STAGE_CHILD_FIELDS = ['child', 'children', 'left', 'right', 'lhs', 'rhs', 'summary_input', 'outer', 'inner'];
 
 // Operator node ids a scalar expression reads: `scalar(v)`, scalar
 // subqueries, EXISTS and IN subqueries.
@@ -128,10 +129,23 @@ function validatePhysicalDag(dag, where, queryCount) {
   dag.edges.forEach((edge, index) => {
     if (!edge || !ids.has(edge.producer) || !ids.has(edge.consumer)) errors.push(`${where}: edge #${index} names a missing producer or consumer`);
   });
-  const scalars = dag.scalar_roots || [];
+  const scalars = Array.isArray(dag.scalar_roots) ? dag.scalar_roots : [];
   if (dag.roots.length + scalars.length !== queryCount) {
     errors.push(`${where}: ${dag.roots.length} roots and ${scalars.length} scalar roots for ${queryCount} workload queries`);
   }
+  // `scalar_roots` holds [query position, expr], in increasing position.
+  let previous = -1;
+  scalars.forEach((entry, index) => {
+    const position = Array.isArray(entry) ? entry[0] : undefined;
+    if (!Number.isInteger(position) || position <= previous || position >= queryCount) {
+      errors.push(`${where}: scalar root #${index} needs a query position after ${previous} and below ${queryCount}`);
+      return;
+    }
+    previous = position;
+    stageScalarRefs(entry[1]).forEach((id) => {
+      if (!ids.has(id)) errors.push(`${where}: scalar root of query #${position + 1} reads missing node ${id}`);
+    });
+  });
   dag.roots.forEach((root, index) => {
     if (typeof root !== 'number') errors.push(`${where}: root #${index} is not a node id`);
     else if (!ids.has(root)) errors.push(`${where}: root ${root} does not name a node`);
@@ -237,8 +251,9 @@ function validateStagePipeline(doc) {
 
 // Stage 3's view of every candidate the document shows: the selected one,
 // the other valid ones cheapest first ("costlier"), the rejected ones with
-// their reasons, then the Stage 2 pruned ones and the Stage 1 ones that did
-// not compose ("composition error") with theirs. `logical` names the Stage 1
+// their reasons ("not judged" when selection failed with an error), then
+// the Stage 2 pruned ones and the Stage 1 ones that did not compose
+// ("composition error") with theirs. `logical` names the Stage 1
 // candidate to show beside the row; `rank` counts the priced ones.
 function stageCandidateRows(doc) {
   const selection = doc.stage3_plan_selection || {};
@@ -248,7 +263,9 @@ function stageCandidateRows(doc) {
   const rows = (physical.candidates || []).map((candidate) => {
     const cost = costs[candidate.id];
     const rejection = rejected.get(candidate.id);
-    const status = candidate.id === selection.selected ? 'selected' : cost ? 'costlier' : 'rejected';
+    // A failed selection (`error`) judged no candidate.
+    const status = candidate.id === selection.selected ? 'selected'
+      : cost ? 'costlier' : rejection || !selection.error ? 'rejected' : 'not judged';
     return {
       id: candidate.id,
       logical: candidate.from_logical,
@@ -266,7 +283,7 @@ function stageCandidateRows(doc) {
   ((doc.stage1_logical_asap_optimization || {}).candidates || []).filter((c) => 'error' in c).forEach((c) => rows.push({
     id: c.id, logical: c.id, display_name: c.display_name, total: null, unit: null, rank: null, status: 'composition error', reason: c.error,
   }));
-  const order = { selected: 0, costlier: 1, rejected: 2, pruned: 3, 'composition error': 4 };
+  const order = { selected: 0, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4 };
   rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
   let rank = 0;
   rows.forEach((row) => { if (row.total !== null) row.rank = ++rank; });
