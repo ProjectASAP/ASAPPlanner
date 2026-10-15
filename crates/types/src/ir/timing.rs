@@ -42,7 +42,7 @@
 //!
 //! | Consumer | Accepts from an input |
 //! |---|---|
-//! | `SummaryAgg.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
+//! | `SummaryAgg.child`, `PaneChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
 //! | `SummaryEstimate.summary_input` | Summary state at either phase |
 //! | `SummaryMerge.children` | Summary state at either phase; at ingestion time only for a merge at ingestion time |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
@@ -128,11 +128,15 @@ impl MaterializationAssignment {
 }
 
 /// Whether `operator`'s output is a sub-DAG output that materialization may
-/// store: a `SummaryAgg` or a `MaintainPopulation`.
+/// store: a `SummaryAgg`, a `PaneChain` or a `MaintainPopulation`.
 pub(crate) fn is_materialization_point<C>(operator: &Operator<C>) -> bool {
     matches!(
         operator,
-        Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::MaintainPopulation { .. })
+        Operator::ASAP(
+            ASAPOp::SummaryAgg { .. }
+                | ASAPOp::PaneChain { .. }
+                | ASAPOp::MaintainPopulation { .. }
+        )
     )
 }
 
@@ -458,7 +462,7 @@ fn validate_asap(
     timing: ExecutionTiming,
 ) -> Result<(), ExecutionDataStateError> {
     match op {
-        ASAPOp::SummaryAgg { child, .. } => {
+        ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. } => {
             let avail = state_of(child);
             match avail {
                 ExecutionDataState::INGESTION_ROWS | ExecutionDataState::QUERY_ROWS => {}

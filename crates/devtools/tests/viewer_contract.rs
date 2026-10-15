@@ -201,6 +201,16 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             evaluation: PopulationStatistic::Sum,
         },
         ASAPOp::SummaryMerge { children: vec![] },
+        ASAPOp::PaneChain {
+            child: (),
+            family: family.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::by(vec![]),
+            grouping: GroupingStrategy::default(),
+            filter: None,
+            pane_width_ms: 60_000,
+            pane_count: 5,
+        },
         ASAPOp::SummarySubtract {
             left: (),
             right: (),
@@ -228,6 +238,7 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             | ASAPOp::MaintainPopulation { .. }
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::PaneChain { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }

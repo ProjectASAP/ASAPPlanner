@@ -54,9 +54,35 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         child: C,
         evaluation: PopulationStatistic,
     },
-    /// Merge compatible partial states for the same grouping and family.
+    /// Merge compatible partial states for the same grouping and family:
+    /// every input state of a group, including each pane of a
+    /// [`PaneChain`](ASAPOp::PaneChain), into one state per group.
     SummaryMerge {
         children: Vec<C>,
+    },
+    /// A tumbling-pane window summary (#509 Pass 2, window-composition
+    /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
+    /// `grouping` and `filter`, built over each of `pane_count` back-to-back
+    /// range windows of `pane_width_ms` that end at `child`'s evaluation
+    /// time, newest first. `child` is the input a range selector would
+    /// read, so pane `i` covers `(-(i+1)·w, -i·w]` relative to it. Output:
+    /// the `SummaryAgg` schema, one state per group and pane; a
+    /// `SummaryMerge` over the chain gives the state of one build over the
+    /// whole `pane_count · pane_width_ms` window
+    /// ([`whole_window_build`](crate::ir::pane_chain::whole_window_build)).
+    /// One compact node whatever the pane count: costs and guarantees come
+    /// from formulas, and the executor expands the panes
+    /// ([`expand_pane_chains`](crate::ir::pane_chain::expand_pane_chains)).
+    PaneChain {
+        child: C,
+        family: FieldDataType,
+        input: SummaryUpdate,
+        reduction: Reduction,
+        grouping: GroupingStrategy,
+        #[serde(default)]
+        filter: Option<super::scalar::Predicate<C>>,
+        pane_width_ms: u64,
+        pane_count: u32,
     },
     // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
@@ -83,7 +109,7 @@ impl<C> ASAPOp<C> {
     pub fn children(&self) -> Vec<&C> {
         use ASAPOp::*;
         match self {
-            SummaryAgg { child, filter, .. } => {
+            SummaryAgg { child, filter, .. } | PaneChain { child, filter, .. } => {
                 let mut inputs = vec![child];
                 if let Some(filter) = filter {
                     inputs.extend(filter.0.operator_refs());
@@ -124,6 +150,27 @@ impl<C> ASAPOp<C> {
                 filter: filter
                     .as_ref()
                     .map(|p| super::scalar::Predicate(p.0.map_operator_refs(&mut f))),
+            },
+            PaneChain {
+                child,
+                family,
+                input,
+                reduction,
+                grouping,
+                filter,
+                pane_width_ms,
+                pane_count,
+            } => PaneChain {
+                child: f(child),
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: grouping.clone(),
+                filter: filter
+                    .as_ref()
+                    .map(|p| super::scalar::Predicate(p.0.map_operator_refs(&mut f))),
+                pane_width_ms: *pane_width_ms,
+                pane_count: *pane_count,
             },
             SummaryEstimate {
                 summary_input,
@@ -179,6 +226,7 @@ impl<C> ASAPOp<C> {
             MaintainPopulation { .. } => "MaintainPopulation",
             EvaluatePopulation { .. } => "EvaluatePopulation",
             SummaryMerge { .. } => "SummaryMerge",
+            PaneChain { .. } => "PaneChain",
             SummarySubtract { .. } => "SummarySubtract",
             SummaryDelete { .. } => "SummaryDelete",
             SummaryJoin { .. } => "SummaryJoin",
@@ -204,7 +252,9 @@ impl ASAPOp {
     /// The summary state this operator produces, if it produces state.
     pub fn produced_state(&self) -> Option<&FieldDataType> {
         match self {
-            ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryJoin { family, .. } => Some(family),
+            ASAPOp::SummaryAgg { family, .. }
+            | ASAPOp::PaneChain { family, .. }
+            | ASAPOp::SummaryJoin { family, .. } => Some(family),
             ASAPOp::SummaryMerge { children } => children.first().and_then(|child| {
                 child
                     .schema
@@ -225,6 +275,12 @@ impl ASAPOp {
         use ASAPOp::*;
         Ok(match self {
             SummaryAgg {
+                child,
+                family,
+                reduction,
+                ..
+            }
+            | PaneChain {
                 child,
                 family,
                 reduction,
@@ -261,11 +317,16 @@ impl ASAPOp {
                     SketchStatistic::TopK { .. } => ("topk", DataType::Utf8),
                 };
                 if matches!(
-                    summary_input.asap(),
-                    Some(SummaryAgg {
-                        reduction: Reduction::PerEntity,
-                        ..
-                    })
+                    summary_input.summary_build(),
+                    Some(
+                        SummaryAgg {
+                            reduction: Reduction::PerEntity,
+                            ..
+                        } | PaneChain {
+                            reduction: Reduction::PerEntity,
+                            ..
+                        }
+                    )
                 ) && dtype == DataType::Int64
                 {
                     dtype = DataType::Float64;
@@ -281,6 +342,13 @@ impl ASAPOp {
                 schema
             }
             FinalizeExactAccumulator { child } => {
+                // Merged panes finalize as one build over their whole window.
+                if let Some(chain) = super::pane_chain::merged_chain(child) {
+                    return FinalizeExactAccumulator {
+                        child: Rc::new(super::pane_chain::whole_window_build(chain)?),
+                    }
+                    .output_schema();
+                }
                 let value_result = if let Some(ASAPOp::SummaryAgg {
                     child: source,
                     family: FieldDataType::ExactAggregate(kind, _),
@@ -288,7 +356,7 @@ impl ASAPOp {
                     reduction,
                     filter,
                     ..
-                }) = child.asap()
+                }) = child.summary_build()
                 {
                     {
                         use crate::post_asap::{ExactKind, SummaryInputExpr};
@@ -439,6 +507,7 @@ impl ASAPOp {
         use ASAPOp::*;
         match self {
             SummaryAgg { .. }
+            | PaneChain { .. }
             | MaintainPopulation { .. }
             | SummaryMerge { .. }
             | SummarySubtract { .. }
@@ -564,51 +633,28 @@ impl ASAPOp {
                 }
                 Ok(())
             }
-            SummaryAgg {
+            PaneChain {
                 child,
-                family,
-                input,
-                filter,
+                pane_width_ms,
+                pane_count,
                 ..
             } => {
-                if family.is_plain() || child.result_kind == OperatorResultKind::State {
+                if *pane_width_ms == 0 || *pane_count == 0 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "summary aggregation requires values and produces a state family".into(),
+                        "a pane chain needs a positive pane width and pane count".into(),
                     ));
                 }
-                fn check(
-                    expr: &crate::post_asap::SummaryInputExpr,
-                    schema: &Schema,
-                ) -> Result<(), SchemaDerivationError> {
-                    use crate::post_asap::SummaryInputExpr;
-                    match expr {
-                        SummaryInputExpr::Column(col) => {
-                            crate::pre_asap::resolve_column_ref(col, schema).map_err(|e| {
-                                SchemaDerivationError::InvalidScalarSignature(e.to_string())
-                            })?;
-                        }
-                        SummaryInputExpr::Tuple(items) => {
-                            for item in items {
-                                check(item, schema)?;
-                            }
-                        }
-                        _ => {}
-                    }
-                    Ok(())
+                // The chain is the range selector: it reads the series the
+                // selector would.
+                if child.result_kind != OperatorResultKind::InstantVector {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(format!(
+                        "a pane chain reads an instant vector, got {:?}",
+                        child.result_kind
+                    )));
                 }
-                check(&input.weight, &child.schema)?;
-                if let Some(item) = &input.item {
-                    check(item, &child.schema)?;
-                }
-                if let Some(filter) = filter {
-                    if filter.0.scalar_type(&child.schema)?.0 != DataType::Bool {
-                        return Err(SchemaDerivationError::InvalidScalarSignature(
-                            "summary filter must be boolean".into(),
-                        ));
-                    }
-                }
-                Ok(())
+                self.summary_agg_inputs()
             }
+            SummaryAgg { .. } => self.summary_agg_inputs(),
             MaintainPopulation { child, population } => {
                 if !population.matches_node(child) {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
@@ -619,6 +665,64 @@ impl ASAPOp {
             }
             _ => Err(Self::unimplemented()),
         }
+    }
+
+    /// The input checks of a `SummaryAgg`, which a `PaneChain` shares.
+    fn summary_agg_inputs(&self) -> Result<(), SchemaDerivationError> {
+        let (ASAPOp::SummaryAgg {
+            child,
+            family,
+            input,
+            filter,
+            ..
+        }
+        | ASAPOp::PaneChain {
+            child,
+            family,
+            input,
+            filter,
+            ..
+        }) = self
+        else {
+            unreachable!("called on a summary build");
+        };
+        if family.is_plain() || child.result_kind == OperatorResultKind::State {
+            return Err(SchemaDerivationError::InvalidScalarSignature(
+                "summary aggregation requires values and produces a state family".into(),
+            ));
+        }
+        fn check(
+            expr: &crate::post_asap::SummaryInputExpr,
+            schema: &Schema,
+        ) -> Result<(), SchemaDerivationError> {
+            use crate::post_asap::SummaryInputExpr;
+            match expr {
+                SummaryInputExpr::Column(col) => {
+                    crate::pre_asap::resolve_column_ref(col, schema).map_err(|e| {
+                        SchemaDerivationError::InvalidScalarSignature(e.to_string())
+                    })?;
+                }
+                SummaryInputExpr::Tuple(items) => {
+                    for item in items {
+                        check(item, schema)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        check(&input.weight, &child.schema)?;
+        if let Some(item) = &input.item {
+            check(item, &child.schema)?;
+        }
+        if let Some(filter) = filter {
+            if filter.0.scalar_type(&child.schema)?.0 != DataType::Bool {
+                return Err(SchemaDerivationError::InvalidScalarSignature(
+                    "summary filter must be boolean".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -657,13 +761,22 @@ fn quantile_may_be_empty(state: &OperatorNode) -> bool {
         Some(ASAPOp::SummaryMerge { children }) => {
             children.iter().any(|child| quantile_may_be_empty(child))
         }
-        Some(ASAPOp::SummaryAgg {
-            child,
-            input,
-            reduction,
-            filter,
-            ..
-        }) => {
+        Some(
+            ASAPOp::SummaryAgg {
+                child,
+                input,
+                reduction,
+                filter,
+                ..
+            }
+            | ASAPOp::PaneChain {
+                child,
+                input,
+                reduction,
+                filter,
+                ..
+            },
+        ) => {
             if filter.is_some() {
                 return true;
             }

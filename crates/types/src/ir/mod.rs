@@ -5,6 +5,7 @@ pub mod error;
 pub mod node;
 pub mod non_asap;
 pub mod operator_properties;
+pub mod pane_chain;
 pub mod query;
 pub mod scalar;
 pub use asap::{ASAPOp, UNIMPLEMENTED_ASAP_OP};

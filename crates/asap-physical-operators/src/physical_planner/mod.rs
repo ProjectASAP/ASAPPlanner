@@ -132,6 +132,19 @@ fn compile_internal(
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
+    // A pane chain stands for its panes; the deployment binds each pane's
+    // raw input, so it runs only once expanded.
+    if let Some(node) = dag
+        .nodes
+        .iter()
+        .find(|n| matches!(n.payload, Payload::ASAP(ASAPOp::PaneChain { .. })))
+    {
+        return Err(invalid(format!(
+            "node {}: a PaneChain runs as its panes; expand it with \
+             `asap_types::ir::pane_chain::expand_pane_chains` before compiling",
+            node.id
+        )));
+    }
     // Helper IDs lie above the u32 range; a larger Planner ID could collide.
     if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {
         return Err(invalid(format!("Planner node ID {} exceeds u32", node.id)));
