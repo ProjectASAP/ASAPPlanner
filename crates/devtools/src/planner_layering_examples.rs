@@ -1,4 +1,4 @@
-//! The workloads of #509 Examples 1, 3 and 4
+//! The workloads of #509 Examples 1, 2, 3 and 4
 //! (`docs/design_docs/proposals/planner-layering.md`), shared by
 //! `stage_pipeline` and the planner-layering acceptance tests.
 
@@ -7,7 +7,7 @@ use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
     Evidence, EvidenceSource, LatencyRequirement, MetricType, PlanningWorkload, Predictability,
     Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
-    RepeatingEntry, RepetitionInterval, TimeSelection, TimestampMs,
+    RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection, TimestampMs,
 };
 
 pub fn declared<T>(value: T) -> Evidence<T> {
@@ -86,6 +86,79 @@ pub fn example1() -> PlanningWorkload {
         },
         data_workload: Some(DataWorkload {
             metric_types: [("http_requests_total".to_string(), MetricType::Counter)].into(),
+            ..shared_data_workload(DataArrival::ContinuouslyIngesting)
+        }),
+    }
+}
+
+/// Example 2's three SQL queries over the last minute of `flows`: the
+/// distinct sources, the entropy of the per-source counts and their L2
+/// norm. Q3 casts the counts to DOUBLE: the design's Int64 `c * c` can
+/// overflow, so the SQL frontend recognizes only the Float64 product.
+pub const EXAMPLE2_SQL: [&str; 3] = [
+    "SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '1 minute'",
+    "SELECT -SUM(p * LN(p)) FROM (\
+     SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows \
+     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
+    "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FROM (\
+     SELECT src_ip, COUNT(*) AS c FROM flows \
+     WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
+];
+
+/// (ε, δ) of Example 2's Q1, Q2 and Q3; Q3 is the strictest.
+pub const EXAMPLE2_ACCURACY: [(f64, f64); 3] = [(0.02, 0.01), (0.05, 0.01), (0.01, 0.01)];
+
+/// Example 2's `flows(ts, src_ip)` table: the design names only these
+/// two columns.
+pub fn example2_catalog() -> asap_frontend_sql::SqlCatalog {
+    use asap_types::pre_asap::schema::{DataType, Field, Schema};
+    asap_frontend_sql::SqlCatalog::new().with_table(
+        "flows",
+        Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("src_ip", DataType::Utf8, false),
+            ],
+            0,
+            vec![],
+        ),
+    )
+}
+
+/// Example 2: three dashboard panels over one flow stream, every 10 s
+/// over the last minute, with 10,000,000 distinct sources.
+pub fn example2() -> PlanningWorkload {
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: None,
+            repeating_queries: Some(
+                EXAMPLE2_SQL
+                    .iter()
+                    .zip(EXAMPLE2_ACCURACY)
+                    .map(|(query, (epsilon, delta))| RepeatingEntry {
+                        query: Query((*query).into()),
+                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                                epsilon,
+                                delta,
+                            }),
+                            response_latency: LatencyRequirement::Unspecified,
+                        },
+                        predictability: Predictability::Predictable { known_at: None },
+                        time_selection: TimeSelection {
+                            scope: QueryTimeScope::RealTime,
+                            lookback: Some(DurationMs(MINUTE_MS)),
+                            as_of: None,
+                        },
+                    })
+                    .collect(),
+            ),
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence::default(),
+            input_cardinality: declared(10_000_000),
             ..shared_data_workload(DataArrival::ContinuouslyIngesting)
         }),
     }

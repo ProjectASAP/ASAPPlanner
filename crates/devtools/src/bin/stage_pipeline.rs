@@ -1,7 +1,8 @@
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --example planner-layering-1 --out planner-layering-example1.json
-// (also planner-layering-3a and planner-layering-3b: #509 Example 3,
-// Patterns A and B; 3a has 972 candidates, all priced, 64 shown by default)
+// (also planner-layering-2: #509 Example 2, three SQL flow statistics;
+// planner-layering-3a and planner-layering-3b: #509 Example 3, Patterns A
+// and B; 3a has 972 candidates, all priced, 64 shown by default)
 // cargo run -p asap-devtools --bin stage_pipeline -- \
 //     --promql "topk by (job) (10, rate(x[1m]))" --epsilon 0.01 --delta 0.001 --out run.json
 // cargo run -p asap-devtools --bin stage_pipeline -- \
@@ -14,8 +15,10 @@
 //   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
 //   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
-//     product), each followed by its Pass 2 identical-expression candidates
-//     (one per subset of its sharing groups), in enumeration order. Every candidate is optimized and
+//     product), each followed by its Pass 2 candidates (the
+//     identical-expression rule's, one per subset of its sharing groups,
+//     then the summary-capability rule's, one per choice of shared summary
+//     builds), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)
 //     and the selected one, with `combinations` (how many exist) and
 //     `capped` (whether some are not shown). A candidate that cannot be
@@ -56,7 +59,7 @@ use std::collections::HashSet;
 
 use asap_aware_mapping::stage3_plan_selection::{Rejection, Selection, SelectionError};
 use asap_devtools::planner_layering_examples::{
-    declared, example1, pattern_a, pattern_b, PatternARecurrence,
+    declared, example1, example2, example2_catalog, pattern_a, pattern_b, PatternARecurrence,
 };
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_planning_stages, run_planning_stages_over,
@@ -75,7 +78,7 @@ use asap_types::workload::{
 use serde_json::{json, Value};
 
 const USAGE: &str =
-    "usage: stage_pipeline (--example planner-layering-{1,3a,3b} | ((--promql | --sql) <query> \
+    "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | ((--promql | --sql) <query> \
 [--name <name>]... [--table <json>...] [--epsilon <f64> --delta <f64>] [--interval-ms <u64>])) \
 [--max-combinations <n>] [--max-displayed <n>] --out <file>";
 
@@ -200,13 +203,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         (Some(example), true) => {
             let workload = match example {
                 "planner-layering-1" => example1(),
+                "planner-layering-2" => example2(),
                 "planner-layering-3a" => {
                     pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed)
                 }
                 "planner-layering-3b" => pattern_b(),
                 other => return Err(format!("unknown example {other}").into()),
             };
-            let roots = lower_promql_roots(&workload)?;
+            let roots = match workload.query_workload.language {
+                QueryLanguage::PromQL => lower_promql_roots(&workload)?,
+                _ => lower_sql_roots(&workload, &example2_catalog())?,
+            };
             let result = run_planning_stages(&workload, roots.clone(), Some(max_combinations));
             document_of(workload_queries(&workload), &roots, result, max_displayed)?
         }
