@@ -7,8 +7,8 @@ use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::pre_asap::ScalarValue;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
 pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
@@ -18,7 +18,7 @@ pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(accuracy),
+                    accuracy,
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -119,8 +119,13 @@ pub fn run_stage1_to_stage3(
 ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
     asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
-        &[Some(accuracy)],
-        &[asap_types::workload::QueryRecurrence::Unknown],
+        &[asap_types::workload::QueryWorkloadEntry {
+            requirements: asap_types::workload::QueryRequirements {
+                accuracy,
+                max_latency_ms: None,
+            },
+            ..Default::default()
+        }],
         &DataWorkload::default(),
         asap_aware_mapping::PlanningModels::builtin(),
     )
@@ -171,8 +176,13 @@ pub fn logical_candidates(
 pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
     let run = asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(Rc::clone(root)))],
-        &[None],
-        &[asap_types::workload::QueryRecurrence::Unknown],
+        &[asap_types::workload::QueryWorkloadEntry {
+            requirements: asap_types::workload::QueryRequirements {
+                accuracy: asap_types::types::AccuracyTarget::exact(),
+                max_latency_ms: None,
+            },
+            ..Default::default()
+        }],
         &DataWorkload::default(),
         asap_aware_mapping::PlanningModels::builtin(),
     )

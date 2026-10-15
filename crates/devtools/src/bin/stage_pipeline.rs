@@ -43,8 +43,9 @@
 //
 // A workload with more than `--max-combinations` (default 10^4) Stage 1
 // candidates, Pass 2's included, is refused as soon as enumeration passes
-// the limit: the run exits with status 3 and the limit, and writes no
-// document.
+// the limit, and so is one whose Stage 2 physical candidates (one per
+// materialization assignment, counted before they are built) pass it: the
+// run exits with status 3 and the limit, and writes no document.
 // Planning never caps or truncates the candidates it ranks; only the display
 // does (`--max-displayed`).
 //
@@ -67,6 +68,7 @@
 use std::collections::HashSet;
 
 use asap_aware_mapping::stage3_plan_selection::{Rejection, Selection, SelectionError};
+use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
     declared, example1, example2, example2_catalog, pattern_a, pattern_b, PatternARecurrence,
 };
@@ -80,9 +82,8 @@ use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{default_metric_for_root, AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, LatencyRequirement,
-    PlanningWorkload, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload,
-    RepeatedDemand, SqlDialect,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
+    QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
 };
 use serde_json::{json, Value};
 
@@ -155,9 +156,10 @@ fn document_of(
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
             "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [] },
         })),
-        Err(error @ PlanningStagesError::TooManyCandidates { .. }) => {
-            Err(Failure::TooManyCandidates(error))
-        }
+        Err(
+            error @ (PlanningStagesError::TooManyCandidates { .. }
+            | PlanningStagesError::TooManyPhysicalCandidates { .. }),
+        ) => Err(Failure::TooManyCandidates(error)),
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
 }
@@ -249,7 +251,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             };
             let catalog = sql_catalog(&tables)?;
             let mut names = HashSet::new();
-            let (mut described, mut roots, mut recurrence) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut described, mut roots, mut entries) = (Vec::new(), Vec::new(), Vec::new());
             for (index, (language, text, name)) in queries.into_iter().enumerate() {
                 let (name, defaulted) = match name {
                     Some(name) => (name, false),
@@ -272,23 +274,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     QueryLanguage::PromQL => lower_promql_roots(&one)?,
                     _ => lower_sql_roots(&one, &catalog)?,
                 });
-                recurrence.extend(one.query_workload.entries().map(|entry| entry.recurrence));
+                entries.extend(one.query_workload.entries());
                 let mut query = workload_queries(&one).remove(0);
                 query["id"] = json!(name);
                 described.push(query);
             }
-            let targets = vec![accuracy; roots.len()];
             let data = DataWorkload {
                 data_ingestion_interval: declared(DurationMs(interval_ms)),
                 ..Default::default()
             };
-            let result = run_planning_stages_over(
-                roots.clone(),
-                &targets,
-                &recurrence,
-                &data,
-                Some(max_combinations),
-            );
+            let result =
+                run_planning_stages_over(roots.clone(), &entries, &data, Some(max_combinations));
             document_of(described, &roots, result, max_displayed)?
         }
         _ => return Err("give exactly one of --example or --promql/--sql queries".into()),
@@ -324,6 +320,8 @@ fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: u
         .filter(|p| shown.contains(p.from_logical.as_str()))
         .map(|p| p.id.as_str())
         .collect();
+    // Labels are for this document only; planning never reads them.
+    let labels = candidate_labels(run);
     // A choice that composition cannot substitute yet is listed with its
     // error rather than ending the run.
     let candidates: Vec<_> = run
@@ -332,10 +330,10 @@ fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: u
         .filter(|c| shown.contains(c.id.as_str()))
         .map(|c| match &c.roots {
             Ok(roots) => {
-                json!({ "id": c.id, "display_name": c.display_name, "dag": export(roots) })
+                json!({ "id": c.id, "display_name": labels[&c.id], "dag": export(roots) })
             }
             Err(error) => {
-                json!({ "id": c.id, "display_name": c.display_name, "error": error.to_string() })
+                json!({ "id": c.id, "display_name": labels[&c.id], "error": error.to_string() })
             }
         })
         .collect();
@@ -343,13 +341,13 @@ fn stage_pipeline(queries: Vec<Value>, run: &PlanningStagesRun, max_displayed: u
         .stage2_physical_asap_optimization
         .iter()
         .filter(|p| shown_physical.contains(p.id.as_str()))
-        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "display_name": p.display_name, "dag": p.dag }))
+        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "display_name": labels[&p.id], "dag": p.dag }))
         .collect();
     let pruned: Vec<_> = run
         .stage2_pruned
         .iter()
         .filter(|p| shown.contains(p.from_logical.as_str()))
-        .map(|p| json!({ "from_logical": p.from_logical, "display_name": p.display_name, "reason": p.reason }))
+        .map(|p| json!({ "from_logical": p.from_logical, "display_name": labels[&p.from_logical], "reason": p.reason }))
         .collect();
     json!({
         "format": "asap-stage-pipeline/v1",
@@ -455,10 +453,10 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
         .entries()
         .enumerate()
         .map(|(index, entry)| {
-            let accuracy = json!(entry.requirements.accuracy.requested());
+            let accuracy = json!(entry.requirements.accuracy.clone());
             let mut requirements = json!({ "accuracy": accuracy });
-            if let LatencyRequirement::ExplicitMaxMs(ms) = entry.requirements.response_latency {
-                requirements["latency_ms"] = json!(ms);
+            if let Some(ms) = entry.requirements.max_latency_ms {
+                requirements["max_latency_ms"] = json!(ms);
             }
             if let QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) =
                 &entry.recurrence
@@ -561,7 +559,7 @@ fn query_batch(
                     .map(|query| BatchEntry {
                         query: Query(query.clone()),
                         requirements: QueryRequirements {
-                            accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                            accuracy: accuracy.clone(),
                             ..Default::default()
                         },
                         predictability: Default::default(),

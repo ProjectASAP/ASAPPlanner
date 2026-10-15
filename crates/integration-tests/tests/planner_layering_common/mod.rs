@@ -6,7 +6,8 @@
 //! `asap_devtools::planning_stages::run_planning_stages`, the pipeline
 //! `stage_pipeline` also runs; the example workloads come from
 //! `asap_devtools::planner_layering_examples`. The functions under "Pending adapters" read properties the IR
-//! cannot express yet (sliding and EH window summaries, retention). They return today's
+//! cannot express yet (sliding and EH window summaries) or derive what it
+//! does not record (retention). They return today's
 //! only possible answer; the implementer of each feature replaces the body
 //! with a read of the new IR. Tests that depend on them are `#[ignore]`d
 //! with the feature.
@@ -19,7 +20,7 @@ use asap_aware_mapping::stage3_plan_selection::Selection;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
-use asap_types::ir::{ASAPOp, Operator, QueryRoot};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
 use asap_types::post_asap::{
     FieldDataType, Materialization, SketchAlgorithm, SketchParams, SketchStatistic,
 };
@@ -77,8 +78,6 @@ pub fn operation(payload: &Payload) -> String {
 #[derive(Debug, Clone)]
 pub struct Logical {
     pub id: String,
-    /// The choice of a per-computation candidate for every Pass 1 target.
-    pub display_name: String,
     pub dag: FlatDag,
     pub query_roots: Vec<NodeId>,
     pub roots: Vec<QueryRoot>,
@@ -144,7 +143,7 @@ impl Run {
     }
 }
 
-fn logical(id: String, display_name: String, roots: Vec<QueryRoot>) -> Logical {
+fn logical(id: String, roots: Vec<QueryRoot>) -> Logical {
     let dag = flatten(&roots).0;
     let query_roots = dag
         .roots
@@ -156,7 +155,6 @@ fn logical(id: String, display_name: String, roots: Vec<QueryRoot>) -> Logical {
         .collect();
     Logical {
         id,
-        display_name,
         dag,
         query_roots,
         roots,
@@ -165,18 +163,17 @@ fn logical(id: String, display_name: String, roots: Vec<QueryRoot>) -> Logical {
 
 /// Every stage over `roots`, the lowered entries of `workload`, with every
 /// logical candidate. Every candidate of the examples composes and
-/// plan selection selects one. Recurrence and predictability (which
-/// materialization needs, Example 4) are not passed to plan selection.
+/// plan selection selects one. Physical ASAP-aware optimization reads each
+/// entry's recurrence and predictability and the data arrival (Example 4);
+/// plan selection also reads the latency bounds.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
     let run = run_planning_stages(workload, roots, None).expect("planning stages run");
     let logical_candidates = run
         .stage1_logical_asap_optimization
         .into_iter()
         .map(|c| {
-            let roots = c
-                .roots
-                .unwrap_or_else(|e| panic!("{} ({}) composes: {e}", c.id, c.display_name));
-            logical(c.id, c.display_name, roots)
+            let roots = c.roots.unwrap_or_else(|e| panic!("{} composes: {e}", c.id));
+            logical(c.id, roots)
         })
         .collect();
     let physical = run
@@ -192,7 +189,6 @@ pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
     Run {
         stage0_query_language_frontends: logical(
             "stage0-query-language-frontends".into(),
-            "query-language frontends".into(),
             run.stage0_query_language_frontends,
         ),
         logical: logical_candidates,
@@ -404,20 +400,48 @@ pub fn assert_valid_and_uniquely_named(run: &Run) {
     }
 }
 
-/// Physical ASAP-aware optimization maps the logical candidates one-to-one
-/// onto physical ones, so no candidate is discarded before plan selection.
-pub fn assert_one_physical_candidate_per_logical(run: &Run) {
+/// No candidate is discarded before plan selection: physical ASAP-aware
+/// optimization gives each logical candidate `L<n>` exactly one physical
+/// candidate with nothing materialized, `P<n>`, and one `P<n>-m<k>` for each
+/// other materialization assignment.
+pub fn assert_one_unmaterialized_physical_candidate_per_logical(run: &Run) {
     assert!(run.pruned.is_empty(), "pruned: {:?}", run.pruned);
-    let sources: BTreeSet<_> = run
+    let unmaterialized: Vec<_> = run
         .physical
+        .iter()
+        .filter(|p| !p.id.contains("-m"))
+        .collect();
+    let sources: BTreeSet<_> = unmaterialized
         .iter()
         .map(|p| p.from_logical.as_str())
         .collect();
     let logical: BTreeSet<_> = run.logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(sources, logical);
-    assert_eq!(run.physical.len(), run.logical.len());
+    assert_eq!(unmaterialized.len(), run.logical.len());
+    for p in &run.physical {
+        let base = p.id.split("-m").next().unwrap();
+        assert_eq!(&base[1..], &p.from_logical[1..], "{}", p.id);
+        let unmaterialized = !p.id.contains("-m");
+        assert_eq!(unmaterialized, !p.candidate.materializes_any(), "{}", p.id);
+        if unmaterialized {
+            for n in &p.dag().nodes {
+                assert_eq!(
+                    materialization(p, n.id),
+                    MaterializationOption::NotMaterialized
+                );
+            }
+        }
+    }
     let ids: BTreeSet<_> = run.physical.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(ids.len(), run.physical.len(), "unique physical ids");
+}
+
+/// The physical candidates with nothing materialized, one per logical
+/// candidate.
+pub fn unmaterialized(run: &Run) -> impl Iterator<Item = &Physical> {
+    run.physical
+        .iter()
+        .filter(|p| !p.candidate.materializes_any())
 }
 
 /// One selected id; every other candidate rejected once, with a reason.
@@ -622,8 +646,48 @@ pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
     }
 }
 
-/// Pending (needs retention in the physical DAG): how long a materialized
-/// node's output is kept, in event time. `None` until the IR records it.
-pub fn retention_ms(_p: &Physical, _node: NodeId) -> Option<u64> {
-    None
+/// How far back from an evaluation a materialized node's kept output
+/// reaches in event time, derived the way plan selection prices what it
+/// keeps (the IR does not record retention): a pane chain keeps its `N`
+/// panes of width `w`, plus the one being built when maintained at
+/// ingestion time; a whole-window build keeps its window, and the next one
+/// being built at ingestion time; each plus the offset of the time shifts
+/// below it. `None` for any other node.
+pub fn retention_ms(p: &Physical, node: NodeId) -> Option<u64> {
+    let dag = p.dag();
+    let at_ingestion = runs_at_ingestion(p, node);
+    let below = |id: NodeId| dag.producers(id).into_iter().next();
+    let offset_below = |mut id: Option<NodeId>| {
+        let mut offset = 0u64;
+        while let Some(at) = id {
+            match dag.payload(at) {
+                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                    offset += shift.offset_ms.unsigned_abs()
+                }
+                Operator::NonASAP(NonASAPOp::Scan { .. }) => break,
+                _ => {}
+            }
+            id = below(at);
+        }
+        offset
+    };
+    match dag.payload(node) {
+        Operator::ASAP(ASAPOp::PaneChain {
+            pane_width_ms,
+            pane_count,
+            ..
+        }) => {
+            let panes = u64::from(*pane_count) + u64::from(at_ingestion);
+            Some(panes * pane_width_ms + offset_below(below(node)))
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
+            let child = below(node)?;
+            let Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) = dag.payload(child) else {
+                return None;
+            };
+            let windows = 1 + u64::from(at_ingestion);
+            Some(windows * range.as_millis() as u64 + offset_below(below(child)))
+        }
+        _ => None,
+    }
 }

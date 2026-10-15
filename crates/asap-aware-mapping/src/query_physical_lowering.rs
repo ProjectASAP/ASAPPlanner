@@ -2874,8 +2874,8 @@ mod tests {
     ) {
         use crate::physical_operator_statistics::ScalarInputStatistics;
         use asap_types::workload::{
-            AccuracyRequirement, BatchEntry, DataWorkload, Evidence, PlanningWorkload,
-            Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
+            BatchEntry, DataWorkload, Evidence, PlanningWorkload, Predictability, Query,
+            QueryLanguage, QueryRequirements, QueryWorkload,
         };
         use std::cell::RefCell;
 
@@ -2885,7 +2885,7 @@ mod tests {
                 query_batch: Some(vec![BatchEntry {
                     query: Query(query.into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
+                        accuracy: AccuracyTarget::exact(),
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,

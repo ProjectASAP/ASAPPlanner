@@ -305,7 +305,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
             query_batch: Some(vec![BatchEntry {
                 query: Query("topk by(job)(1, m)".into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
+                    accuracy: AccuracyTarget::exact(),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

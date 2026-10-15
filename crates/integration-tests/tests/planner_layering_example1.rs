@@ -26,7 +26,6 @@ use asap_types::ir::flat::NodeId;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
 use asap_types::post_asap::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::post_asap::{Materialization, Medium};
-use asap_types::types::AccuracyTarget;
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
@@ -130,6 +129,14 @@ fn physical_with(run: &Run, option: Q2Option) -> &Physical {
 fn every_10s() -> asap_types::workload::QueryRecurrence {
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
     QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000)))
+}
+
+/// The workload entry of an exact query evaluated every 10 s.
+fn exact_every_10s() -> asap_types::workload::QueryWorkloadEntry {
+    asap_types::workload::QueryWorkloadEntry {
+        recurrence: every_10s(),
+        ..Default::default()
+    }
 }
 
 // ── Workload ─────────────────────────────────────────────────────────────
@@ -358,33 +365,33 @@ fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 
 // ── Physical ASAP-aware optimization ─────────────────────────────────────
 
-/// No candidate is discarded before plan selection: the logical candidates
-/// map one-to-one, 3 of them without a shared input or tumbling panes.
+/// No candidate is discarded before plan selection: each logical candidate
+/// keeps one physical candidate with nothing materialized, 3 of them
+/// without a shared input or tumbling panes.
 #[test]
 fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let run = pipeline();
-    assert_one_physical_candidate_per_logical(&run);
-    let unshared = run
-        .physical
-        .iter()
+    assert_one_unmaterialized_physical_candidate_per_logical(&run);
+    let unshared = unmaterialized(&run)
         .filter(|p| whole_windows(p.dag()) && !classify(p.dag(), &p.query_roots).1)
         .count();
     assert_eq!(unshared, 3);
 }
 
-/// Each physical candidate keeps its logical Q2 option and input sharing.
+/// Each physical candidate keeps its logical Q2 option, and one with
+/// nothing materialized keeps its input sharing. Maintaining Q2's panes at
+/// ingestion time splits a scan Q1 reads at query time, one copy per phase.
 #[test]
 fn stage2_physical_asap_optimization_preserves_logical_choices() {
     let run = pipeline();
     for p in &run.physical {
         let source = run.logical.iter().find(|c| c.id == p.from_logical).unwrap();
-        assert_eq!(
-            classify(p.dag(), &p.query_roots),
-            classify(&source.dag, &source.query_roots),
-            "{} vs {}",
-            p.id,
-            source.id
-        );
+        let (option, shared) = classify(p.dag(), &p.query_roots);
+        let (logical_option, logical_shared) = classify(&source.dag, &source.query_roots);
+        assert_eq!(option, logical_option, "{} vs {}", p.id, source.id);
+        if !p.candidate.materializes_any() {
+            assert_eq!(shared, logical_shared, "{} vs {}", p.id, source.id);
+        }
     }
 }
 
@@ -472,22 +479,57 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
     }
 }
 
-/// Every sub-DAG is NotMaterialized, so every node runs at query time.
+/// Only tumbling panes can be maintained at ingestion time: the
+/// whole-window builds' fixed interval has no phase, and no summary is read
+/// by both queries. Q1's rate panes are counter states, which need each
+/// series' samples in time order; continuously ingesting PromQL data is
+/// taken to arrive in that order, so they are maintained too. Each pane
+/// chain is maintained or not independently: a logical candidate with `c`
+/// chains has `2^c` physical candidates.
 #[test]
-fn stage2_physical_asap_optimization_nothing_is_materialized() {
+fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
     let run = pipeline();
+    let mut counter_maintained = 0;
     for p in &run.physical {
         for n in &p.dag().nodes {
-            assert_eq!(
-                materialization(p, n.id),
-                MaterializationOption::NotMaterialized,
-                "{}: {:?}",
-                p.id,
-                n.id
-            );
-            assert!(!runs_at_ingestion(p, n.id), "{}: {:?}", p.id, n.id);
+            match materialization(p, n.id) {
+                MaterializationOption::NotMaterialized => {}
+                MaterializationOption::MatAtIngestion => {
+                    let Operator::ASAP(ASAPOp::PaneChain { family, .. }) = p.dag().payload(n.id)
+                    else {
+                        panic!("{}: {:?} is not a pane chain", p.id, n.id)
+                    };
+                    if matches!(
+                        family,
+                        FieldDataType::ExactAggregate(
+                            asap_types::post_asap::ExactKind::Rate
+                                | asap_types::post_asap::ExactKind::Increase,
+                            _
+                        )
+                    ) {
+                        counter_maintained += 1;
+                    }
+                }
+                other => panic!("{}: {:?} is {other:?}", p.id, n.id),
+            }
         }
     }
+    assert!(counter_maintained > 0, "Q1's rate panes are maintained");
+    let expected: usize = run
+        .logical
+        .iter()
+        .map(|c| {
+            let chains = c
+                .dag
+                .node_ids()
+                .into_iter()
+                .filter(|&id| matches!(c.dag.payload(id), Operator::ASAP(ASAPOp::PaneChain { .. })))
+                .count();
+            1 << chains
+        })
+        .sum();
+    assert_eq!(run.physical.len(), expected);
+    assert_eq!(run.physical.len(), 57);
 }
 
 /// Compile `p` in the physical planner (the runtime capability check), with
@@ -514,7 +556,7 @@ fn compile_in_runtime(p: &Physical) -> Result<(), String> {
     let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
     compile(dag, inputs, &roots)
         .map(|_| ())
-        .map_err(|e| format!("{} ({}): {e}", p.id, p.candidate.display_name))
+        .map_err(|e| format!("{}: {e}", p.id))
 }
 
 /// Runtime capability check (added by the implementer, not part of the
@@ -693,8 +735,7 @@ fn materialized_case() -> Run {
     time_range.materialization = Materialization::MatAtQuery(Medium::Memory);
     let selection = select_plan(
         std::slice::from_ref(&p.candidate),
-        &[Some(AccuracyTarget::exact()), Some(AccuracyTarget::exact())],
-        &[every_10s(), every_10s()],
+        &[exact_every_10s(), exact_every_10s()],
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
     )

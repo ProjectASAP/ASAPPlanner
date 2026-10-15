@@ -32,7 +32,7 @@ fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
+                    accuracy: AccuracyTarget::exact(),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -633,7 +633,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
             query_batch: Some(vec![BatchEntry {
                 query: Query("topk by(job)(1, m)".into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
+                    accuracy: AccuracyTarget::exact(),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

@@ -4,10 +4,10 @@
 
 use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs,
-    Evidence, EvidenceSource, LatencyRequirement, MetricType, PlanningWorkload, Predictability,
-    Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
-    RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection, TimestampMs,
+    BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence, EvidenceSource,
+    MetricType, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
+    QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    SqlDialect, TimeSelection, TimestampMs,
 };
 
 pub fn declared<T>(value: T) -> Evidence<T> {
@@ -50,12 +50,12 @@ pub const EXAMPLE1_Q2: &str = "topk by (job) (10, sum_over_time(http_requests_to
 /// `http_requests_total` is declared a counter: its samples are never
 /// negative.
 pub fn example1() -> PlanningWorkload {
-    let panel = |query: &str, accuracy, response_latency| RepeatingEntry {
+    let panel = |query: &str, accuracy, max_latency_ms| RepeatingEntry {
         query: Query(query.into()),
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
         requirements: QueryRequirements {
-            accuracy: AccuracyRequirement::Explicit(accuracy),
-            response_latency,
+            accuracy,
+            max_latency_ms,
         },
         predictability: Predictability::Predictable { known_at: None },
         time_selection: TimeSelection {
@@ -69,15 +69,11 @@ pub fn example1() -> PlanningWorkload {
             language: QueryLanguage::PromQL,
             query_batch: None,
             repeating_queries: Some(vec![
-                panel(
-                    EXAMPLE1_Q1,
-                    AccuracyTarget::exact(),
-                    LatencyRequirement::Unspecified,
-                ),
+                panel(EXAMPLE1_Q1, AccuracyTarget::exact(), None),
                 panel(
                     EXAMPLE1_Q2,
                     AccuracyTarget::epsilon_delta(0.01, 0.001),
-                    LatencyRequirement::ExplicitMaxMs(100.0),
+                    Some(100.0),
                 ),
             ]),
         },
@@ -137,10 +133,8 @@ pub fn example2() -> PlanningWorkload {
                         query: Query((*query).into()),
                         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
                         requirements: QueryRequirements {
-                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::epsilon_delta(
-                                epsilon, delta,
-                            )),
-                            response_latency: LatencyRequirement::Unspecified,
+                            accuracy: AccuracyTarget::epsilon_delta(epsilon, delta),
+                            max_latency_ms: None,
                         },
                         predictability: Predictability::Predictable { known_at: None },
                         time_selection: TimeSelection {
@@ -193,10 +187,8 @@ pub enum PatternARecurrence {
 
 fn pattern_a_requirements() -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(
-            AccuracyTarget::epsilon_delta(0.005, 0.01).with_metric(ErrorMetric::Rank),
-        ),
-        response_latency: LatencyRequirement::Unspecified,
+        accuracy: AccuracyTarget::epsilon_delta(0.005, 0.01).with_metric(ErrorMetric::Rank),
+        max_latency_ms: None,
     }
 }
 
@@ -273,10 +265,9 @@ pub fn pattern_b() -> PlanningWorkload {
                     PATTERN_B_INTERVAL_MS as u32,
                 )),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(
-                        AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank),
-                    ),
-                    response_latency: LatencyRequirement::ExplicitMaxMs(200.0),
+                    accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01)
+                        .with_metric(ErrorMetric::Rank),
+                    max_latency_ms: Some(200.0),
                 },
                 predictability: Predictability::Predictable { known_at: None },
                 time_selection: TimeSelection {

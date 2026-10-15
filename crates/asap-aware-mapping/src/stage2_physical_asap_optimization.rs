@@ -1,13 +1,48 @@
-//! #509 Stage 2, physical ASAP-aware optimization (MVP): turns one
+//! #509 Stage 2, physical ASAP-aware optimization: turns one
 //! CandidateLogicalASAPDAG into CandidatePhysicalASAPDAGs by materialization
-//! and physical operator implementation. Materialization offers one option
-//! for now: every sub-DAG is `Materialization::NotMaterialized` and runs at
-//! query time, so each logical candidate yields exactly one physical
-//! candidate. Enumerating
-//! `MatAtIngestion(medium)` and `MatAtQuery(medium)` per sub-DAG
-//! (Algorithm 3) comes in #604. A candidate this stage cannot implement
-//! fails with a [`PhysicalASAPOptimizationError`], and the caller prunes that candidate alone,
-//! with the error as its reason.
+//! and physical operator implementation.
+//!
+//! ## Materialization
+//!
+//! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
+//! materialization candidate ([`MaterializationCandidate`]) whose
+//! output materialization may store (#509 §Materialization, Algorithm 3).
+//! Each has up to three options:
+//!
+//! * `NotMaterialized`: rebuilt at query time by every query that reads it;
+//! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
+//!   queries, when the build is eligible ([`IngestionPruneReason`]);
+//! * `MatAtQuery(Memory)`: built once per evaluation for every query that
+//!   reads it, offered for a build two or more queries read. State is reused
+//!   only within one evaluation; keeping it across evaluations comes later.
+//!
+//! A build at ingestion time needs every build below it at ingestion time too
+//! (#509 Algorithm 3, line 13); such assignments are not generated. Every
+//! other combination of options is one physical candidate, the
+//! all-`NotMaterialized` one first: nothing is capped. A node that one
+//! query reads at ingestion time and another at query time is copied, one
+//! copy per phase ([`split_shared_by_phase`]).
+//!
+//! A build may run at ingestion time (S4) only when:
+//!
+//! * the data workload is continuously ingesting or mixed (unknown arrival
+//!   counts as not ingesting);
+//! * every query reading it repeats and is predictable;
+//! * it has no filter: an ingestion-time build reads raw samples, which
+//!   carry none of the columns a filter reads;
+//! * if it is a counter state (`Rate`, `Increase`, `IRate`), whose update
+//!   needs each series' samples in time order, the data is continuously
+//!   ingesting and every source below it is a time series. Assumption:
+//!   continuously ingesting PromQL data arrives in time order per series,
+//!   as Prometheus assumes (it rejects out-of-order samples). Table (SQL)
+//!   sources and mixed data, whose at-rest part may load in any order, are
+//!   not taken to be ordered;
+//! * it is a tumbling-pane chain, or a whole-window build whose readers
+//!   all run at one fixed interval with a known phase, over a window no
+//!   longer than that interval and not shifted;
+//! * everything below it can run at ingestion time.
+//!
+//! ## Physical operator implementation
 //!
 //! The runtime has one implementation per logical operator except exact
 //! top-k, which it cannot run as `Aggregate{[TopK]}`. Stage 2 records that
@@ -21,38 +56,60 @@
 //! not make it the same answer.
 //! An `Aggregate{[TopK]}` over a per-entity reduction, or with other
 //! measures, a filter or `HAVING`, has no such rewrite, and its candidate
-//! fails.
+//! fails with a [`PhysicalASAPOptimizationError`]; the caller prunes that
+//! candidate alone, with the error as its reason.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use asap_types::ir::operator_properties::Source;
 use asap_types::ir::physical_export::{
-    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
+    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG, PhysicalASAPNodeId,
 };
 use asap_types::ir::{
-    apply_materialization_timings, MaterializationAssignment, NonASAPOp, Operator, OperatorNode,
-    ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
+    apply_materialization_timings, is_filtered_build, split_shared_by_phase, ASAPOp,
+    MaterializationAssignment, Medium, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot,
+    ScalarExpr, SchemaDerivationError, SortKey, TimingMemo,
 };
-use asap_types::post_asap::{ExecutionDataStateError, Materialization};
+use asap_types::post_asap::{
+    ExactKind, ExecutionDataStateError, ExecutionTiming, FieldDataType, Materialization,
+};
 use asap_types::pre_asap::column_resolution::resolve_column_ref;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::{AggIntent, Reduction};
+use asap_types::workload::{
+    DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
+};
 use thiserror::Error;
 
 /// One CandidatePhysicalASAPDAG (Stage 2 output), derived from exactly one
-/// CandidateLogicalASAPDAG (Stage 1 output).
-/// `roots` are the timed query roots (one per query, in workload order)
-/// that `dag` exports.
+/// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
+/// display labels are derived from it by the devtools.
 #[derive(Debug, Clone)]
 pub struct PhysicalCandidate {
+    /// `P<n>` (nothing materialized) or `P<n>-m<k>`, set by the caller.
     pub id: String,
+    /// The id of the logical candidate it implements.
     pub from_logical: String,
-    /// Human-readable name of the candidate, used only for display (see
-    /// `pass::stage1_to_stage3`).
-    pub display_name: String,
+    /// The timed query roots, one per query in workload order, that `dag`
+    /// exports.
     pub roots: Vec<QueryRoot>,
     pub dag: PhysicalASAPDAG,
+    /// Its materialization assignment: the option chosen for each summary
+    /// build (`SummaryAgg` or `PaneChain`) of `dag`, by node id, including
+    /// the builds left `NotMaterialized`. A build one query reads at
+    /// ingestion time and another at query time appears once per copy.
+    pub materialization: BTreeMap<PhysicalASAPNodeId, Materialization>,
+}
+
+impl PhysicalCandidate {
+    /// Whether any summary build is materialized.
+    pub fn materializes_any(&self) -> bool {
+        self.materialization
+            .values()
+            .any(|m| *m != Materialization::NotMaterialized)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -65,33 +122,375 @@ pub enum PhysicalASAPOptimizationError {
     ExactTopK(String),
 }
 
+/// Why a summary build cannot be materialized at ingestion time (S4).
+/// Stage 2 bookkeeping, like [`MaterializationCandidate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IngestionPruneReason {
+    /// The data workload is at rest, or its arrival is unknown.
+    NotIngesting,
+    /// A query reading it is not repeated.
+    NotRepeated,
+    /// A query reading it is not predictable.
+    NotPredictable,
+    /// It has a filter, which only a query-time build can apply.
+    Filtered,
+    /// It is a counter state, whose update needs each series' samples in
+    /// time order, over data not taken to arrive in that order: only
+    /// continuously ingesting time-series (PromQL) sources are.
+    CounterNeedsTimeOrder,
+    /// A whole-window build whose readers do not all run at one fixed
+    /// interval with a known phase, or whose window is longer than that
+    /// interval, shifted, or not a range.
+    WindowNotFixed,
+    /// Something below it can only run at query time.
+    UpstreamAtQueryTime(String),
+}
+
+/// One summary build Stage 2 may store, with its materialization options.
+/// It is not a whole-workload plan like [`PhysicalCandidate`]: it is Stage
+/// 2's enumeration bookkeeping, and the physical candidates are the
+/// combinations of the materialization candidates' options. For example,
+/// over one metric:
+///
+/// ```text
+/// q1: quantile_over_time(0.99, latency[5m])   every 1m
+/// q2: max_over_time(latency[5m])              every 1m
+/// ```
+///
+/// If Stage 1 chose KLL panes for q1 and exact max panes for q2, Stage 2
+/// finds two materialization candidates:
+///
+/// | materialization candidate | readers | options                         |
+/// |---------------------------|---------|---------------------------------|
+/// | Kll ×5 panes (q1)         | q1      | NotMaterialized, MatAtIngestion |
+/// | Max acc ×5 panes (q2)     | q2      | NotMaterialized, MatAtIngestion |
+///
+/// One read by two or more queries also gets `MatAtQuery` (built once per
+/// evaluation and reused). The physical candidates are the product of the
+/// options, here 2 × 2 = 4, less the assignments that put a build at
+/// ingestion time over one that is not; Stage 3 prices each.
+/// `at_ingestion` records why ingestion is ruled out when it is (e.g.
+/// `Filtered`, `NotRepeated`). Each physical candidate carries the
+/// resulting assignment ([`PhysicalCandidate::materialization`]).
+#[derive(Debug, Clone)]
+pub(crate) struct MaterializationCandidate {
+    /// The build in the implemented DAG.
+    pub(crate) node: Rc<OperatorNode>,
+    /// The queries (indices into the roots) that read it.
+    pub(crate) readers: Vec<usize>,
+    /// `Ok` when `MatAtIngestion` is an option.
+    pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
+}
+
+impl MaterializationCandidate {
+    /// Its options, `NotMaterialized` first: `MatAtIngestion` when eligible,
+    /// `MatAtQuery` when two or more queries read it.
+    pub(crate) fn options(&self) -> Vec<Materialization> {
+        let mut options = vec![Materialization::NotMaterialized];
+        if self.at_ingestion.is_ok() {
+            options.push(Materialization::MatAtIngestion(Medium::Memory));
+        }
+        if self.readers.len() > 1 {
+            options.push(Materialization::MatAtQuery(Medium::Memory));
+        }
+        options
+    }
+}
+
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
-/// (physical operator implementation) and time it with every
-/// sub-DAG `NotMaterialized`. `id` and `display_name` are left empty for the caller
-/// to name. Sharing between `roots` is preserved: one memo serves the whole
-/// workload.
+/// (physical operator implementation), then one physical candidate per
+/// materialization assignment of its mat_candidates, the all-`NotMaterialized` one
+/// first. `entries[i]` is the workload entry of query `i` (`roots[i]`):
+/// its recurrence and predictability decide whether state may be kept from
+/// ingestion time; a missing entry is unknown. `id` is left empty for the
+/// caller to name. Sharing between `roots` is preserved: one memo serves the
+/// whole workload.
 pub fn optimize_physical_asap(
     from_logical: &str,
     roots: &[QueryRoot],
-) -> Result<PhysicalCandidate, PhysicalASAPOptimizationError> {
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+) -> Result<Vec<PhysicalCandidate>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
-    let assignment = MaterializationAssignment::with_default(Materialization::NotMaterialized);
-    let mut timing = TimingMemo::new();
-    let timed = map_roots(&implemented, &mut |node| {
-        Ok(apply_materialization_timings(
-            node,
-            &assignment,
-            &mut timing,
-        )?)
-    })?;
-    let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
-    Ok(PhysicalCandidate {
-        id: String::new(),
-        from_logical: from_logical.to_string(),
-        display_name: String::new(),
-        roots: timed,
-        dag,
+    let mat_candidates = materialization_candidates(&implemented, entries, data);
+    let mut candidates = Vec::new();
+    for assignment in materialization_assignments(&mat_candidates) {
+        let materialized: Vec<_> = mat_candidates
+            .iter()
+            .zip(&assignment)
+            .filter(|(_, m)| **m != Materialization::NotMaterialized)
+            .map(|(mat_candidate, m)| (mat_candidate, *m))
+            .collect();
+        let mut options = MaterializationAssignment::with_default(Materialization::NotMaterialized);
+        for (mat_candidate, materialization) in &materialized {
+            options.set(&mat_candidate.node, *materialization);
+        }
+        let operators: Vec<Rc<OperatorNode>> = implemented
+            .iter()
+            .flat_map(|root| root_operators(root).into_iter().cloned())
+            .collect();
+        let (split, options) = split_shared_by_phase(&operators, &options);
+        let replaced: HashMap<_, _> = operators
+            .iter()
+            .map(Rc::as_ptr)
+            .zip(split.iter().cloned())
+            .collect();
+        let split_roots = map_roots(&implemented, &mut |node| {
+            Ok(replaced[&Rc::as_ptr(node)].clone())
+        })?;
+        let mut timing = TimingMemo::new();
+        let timed = map_roots(&split_roots, &mut |node| {
+            Ok(apply_materialization_timings(node, &options, &mut timing)?)
+        })?;
+        let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
+        let materialization = dag
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.payload,
+                    Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                )
+            })
+            .map(|n| (n.id, n.materialization))
+            .collect();
+        candidates.push(PhysicalCandidate {
+            id: String::new(),
+            from_logical: from_logical.to_string(),
+            roots: timed,
+            dag,
+            materialization,
+        });
+    }
+    Ok(candidates)
+}
+
+/// The number of physical candidates [`optimize_physical_asap`] returns for
+/// `roots`, without building them; `Err` when a candidate cannot be
+/// implemented.
+pub fn physical_candidate_count(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+) -> Result<usize, PhysicalASAPOptimizationError> {
+    let mut memo = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    Ok(
+        materialization_assignments(&materialization_candidates(&implemented, entries, data))
+            .count(),
+    )
+}
+
+/// The operator nodes `root` reads.
+fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
+    match root {
+        QueryRoot::Operator(node) => vec![node],
+        QueryRoot::Scalar(expr) => expr.operator_refs(),
+    }
+}
+
+/// Every summary build of `roots` (implemented), in discovery order, with
+/// its readers and whether it may run at ingestion time.
+pub(crate) fn materialization_candidates(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+) -> Vec<MaterializationCandidate> {
+    let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
+    let mut readers: HashMap<*const OperatorNode, Vec<usize>> = HashMap::new();
+    for (query, root) in roots.iter().enumerate() {
+        for operator in root_operators(root) {
+            for node in OperatorNode::reachable(operator) {
+                if !matches!(
+                    node.asap(),
+                    Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                ) {
+                    continue;
+                }
+                let entry = readers.entry(Rc::as_ptr(&node)).or_default();
+                if entry.is_empty() {
+                    nodes.push(Rc::clone(&node));
+                }
+                if !entry.contains(&query) {
+                    entry.push(query);
+                }
+            }
+        }
+    }
+    let below = candidates_below(&nodes);
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(c, node)| {
+            let readers = readers[&Rc::as_ptr(node)].clone();
+            let at_ingestion =
+                ingestion_eligibility(node, &readers, entries, data).and_then(|()| {
+                    // Only this build and the builds below it at ingestion time.
+                    let mut trial =
+                        MaterializationAssignment::with_default(Materialization::NotMaterialized);
+                    for &v in below[c].iter().chain([&c]) {
+                        trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
+                    }
+                    apply_materialization_timings(node, &trial, &mut TimingMemo::new())
+                        .map(|_| ())
+                        .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
+                });
+            MaterializationCandidate {
+                node: Rc::clone(node),
+                readers,
+                at_ingestion,
+            }
+        })
+        .collect()
+}
+
+/// Whether every scan below `node` reads a time series (a PromQL source).
+fn reads_only_time_series(node: &OperatorNode) -> bool {
+    match node.non_asap() {
+        Some(NonASAPOp::Scan { source, .. }) => matches!(source, Source::TimeSeries { .. }),
+        _ => node.children().iter().all(|c| reads_only_time_series(c)),
+    }
+}
+
+/// The workload rules of S4 for `node` (module doc).
+fn ingestion_eligibility(
+    node: &OperatorNode,
+    readers: &[usize],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+) -> Result<(), IngestionPruneReason> {
+    use IngestionPruneReason as Why;
+    if !matches!(
+        data.arrival,
+        DataArrival::ContinuouslyIngesting | DataArrival::Mixed
+    ) {
+        return Err(Why::NotIngesting);
+    }
+    let demands: Vec<Option<&QueryWorkloadEntry>> =
+        readers.iter().map(|&q| entries.get(q)).collect();
+    if demands
+        .iter()
+        .any(|d| !d.is_some_and(|d| matches!(d.recurrence, QueryRecurrence::Repeated(_))))
+    {
+        return Err(Why::NotRepeated);
+    }
+    if demands
+        .iter()
+        .any(|d| !d.is_some_and(|d| matches!(d.predictability, Predictability::Predictable { .. })))
+    {
+        return Err(Why::NotPredictable);
+    }
+    if is_filtered_build(node) {
+        return Err(Why::Filtered);
+    }
+    let (family, chain) = match node.asap() {
+        Some(ASAPOp::SummaryAgg { family, .. }) => (family, false),
+        Some(ASAPOp::PaneChain { family, .. }) => (family, true),
+        _ => unreachable!("a materialization candidate is a summary build"),
+    };
+    if matches!(
+        family,
+        FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase | ExactKind::IRate, _)
+    ) {
+        // Assumption (module doc): continuously ingesting PromQL data
+        // arrives in time order per series, as Prometheus assumes.
+        let ordered =
+            data.arrival == DataArrival::ContinuouslyIngesting && reads_only_time_series(node);
+        if !ordered {
+            return Err(Why::CounterNeedsTimeOrder);
+        }
+    }
+    if chain {
+        return Ok(());
+    }
+    // A whole-window build: one window per evaluation, at one known phase,
+    // that ends at the evaluation and fits in the interval.
+    let mut cadence = None;
+    for d in demands.into_iter().flatten() {
+        let QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            interval,
+            evaluation_phase,
+        }) = &d.recurrence
+        else {
+            return Err(Why::WindowNotFixed);
+        };
+        if cadence.is_some_and(|c| c != (interval.0, evaluation_phase.0)) {
+            return Err(Why::WindowNotFixed);
+        }
+        cadence = Some((interval.0, evaluation_phase.0));
+    }
+    let Some((interval_ms, _)) = cadence else {
+        return Err(Why::WindowNotFixed);
+    };
+    match node.children()[0].non_asap() {
+        Some(NonASAPOp::TimeRange {
+            range,
+            kind: asap_types::ir::TimeRangeKind::Range,
+            child,
+        }) if range.as_millis() <= u128::from(interval_ms)
+            && !matches!(child.non_asap(), Some(NonASAPOp::TimeShift { .. })) =>
+        {
+            Ok(())
+        }
+        _ => Err(Why::WindowNotFixed),
+    }
+}
+
+/// For each of `nodes`, the indices of the others below it.
+fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
+    nodes
+        .iter()
+        .map(|node| {
+            let reachable = OperatorNode::reachable(node);
+            (0..nodes.len())
+                .filter(|&v| {
+                    !Rc::ptr_eq(&nodes[v], node)
+                        && reachable.iter().any(|n| Rc::ptr_eq(n, &nodes[v]))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Every assignment of an option to each materialization candidate (mixed
+/// radix, the last varying fastest, all `NotMaterialized` first) in which
+/// every build below an ingestion-time build is at ingestion time too.
+fn materialization_assignments(
+    mat_candidates: &[MaterializationCandidate],
+) -> impl Iterator<Item = Vec<Materialization>> + '_ {
+    let options: Vec<Vec<Materialization>> = mat_candidates.iter().map(|c| c.options()).collect();
+    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
+    let below = candidates_below(&nodes);
+    let mut digits = Some(vec![0usize; mat_candidates.len()]);
+    std::iter::from_fn(move || loop {
+        let current = digits.as_mut()?;
+        let assignment: Vec<Materialization> = current
+            .iter()
+            .zip(&options)
+            .map(|(&d, options)| options[d])
+            .collect();
+        // Advance (mixed radix); `None` after the last assignment.
+        let mut carried = true;
+        for (digit, options) in current.iter_mut().zip(&options).rev() {
+            *digit += 1;
+            if *digit < options.len() {
+                carried = false;
+                break;
+            }
+            *digit = 0;
+        }
+        if carried {
+            digits = None;
+        }
+        let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
+        let down_closed = assignment.iter().enumerate().all(|(c, m)| {
+            !at_ingestion(m) || below[c].iter().all(|&v| at_ingestion(&assignment[v]))
+        });
+        if down_closed {
+            return Some(assignment);
+        }
+        digits.as_ref()?;
     })
 }
 
@@ -258,6 +657,13 @@ mod tests {
     use asap_types::post_asap::ExecutionTiming;
     use asap_types::types::AccuracyTarget;
 
+    /// The all-`NotMaterialized` candidate, with no workload declared.
+    fn first_candidate(roots: &[QueryRoot]) -> PhysicalCandidate {
+        optimize_physical_asap("L1", roots, &[], &DataWorkload::default())
+            .unwrap()
+            .remove(0)
+    }
+
     fn operator_root(candidate: &PhysicalCandidate, i: usize) -> Rc<OperatorNode> {
         match &candidate.roots[i] {
             QueryRoot::Operator(node) => node.clone(),
@@ -299,7 +705,7 @@ mod tests {
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::exact(),
         );
-        let candidate = optimize_physical_asap("L1", &[root.clone().into()]).unwrap();
+        let candidate = first_candidate(&[root.clone().into()]);
         let physical = operator_root(&candidate, 0);
         assert_eq!(names(&physical), names(&root));
         let limit = topk_limit(&physical);
@@ -311,7 +717,7 @@ mod tests {
     #[test]
     fn promql_topk_over_grouped_aggregate_sorts_by_its_measure() {
         let root = lower_promql("topk(5, sum by (job) (m))", AccuracyTarget::exact());
-        let candidate = optimize_physical_asap("L1", &[root.into()]).unwrap();
+        let candidate = first_candidate(&[root.into()]);
         let physical = operator_root(&candidate, 0);
         assert_eq!(names(&physical), ["topk_5"]);
         let limit = topk_limit(&physical);
@@ -328,7 +734,7 @@ mod tests {
             "sum by (job) (topk by (job) (10, sum_over_time(m[1m])))",
             AccuracyTarget::exact(),
         );
-        let candidate = optimize_physical_asap("L1", &[root.clone().into()]).unwrap();
+        let candidate = first_candidate(&[root.clone().into()]);
         let physical = operator_root(&candidate, 0);
         assert_eq!(names(&physical), names(&root));
         let NonASAPOp::Aggregate { child: input, .. } = physical.expect_non_asap() else {
@@ -394,7 +800,8 @@ mod tests {
             ),
         ];
         for root in cases {
-            let error = optimize_physical_asap("L1", &[root.into()]).unwrap_err();
+            let error = optimize_physical_asap("L1", &[root.into()], &[], &DataWorkload::default())
+                .unwrap_err();
             assert!(
                 matches!(error, PhysicalASAPOptimizationError::ExactTopK(_)),
                 "{error}"
@@ -414,7 +821,7 @@ mod tests {
             panic!("topk aggregate")
         };
         let sum = Rc::new(sum.with_new_children(|_| shared.clone()).unwrap());
-        let candidate = optimize_physical_asap("L1", &[topk.into(), sum.into()]).unwrap();
+        let candidate = first_candidate(&[topk.into(), sum.into()]);
         let root = |i: usize| match &candidate.roots[i] {
             QueryRoot::Operator(node) => node.clone(),
             QueryRoot::Scalar(_) => panic!("operator root"),
@@ -497,7 +904,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-        let candidate = optimize_physical_asap("L1", &roots).unwrap();
+        let candidate = first_candidate(&roots);
         assert!(candidate
             .dag
             .nodes
@@ -508,5 +915,388 @@ mod tests {
             .nodes
             .iter()
             .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
+    }
+
+    // ── Materialization ──────────────────────────────────────────────────
+
+    use asap_types::workload::{DataArrival, RepetitionInterval, TimestampMs};
+
+    const MINUTE: u64 = 60_000;
+
+    /// The composed logical candidate of `query` that builds its last
+    /// summary option (DDSketch for a quantile) for every target.
+    fn summary_root(query: &str) -> QueryRoot {
+        let root = lower_promql(
+            query,
+            AccuracyTarget::epsilon_delta(0.01, 0.001)
+                .with_metric(asap_types::types::ErrorMetric::Rank),
+        );
+        let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+        )
+        .unwrap();
+        let choice: Vec<_> = inventory
+            .targets
+            .iter()
+            .map(|t| t.choices.candidates.len() - 1)
+            .collect();
+        crate::per_computation_candidates::compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .remove(0)
+            .1
+    }
+
+    /// `root` with its summary build in 1-min tumbling panes.
+    fn in_panes(root: QueryRoot) -> QueryRoot {
+        let roots = [root];
+        let sites = crate::asap_aware_cse::pane_sites(&roots, &[Some(MINUTE)]);
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        let mut variants =
+            crate::asap_aware_cse::window_composition_variants(&roots, &sites).unwrap();
+        variants.pop().unwrap().roots.unwrap().remove(0)
+    }
+
+    const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
+
+    /// The options `candidate` chose other than `NotMaterialized`, by node.
+    fn materialized(candidate: &PhysicalCandidate) -> Vec<Materialization> {
+        candidate
+            .materialization
+            .values()
+            .copied()
+            .filter(|m| *m != Materialization::NotMaterialized)
+            .collect()
+    }
+
+    /// A predictable query evaluated every minute.
+    fn every_minute() -> QueryWorkloadEntry {
+        QueryWorkloadEntry {
+            predictability: Predictability::Predictable { known_at: None },
+            ..crate::test_support::entry(QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                RepetitionInterval(MINUTE as u32),
+            )))
+        }
+    }
+
+    fn arriving() -> DataWorkload {
+        DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+            ..Default::default()
+        }
+    }
+
+    /// The distinct nodes of `kind` the candidate's roots read.
+    fn node_of(candidate: &PhysicalCandidate, kind: &str) -> Vec<Rc<OperatorNode>> {
+        let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
+        for root in candidate.roots.iter().flat_map(root_operators) {
+            for node in OperatorNode::reachable(root) {
+                if node.operator.kind_name() == kind && !nodes.iter().any(|n| Rc::ptr_eq(n, &node))
+                {
+                    nodes.push(node);
+                }
+            }
+        }
+        nodes
+    }
+
+    /// #509 Example 4, B1 and B2: a tumbling-pane chain read by a repeating,
+    /// predictable query over arriving data is either rebuilt at query time
+    /// or maintained at ingestion time. Maintained, the chain and the scan
+    /// below it run at ingestion time, and the merge and estimate at query
+    /// time.
+    #[test]
+    fn a_pane_chain_over_arriving_data_may_be_maintained_at_ingestion_time() {
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let candidates =
+            optimize_physical_asap("L1", &[root], &[every_minute()], &arriving()).unwrap();
+        assert_eq!(candidates.len(), 2);
+        let [b2, b1] = &candidates[..] else {
+            unreachable!()
+        };
+        assert!(!b2.materializes_any());
+        assert!(b2
+            .dag
+            .nodes
+            .iter()
+            .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
+        assert_eq!(materialized(b1), [AT_INGESTION]);
+        let [chain] = &node_of(b1, "PaneChain")[..] else {
+            panic!("one chain")
+        };
+        assert_eq!(
+            chain.materialization,
+            Materialization::MatAtIngestion(Medium::Memory)
+        );
+        for below in OperatorNode::reachable(chain) {
+            assert_eq!(below.timing, Some(ExecutionTiming::IngestionTime));
+        }
+        for kind in ["SummaryMerge", "SummaryEstimate"] {
+            for node in node_of(b1, kind) {
+                assert_eq!(node.timing, Some(ExecutionTiming::QueryTime), "{kind}");
+            }
+        }
+    }
+
+    /// S4: maintaining state at ingestion time needs arriving data and
+    /// queries that repeat and are predictable; otherwise the chain only
+    /// runs at query time, and the materialization candidate says why.
+    #[test]
+    fn ingestion_time_needs_arriving_data_and_repeated_predictable_queries() {
+        use IngestionPruneReason as Why;
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let at_rest = DataWorkload {
+            arrival: DataArrival::AtRest,
+            ..Default::default()
+        };
+        let unknown = QueryWorkloadEntry {
+            predictability: Predictability::Unknown,
+            ..every_minute()
+        };
+        let once = QueryWorkloadEntry {
+            recurrence: QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            ..every_minute()
+        };
+        for (demand, data, why) in [
+            (every_minute(), at_rest, Why::NotIngesting),
+            (every_minute(), DataWorkload::default(), Why::NotIngesting),
+            (unknown, arriving(), Why::NotPredictable),
+            (once, arriving(), Why::NotRepeated),
+        ] {
+            let roots = [root.clone()];
+            let candidates =
+                optimize_physical_asap("L1", &roots, std::slice::from_ref(&demand), &data).unwrap();
+            assert_eq!(candidates.len(), 1, "{why:?}");
+            let mut memo = HashMap::new();
+            let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
+            let mat_candidates = materialization_candidates(&implemented, &[demand], &data);
+            assert_eq!(mat_candidates.len(), 1);
+            assert_eq!(mat_candidates[0].at_ingestion, Err(why));
+        }
+    }
+
+    /// A counter state (`rate`, `increase`) needs each series' samples in
+    /// time order. Continuously ingesting time-series (PromQL) data is taken
+    /// to arrive in that order, as Prometheus assumes, so its counter panes
+    /// may be maintained at ingestion time.
+    #[test]
+    fn counter_panes_over_ingesting_promql_data_run_at_ingestion_time() {
+        for query in ["rate(m[5m])", "increase(m[5m])"] {
+            let roots = [in_panes(summary_root(query))];
+            let mut memo = HashMap::new();
+            let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
+            let mat_candidates =
+                materialization_candidates(&implemented, &[every_minute()], &arriving());
+            assert_eq!(mat_candidates[0].at_ingestion, Ok(()), "{query}");
+            let candidates =
+                optimize_physical_asap("L1", &roots, &[every_minute()], &arriving()).unwrap();
+            assert_eq!(candidates.len(), 2, "{query}");
+        }
+    }
+
+    /// Only continuously ingesting time-series data is taken to arrive in
+    /// time order: a counter over a table source, or over mixed data (whose
+    /// at-rest part may be loaded in any order), stays at query time.
+    #[test]
+    fn counter_panes_over_other_sources_stay_at_query_time() {
+        use IngestionPruneReason as Why;
+        let root = in_panes(summary_root("rate(m[5m])"));
+        let QueryRoot::Operator(node) = &root else {
+            panic!("{root:?}")
+        };
+        let table = QueryRoot::Operator(to_table(node));
+        let mixed = DataWorkload {
+            arrival: DataArrival::Mixed,
+            ..Default::default()
+        };
+        for (root, data) in [(table, arriving()), (root.clone(), mixed)] {
+            let roots = [root];
+            let mut memo = HashMap::new();
+            let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
+            let mat_candidates = materialization_candidates(&implemented, &[every_minute()], &data);
+            assert_eq!(
+                mat_candidates[0].at_ingestion,
+                Err(Why::CounterNeedsTimeOrder)
+            );
+        }
+    }
+
+    /// `node` with every time-series scan turned into a table scan of the
+    /// same name and schema.
+    fn to_table(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        let mut out = (**node).clone();
+        out.operator = node.operator.map_children(to_table);
+        if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &mut out.operator {
+            if let Source::TimeSeries { metric } = source {
+                *source = Source::Table {
+                    table_ref: metric.clone(),
+                };
+            }
+        }
+        Rc::new(out)
+    }
+
+    /// A whole-window build is maintained only for one window per
+    /// evaluation at a known phase: a fixed interval with a phase, a window
+    /// no longer than it, and no filter.
+    #[test]
+    fn a_whole_window_build_needs_a_known_phase_and_a_window_within_the_interval() {
+        use IngestionPruneReason as Why;
+        let root = summary_root("quantile_over_time(0.99, m[1m])");
+        let at = |interval_ms: u32| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(interval_ms),
+                evaluation_phase: TimestampMs(0),
+            }),
+            ..every_minute()
+        };
+        let mat_candidates = |root: &QueryRoot, demand: QueryWorkloadEntry| {
+            let mut memo = HashMap::new();
+            let implemented =
+                map_roots(std::slice::from_ref(root), &mut |n| implement(n, &mut memo)).unwrap();
+            materialization_candidates(&implemented, &[demand], &arriving())
+                .remove(0)
+                .at_ingestion
+        };
+        assert_eq!(mat_candidates(&root, at(MINUTE as u32)), Ok(()));
+        assert_eq!(
+            mat_candidates(&root, every_minute()),
+            Err(Why::WindowNotFixed)
+        );
+        assert_eq!(mat_candidates(&root, at(30_000)), Err(Why::WindowNotFixed));
+        let candidates = optimize_physical_asap(
+            "L1",
+            std::slice::from_ref(&root),
+            &[at(MINUTE as u32)],
+            &arriving(),
+        )
+        .unwrap();
+        assert_eq!(materialized(&candidates[1]), [AT_INGESTION]);
+
+        // The same build with a filter.
+        let QueryRoot::Operator(node) = &root else {
+            unreachable!()
+        };
+        let build = OperatorNode::reachable(node)
+            .into_iter()
+            .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            .unwrap();
+        let Operator::ASAP(ASAPOp::SummaryAgg {
+            child,
+            family,
+            input,
+            reduction,
+            grouping,
+            ..
+        }) = build.operator.clone()
+        else {
+            unreachable!()
+        };
+        let filtered = Rc::new(
+            OperatorNode::with_schema(
+                Operator::ASAP(ASAPOp::SummaryAgg {
+                    child,
+                    family,
+                    input,
+                    reduction,
+                    grouping,
+                    filter: Some(asap_types::ir::Predicate(ScalarExpr::Literal(
+                        asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true),
+                    ))),
+                }),
+                build.schema.clone(),
+            )
+            .with_guarantee(build.guarantee.clone()),
+        );
+        assert_eq!(
+            mat_candidates(&QueryRoot::Operator(filtered), at(MINUTE as u32)),
+            Err(Why::Filtered)
+        );
+    }
+
+    /// A build two queries read is also offered built once per evaluation
+    /// for both (`MatAtQuery`); a build one query reads is not.
+    #[test]
+    fn a_build_two_queries_read_may_be_built_once_per_evaluation() {
+        let QueryRoot::Operator(p99) = summary_root("quantile_over_time(0.99, m[1m])") else {
+            unreachable!()
+        };
+        let build = OperatorNode::reachable(&p99)
+            .into_iter()
+            .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+            .unwrap();
+        let p50 = Rc::new(
+            OperatorNode::new(Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: Rc::clone(&build),
+                query: asap_types::post_asap::SketchStatistic::Quantile { q: 0.5 },
+            }))
+            .unwrap(),
+        );
+        let roots = [QueryRoot::Operator(p99), QueryRoot::Operator(p50)];
+        let candidates =
+            optimize_physical_asap("L1", &roots, &[], &DataWorkload::default()).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            materialized(&candidates[1]),
+            [Materialization::MatAtQuery(Medium::Memory)]
+        );
+        let [build] = &node_of(&candidates[1], "SummaryAgg")[..] else {
+            panic!("one shared build")
+        };
+        assert_eq!(
+            build.materialization,
+            Materialization::MatAtQuery(Medium::Memory)
+        );
+    }
+
+    /// Two queries share one scan: one reads it through panes maintained at
+    /// ingestion time, the other at query time. The scan is split, one copy
+    /// per phase; with nothing materialized it stays one node.
+    #[test]
+    fn a_scan_two_queries_read_at_two_phases_is_split() {
+        let QueryRoot::Operator(panes) = in_panes(summary_root("quantile_over_time(0.99, m[5m])"))
+        else {
+            unreachable!()
+        };
+        let scan = OperatorNode::reachable(&panes)
+            .into_iter()
+            .find(|n| matches!(n.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .unwrap();
+        let ranged = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+            range: std::time::Duration::from_millis(5 * MINUTE),
+            kind: asap_types::ir::TimeRangeKind::Range,
+            child: Rc::clone(&scan),
+        }))
+        .unwrap();
+        let exact = crate::test_support::aggregate(
+            Reduction::by(vec![]),
+            vec![AggIntent::Max { col: None }],
+            vec![],
+            None,
+            ranged,
+        );
+        let roots = [QueryRoot::Operator(panes), QueryRoot::Operator(exact)];
+        let candidates =
+            optimize_physical_asap("L1", &roots, &[every_minute(), every_minute()], &arriving())
+                .unwrap();
+        assert_eq!(candidates.len(), 2);
+        let scans = |c: &PhysicalCandidate| {
+            let mut timings: Vec<_> = c
+                .dag
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
+                .map(|n| n.output_state.timing)
+                .collect();
+            timings.sort_by_key(|t| *t == ExecutionTiming::QueryTime);
+            timings
+        };
+        assert_eq!(scans(&candidates[0]), [ExecutionTiming::QueryTime]);
+        assert_eq!(
+            scans(&candidates[1]),
+            [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime]
+        );
     }
 }

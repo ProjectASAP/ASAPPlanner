@@ -150,8 +150,13 @@ async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
     let run = asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
-        &[Some(asap_types::types::AccuracyTarget::exact())],
-        &[asap_types::workload::QueryRecurrence::Unknown],
+        &[asap_types::workload::QueryWorkloadEntry {
+            requirements: asap_types::workload::QueryRequirements {
+                accuracy: asap_types::types::AccuracyTarget::exact(),
+                max_latency_ms: None,
+            },
+            ..Default::default()
+        }],
         &Default::default(),
         asap_aware_mapping::PlanningModels::builtin(),
     )

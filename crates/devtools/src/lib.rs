@@ -14,8 +14,10 @@
 //!
 //! [`planning_stages`] and [`planner_layering_examples`] hold the one
 //! pipeline and the #509 example workloads that `stage_pipeline` and the
-//! planner-layering acceptance tests share.
+//! planner-layering acceptance tests share; [`candidate_labels`] names the
+//! candidates for the viewer document.
 
+pub mod candidate_labels;
 pub mod planner_layering_examples;
 pub mod planning_stages;
 
@@ -42,7 +44,7 @@ pub fn lower_promql_with_data_ingestion_interval(
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: asap_types::workload::AccuracyRequirement::Explicit(accuracy),
+                    accuracy,
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

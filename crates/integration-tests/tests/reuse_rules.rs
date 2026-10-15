@@ -25,7 +25,8 @@ use asap_types::ir::{
 use asap_types::post_asap::Schema;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
+    DataArrival, DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
+    RepetitionInterval,
 };
 
 const EVALUATION_MS: i64 = 300_000;
@@ -43,12 +44,19 @@ fn plan(queries: &[&str], recurrence: QueryRecurrence) -> Stage1ToStage3Run<usiz
         .collect();
     run_stage1_to_stage3(
         roots,
-        &vec![Some(AccuracyTarget::exact()); queries.len()],
-        &vec![recurrence; queries.len()],
+        &vec![exact(recurrence); queries.len()],
         &data(),
         PlanningModels::builtin(),
     )
     .unwrap()
+}
+
+/// The workload entry of an exact query evaluated as `recurrence` says.
+fn exact(recurrence: QueryRecurrence) -> QueryWorkloadEntry {
+    QueryWorkloadEntry {
+        recurrence,
+        ..Default::default()
+    }
 }
 
 /// The #509 shared data workload: 1,000,000 series sampled every 15 s.
@@ -176,10 +184,11 @@ fn nested_sum_merge_is_selected_and_answers_as_the_nested_sums() {
     assert_eq!(answer, execute(&nested));
 }
 
-/// A stand-in for Stage 2 materialization (G8): the highest computed nodes
+/// A stand-in for materialization Stage 2 does not offer: Stage 2 builds a
+/// shared summary once per evaluation (`MatAtQuery`), but not a shared exact
+/// computation such as a top-k ranking. Here the highest computed nodes
 /// (not a raw scan or time range) that more than one query reads are
-/// computed once per evaluation (`MatAtQuery`). Returns what the selected candidate
-/// reuses.
+/// computed once per evaluation. Returns what the selected candidate reuses.
 fn materialize_shared(run: &Stage1ToStage3Run<usize>) -> Vec<String> {
     let mut candidates = run.stage2_physical_asap_optimization.clone();
     for candidate in &mut candidates {
@@ -231,8 +240,7 @@ fn materialize_shared(run: &Stage1ToStage3Run<usize>) -> Vec<String> {
     let queries = run.stage1_pass1_per_computation.roots.len();
     let selection = select_plan(
         &candidates,
-        &vec![None; queries],
-        &vec![repeating(); queries],
+        &vec![exact(repeating()); queries],
         &data(),
         PlanningModels::builtin(),
     )
@@ -249,22 +257,28 @@ fn materialize_shared(run: &Stage1ToStage3Run<usize>) -> Vec<String> {
 }
 
 /// The reuse candidates of `queries`, and what the selected candidate
-/// reuses when every shared computed node is computed once.
+/// reuses. Stage 2 offers each computation two queries read built once per
+/// evaluation (`MatAtQuery`); the selected reuse candidate takes it.
 fn selected_reuse(queries: &[&str]) -> Vec<String> {
     let run = plan(queries, repeating());
     assert!(run.stage2_pruned.is_empty(), "{:?}", run.stage2_pruned);
-    let reused: Vec<_> = run
-        .stage1_pass2
-        .iter()
-        .filter(|p| !p.reused.is_empty())
-        .collect();
-    assert!(!reused.is_empty(), "{queries:?}");
+    assert!(
+        run.stage1_pass2.iter().any(|p| !p.reused.is_empty()),
+        "{queries:?}"
+    );
     let selected = run.selected().unwrap();
     assert!(
-        !reused.iter().any(|p| p.id == selected.from_logical),
-        "{queries:?}: not cheaper while every query recomputes what it reads"
+        selected
+            .materialization
+            .values()
+            .any(|m| matches!(m, Materialization::MatAtQuery(_))),
+        "{queries:?}: {} computes its shared state once",
+        selected.id
     );
-    materialize_shared(&run)
+    run.stage1_pass2
+        .iter()
+        .find(|p| p.id == selected.from_logical)
+        .map_or_else(Vec::new, |p| p.reused.clone())
 }
 
 /// `sum by (job)` beside `sum by (job, instance)`: with the finer sums
@@ -283,10 +297,13 @@ fn rollup_is_selected_when_the_finer_sums_are_computed_once() {
 #[test]
 fn exact_topk_reuse_is_selected_when_the_ranking_is_computed_once() {
     assert_eq!(
-        selected_reuse(&[
-            "topk by (job) (5, rate(m[1m]))",
-            "topk by (job) (10, rate(m[1m]))",
-        ]),
+        materialize_shared(&plan(
+            &[
+                "topk by (job) (5, rate(m[1m]))",
+                "topk by (job) (10, rate(m[1m]))",
+            ],
+            repeating(),
+        )),
         ["top-k for Q1, Q2 from one top-10"]
     );
 }

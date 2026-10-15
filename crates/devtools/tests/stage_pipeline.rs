@@ -106,7 +106,14 @@ fn example1_document_is_valid_and_committed_fixture_is_current() {
         .chain(pruned)
         .map(|p| p["from_logical"].as_str().unwrap())
         .collect();
-    assert_eq!(physical.len() + pruned.len(), composed.len());
+    // One physical candidate with nothing materialized per composed
+    // logical candidate, `P<n>`, plus `P<n>-m<k>` for each other
+    // materialization assignment.
+    let unmaterialized = physical
+        .iter()
+        .filter(|p| !p["id"].as_str().unwrap().contains("-m"))
+        .count();
+    assert_eq!(unmaterialized + pruned.len(), composed.len());
     assert_eq!(sources, composed);
     for candidate in physical {
         assert!(candidate.get("cost").is_none(), "Stage 2 has no cost");
@@ -357,11 +364,34 @@ fn workload_above_the_candidate_limit_is_rejected() {
             "{stderr}"
         );
     }
+    // At Stage 1's 27 candidates, Stage 2's 57 physical candidates (30 maintain
+    // pane chains at ingestion time) pass the limit; they are counted, not built.
+    let (status, stderr) = failure(&[
+        "--example",
+        "planner-layering-1",
+        "--max-combinations",
+        "27",
+    ]);
+    assert_eq!(status, Some(3));
+    assert!(
+        stderr.contains(
+            "workload has more than 27 Stage 2 physical candidates (materialization options \
+             included); planning it needs early pruning (#673)"
+        ),
+        "{stderr}"
+    );
     // At the limit, it plans every candidate.
-    let document = generate(&["--max-combinations", "27"]);
+    let document = generate(&["--max-combinations", "57"]);
     assert_eq!(
         document["stage1_logical_asap_optimization"]["combinations"],
         27
+    );
+    assert_eq!(
+        document["stage2_physical_asap_optimization"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        57
     );
 }
 
@@ -391,6 +421,7 @@ fn planning_stages_without_a_limit_plan_every_candidate() {
     let workload = example1();
     let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
     assert_eq!(run.stage1_logical_asap_optimization.len(), 27);
+    assert_eq!(run.stage2_physical_asap_optimization.len(), 57);
     let limited = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), Some(26));
     assert!(matches!(
         limited,

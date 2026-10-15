@@ -176,6 +176,12 @@ pub enum ExecutionDataStateError {
         fixed: ExecutionTiming,
         materialization: Materialization,
     },
+    /// A summary build with a filter placed at ingestion time. An
+    /// ingestion-time build reads raw samples, which carry none of the
+    /// query's columns the filter reads, so only a query-time build can
+    /// apply it.
+    #[error("{operator} has a filter, which only a query-time build can apply")]
+    FilteredSummaryAtIngestion { operator: &'static str },
     #[error("unsupported maintenance binary schema or operator")]
     InvalidMaintenanceBinary,
     #[error("checked division requires one valid guard on a read-time division operator")]

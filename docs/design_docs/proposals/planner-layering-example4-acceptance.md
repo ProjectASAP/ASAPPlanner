@@ -49,9 +49,12 @@ every other logical candidate gets its own the same way (not counted).
 time, both kept. Not materializing it is the no-window plan, so it is not a
 separate option.
 
-**Today:** no window summaries, and physical ASAP-aware optimization assigns
-every sub-DAG `NotMaterialized` (#667's options exist in the IR; their
-enumeration is #604), so none of these candidates exists.
+**Today:** Pass 2 builds tumbling panes (`PaneChain`), and physical
+ASAP-aware optimization enumerates `NotMaterialized`, `MatAtIngestion` and
+`MatAtQuery` (state reused within one evaluation) for every summary build.
+B1 and B2 exist. B3 (panes built at query time and kept across
+evaluations) comes with G9 (#625), and Pattern A's shared EH with #628 and
+#634, so A1–A3 do not exist yet.
 
 ## Invariants and tests
 
@@ -59,38 +62,43 @@ enumeration is #604), so none of these candidates exists.
 `Materialization` (#667). Tests read it through
 `planner_layering_common::materialization(p, node)` without the storage
 medium (`MatAtIngestion`, `MatAtQuery`, `NotMaterialized`), and the kept
-event-time span through `retention_ms(p, node)`, which returns `None` until
-the IR records retention.
+event-time span through `retention_ms(p, node)`. The IR does not record
+retention, so the adapter derives it the way plan selection prices kept
+state: a chain of `N` panes of width `w` keeps `N·w`, plus one pane while
+maintained at ingestion time; a whole-window build keeps its window, plus
+the next one at ingestion time; each plus the offset of the shifts below
+it.
 
 ### Constraints over every candidate
 
 | Invariant | Test | Status |
 |---|---|---|
-| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time` | passes (vacuously today) |
-| With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes (vacuously today) |
-| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers` | passes (vacuously today) |
+| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained panes |
+| With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes |
+| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min |
 
 ### Pattern A
 
 | Invariant | Test | Status |
 |---|---|---|
-| The shared EH yields exactly A1, A2, A3 | `stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: #628, #634, #604, #625 |
-| At rest, A2 is not generated; A1 and A3 remain | `stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: #628, #634, #604, #625 |
-| A materialized EH is one build node read by all five queries, priced once | `stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: #628, #634, #604, #625 |
-| A3 costs strictly more than A1 (five builds instead of one: a `NotMaterialized` node is charged per consuming query) | `stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: #628, #634, #604, #625 |
-| As given, A1 is the cheapest of the three | `stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: #628, #634, #604, #625 |
-| Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: #628, #634, #604, #625 |
+| The shared EH yields exactly A1, A2, A3 | `stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: the shared EH (#628, #634) |
+| At rest, A2 is not generated; A1 and A3 remain | `stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: the shared EH (#628, #634) |
+| A materialized EH is one build node read by all five queries, priced once | `stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: the shared EH (#628, #634) |
+| A3 costs strictly more than A1 (five builds instead of one: a `NotMaterialized` node is charged per consuming query) | `stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: the shared EH (#628, #634) |
+| As given, A1 is the cheapest of the three | `stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: the shared EH (#628, #634) |
+| Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: the shared EH (#628, #634) |
 
 ### Pattern B
 
 | Invariant | Test | Status |
 |---|---|---|
-| The tumbling KLL candidate yields exactly B1, B2, B3 | `stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options` | ignored: #601, #604, #625 |
-| B1 builds at ingestion time; its merge and estimate run at query time | `stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | ignored: #601, #604 |
-| B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | ignored: #601, #625 |
-| The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (no PR yet), #604 |
-| B2 costs at least B1 and B3 | `stage3_plan_selection_b_rebuilding_every_window_costs_most` | ignored: #601, #604, #625 |
-| With the built-in models, B1 is the cheapest of the three | `stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows` | ignored: #601, #604, #625 |
+| The tumbling KLL candidate yields exactly B1, B2, B3 | `stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options` | ignored: B3 (G9, #625) |
+| Until B3: the tumbling KLL candidate yields B1 and B2, both priced within the 200 ms latency bound (implementer test) | `stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2` | passes |
+| B1 builds at ingestion time; its merge and estimate run at query time | `stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | passes |
+| B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | ignored: B3 (G9, #625) |
+| The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (no PR yet) |
+| B2 costs at least B1 and B3 | `stage3_plan_selection_b_rebuilding_every_window_costs_most` | ignored: B3 (G9, #625) |
+| With the built-in models, B1 is the cheapest of the three | `stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows` | ignored: the built-in model contradicts it. B1 keeps 6 panes of 1M per-series KLLs (about 107 GB) for 13,326.5 cost/s; B2 rebuilds them for 2.183, and the whole-window KLL (P2, 2.100) is selected |
 
 ### Selection direction, relative to the cost model
 
@@ -114,11 +122,11 @@ the IR records retention.
    optimization does not duplicate the node. So A3 costs five EH builds and
    A1 one, as the tests require. The A3 tests stay ignored only because the
    shared EH and its materialization options do not exist yet.
-2. **Recurrence input.** Materialization depends on `recurrence`,
-   `predictability` and `arrival`, but `optimize_physical_asap` takes only
-   the logical candidate and `select_plan` only the accuracy targets and
-   data workload. They need the per-entry recurrence for A2's amortization
-   and for B1 (#604).
+2. **Recurrence input (resolved).** Materialization depends on
+   `recurrence`, `predictability` and `arrival`: `optimize_physical_asap`
+   takes the workload entries (`QueryWorkloadEntry`: recurrence,
+   predictability, accuracy target, latency bound) and the data workload,
+   and `select_plan` the same entries.
 3. **Monthly variant.** The doc does not say whether each monthly run still
    ends at T or at its own run time, nor give `known_at`. Tests use a
    repeating entry whose window ends at each run, known at T.

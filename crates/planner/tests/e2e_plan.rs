@@ -12,17 +12,17 @@ use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence,
-    LatencyRequirement, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
-    QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability,
+    Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
+    RepetitionInterval, SqlDialect, TimeSelection,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
 
 fn approximate() -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::epsilon(0.01)),
-        response_latency: LatencyRequirement::Unspecified,
+        accuracy: AccuracyTarget::epsilon(0.01),
+        max_latency_ms: None,
     }
 }
 
@@ -31,9 +31,7 @@ fn approximate() -> QueryRequirements {
 fn approximate_for(sql: &str) -> QueryRequirements {
     let mut requirements = approximate();
     if sql.contains("percentile") {
-        requirements.accuracy = AccuracyRequirement::Explicit(
-            AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank),
-        );
+        requirements.accuracy = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank);
     }
     requirements
 }
@@ -127,7 +125,7 @@ async fn facade_plans_match_run_stage1_to_stage3() {
     let mut roots = Vec::new();
     let mut targets = Vec::new();
     for (index, entry) in workload.query_workload.entries().enumerate() {
-        let accuracy = entry.requirements.accuracy.requested();
+        let accuracy = entry.requirements.accuracy.clone();
         let expr = lower_sql_dialect(
             &entry.query.0,
             &catalog,
@@ -140,12 +138,15 @@ async fn facade_plans_match_run_stage1_to_stage3() {
         targets.push(Some(accuracy));
     }
     let data = workload.data_workload.clone().unwrap();
-    let recurrence: Vec<_> = workload
-        .query_workload
-        .entries()
-        .map(|entry| entry.recurrence)
-        .collect();
-    let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, models).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| Some(e.requirements.accuracy.clone()))
+            .collect::<Vec<_>>(),
+        targets
+    );
+    let run = run_stage1_to_stage3(roots, &entries, &data, models).unwrap();
     let selection = run
         .stage3_plan_selection
         .as_ref()

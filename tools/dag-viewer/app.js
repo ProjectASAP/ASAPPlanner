@@ -192,7 +192,7 @@
     $('queries').innerHTML = doc.workload.queries.map((q) => {
       const r = q.requirements || {};
       const acc = accuracyText(r.accuracy, r.default_metric);
-      const req = [acc && `accuracy ${acc}`, r.latency_ms && `latency ≤ ${r.latency_ms} ms`, r.repeat_interval_ms && `every ${r.repeat_interval_ms / 1000} s`].filter(Boolean).join(' · ');
+      const req = [acc && `accuracy ${acc}`, r.max_latency_ms && `latency ≤ ${r.max_latency_ms} ms`, r.repeat_interval_ms && `every ${r.repeat_interval_ms / 1000} s`].filter(Boolean).join(' · ');
       return `<div class="query"><span class="qid">${esc(q.id)} · ${esc(q.language)}</span><code>${esc(q.text)}</code>${req ? `<span class="req">${esc(req)}</span>` : ''}</div>`;
     }).join('');
     const count = (status) => rows.filter((r) => r.status === status).length;

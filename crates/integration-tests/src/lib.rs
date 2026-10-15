@@ -17,8 +17,8 @@ pub mod fixtures {
     use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
-        AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
-        Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+        BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+        QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
     };
     use std::rc::Rc;
 
@@ -46,7 +46,7 @@ pub mod fixtures {
                 query_batch: Some(vec![BatchEntry {
                     query: Query(query.into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(accuracy),
+                        accuracy,
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,
@@ -147,7 +147,7 @@ pub mod post_asap {
 pub mod planning {
     use asap_types::ir::{OperatorNode, QueryRoot};
     use asap_types::types::AccuracyTarget;
-    use asap_types::workload::DataWorkload;
+    use asap_types::workload::{DataWorkload, QueryRequirements, QueryWorkloadEntry};
     use std::rc::Rc;
 
     /// Every planning stage's output for the single query `root`.
@@ -157,8 +157,13 @@ pub mod planning {
     ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
         asap_aware_mapping::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
-            &[Some(accuracy)],
-            &[asap_types::workload::QueryRecurrence::Unknown],
+            &[QueryWorkloadEntry {
+                requirements: QueryRequirements {
+                    accuracy,
+                    max_latency_ms: None,
+                },
+                ..Default::default()
+            }],
             &DataWorkload::default(),
             asap_aware_mapping::PlanningModels::builtin(),
         )

@@ -181,10 +181,9 @@ fn scalar_root_producers_are_discovered_once() {
 /// #509 Example 1 Q1 is exact: each target's one exact option is its exact
 /// accumulator state (grouped sum, rate); no plain exact form and no summary.
 /// One ImplicitExact PromQL query lowered through the workload frontend.
-fn implicit_exact_promql(query: &str) -> Vec<QueryRoot> {
+fn exact_promql(query: &str) -> Vec<QueryRoot> {
     use asap_types::workload::{
-        AccuracyRequirement, BatchEntry, PlanningWorkload, Query, QueryLanguage, QueryRequirements,
-        QueryWorkload,
+        BatchEntry, PlanningWorkload, Query, QueryLanguage, QueryRequirements, QueryWorkload,
     };
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
@@ -192,7 +191,7 @@ fn implicit_exact_promql(query: &str) -> Vec<QueryRoot> {
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::ImplicitExact,
+                    accuracy: AccuracyTarget::exact(),
                     ..Default::default()
                 },
                 predictability: Default::default(),
@@ -215,7 +214,7 @@ fn implicit_exact_promql(query: &str) -> Vec<QueryRoot> {
 
 #[test]
 fn example_1_exact_q1_keeps_exact_accumulators_only() {
-    let roots = implicit_exact_promql("sum by (job) (rate(http_requests_total[1m]))");
+    let roots = exact_promql("sum by (job) (rate(http_requests_total[1m]))");
     let candidates =
         generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
     let found: Vec<_> = candidates
@@ -666,7 +665,7 @@ fn global_aggregate_having_stays_above() {
 /// its exact Sum accumulator.
 #[test]
 fn example_1_exact_q2_prunes_topk_heaps() {
-    let roots = implicit_exact_promql("topk by (job) (10, sum_over_time(http_requests_total[1m]))");
+    let roots = exact_promql("topk by (job) (10, sum_over_time(http_requests_total[1m]))");
     let candidates =
         generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
     let found: Vec<_> = candidates
@@ -762,7 +761,7 @@ fn scalar_reference_filter_is_not_having() {
 /// PromQL `scalar(...)` operands are scalar references, not `HAVING`.
 #[test]
 fn promql_scalar_operand_is_not_having() {
-    let roots = implicit_exact_promql("http_requests_total > scalar(sum(http_requests_total))");
+    let roots = exact_promql("http_requests_total > scalar(sum(http_requests_total))");
     let targets = generate_per_computation_candidates(roots.into_iter().enumerate().collect())
         .unwrap()
         .targets;
@@ -771,7 +770,7 @@ fn promql_scalar_operand_is_not_having() {
         assert!(target.having.is_empty(), "{:?}", target.having);
     }
 
-    let roots = implicit_exact_promql("sum by (job) (x) > scalar(count(x))");
+    let roots = exact_promql("sum by (job) (x) > scalar(count(x))");
     let targets = generate_per_computation_candidates(roots.into_iter().enumerate().collect())
         .unwrap()
         .targets;
@@ -1145,7 +1144,7 @@ fn own_having_subquery_is_substituted() {
 #[test]
 fn per_series_avg_with_series_identity_composes_from_sum_and_count() {
     use asap_types::ir::schema_support::with_promql_series_identity;
-    let [QueryRoot::Operator(root)] = &implicit_exact_promql("avg_over_time(m[5m])")[..] else {
+    let [QueryRoot::Operator(root)] = &exact_promql("avg_over_time(m[5m])")[..] else {
         panic!("one operator root");
     };
     let root = with_promql_series_identity(root).unwrap();

@@ -5,8 +5,8 @@ use asap_aware_mapping::pass::{run_stage1_to_stage3, PlanningModels, Stage1ToSta
 use asap_frontend_promql::lower_promql_query_workload;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload,
+    BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query, QueryLanguage,
+    QueryRequirements, QueryWorkload,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -19,7 +19,7 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(target.clone()),
+                    accuracy: target.clone(),
                     ..Default::default()
                 },
                 predictability: Default::default(),
@@ -40,12 +40,7 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
     let roots = lower_promql_query_workload(&workload, NOW_MS).expect("lowers");
     run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
-        &[Some(target)],
-        &workload
-            .query_workload
-            .entries()
-            .map(|entry| entry.recurrence)
-            .collect::<Vec<_>>(),
+        &workload.query_workload.entries().collect::<Vec<_>>(),
         &workload.data_workload.unwrap(),
         PlanningModels::builtin(),
     )

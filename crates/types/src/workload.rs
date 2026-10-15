@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 // ── Query surface ─────────────────────────────────────────────────────────────
 
 /// A raw query string in its source language, before any parsing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Query(pub String);
 
@@ -56,48 +56,29 @@ pub enum QueryLanguage {
 
 // ── Per-query requirements ────────────────────────────────────────────────────
 
-/// Whether the caller explicitly requested an accuracy target or inherited
-/// the normalized exact default. An explicit request may omit its metric
-/// ([`AccuracyTarget`]).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccuracyRequirement {
-    Explicit(AccuracyTarget),
-    ImplicitExact,
-}
-
-impl AccuracyRequirement {
-    pub fn requested(&self) -> AccuracyTarget {
-        match self {
-            Self::Explicit(requested) => requested.clone(),
-            Self::ImplicitExact => AccuracyTarget::exact(),
-        }
-    }
-}
-
-/// Optional maximum wall-clock response time for one query execution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LatencyRequirement {
-    ExplicitMaxMs(f64),
-    #[default]
-    Unspecified,
-}
-
 /// Independent accuracy and response-latency constraints attached to one
 /// query in the workload.
+///
+/// JSON: `{"accuracy": {"error": 0.01, "metric": "rank"}, "max_latency_ms":
+/// 200.0}`. An omitted `accuracy` is [`AccuracyTarget::exact`] and an
+/// omitted `max_latency_ms` imposes no bound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRequirements {
-    pub accuracy: AccuracyRequirement,
-    pub response_latency: LatencyRequirement,
+    /// The accuracy the query's answer must meet.
+    #[serde(default = "AccuracyTarget::exact")]
+    pub accuracy: AccuracyTarget,
+    /// The longest one evaluation may take, in milliseconds; `None` for no
+    /// bound.
+    #[serde(default)]
+    pub max_latency_ms: Option<f64>,
 }
 
 impl Default for QueryRequirements {
     fn default() -> Self {
         Self {
-            accuracy: AccuracyRequirement::ImplicitExact,
-            response_latency: LatencyRequirement::Unspecified,
+            accuracy: AccuracyTarget::exact(),
+            max_latency_ms: None,
         }
     }
 }
@@ -293,7 +274,7 @@ pub enum RepeatedDemand {
 ///     RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueryRecurrence {
     OneTime {
@@ -301,6 +282,7 @@ pub enum QueryRecurrence {
         execute_at: Option<TimestampMs>,
     },
     Repeated(RepeatedDemand),
+    #[default]
     Unknown,
 }
 
@@ -371,7 +353,12 @@ pub struct RepeatingEntry {
 
 /// Planner-facing normalized form of either [`BatchEntry`] or
 /// [`RepeatingEntry`]. It keeps requirements, predictability, recurrence, and
-/// event-time selection as separate axes.
+/// event-time selection as separate axes. Planning takes one per query, in
+/// root order: Stage 2 (physical ASAP-aware optimization) reads the
+/// recurrence and predictability, Stage 3 (plan selection) the accuracy
+/// target, the latency bound and the recurrence. The default is an empty
+/// query, exact, with no latency bound and unknown predictability and
+/// recurrence.
 ///
 /// # Example
 ///
@@ -392,13 +379,20 @@ pub struct RepeatingEntry {
 ///     },
 /// };
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryWorkloadEntry {
+    /// The query text in the workload's language.
     pub query: Query,
+    /// Its accuracy target and latency bound (default: exact, no bound).
     pub requirements: QueryRequirements,
+    /// How far ahead it is known: a build may run at ingestion time only for
+    /// `Predictable` queries (default: unknown).
     pub predictability: Predictability,
+    /// How often it runs: sets how often each node is priced, and only
+    /// repeated queries may keep state from ingestion time (default: unknown).
     pub recurrence: QueryRecurrence,
+    /// The event time it reads (default: unknown scope, no lookback).
     pub time_selection: TimeSelection,
 }
 
@@ -695,7 +689,7 @@ impl PlanningWorkload {
 }
 
 fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
-    if let LatencyRequirement::ExplicitMaxMs(ms) = entry.requirements.response_latency {
+    if let Some(ms) = entry.requirements.max_latency_ms {
         if !ms.is_finite() || ms < 0.0 {
             return Err(WorkloadError::InvalidLatency(ms));
         }
@@ -775,6 +769,34 @@ pub enum WorkloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Query requirements: an accuracy target (omitted: exact) and an
+    /// optional latency bound in ms (omitted: none). The old tagged forms
+    /// and unknown fields are rejected.
+    #[test]
+    fn query_requirements_json_is_a_target_and_an_optional_bound() {
+        let parse = |json: &str| serde_json::from_str::<QueryRequirements>(json);
+        let empty = serde_json::to_value(parse("{}").unwrap()).unwrap();
+        assert_eq!(
+            empty,
+            serde_json::json!({"accuracy": {"error": 0.0, "failure_probability": 0.0,
+                "scope": "whole_result"}, "max_latency_ms": null})
+        );
+        let bounded = serde_json::to_value(
+            parse(r#"{"accuracy": {"error": 0.01}, "max_latency_ms": 200.0}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bounded["accuracy"]["error"], 0.01);
+        assert_eq!(bounded["max_latency_ms"], 200.0);
+        for old in [
+            r#"{"accuracy": "implicit_exact", "response_latency": "unspecified"}"#,
+            r#"{"accuracy": {"explicit": {"error": 0.01}}}"#,
+            r#"{"response_latency": {"explicit_max_ms": 100.0}}"#,
+            r#"{"max_latency_ms": 100.0, "unknown": 1}"#,
+        ] {
+            assert!(parse(old).is_err(), "{old}");
+        }
+    }
 
     /// A stream norm is a finite, non-negative magnitude.
     #[test]
@@ -940,10 +962,8 @@ mod tests {
                     query: Query("rate(requests_total[5m])".into()),
                     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::epsilon_delta(
-                            0.01, 0.001,
-                        )),
-                        response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
+                        accuracy: AccuracyTarget::epsilon_delta(0.01, 0.001),
+                        max_latency_ms: Some(100.0),
                     },
                     predictability: Predictability::Predictable { known_at: None },
                     time_selection: TimeSelection {

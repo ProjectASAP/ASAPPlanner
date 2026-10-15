@@ -19,9 +19,9 @@ use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
-    AccuracyRequirement, DataArrival, DataWorkload, DurationMs, Evidence, LatencyRequirement,
-    PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, SqlDialect, TimeSelection,
+    DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
+    RepetitionInterval, SqlDialect, TimeSelection,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -39,8 +39,8 @@ fn requested(query: &str, epsilon: f64) -> AccuracyTarget {
 
 fn requirements(query: &str, epsilon: f64) -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyRequirement::Explicit(requested(query, epsilon)),
-        response_latency: LatencyRequirement::Unspecified,
+        accuracy: requested(query, epsilon),
+        max_latency_ms: None,
     }
 }
 
@@ -99,18 +99,9 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
 fn promql_stages(queries: &[(&str, f64)]) -> Stage1ToStage3Run<usize> {
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload, NOW_MS).expect("lowers");
-    let targets: Vec<_> = queries
-        .iter()
-        .map(|(query, epsilon)| Some(requested(query, *epsilon)))
-        .collect();
     run_stage1_to_stage3(
         roots.into_iter().enumerate().collect(),
-        &targets,
-        &workload
-            .query_workload
-            .entries()
-            .map(|entry| entry.recurrence)
-            .collect::<Vec<_>>(),
+        &workload.query_workload.entries().collect::<Vec<_>>(),
         &workload.data_workload.clone().unwrap(),
         PlanningModels::builtin(),
     )
@@ -218,7 +209,6 @@ fn unique_deployments(output: &PlanOutput) -> usize {
 /// equal-params subset of summary capability. Both plans hold the same `Rc`,
 /// so a consumer maintains it once.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan while summaries run at query time; sharing needs Pass 2 (#580)"]
 async fn quantiles_with_equal_params_share_one_producer() {
     let output = plan_promql(&[
         ("quantile_over_time(0.5, lat[5m])", 0.01),
@@ -233,7 +223,7 @@ async fn quantiles_with_equal_params_share_one_producer() {
 /// A different window or label selector is a different producer, even when
 /// one query asks for a stricter accuracy than the other.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan while summaries run at query time; sharing needs Pass 2 (#580)"]
+#[ignore = "plan selection still selects an exact plan for at least one query: with the built-in cost model its query-time summary costs more than exact (#580)"]
 async fn different_producers_are_not_shared() {
     for queries in [
         [
@@ -297,7 +287,7 @@ fn kll_k_for(epsilon: f64) -> u32 {
 /// p50 at ε=0.01 and p99 at ε=0.001 over the same input share one KLL sized
 /// for the strictest consumer; each reader's guarantee meets its own target.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan while summaries run at query time; sharing needs Pass 2 (#580)"]
+#[ignore = "plan selection still selects an exact plan for at least one query: with the built-in cost model its query-time summary costs more than exact (#580)"]
 async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
     let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
     let p99 = ("quantile_over_time(0.99, lat[5m])", 0.001);
@@ -323,7 +313,6 @@ async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
 /// Cross-series quantiles name their KLL state after the input column, not the
 /// quantile, so p50 and p99 over one selector share it.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan while summaries run at query time; sharing needs Pass 2 (#580)"]
 async fn cross_series_p50_and_p99_share_one_producer() {
     let output = plan_promql(&[("quantile(0.5, lat)", 0.01), ("quantile(0.99, lat)", 0.01)]).await;
     assert!(same_states(&states(&output)));
@@ -333,7 +322,6 @@ async fn cross_series_p50_and_p99_share_one_producer() {
 /// An ungrouped aggregate has no unique key, so pre-ASAP CSE keeps the two
 /// copies apart; their identical producers (rate, then sum) are shared here.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan while summaries run at query time; sharing needs Pass 2 (#580)"]
 async fn identical_ungrouped_queries_share_their_producers() {
     let query = ("sum(rate(x[5m]))", 0.01);
     let output = plan_promql(&[query, query]).await;
@@ -344,7 +332,6 @@ async fn identical_ungrouped_queries_share_their_producers() {
 /// The SQL frontend reaches the same sharing for two copies of one filtered
 /// percentile.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan while summaries run at query time; sharing needs Pass 2 (#580)"]
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
@@ -357,7 +344,7 @@ async fn identical_sql_percentiles_share_one_producer() {
 /// column build one KLL, named after its input, while each query keeps its
 /// own output column.
 #[tokio::test]
-#[ignore = "plan selection picks the exact plan while summaries run at query time; sharing needs Pass 2 (#580)"]
+#[ignore = "plan selection still selects an exact plan for at least one query: with the built-in cost model its query-time summary costs more than exact (#580)"]
 async fn sql_p50_and_p99_share_one_producer() {
     let p50 =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";

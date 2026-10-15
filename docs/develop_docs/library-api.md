@@ -86,7 +86,7 @@ that a supported candidate exists.
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_types::types::AccuracyTarget;
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_batch: Some(vec![BatchEntry {
             query: Query("sum(latency)".into()),
             requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                accuracy: AccuracyTarget::exact(),
                 ..Default::default()
             },
             predictability: Default::default(),
@@ -200,7 +200,7 @@ The default cost model is suitable for inspection, not deployment calibration.
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::{
@@ -217,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_batch: Some(vec![BatchEntry {
             query: Query("quantile(0.99, latency)".into()),
             requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                accuracy: accuracy.clone(),
                 ..Default::default()
             },
             predictability: Default::default(),
@@ -348,7 +348,7 @@ replacement::default_strategies_with_evidence<'a>(
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::{
@@ -365,7 +365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_batch: Some(vec![BatchEntry {
             query: Query("quantile(0.99, latency)".into()),
             requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                accuracy: accuracy.clone(),
                 ..Default::default()
             },
             predictability: Default::default(),
@@ -503,7 +503,7 @@ ingestion rate. `PlanningWorkload::validate()` shares these checks.
 
 | Type/input | Current behavior | Caller responsibility |
 | --- | --- | --- |
-| `QueryRequirements::default()` | `ImplicitExact`, unspecified response latency | Pass approximation explicitly and thread per-root requirements into search |
+| `QueryRequirements::default()` | `AccuracyTarget::exact()`, no latency bound (`max_latency_ms: None`) | Pass approximation explicitly and thread per-root requirements into search |
 | `DataWorkload::default()` | Unknown arrival, unknown evidence | Supply facts needed for the requested comparisons |
 | `Evidence<T>::default()` | No value, unknown source | Unknown/stale evidence is not zero; provide scoped valid observations |
 | `DefaultCostModel` | Built-in ordering/sizing and structural cost hooks | Supply deployment evidence for calibrated comparisons |
@@ -578,7 +578,7 @@ planning.
 ```rust
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    BatchEntry, DataWorkload, DurationMs, Evidence, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 use asap_aware_mapping::{search_workload, DefaultCostModel};
@@ -591,7 +591,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_batch: Some(vec![BatchEntry {
             query: Query("sum(latency)".into()),
             requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                accuracy: AccuracyTarget::exact(),
                 ..Default::default()
             },
             predictability: Default::default(),

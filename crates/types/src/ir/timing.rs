@@ -113,13 +113,20 @@ impl MaterializationAssignment {
     ) -> Result<Materialization, ExecutionDataStateError> {
         let at_ingestion = |m: Materialization| m.timing() == ExecutionTiming::IngestionTime;
         match self.get(node) {
+            Some(m) if at_ingestion(m) && is_filtered_build(node) => {
+                Err(ExecutionDataStateError::FilteredSummaryAtIngestion {
+                    operator: node.operator.kind_name(),
+                })
+            }
             Some(m) if at_ingestion(m) && upstream_at_query_time => {
                 Err(ExecutionDataStateError::UpstreamNotAtIngestion {
                     operator: node.operator.kind_name(),
                 })
             }
             Some(m) => Ok(m),
-            None if at_ingestion(self.unassigned) && upstream_at_query_time => {
+            None if at_ingestion(self.unassigned)
+                && (upstream_at_query_time || is_filtered_build(node)) =>
+            {
                 Ok(Materialization::NotMaterialized)
             }
             None => Ok(self.unassigned),
@@ -136,6 +143,24 @@ pub(crate) fn is_materialization_point<C>(operator: &Operator<C>) -> bool {
             ASAPOp::SummaryAgg { .. }
                 | ASAPOp::PaneChain { .. }
                 | ASAPOp::MaintainPopulation { .. }
+        )
+    )
+}
+
+/// Whether `node` is a summary build (`SummaryAgg` or `PaneChain`) with a
+/// filter, which never runs at ingestion time
+/// ([`ExecutionDataStateError::FilteredSummaryAtIngestion`]).
+pub fn is_filtered_build(node: &OperatorNode) -> bool {
+    matches!(
+        node.asap(),
+        Some(
+            ASAPOp::SummaryAgg {
+                filter: Some(_),
+                ..
+            } | ASAPOp::PaneChain {
+                filter: Some(_),
+                ..
+            }
         )
     )
 }
@@ -314,6 +339,11 @@ fn placement(
             .any(|child| forces_query_time(child, assignment, forced))
     };
     if let Some(placed) = node.timing {
+        if placed == ExecutionTiming::IngestionTime && is_filtered_build(node) {
+            return Err(ExecutionDataStateError::FilteredSummaryAtIngestion {
+                operator: node.operator.kind_name(),
+            });
+        }
         if placed == ExecutionTiming::IngestionTime && upstream_at_query_time(forced) {
             return Err(ExecutionDataStateError::UpstreamNotAtIngestion {
                 operator: node.operator.kind_name(),
@@ -719,16 +749,18 @@ fn validate_non_asap(
 }
 
 /// Copy, for one consumer, every sub-DAG that `assignment` would reach with
-/// two different timings, so that a workload whose CSE shared a `Scan`
-/// between an ingestion-time summary and a query-time computation can still
-/// be timed. Only the conflicting sub-DAGs are copied; a sub-DAG reached with
-/// one timing stays one `Rc`. Returns the (possibly rewritten) root and
-/// `assignment` remapped onto it: a rebuilt node keeps its original's
-/// explicit materialization.
+/// two different timings from `roots` (one query each, or the roots of one
+/// query), so that a workload whose CSE shared a `Scan` between an
+/// ingestion-time summary and a query-time computation, in one query or
+/// across queries, can still be timed. Only the conflicting sub-DAGs are
+/// copied, one copy per timing; a sub-DAG reached with one timing stays one
+/// `Rc`, shared by the roots that read it. Returns the (possibly rewritten)
+/// roots, in order, and `assignment` remapped onto them: a rebuilt node
+/// keeps its original's explicit materialization.
 pub fn split_shared_by_phase(
-    root: &Rc<OperatorNode>,
+    roots: &[Rc<OperatorNode>],
     assignment: &MaterializationAssignment,
-) -> (Rc<OperatorNode>, MaterializationAssignment) {
+) -> (Vec<Rc<OperatorNode>>, MaterializationAssignment) {
     // First pass: the set of timings each node is reached with.
     let mut reached: HashMap<*const OperatorNode, Vec<ExecutionTiming>> = HashMap::new();
     let mut forced = HashMap::new();
@@ -749,15 +781,17 @@ pub fn split_shared_by_phase(
             collect(child, timing, assignment, reached, forced);
         }
     }
-    collect(
-        root,
-        ExecutionTiming::QueryTime,
-        assignment,
-        &mut reached,
-        &mut forced,
-    );
+    for root in roots {
+        collect(
+            root,
+            ExecutionTiming::QueryTime,
+            assignment,
+            &mut reached,
+            &mut forced,
+        );
+    }
     if reached.values().all(|timings| timings.len() <= 1) {
-        return (Rc::clone(root), assignment.clone());
+        return (roots.to_vec(), assignment.clone());
     }
     // Second pass: rebuild, giving each (node, timing) pair its own copy.
     let mut copies: HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>> =
@@ -797,21 +831,26 @@ pub fn split_shared_by_phase(
         copies.insert(key, Rc::clone(&out));
         out
     }
-    let root = rebuild(
-        root,
-        ExecutionTiming::QueryTime,
-        assignment,
-        &reached,
-        &mut copies,
-        &mut forced,
-    );
+    let split = roots
+        .iter()
+        .map(|root| {
+            rebuild(
+                root,
+                ExecutionTiming::QueryTime,
+                assignment,
+                &reached,
+                &mut copies,
+                &mut forced,
+            )
+        })
+        .collect();
     let mut remapped = assignment.clone();
     for ((original, _), copy) in &copies {
         if let Some((_, materialization)) = assignment.assigned.get(original) {
             remapped.set(copy, *materialization);
         }
     }
-    (root, remapped)
+    (split, remapped)
 }
 
 /// Maintenance arithmetic needs the same per-series population on both sides.
@@ -1141,8 +1180,11 @@ mod tests {
                 second: ExecutionDataState::QUERY_ROWS,
             })
         );
-        let (split, assignment) = split_shared_by_phase(&root, &all_at_ingestion());
-        assert!(apply_materialization_timings(&split, &assignment, &mut TimingMemo::new()).is_ok());
+        let (split, assignment) =
+            split_shared_by_phase(std::slice::from_ref(&root), &all_at_ingestion());
+        assert!(
+            apply_materialization_timings(&split[0], &assignment, &mut TimingMemo::new()).is_ok()
+        );
     }
 
     /// A finalize pinned to ingestion time (as fixed-window rate candidates
@@ -1184,9 +1226,9 @@ mod tests {
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&summary, AT_INGESTION);
-        let (split, assignment) = split_shared_by_phase(&root, &assignment);
+        let (split, assignment) = split_shared_by_phase(std::slice::from_ref(&root), &assignment);
         let timed =
-            apply_materialization_timings(&split, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&split[0], &assignment, &mut TimingMemo::new()).unwrap();
         let summary = child(&child(&child(&timed)));
         assert!(matches!(
             summary.operator,
@@ -1225,6 +1267,116 @@ mod tests {
                 operator: "Aggregate"
             })
         );
+    }
+
+    /// A summary build with a filter never runs at ingestion time: an
+    /// ingestion-time build reads raw samples, which carry none of the
+    /// query's columns the filter reads. An explicit `MatAtIngestion` is an
+    /// error; the all-at-ingestion default leaves it at query time.
+    #[test]
+    fn a_filtered_summary_build_never_runs_at_ingestion_time() {
+        use crate::ir::{Predicate, ScalarExpr};
+        use crate::pre_asap::expr_ir::ScalarValue;
+        let plain = agg(scan(), kll());
+        let Operator::ASAP(ASAPOp::SummaryAgg {
+            child: rows,
+            family,
+            input,
+            reduction,
+            grouping,
+            ..
+        }) = plain.operator.clone()
+        else {
+            unreachable!()
+        };
+        let filtered = Rc::new(
+            OperatorNode::with_schema(
+                Operator::ASAP(ASAPOp::SummaryAgg {
+                    child: rows,
+                    family,
+                    input,
+                    reduction,
+                    grouping,
+                    filter: Some(Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true)))),
+                }),
+                plain.schema.clone(),
+            )
+            .with_guarantee(None),
+        );
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&filtered, AT_INGESTION);
+        assert_eq!(
+            apply_materialization_timings(
+                &estimate(Rc::clone(&filtered)),
+                &assignment,
+                &mut TimingMemo::new()
+            )
+            .err(),
+            Some(ExecutionDataStateError::FilteredSummaryAtIngestion {
+                operator: "SummaryAgg"
+            })
+        );
+        let timed = apply(&estimate(filtered)).unwrap();
+        assert_eq!(child(&timed).timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(
+            child(&timed).materialization,
+            Materialization::NotMaterialized
+        );
+        assert!(validate_at_ingestion(&child(&timed), ExecutionTiming::QueryTime).is_ok());
+    }
+
+    /// Two queries share a scan: one reads it through a summary built at
+    /// ingestion time, the other at query time. Splitting the workload's
+    /// roots together copies the scan for one phase, so one timing pass
+    /// over both roots succeeds; a node both queries reach at one timing
+    /// stays one node.
+    #[test]
+    fn split_across_roots_copies_only_what_two_queries_read_at_two_phases() {
+        let shared = scan();
+        let summary = agg(Rc::clone(&shared), kll());
+        let by_summary = max(estimate(Rc::clone(&summary)));
+        let raw = max(Rc::clone(&shared));
+        let common = max(estimate(agg(scan(), kll())));
+        let roots = [
+            concat(vec![Rc::clone(&by_summary), Rc::clone(&common)]),
+            concat(vec![raw, Rc::clone(&common)]),
+        ];
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&summary, AT_INGESTION);
+        let timed_unsplit = {
+            let mut memo = TimingMemo::new();
+            roots
+                .iter()
+                .map(|root| apply_materialization_timings(root, &assignment, &mut memo))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        assert!(matches!(
+            timed_unsplit,
+            Err(ExecutionDataStateError::ConflictingTiming { .. })
+        ));
+        let (split, assignment) = split_shared_by_phase(&roots, &assignment);
+        assert_eq!(split.len(), 2);
+        let mut memo = TimingMemo::new();
+        let timed: Vec<_> = split
+            .iter()
+            .map(|root| apply_materialization_timings(root, &assignment, &mut memo).unwrap())
+            .collect();
+        let summary = child(&child(&child(&timed[0])));
+        assert_eq!(summary.materialization, AT_INGESTION);
+        assert_eq!(child(&summary).timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(
+            child(&child(&timed[1])).timing,
+            Some(ExecutionTiming::QueryTime)
+        );
+        assert!(Rc::ptr_eq(timed[0].children()[1], timed[1].children()[1]));
+    }
+
+    fn concat(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
+        OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Concat {
+            children,
+            discriminator_unique_key: None,
+        }))
+        .unwrap()
     }
 
     fn finalize(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
