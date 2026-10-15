@@ -152,6 +152,43 @@ fn kll_kernel_rejects_a_k_above_the_library_cap() {
     assert!(validate_summary_kernel(&kll(26_603), &update, &grouping).is_err());
 }
 
+/// A plain CountSketch reads the median of its rows, so plan validation and
+/// kernel construction both require a positive odd depth.
+#[test]
+fn count_sketch_kernel_requires_an_odd_depth() {
+    use asap_physical_operators::{
+        capability::validate_summary_kernel, factory::create_planner_accumulator,
+    };
+    use planner_types::post_asap::{
+        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryInputExpr,
+        SummaryUpdate,
+    };
+    use planner_types::pre_asap::ColumnRef;
+    let grouping = GroupingStrategy::default();
+    let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
+    update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
+    let count_sketch = |depth| {
+        FieldDataType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::CountSketch,
+                SketchParams::CountSketch { width: 64, depth },
+            ),
+            grouping.clone(),
+        )
+    };
+    for (depth, valid) in [(5, true), (4, false)] {
+        let family = count_sketch(depth);
+        assert_eq!(
+            validate_summary_kernel(&family, &update, &grouping).is_ok(),
+            valid
+        );
+        assert_eq!(
+            create_planner_accumulator(&family, &update, &grouping).is_ok(),
+            valid
+        );
+    }
+}
+
 // Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
