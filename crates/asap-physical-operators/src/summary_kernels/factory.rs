@@ -46,6 +46,21 @@ pub trait AccumulatorUpdater: Send {
         }
     }
 
+    /// Update from one typed row value. Numeric kernels keep their Float64
+    /// contract; a frequency kernel may also take non-numeric identities.
+    fn update_value(
+        &mut self,
+        value: &crate::values::Value,
+        timestamp_ms: i64,
+    ) -> Result<(), String> {
+        let crate::values::Value::Float64(value) = value else {
+            return Err("summary update requires Float64".into());
+        };
+        self.validate_single_input(*value)?;
+        self.update_single(*value, timestamp_ms);
+        Ok(())
+    }
+
     /// Feed a single (value, timestamp_ms) pair — for SingleSubpopulation types.
     fn update_single(&mut self, value: f64, timestamp_ms: i64);
 
@@ -645,7 +660,7 @@ pub fn create_planner_accumulator(
         }
     };
     if updater.is_keyed() != input.item.is_some()
-        && !crate::capability::is_unit_sample_frequency(input)
+        && crate::capability::unit_frequency_column(input).is_none()
     {
         return Err("Planner item expression does not match the selected kernel layout".into());
     }
@@ -718,6 +733,11 @@ impl AccumulatorUpdater for HllUpdater {
 }
 
 impl AccumulatorUpdater for UnivMonUpdater {
+    fn update_value(&mut self, value: &crate::values::Value, _: i64) -> Result<(), String> {
+        self.acc
+            .insert_value(value)
+            .map_err(|error| error.to_string())
+    }
     fn is_keyed(&self) -> bool {
         false
     }
