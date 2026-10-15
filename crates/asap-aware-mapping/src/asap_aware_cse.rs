@@ -427,11 +427,15 @@ fn all_equal<'a>(mut nodes: impl Iterator<Item = &'a Rc<OperatorNode>>) -> bool 
     nodes.all(|node| Rc::ptr_eq(node, first) || **node == **first)
 }
 
+/// The most summary builds one summary-capability group may have: every
+/// subset of two or more is a candidate, about a million at 20.
+pub const MAX_GROUP_MEMBERS: usize = 20;
+
 /// Every Pass 2 candidate of the summary-capability rule for the candidate
 /// with query roots `roots` and groups `groups` ([`capability_groups`]):
 /// one per choice, for each group, of no sharing or one subset of two or
 /// more members whose sizes are not all equal, other than sharing nothing.
-/// An error only for a group of more than 63 members; a variant whose
+/// An error only for a group of more than [`MAX_GROUP_MEMBERS`] members; a variant whose
 /// composition fails carries its own error.
 /// The first group varies slowest; within a group, subsets come in
 /// binary-counter order (the first member the lowest bit).
@@ -439,10 +443,14 @@ pub fn summary_capability_variants(
     roots: &[QueryRoot],
     groups: &[CapabilityGroup],
 ) -> Result<Vec<SummaryCapabilityVariant>, PerComputationCandidateError> {
-    // One 64-bit mask enumerates the subsets of at most 63 members.
-    if groups.iter().any(|group| group.members.len() > 63) {
+    // Every subset of a group is a candidate: 2^n of them. Past
+    // MAX_GROUP_MEMBERS that is no longer a list plan selection can price.
+    if groups
+        .iter()
+        .any(|group| group.members.len() > MAX_GROUP_MEMBERS)
+    {
         return Err(PerComputationCandidateError::Unsupported(
-            "a summary-capability group of more than 63 summary builds",
+            "a summary-capability group of more than 20 summary builds (2^n sharing subsets)",
         ));
     }
     // Each group's options: `None` (no sharing), then its subsets.
@@ -963,10 +971,10 @@ mod tests {
         }
     }
 
-    /// A group of more than 63 members has more subsets than one 64-bit
-    /// mask enumerates: an error, not a silent skip.
+    /// A group of more than 20 members (over a million sharing subsets)
+    /// is an error, not a silent skip or an endless enumeration.
     #[test]
-    fn a_group_past_63_members_is_an_error() {
+    fn a_group_past_20_members_is_an_error() {
         let roots = chose(
             &[
                 ("quantile_over_time(0.5, lat[5m])", 0.01),
@@ -976,7 +984,12 @@ mod tests {
         );
         let mut groups = capability_groups(&roots);
         let members = groups[0].members.clone();
-        groups[0].members = members.iter().cycle().take(64).cloned().collect();
+        groups[0].members = members
+            .iter()
+            .cycle()
+            .take(MAX_GROUP_MEMBERS + 1)
+            .cloned()
+            .collect();
         assert!(matches!(
             summary_capability_variants(&roots, &groups),
             Err(PerComputationCandidateError::Unsupported(_))
