@@ -17,7 +17,7 @@ use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCat
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
 fn col(name: &str, dtype: DataType) -> Field {
@@ -42,13 +42,13 @@ fn catalog() -> SqlCatalog {
 }
 
 async fn sql(q: &str) -> Rc<OperatorNode> {
-    lower_sql(q, &catalog(), RequestedAccuracy::exact())
+    lower_sql(q, &catalog(), AccuracyTarget::exact())
         .await
         .unwrap_or_else(|e| panic!("SQL {q:?} failed to lower: {e:?}"))
 }
 
 fn promql(q: &str) -> Rc<OperatorNode> {
-    lower_promql_with_data_ingestion_interval(q, RequestedAccuracy::exact(), 1_000)
+    lower_promql_with_data_ingestion_interval(q, AccuracyTarget::exact(), 1_000)
         .unwrap_or_else(|e| panic!("PromQL {q:?} failed to lower: {e:?}"))
 }
 

@@ -10,7 +10,7 @@ use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::ir::{OperatorNode, ScalarExpr};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -297,11 +297,8 @@ async fn main() {
         let mut lowered = 0;
         let mut failed = 0;
         for q in promql_lines(corpus) {
-            match lower_promql_with_data_ingestion_interval(
-                q,
-                RequestedAccuracy::exact(),
-                interval_ms,
-            ) {
+            match lower_promql_with_data_ingestion_interval(q, AccuracyTarget::exact(), interval_ms)
+            {
                 Ok(qe) => {
                     walk(&qe, &mut variants);
                     lowered += 1;
@@ -333,7 +330,7 @@ async fn main() {
                 &q,
                 &catalog,
                 SqlDialect::DataFusionSQL,
-                RequestedAccuracy::exact(),
+                AccuracyTarget::exact(),
             )
             .await
             {
@@ -366,7 +363,7 @@ async fn main() {
                 &q,
                 &catalog,
                 SqlDialect::ClickhouseSQL,
-                RequestedAccuracy::exact(),
+                AccuracyTarget::exact(),
             )
             .await
             {

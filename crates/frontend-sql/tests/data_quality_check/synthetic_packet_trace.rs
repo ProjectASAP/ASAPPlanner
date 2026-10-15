@@ -25,7 +25,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/synthetic_packet_trace_queries.sql");
 
@@ -125,7 +125,7 @@ fn has_window_func(node: &OperatorNode) -> bool {
 }
 
 async fn lower(q: &str) -> Rc<OperatorNode> {
-    lower_sql(q, &catalog(), RequestedAccuracy::exact())
+    lower_sql(q, &catalog(), AccuracyTarget::exact())
         .await
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
@@ -145,7 +145,7 @@ async fn corpus_lowering_covers_every_query() {
     let mut t = Tally::default();
     for q in queries() {
         // A panic here (not an `Err`) fails the test — the totality guarantee.
-        match lower_sql(&q, &cat, RequestedAccuracy::exact()).await {
+        match lower_sql(&q, &cat, AccuracyTarget::exact()).await {
             Ok(_) => t.lowered += 1,
             // DataFusion surfaces parse/plan failures as `DataFusion(_)`.
             Err(LoweringError::DataFusion(_)) => t.unparseable += 1,

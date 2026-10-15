@@ -21,7 +21,7 @@
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
 const CORPUS: &str = include_str!("data/o11y_bench_promql.txt");
@@ -40,7 +40,7 @@ fn lowering_is_total_over_the_o11y_bench_corpus() {
     let mut rejected = Vec::new();
 
     for q in queries() {
-        match lower_promql(q, RequestedAccuracy::exact()) {
+        match lower_promql(q, AccuracyTarget::exact()) {
             Ok(_) => lowered += 1,
             Err(LoweringError::Parse(e)) => panic!("unexpected parse failure for {q:?}: {e}"),
             Err(e) => rejected.push((q, e)),

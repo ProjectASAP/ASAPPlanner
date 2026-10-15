@@ -892,13 +892,13 @@ mod tests {
     use super::*;
     use crate::test_support::lower_promql;
     use asap_types::ir::schema_support::with_promql_series_identity;
-    use asap_types::types::RequestedAccuracy;
+    use asap_types::types::AccuracyTarget;
 
     fn roots(queries: &[&str]) -> Vec<QueryRoot> {
         queries
             .iter()
             .map(|q| {
-                let root = lower_promql(q, RequestedAccuracy::exact());
+                let root = lower_promql(q, AccuracyTarget::exact());
                 QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
             })
             .collect()
@@ -1079,7 +1079,7 @@ mod tests {
             .map(|(i, (q, epsilon))| {
                 let root = lower_promql(
                     q,
-                    asap_types::types::RequestedAccuracy::epsilon_delta(*epsilon, 0.01)
+                    asap_types::types::AccuracyTarget::epsilon_delta(*epsilon, 0.01)
                         .with_metric(asap_types::types::ErrorMetric::Rank),
                 );
                 (

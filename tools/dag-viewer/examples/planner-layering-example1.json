@@ -59910,6 +59910,134 @@
     "pruned": []
   },
   "stage3_plan_selection": {
+    "accepted": {
+      "P1": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P2": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P3": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P4": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P5": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P6": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P7": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P8": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ],
+      "P9": [
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        },
+        {
+          "accepted_metric": null,
+          "sketches": [],
+          "summary": "metric not set; accepted exact",
+          "target_metric": null
+        }
+      ]
+    },
     "costs": {
       "P1": {
         "per_node": {
@@ -60533,92 +60661,92 @@
     "rejected": [
       {
         "id": "P10",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P11",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P12",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P13",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P14",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P15",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P16",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P17",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P18",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P19",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P20",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P21",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P22",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P23",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P24",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P25",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P26",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
         "id": "P27",
-        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracySpec { metric: Absolute { scale: Some(StreamL1) }, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
+        "reason": "q2: the output has no guarantee, and the deployment has no evidence that it meets target AccuracyTarget { metric: None, error: 0.01, failure_probability: Some(0.001), scope: WholeResult }",
         "valid": false
       },
       {
@@ -60670,7 +60798,11 @@
         "id": "q1",
         "language": "promql",
         "requirements": {
-          "accuracy": "exact",
+          "accuracy": {
+            "error": 0.0,
+            "failure_probability": 0.0,
+            "scope": "whole_result"
+          },
           "repeat_interval_ms": 10000
         },
         "text": "sum by (job) (rate(http_requests_total[1m]))"
@@ -60680,9 +60812,11 @@
         "language": "promql",
         "requirements": {
           "accuracy": {
-            "delta": 0.001,
-            "epsilon": 0.01
+            "error": 0.01,
+            "failure_probability": 0.001,
+            "scope": "whole_result"
           },
+          "default_metric": "absolute_stream_l1",
           "latency_ms": 100.0,
           "repeat_interval_ms": 10000
         },

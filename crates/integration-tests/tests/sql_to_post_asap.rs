@@ -35,7 +35,7 @@ use asap_types::post_asap::{
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
 /// This crate has no "bind me one tree" public API any more —
@@ -118,7 +118,7 @@ fn catalog() -> SqlCatalog {
     )
 }
 
-async fn lower(sql: &str, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
+async fn lower(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     lower_sql(sql, &catalog(), accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
@@ -144,7 +144,7 @@ async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
             &sql,
             &catalog(),
             SqlDialect::ClickhouseSQL,
-            RequestedAccuracy::exact(),
+            AccuracyTarget::exact(),
         )
         .await
         .expect("explicit temporal SQL must lower");
@@ -190,7 +190,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
             &sql,
             &catalog(),
             SqlDialect::ClickhouseSQL,
-            RequestedAccuracy::exact(),
+            AccuracyTarget::exact(),
         )
         .await
         .expect("nested temporal SQL must lower");
@@ -244,7 +244,7 @@ fn inner_aggregate(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
 async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     let pre_asap = lower(
         "SELECT approx_percentile_cont(latency, 0.99) AS p99 FROM metrics",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .await;
     let Some(NonASAPOp::Project {
@@ -297,7 +297,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
          ON b.service=a.service",
         &catalog(),
         SqlDialect::ClickhouseSQL,
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await
     .expect("two-subquery rate ratio must lower");
@@ -413,7 +413,7 @@ async fn unsupported_sql_join_shapes_remain_fail_closed() {
             sql,
             &catalog(),
             SqlDialect::ClickhouseSQL,
-            RequestedAccuracy::exact(),
+            AccuracyTarget::exact(),
         )
         .await
         .unwrap_or_else(|error| panic!("join must lower before fail-closed mapping: {error}"));
@@ -443,7 +443,7 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
          (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
           FROM metrics GROUP BY service) t \
          WHERE t.p > 100 ORDER BY t.p DESC LIMIT 5",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .await;
     let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
@@ -496,7 +496,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
          (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
           FROM metrics WHERE service = 'api' GROUP BY service) t \
          WHERE t.p > 100",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .await;
     let expected_read_predicate = {
@@ -590,7 +590,7 @@ async fn sql_filter_preserves_local_fallback_boundary_for_unsupported_child() {
         "SELECT t.service, t.avg_bytes FROM \
          (SELECT service, AVG(bytes) AS avg_bytes FROM metrics GROUP BY service) t \
          WHERE t.avg_bytes > 100",
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await;
     let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
@@ -639,7 +639,7 @@ async fn sql_filter_preserves_local_fallback_boundary_for_unsupported_child() {
 async fn sql_quantile_binds_kll_sketch_over_named_column() {
     let pre_asap = lower(
         "SELECT approx_percentile_cont(latency, 0.99) FROM metrics",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .await;
     let agg = inner_aggregate(&pre_asap);
@@ -741,7 +741,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     let pre_asap = lower(
         "SELECT COUNT(DISTINCT service) FROM metrics",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .await;
     let agg = inner_aggregate(&pre_asap);
@@ -802,7 +802,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
 async fn sql_exact_workload_binds_accumulators_not_sketches() {
     let pre_asap = lower(
         "SELECT service, SUM(bytes) FROM metrics GROUP BY service",
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await;
     let agg = inner_aggregate(&pre_asap);
@@ -828,7 +828,7 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
         "group keys pass through verbatim"
     );
 
-    let pre_asap = lower("SELECT AVG(bytes) FROM metrics", RequestedAccuracy::exact()).await;
+    let pre_asap = lower("SELECT AVG(bytes) FROM metrics", AccuracyTarget::exact()).await;
     let agg = inner_aggregate(&pre_asap);
     let root = realize(agg).expect("binding failed");
     assert!(
@@ -845,7 +845,7 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
 async fn map_projection_export_preserves_unsupported_child_boundary() {
     let pre = lower_sql_dialect(
         "SELECT map('job', t.service) AS labels, t.avg_bytes FROM (SELECT service, AVG(bytes) AS avg_bytes FROM metrics GROUP BY service) t WHERE t.avg_bytes > 100",
-        &catalog(), SqlDialect::ClickhouseSQL, RequestedAccuracy::exact(),
+        &catalog(), SqlDialect::ClickhouseSQL, AccuracyTarget::exact(),
     ).await.unwrap();
     let space = search_workload(vec![("map_query", pre)]).unwrap();
     let root = space

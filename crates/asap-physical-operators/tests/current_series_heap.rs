@@ -12,7 +12,7 @@ use asap_physical_operators::{
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use planner_types::types::RequestedAccuracy;
+use planner_types::types::AccuracyTarget;
 use planner_types::{post_asap::*, pre_asap::DataType};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -305,7 +305,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
             query_batch: Some(vec![BatchEntry {
                 query: Query("topk by(job)(1, m)".into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

@@ -7,7 +7,7 @@ use planner_types::ir::OperatorNode;
 
 use asap_physical_operators::physical_planner::promql_rows::SERIES_IDENTITY_COLUMN;
 use planner_types::{
-    types::RequestedAccuracy,
+    types::AccuracyTarget,
     workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence,
         PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
@@ -16,7 +16,7 @@ use planner_types::{
 };
 use std::rc::Rc;
 
-fn lower(query: &str, accuracy: &RequestedAccuracy) -> Rc<OperatorNode> {
+fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -63,7 +63,7 @@ const CURRENT_SERIES_TOPK: &str = "topk by(job)(1, m)";
 
 #[test]
 fn selection_never_commits_a_series_identity_heap() {
-    let accuracy = RequestedAccuracy::epsilon(0.1);
+    let accuracy = AccuracyTarget::epsilon(0.1);
     let root = lower(CURRENT_SERIES_TOPK, &accuracy);
     assert!(!carries_identity(&selected_dag(root, accuracy)));
 }

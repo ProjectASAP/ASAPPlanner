@@ -5,7 +5,7 @@ use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlLowerer};
 use asap_types::{
     ir::{NonASAPOp, OperatorNode},
     pre_asap::{AggIntent, DataType, Field, Schema},
-    types::{ErrorMetric, RequestedAccuracy},
+    types::{AccuracyTarget, ErrorMetric},
 };
 use std::rc::Rc;
 
@@ -35,7 +35,7 @@ fn has_l2(node: &OperatorNode) -> bool {
 async fn relational(sql: &str, catalog: &SqlCatalog) -> Rc<OperatorNode> {
     resolve_root(
         &SqlLowerer::new(catalog)
-            .lower(sql, &RequestedAccuracy::exact())
+            .lower(sql, &AccuracyTarget::exact())
             .await
             .unwrap(),
     )
@@ -50,7 +50,7 @@ const CAST_COUNT: &str = "SELECT SQRT(SUM(c * c)) AS norm FROM (SELECT src_ip, C
 #[tokio::test]
 async fn recognizes_float_frequency_l2() {
     for sql in [CAST_PRODUCT, CAST_COUNT] {
-        let rewritten = lower_sql(sql, &catalog(false), RequestedAccuracy::exact())
+        let rewritten = lower_sql(sql, &catalog(false), AccuracyTarget::exact())
             .await
             .unwrap();
         let original = relational(sql, &catalog(false)).await;
@@ -71,7 +71,7 @@ async fn declines_non_equivalent_frequency_shapes() {
         ("SELECT SQRT(SUM(c*c)) FROM (SELECT src_ip, CAST(COUNT(*) AS DOUBLE) AS c FROM flows GROUP BY src_ip HAVING COUNT(*) > 1) f", false),
         ("SELECT SQRT(SUM(c*c)) FROM (SELECT src_ip, CAST(SUM(CAST(keep AS BIGINT)) AS DOUBLE) AS c FROM flows GROUP BY src_ip) f", false),
     ] {
-        let root = lower_sql(sql, &catalog(nullable), RequestedAccuracy::exact())
+        let root = lower_sql(sql, &catalog(nullable), AccuracyTarget::exact())
             .await
             .unwrap();
         assert!(!has_l2(&root), "{sql}");
@@ -81,7 +81,7 @@ async fn declines_non_equivalent_frequency_shapes() {
 /// The L2 intent carries the query's accuracy target, not a default.
 #[tokio::test]
 async fn frequency_l2_preserves_accuracy_target() {
-    let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
     let node = lower_sql(CAST_COUNT, &catalog(false), target.clone())
         .await
         .unwrap();
@@ -103,7 +103,7 @@ async fn frequency_l2_preserves_accuracy_target() {
 /// empty-input guard is an exact count.
 #[tokio::test]
 async fn frequency_empty_input_guard_uses_an_exact_count() {
-    let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
     let node = lower_sql(CAST_COUNT, &catalog(false), target)
         .await
         .unwrap();
@@ -134,7 +134,7 @@ async fn batch_lowering_recognizes_frequency_l2() {
         query_batch: Some(vec![BatchEntry {
             query: Query(CAST_COUNT.into()),
             requirements: QueryRequirements {
-                accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
+                accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
                 response_latency: LatencyRequirement::Unspecified,
             },
             predictability: Predictability::Unknown,
@@ -156,7 +156,7 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
         generate_per_computation_candidates, ComputationCandidate,
     };
     use asap_types::ir::QueryRoot;
-    let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
     let root = lower_sql(CAST_COUNT, &catalog(false), target)
         .await
         .unwrap();
@@ -206,7 +206,7 @@ async fn example2_queries_lower_to_frequency_intents() {
     let lower = |sql: String| {
         let catalog = &catalog;
         async move {
-            lower_sql(&sql, catalog, RequestedAccuracy::exact())
+            lower_sql(&sql, catalog, AccuracyTarget::exact())
                 .await
                 .unwrap()
         }

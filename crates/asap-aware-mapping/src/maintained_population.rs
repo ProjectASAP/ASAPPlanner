@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn lower(q: &str) -> Rc<OperatorNode> {
-        lower_promql(q, asap_types::types::RequestedAccuracy::exact())
+        lower_promql(q, asap_types::types::AccuracyTarget::exact())
     }
 
     // Instant scalar aggregations share the same retractable series population.

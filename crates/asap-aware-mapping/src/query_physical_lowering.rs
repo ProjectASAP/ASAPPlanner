@@ -1318,7 +1318,7 @@ mod tests {
         PromqlEdgeStatistics, PromqlUnaryEdgeStatistics, PromqlValueKind, UnaryEdgeStatistics,
     };
     use asap_types::ir::{BinaryOperator, ExprSemantics, Predicate, SortKey, TimeRangeKind};
-    use asap_types::types::RequestedAccuracy;
+    use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
@@ -2885,7 +2885,7 @@ mod tests {
                 query_batch: Some(vec![BatchEntry {
                     query: Query(query.into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,

@@ -19,7 +19,7 @@ use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
 use asap_types::post_asap::{ExactKind, FieldDataType, SketchAlgorithm};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use futures::StreamExt;
 
 fn catalog() -> SqlCatalog {
@@ -135,15 +135,15 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     out
 }
 
-async fn lower(sql: &str, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
+async fn lower(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     lower_sql(sql, &catalog(), accuracy).await.unwrap()
 }
 
 /// The selected plan for an exact `sql`, through all three stages.
 async fn exact_plan(sql: &str) -> Rc<OperatorNode> {
     selected_dag(
-        lower(sql, RequestedAccuracy::exact()).await,
-        RequestedAccuracy::exact(),
+        lower(sql, AccuracyTarget::exact()).await,
+        AccuracyTarget::exact(),
     )
 }
 
@@ -204,7 +204,7 @@ fn with_summary_filter(root: &Rc<OperatorNode>, filter: &Predicate) -> Rc<Operat
 
 /// The predicate of the filtered aggregate in `sql`, and its input schema.
 async fn measure_filter(sql: &str) -> (Predicate, Schema) {
-    OperatorNode::reachable(&lower(sql, RequestedAccuracy::exact()).await)
+    OperatorNode::reachable(&lower(sql, AccuracyTarget::exact()).await)
         .into_iter()
         .find_map(|n| match n.non_asap() {
             Some(NonASAPOp::Aggregate { filters, child, .. }) => {
@@ -222,7 +222,7 @@ async fn hand_filtered(
     family: impl Fn(&FieldDataType) -> bool,
     filter: &(Predicate, Schema),
 ) -> Vec<Rc<OperatorNode>> {
-    let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
     let mut result = vec![];
     for root in logical_candidates(lower(sql, target.clone()).await, target) {
         let builds: Vec<_> = OperatorNode::reachable(&root)
@@ -290,7 +290,7 @@ async fn hand_filtered_kll_compiles_and_executes() {
 
 /// The KLL candidates of `sql`, unchanged.
 async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
-    let target = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
     let roots: Vec<_> = logical_candidates(lower(sql, target.clone()).await, target)
         .into_iter()
         .filter(|root| {

@@ -63,12 +63,14 @@ pub trait AccuracyModel {
         stats: &PropagationStats,
     ) -> Result<AccuracyGuarantee, AccuracyError>;
 
-    /// Whether `guarantee` meets `target`: a bound in the target's metric
-    /// (or one with a sound direct comparison) within its ε, and within its
-    /// δ when it states one, over the values the target's scope covers (a
-    /// per-value δ does not meet a whole-result target). A bound in another metric does not satisfy,
-    /// however small. Unknown required dimensions fail; selection
-    /// separately excludes missing accuracy evidence.
+    /// Whether `guarantee` meets `target`: a bound within its ε, and within
+    /// its δ when it states one, over the values the target's scope covers
+    /// (a per-value δ does not meet a whole-result target). When the target
+    /// sets a metric, the bound must be in that metric (or one with a sound
+    /// direct comparison): a bound in another metric does not satisfy,
+    /// however small. When it sets none, a bound in any metric does, each
+    /// compared in its own metric. Unknown required dimensions fail;
+    /// selection separately excludes missing accuracy evidence.
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool;
 }
 
@@ -119,7 +121,9 @@ impl AccuracyModel for DefaultAccuracyModel {
         if target.is_exact() || guarantee.is_exact() {
             return guarantee.is_exact();
         }
-        metric_meets(guarantee.spec.metric, target.metric)
+        target
+            .metric
+            .is_none_or(|metric| metric_meets(guarantee.spec.metric, metric))
             && scope_meets(guarantee, target)
             && within(guarantee.spec.error.evaluate(), target.error)
             && target
@@ -335,5 +339,36 @@ mod tests {
         let whole = AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative);
         assert!(model.satisfies(&never_fails, &whole));
         assert!(model.satisfies(&whole_result_guarantee(&never_fails, None), &whole));
+    }
+
+    /// A target whose metric the user did not set accepts a guarantee in
+    /// any metric whose own ε, δ and scope meet the target's numbers: a
+    /// rank, a relative or an absolute bound at any scale. A larger bound
+    /// or failure probability still misses it.
+    #[test]
+    fn a_target_without_a_metric_accepts_any_metric() {
+        let model = DefaultAccuracyModel;
+        let target = AccuracyTarget::epsilon_delta(0.01, 0.01).with_scope(AccuracyScope::PerValue);
+        assert_eq!(target.metric, None);
+        for metric in [
+            ErrorMetric::ABSOLUTE,
+            ErrorMetric::ABSOLUTE_STREAM_L1,
+            ErrorMetric::ABSOLUTE_STREAM_L2,
+            ErrorMetric::Relative,
+            ErrorMetric::Rank,
+        ] {
+            assert!(
+                model.satisfies(&guarantee(metric, 0.01, 0.01), &target),
+                "{metric:?}"
+            );
+            assert!(
+                !model.satisfies(&guarantee(metric, 0.02, 0.01), &target),
+                "{metric:?}"
+            );
+            assert!(
+                !model.satisfies(&guarantee(metric, 0.01, 0.02), &target),
+                "{metric:?}"
+            );
+        }
     }
 }

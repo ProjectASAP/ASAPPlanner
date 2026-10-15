@@ -180,6 +180,24 @@ class CandidateRowTests(unittest.TestCase):
         self.assertEqual({row["status"] for row in rows}, {"not judged"})
         self.assertTrue(all(row["reason"] is None for row in rows))
 
+    def test_valid_rows_show_the_accepted_metric(self):
+        """Every valid candidate's row says, per query, which metric Stage 3
+        accepted and whether the target set one; invalid rows say nothing."""
+        rows = self.js.call("stageCandidateRows", self.doc)
+        for row in rows:
+            if row["status"] in ("selected", "costlier"):
+                self.assertEqual(row["accepted"], "q1: metric not set; accepted exact; q2: metric not set; accepted exact")
+            else:
+                self.assertIsNone(row["accepted"])
+
+    def test_accuracy_text_reads_the_target_json(self):
+        text = lambda target: self.js.call("accuracyText", target)
+        self.assertEqual(text({"error": 0.0, "failure_probability": 0.0, "scope": "whole_result"}), "exact")
+        self.assertEqual(text({"error": 0.01, "scope": "whole_result"}), "ε=0.01 (metric not set)")
+        self.assertEqual(text({"metric": "rank", "error": 0.01, "failure_probability": 0.001, "scope": "whole_result"}), "ε=0.01, δ=0.001 (rank)")
+        self.assertEqual(self.js.call("accuracyText", {"error": 0.01}, "relative"), "ε=0.01 (metric not set; default relative)")
+        self.assertEqual(text(None), "")
+
     def test_header_counts_candidates_and_shows_a_selection_error(self):
         combinations = self.doc["stage1_logical_asap_optimization"]["combinations"]
         self.assertEqual(self.js.call("stageCandidateHeader", self.doc), f"{combinations} candidates")
@@ -443,7 +461,9 @@ class AppTests(unittest.TestCase):
         self.assertIn("✓ selected", self.text(js, "lane2-meta"))
         self.assertEqual(js.eval("__els.pick2.value"), selected)
         self.assertEqual(js.eval("__els.pick1.value"), "L1")
-        self.assertIn("9 candidates", js.eval("__els['rank-meta'].textContent"))
+        combinations = example1()["stage1_logical_asap_optimization"]["combinations"]
+        self.assertIn(f"{combinations} candidates", js.eval("__els['rank-meta'].textContent"))
+        self.assertIn("metric not set; accepted exact", self.text(js, "lane2-meta"))
         self.assertGreater(js.eval("__nodes"), 0)
 
     def test_rank_list_has_composition_error_rows(self):

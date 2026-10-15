@@ -10,7 +10,7 @@ use asap_aware_mapping::stage3_plan_selection::{Selection, SelectionError};
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryRecurrence};
 
 #[derive(Debug)]
@@ -140,7 +140,7 @@ pub fn run_planning_stages(
 /// evaluated as `recurrence[i]` says.
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
-    targets: &[RequestedAccuracy],
+    targets: &[AccuracyTarget],
     recurrence: &[QueryRecurrence],
     data: &DataWorkload,
     max_combinations: Option<usize>,

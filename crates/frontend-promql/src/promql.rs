@@ -79,7 +79,7 @@ use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
 use asap_types::pre_asap::{
     ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
 };
-use asap_types::types::{ErrorMetric, RequestedAccuracy};
+use asap_types::types::{AccuracyTarget, ErrorMetric};
 
 /// Every scalar expression this front end builds follows PromQL's numeric rules.
 const PROMQL: ExprSemantics = ExprSemantics::Promql;
@@ -183,7 +183,7 @@ const MAX_DEPTH: usize = 256;
 impl PromqlLowerer {
     pub(crate) fn lower_query_with_ingestion_interval(
         query: &str,
-        accuracy: &RequestedAccuracy,
+        accuracy: &AccuracyTarget,
         interval: Duration,
     ) -> Result<asap_types::ir::QueryRoot> {
         let _guard = AccuracyGuard::install(accuracy.clone());
@@ -214,18 +214,18 @@ impl PromqlLowerer {
 }
 
 std::thread_local! {
-    static ACCURACY: std::cell::RefCell<RequestedAccuracy> =
-        const { std::cell::RefCell::new(RequestedAccuracy::exact()) };
+    static ACCURACY: std::cell::RefCell<AccuracyTarget> =
+        const { std::cell::RefCell::new(AccuracyTarget::exact()) };
     static INGESTION_INTERVAL: std::cell::RefCell<Option<Duration>> = const { std::cell::RefCell::new(None) };
 }
 
 /// RAII guard installing `accuracy` as the ambient accuracy target for the
 /// current thread's lowering, restoring the prior value on drop — same shape
 /// as `histogram::CatalogGuard`.
-struct AccuracyGuard(RequestedAccuracy);
+struct AccuracyGuard(AccuracyTarget);
 
 impl AccuracyGuard {
-    fn install(accuracy: RequestedAccuracy) -> Self {
+    fn install(accuracy: AccuracyTarget) -> Self {
         let prev = ACCURACY.with(|a| a.replace(accuracy));
         AccuracyGuard(prev)
     }
@@ -234,12 +234,12 @@ impl AccuracyGuard {
 impl Drop for AccuracyGuard {
     fn drop(&mut self) {
         ACCURACY
-            .with(|a| *a.borrow_mut() = std::mem::replace(&mut self.0, RequestedAccuracy::exact()));
+            .with(|a| *a.borrow_mut() = std::mem::replace(&mut self.0, AccuracyTarget::exact()));
     }
 }
 
 /// The ambient accuracy target installed by the current [`PromqlLowerer::lower`] call.
-fn current_accuracy() -> RequestedAccuracy {
+fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
 

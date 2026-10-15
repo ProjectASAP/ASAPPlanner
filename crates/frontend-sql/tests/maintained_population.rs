@@ -1,7 +1,7 @@
 //! SQL and PromQL use the same shared-state rule without sharing membership semantics.
 use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use asap_types::{
     ir::{
         apply_materialization_timings, cse::share_common_sub_dags,
@@ -21,7 +21,7 @@ async fn aggregate(q: &str) -> Rc<OperatorNode> {
             Field::plain("job", DataType::Utf8, false),
         ]),
     );
-    lower_sql(q, &catalog, RequestedAccuracy::exact())
+    lower_sql(q, &catalog, AccuracyTarget::exact())
         .await
         .unwrap()
 }

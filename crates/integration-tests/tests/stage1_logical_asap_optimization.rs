@@ -21,7 +21,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query,
     QueryLanguage, QueryRequirements, QueryWorkload,
@@ -30,8 +30,8 @@ use futures::StreamExt;
 
 mod physical_common;
 
-fn accuracy() -> RequestedAccuracy {
-    RequestedAccuracy::epsilon_delta(0.01, 0.01)
+fn accuracy() -> AccuracyTarget {
+    AccuracyTarget::epsilon_delta(0.01, 0.01)
 }
 
 async fn sql(query: &str) -> QueryRoot {

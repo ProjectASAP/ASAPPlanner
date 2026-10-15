@@ -6562,16 +6562,15 @@ mod tests {
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
     use asap_types::pre_asap::schema::{DataType, Field, Schema as SchemaTy};
-    use asap_types::types::RequestedAccuracy;
-
     use asap_types::types::AccuracyTarget;
+
     use std::collections::HashMap;
 
     /// A query result reads an exact state through its finalize; any other
     /// selected root is returned as assembled.
     #[test]
     fn assemble_selected_query_finalizes_only_an_exact_state_root() {
-        let assemble = |query: &str, accuracy: RequestedAccuracy| {
+        let assemble = |query: &str, accuracy: AccuracyTarget| {
             let space = search_workload(vec![("q", lower_promql(query, accuracy))]).unwrap();
             let selection = space.global_selection(&DefaultCostModel);
             let root = &space.roots[0].1;
@@ -6580,7 +6579,7 @@ mod tests {
                 selection.assemble_selected_query(root).unwrap().unwrap(),
             )
         };
-        let (state, query) = assemble("sum_over_time(m[1m])", RequestedAccuracy::exact());
+        let (state, query) = assemble("sum_over_time(m[1m])", AccuracyTarget::exact());
         assert!(matches!(
             state.asap(),
             Some(ASAPOp::SummaryAgg {
@@ -6596,7 +6595,7 @@ mod tests {
 
         let (estimate, query) = assemble(
             "quantile_over_time(0.99, m[1m])",
-            RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Rank),
+            AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank),
         );
         assert!(estimate.contains_asap());
         assert!(Rc::ptr_eq(&estimate, &query));
@@ -6690,7 +6689,7 @@ mod tests {
     fn search_rejects_a_root_with_an_asap_operator() {
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
-            RequestedAccuracy::epsilon(0.01),
+            AccuracyTarget::epsilon(0.01),
         );
         let space = search_workload(vec![("q", root)]).unwrap();
         let summary = space
@@ -6731,11 +6730,8 @@ mod tests {
     #[test]
     fn rate_candidate_inventories_have_no_timing_only_duplicates() {
         for (query, accuracy) in [
-            ("sum by(job)(rate(m[1m]))", RequestedAccuracy::exact()),
-            (
-                "topk by(job)(2, rate(m[1m]))",
-                RequestedAccuracy::epsilon(0.1),
-            ),
+            ("sum by(job)(rate(m[1m]))", AccuracyTarget::exact()),
+            ("topk by(job)(2, rate(m[1m]))", AccuracyTarget::epsilon(0.1)),
         ] {
             let root = lower_promql(query, accuracy);
             let inventory = search_workload(vec![(0usize, root)])
@@ -6757,7 +6753,7 @@ mod tests {
     // so materialization assignment can place it in precompute or at query time.
     #[test]
     fn grouped_rate_sum_inventory_keeps_sum_state_for_materialization_placement() {
-        let root = lower_promql("sum by(job)(rate(m[1m]))", RequestedAccuracy::exact());
+        let root = lower_promql("sum by(job)(rate(m[1m]))", AccuracyTarget::exact());
         let inventory = search_workload(vec![(0usize, root)])
             .unwrap()
             .enumerate_candidate_dags(4096)
@@ -6787,7 +6783,7 @@ mod tests {
             "sum by(job)(m)",
             "sum_over_time(m[1m])",
         ] {
-            let root = lower_promql(query, RequestedAccuracy::exact());
+            let root = lower_promql(query, AccuracyTarget::exact());
             let space = search_workload(vec![(0usize, root.clone())]).unwrap();
             let inventory = space.enumerate_candidate_dags(4096).unwrap();
             assert!(!inventory.candidates.is_empty());
@@ -6935,7 +6931,7 @@ mod tests {
     // Finite samples can overflow a sum although their native average is finite.
     #[test]
     fn temporal_average_requires_finite_division_guard() {
-        let root = lower_promql("avg_over_time(a[5m])", RequestedAccuracy::exact());
+        let root = lower_promql("avg_over_time(a[5m])", AccuracyTarget::exact());
         let candidates =
             ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         let operator = candidates
@@ -6962,7 +6958,7 @@ mod tests {
     fn approximate_temporal_topk_admits_exact_maintained_values() {
         let root = lower_promql(
             "topk by(job)(1,count_over_time(a[5m]))",
-            RequestedAccuracy::epsilon_delta(0.01, 0.01),
+            AccuracyTarget::epsilon_delta(0.01, 0.01),
         );
         let planning_inputs =
             CandidatePlanningInputs::with_default_accuracy(&crate::cost_model::DefaultCostModel);
@@ -6980,7 +6976,7 @@ mod tests {
             "topk(5, sum_over_time(a[5m]))",
             "topk by(job)(5, count_over_time(a[5m]))",
         ] {
-            let root = lower_promql(query, RequestedAccuracy::exact());
+            let root = lower_promql(query, AccuracyTarget::exact());
             let planning_inputs = CandidatePlanningInputs::with_default_accuracy(
                 &crate::cost_model::DefaultCostModel,
             );
@@ -7033,7 +7029,7 @@ mod tests {
             }
         }
         let requested =
-            RequestedAccuracy::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative);
+            AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative);
         let target = requested.target_in(ErrorMetric::Relative);
         let inputs = CandidatePlanningInputs {
             evidence: &Domain,
@@ -7054,7 +7050,7 @@ mod tests {
     // Missing domain proof permits an uncertified direct quantile ratio only.
     #[test]
     fn quantile_ratio_without_input_proof_has_no_root_guarantee() {
-        let requested = RequestedAccuracy::epsilon_delta(0.01, 0.01);
+        let requested = AccuracyTarget::epsilon_delta(0.01, 0.01);
         let target = requested.target_in(ErrorMetric::Relative);
         let root = lower_promql(
             "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
@@ -9223,7 +9219,7 @@ mod tests {
                 Some(false)
             }
         }
-        let root = lower_promql("sum_over_time(a[1m])", RequestedAccuracy::exact());
+        let root = lower_promql("sum_over_time(a[1m])", AccuracyTarget::exact());
         let space = search_workload(vec![("q", root)]).unwrap();
         let selected = space.global_selection(&Unsupported);
         assert!(selected
@@ -9236,10 +9232,7 @@ mod tests {
     // Composable temporal/grouped Sum must be executable as one producer.
     #[test]
     fn grouped_temporal_sum_has_one_summary_producer_candidate() {
-        let root = lower_promql(
-            "sum by(job)(sum_over_time(a[1m]))",
-            RequestedAccuracy::exact(),
-        );
+        let root = lower_promql("sum by(job)(sum_over_time(a[1m]))", AccuracyTarget::exact());
         let candidates =
             ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         assert!(candidates
@@ -9309,10 +9302,7 @@ mod tests {
                 ))
             }
         }
-        let root = lower_promql(
-            "sum by(job)(sum_over_time(a[1m]))",
-            RequestedAccuracy::exact(),
-        );
+        let root = lower_promql("sum by(job)(sum_over_time(a[1m]))", AccuracyTarget::exact());
         let space = search_workload(vec![("q", root)]).unwrap();
         let selection = space.global_selection(&ExplicitCosts);
         let selected = selection

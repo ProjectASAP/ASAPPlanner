@@ -28,7 +28,10 @@
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
 //     under `pruned` with the reason;
 //   - stage3_plan_selection: the selected candidate, chosen among all candidates;
-//     the shown candidates' costs, and every other shown candidate as
+//     the shown candidates' costs and accepted accuracy (per query: the
+//     target's metric or null when not set, the accepted guarantee's
+//     metric or null when exact, the sketches read and a one-line
+//     summary), and every other shown candidate as
 //     rejected (`valid: false`) or costlier. Each node's `cost` is one
 //     computation's price times `multiplier`, the times it is computed:
 //     once if materialized, else once per query (or materialized node)
@@ -49,8 +52,11 @@
 // names the query before it (default `q<n>`). `--epsilon`/
 // `--delta` apply to every query; without them the queries are exact.
 // `--metric` (`absolute`, `absolute_stream_l1`, `absolute_stream_l2`,
-// `relative` or `rank`) names the error metric of that target; a quantile
-// query's target must name one.
+// `relative` or `rank`) sets the error metric of that target; without it,
+// a candidate is accepted in whatever metric its guarantee meets ε (and δ)
+// in, and `stage3_plan_selection.accepted` reports, per shown valid
+// candidate and query, the metric accepted (e.g. "metric not set; accepted
+// rank (Kll)").
 // `--interval-ms` is the source cadence (default 15000). `--table '<json>'`
 // (repeatable) declares a table the SQL queries read: `{"name": ...,
 // "columns": [{"name": ..., "type": "timestamp|utf8|string|float64|double|
@@ -72,7 +78,7 @@ use asap_devtools::SqlCatalog;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{ErrorMetric, RequestedAccuracy};
+use asap_types::types::{default_metric_for_root, AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, LatencyRequirement,
     PlanningWorkload, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload,
@@ -133,6 +139,7 @@ fn document_of(
     result: Result<PlanningStagesRun, PlanningStagesError>,
     max_displayed: usize,
 ) -> Result<Value, Failure> {
+    let queries = with_default_metrics(queries, roots);
     match result {
         Ok(run) => Ok(stage_pipeline(queries, &run, max_displayed)),
         Err(PlanningStagesError::Pass1(error)) => Ok(json!({
@@ -230,9 +237,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         (None, false) => {
             let accuracy = match (epsilon, delta) {
-                (None, None) => RequestedAccuracy::exact(),
-                (Some(epsilon), None) => RequestedAccuracy::epsilon(epsilon),
-                (Some(epsilon), Some(delta)) => RequestedAccuracy::epsilon_delta(epsilon, delta),
+                (None, None) => AccuracyTarget::exact(),
+                (Some(epsilon), None) => AccuracyTarget::epsilon(epsilon),
+                (Some(epsilon), Some(delta)) => AccuracyTarget::epsilon_delta(epsilon, delta),
                 (None, Some(_)) => return Err("--delta needs --epsilon".into()),
             };
             let accuracy = match metric {
@@ -397,8 +404,30 @@ fn plan_selection_json(
             )
         })
         .collect();
+    let accepted: serde_json::Map<_, _> = selection
+        .accepted
+        .iter()
+        .filter(|(id, _)| shown(id))
+        .map(|(id, queries)| {
+            let queries: Vec<Value> = queries
+                .iter()
+                .map(|accepted| {
+                    accepted.as_ref().map_or(Value::Null, |accepted| {
+                        json!({
+                            "target_metric": accepted.target_metric,
+                            "accepted_metric": accepted.accepted_metric,
+                            "sketches": accepted.sketches,
+                            "summary": accepted.to_string(),
+                        })
+                    })
+                })
+                .collect();
+            (id.clone(), Value::Array(queries))
+        })
+        .collect();
     json!({
         "costs": costs,
+        "accepted": accepted,
         "selected": selection.selected,
         "rejected": rejections_json(&selection.rejected),
     })
@@ -426,19 +455,7 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
         .entries()
         .enumerate()
         .map(|(index, entry)| {
-            let requested = entry.requirements.accuracy.requested();
-            let accuracy = if requested.is_exact() {
-                json!("exact")
-            } else {
-                let mut accuracy = json!({ "epsilon": requested.error });
-                if let Some(delta) = requested.failure_probability {
-                    accuracy["delta"] = json!(delta);
-                }
-                if let Some(metric) = requested.metric {
-                    accuracy["metric"] = json!(metric);
-                }
-                accuracy
-            };
+            let accuracy = json!(entry.requirements.accuracy.requested());
             let mut requirements = json!({ "accuracy": accuracy });
             if let LatencyRequirement::ExplicitMaxMs(ms) = entry.requirements.response_latency {
                 requirements["latency_ms"] = json!(ms);
@@ -456,6 +473,23 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// `queries` with, for each approximate target that sets no metric, the
+/// metric its root's result is naturally stated in
+/// ([`default_metric_for_root`]; null for a quantile, which has none) as
+/// `requirements.default_metric`. Display only: Stage 3 accepts any metric.
+fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Value> {
+    for (query, root) in queries.iter_mut().zip(roots) {
+        let accuracy = &query["requirements"]["accuracy"];
+        let Ok(target) = serde_json::from_value::<AccuracyTarget>(accuracy.clone()) else {
+            continue;
+        };
+        if target.metric.is_none() && !target.is_exact() {
+            query["requirements"]["default_metric"] = json!(default_metric_for_root(root));
+        }
+    }
+    queries
 }
 
 /// The tables `--table` declares.
@@ -515,7 +549,7 @@ fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
 fn query_batch(
     language: QueryLanguage,
     queries: &[String],
-    accuracy: RequestedAccuracy,
+    accuracy: AccuracyTarget,
     interval_ms: u64,
 ) -> PlanningWorkload {
     PlanningWorkload {
@@ -578,7 +612,7 @@ mod tests {
         let workload = query_batch(
             QueryLanguage::PromQL,
             &["sum(m)".into()],
-            RequestedAccuracy::exact(),
+            AccuracyTarget::exact(),
             15_000,
         );
         let run =

@@ -23,7 +23,7 @@ use asap_types::post_asap::{
     SummaryUpdate,
 };
 use asap_types::pre_asap::{expr_ir::ColumnRef, Reduction};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use futures::{executor::block_on, StreamExt};
 
 type Series = BTreeMap<String, String>;
@@ -53,7 +53,7 @@ fn canonical(labels: &Series) -> Series {
 /// `m` declared a counter: plan selection's answer to a heap's open
 /// requirement that its weights are counter samples, which the executor
 /// needs before it builds a Count-Min heap.
-fn candidates(query: &str, accuracy: RequestedAccuracy) -> Vec<Rc<OperatorNode>> {
+fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
     use asap_aware_mapping::stage3_plan_selection::with_confirmed_weights;
     use asap_types::ir::QueryRoot;
     use asap_types::workload::{DataWorkload, MetricType};
@@ -396,11 +396,11 @@ fn check(
 // and each population's estimates equal feeding its kernel sample by sample.
 #[test]
 fn raw_sample_summaries_compile_and_match_their_kernels() {
-    let exact = RequestedAccuracy::exact();
-    let sketch = RequestedAccuracy::epsilon(0.02);
+    let exact = AccuracyTarget::exact();
+    let sketch = AccuracyTarget::epsilon(0.02);
     // A UnivMon sized for a distinct count at ε = 0.02 holds a heap of
     // millions of keys on each of its 19 layers, past the default 64 MiB.
-    let distinct = RequestedAccuracy::epsilon_delta(0.2, 0.1);
+    let distinct = AccuracyTarget::epsilon_delta(0.2, 0.1);
     let queries = [
         ("sum_over_time(m[5m])", &exact),
         ("count_over_time(m[5m])", &exact),
@@ -483,7 +483,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
 fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (PhysicalASAPDAG, u64, u64) {
     let candidate = candidates(
         "sum by (service) (sum_over_time(m[5m]))",
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .pop()
     .unwrap();

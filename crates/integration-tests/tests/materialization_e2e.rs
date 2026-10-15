@@ -25,7 +25,7 @@ use asap_types::ir::{
 use asap_types::post_asap::maintained_population::PopulationInput;
 use asap_types::post_asap::ExecutionTiming;
 use asap_types::pre_asap::Source;
-use asap_types::types::{ErrorMetric, RequestedAccuracy};
+use asap_types::types::{AccuracyTarget, ErrorMetric};
 
 mod physical_common;
 
@@ -34,7 +34,7 @@ const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Me
 /// The logical DAG the planner pipeline selects for `query`, optionally with
 /// a PromQL series identity (per-entity state needs one).
 fn selected(query: &str, series_identity: bool) -> Rc<OperatorNode> {
-    selected_with(query, series_identity, RequestedAccuracy::epsilon(0.01))
+    selected_with(query, series_identity, AccuracyTarget::epsilon(0.01))
 }
 
 /// [`selected`] for a quantile query, whose target names its metric (a
@@ -43,15 +43,11 @@ fn selected_quantile(query: &str, series_identity: bool) -> Rc<OperatorNode> {
     selected_with(
         query,
         series_identity,
-        RequestedAccuracy::epsilon(0.01).with_metric(ErrorMetric::Rank),
+        AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank),
     )
 }
 
-fn selected_with(
-    query: &str,
-    series_identity: bool,
-    accuracy: RequestedAccuracy,
-) -> Rc<OperatorNode> {
+fn selected_with(query: &str, series_identity: bool, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let mut root = lower_promql(query, accuracy.clone()).unwrap();
     if series_identity {
         root = promql_rows::with_series_identity(&root).unwrap();
@@ -62,7 +58,7 @@ fn selected_with(
 /// The first logical candidate for `query` that builds a sketch: plan
 /// selection picks the exact plan while every summary runs at query time.
 fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
-    let accuracy = RequestedAccuracy::epsilon(0.01);
+    let accuracy = AccuracyTarget::epsilon(0.01);
     let root = lower_promql(query, accuracy.clone()).unwrap();
     logical_candidates(root, accuracy)
         .into_iter()
@@ -261,7 +257,7 @@ fn materialization_decides_precompute_contents() {
 #[test]
 fn population_materialization_decides_precompute_contents() {
     let root = promql_rows::with_series_identity(
-        &lower_promql("topk by(job)(1, m)", RequestedAccuracy::epsilon(0.01)).unwrap(),
+        &lower_promql("topk by(job)(1, m)", AccuracyTarget::epsilon(0.01)).unwrap(),
     )
     .unwrap();
     let root = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))

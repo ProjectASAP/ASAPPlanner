@@ -9,7 +9,7 @@ use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 mod support;
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::AggIntent;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use support::{lower_promql, lower_promql_with_histograms};
 
 /// The histogram/quantile intent kind in the lowered DAG: `"HQ"` for the
@@ -40,11 +40,11 @@ fn quantile_kind(qe: &OperatorNode) -> &'static str {
 }
 
 fn heuristic(q: &str) -> &'static str {
-    quantile_kind(&lower_promql(q, RequestedAccuracy::exact()).unwrap())
+    quantile_kind(&lower_promql(q, AccuracyTarget::exact()).unwrap())
 }
 
 fn with_meta(q: &str, catalog: HistogramCatalog) -> &'static str {
-    quantile_kind(&lower_promql_with_histograms(q, RequestedAccuracy::exact(), catalog).unwrap())
+    quantile_kind(&lower_promql_with_histograms(q, AccuracyTarget::exact(), catalog).unwrap())
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn heuristic_baseline_is_unchanged_without_a_catalog() {
     );
     assert!(lower_promql(
         "histogram_quantile(0.9, native_latency)",
-        RequestedAccuracy::exact()
+        AccuracyTarget::exact()
     )
     .is_err());
 }
@@ -68,7 +68,7 @@ fn declared_classic_bucket_fixes_the_false_negative() {
     // A classic histogram exposed WITHOUT the `_bucket` suffix and queried with
     // no `le` grouping/matcher requires an explicit sample-type declaration.
     let q = "histogram_quantile(0.9, latency_seconds)";
-    assert!(lower_promql(q, RequestedAccuracy::exact()).is_err());
+    assert!(lower_promql(q, AccuracyTarget::exact()).is_err());
     assert_eq!(
         with_meta(
             q,
@@ -98,10 +98,8 @@ fn declared_raw_extension_and_native_gap_override_the_heuristic() {
         "raw samples are sketch-able"
     );
     let catalog = HistogramCatalog::new().with("foo_bucket", HistogramKind::Native);
-    assert!(lower_promql_with_histograms(q, RequestedAccuracy::exact(), catalog.clone()).is_err());
-    assert!(
-        lower_promql_with_histograms("foo_bucket", RequestedAccuracy::exact(), catalog).is_err()
-    );
+    assert!(lower_promql_with_histograms(q, AccuracyTarget::exact(), catalog.clone()).is_err());
+    assert!(lower_promql_with_histograms("foo_bucket", AccuracyTarget::exact(), catalog).is_err());
 }
 
 #[test]
@@ -118,7 +116,7 @@ fn undeclared_metric_falls_back_to_the_heuristic() {
     );
     assert!(lower_promql_with_histograms(
         "histogram_quantile(0.9, native_thing)",
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
         catalog
     )
     .is_err());

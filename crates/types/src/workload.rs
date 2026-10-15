@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::types::RequestedAccuracy;
+use crate::types::AccuracyTarget;
 use serde::{Deserialize, Serialize};
 
 // ── Query surface ─────────────────────────────────────────────────────────────
@@ -58,19 +58,19 @@ pub enum QueryLanguage {
 
 /// Whether the caller explicitly requested an accuracy target or inherited
 /// the normalized exact default. An explicit request may omit its metric
-/// ([`RequestedAccuracy`]).
+/// ([`AccuracyTarget`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccuracyRequirement {
-    Explicit(RequestedAccuracy),
+    Explicit(AccuracyTarget),
     ImplicitExact,
 }
 
 impl AccuracyRequirement {
-    pub fn requested(&self) -> RequestedAccuracy {
+    pub fn requested(&self) -> AccuracyTarget {
         match self {
             Self::Explicit(requested) => requested.clone(),
-            Self::ImplicitExact => RequestedAccuracy::exact(),
+            Self::ImplicitExact => AccuracyTarget::exact(),
         }
     }
 }
@@ -940,7 +940,7 @@ mod tests {
                     query: Query("rate(requests_total[5m])".into()),
                     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::epsilon_delta(
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::epsilon_delta(
                             0.01, 0.001,
                         )),
                         response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
@@ -1012,12 +1012,10 @@ mod tests {
             "predictable": {"known_at": null, "typo": true}
         }))
         .is_err());
-        assert!(
-            serde_json::from_value::<RequestedAccuracy>(serde_json::json!({
-                "EpsilonDelta": {"epsilon": 0.1, "delta": 0.01, "typo": true}
-            }))
-            .is_err()
-        );
+        assert!(serde_json::from_value::<AccuracyTarget>(serde_json::json!({
+            "error": 0.1, "failure_probability": 0.01, "typo": true
+        }))
+        .is_err());
     }
 
     #[test]

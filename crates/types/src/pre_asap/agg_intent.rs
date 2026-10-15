@@ -929,7 +929,7 @@ mod tests {
     /// with no `col` key — still deserializes, as the sample-value convention `None`.
     #[test]
     fn agg_intent_serde_reads_pre_115_payloads() {
-        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
+        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":{"error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::Quantile {
@@ -939,7 +939,7 @@ mod tests {
             }
         );
 
-        let legacy = r#"{"kind":"top_k","k":5,"accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
+        let legacy = r#"{"kind":"top_k","k":5,"accuracy":{"error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::TopK {
@@ -948,7 +948,7 @@ mod tests {
             }
         );
 
-        let legacy = r#"{"kind":"cardinality","accuracy":{"metric":"absolute","error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
+        let legacy = r#"{"kind":"cardinality","accuracy":{"error":0.0,"failure_probability":0.0,"scope":"whole_result"}}"#;
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::Cardinality {

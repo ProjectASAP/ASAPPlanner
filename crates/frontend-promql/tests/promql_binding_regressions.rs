@@ -1,5 +1,5 @@
 mod support;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
 /// Prometheus treats these quantile parameters as valid queries returning special values.
@@ -12,7 +12,7 @@ fn quantile_parameters_retain_prometheus_special_value_semantics() {
             format!("histogram_quantile({parameter}, smoke_bucket)"),
         ] {
             assert!(
-                lower_promql(&query, RequestedAccuracy::exact()).is_ok(),
+                lower_promql(&query, AccuracyTarget::exact()).is_ok(),
                 "{query}"
             );
         }
@@ -23,8 +23,8 @@ fn quantile_parameters_retain_prometheus_special_value_semantics() {
 #[test]
 fn irate_and_rate_have_distinct_canonical_intents() {
     for input in ["smoke_counter_total[5m]", "smoke_counter_total[5m:1m]"] {
-        let rate = lower_promql(&format!("rate({input})"), RequestedAccuracy::exact()).unwrap();
-        let irate = lower_promql(&format!("irate({input})"), RequestedAccuracy::exact()).unwrap();
+        let rate = lower_promql(&format!("rate({input})"), AccuracyTarget::exact()).unwrap();
+        let irate = lower_promql(&format!("irate({input})"), AccuracyTarget::exact()).unwrap();
         assert_ne!(rate, irate, "rate and irate must not collapse: {input}");
     }
 }
@@ -34,7 +34,7 @@ fn irate_and_rate_have_distinct_canonical_intents() {
 fn count_is_row_count_not_distinct_sample_value_count() {
     use asap_types::ir::NonASAPOp;
     use asap_types::pre_asap::AggIntent;
-    let tree = lower_promql("count(smoke_gauge)", RequestedAccuracy::exact()).unwrap();
+    let tree = lower_promql("count(smoke_gauge)", AccuracyTarget::exact()).unwrap();
     let NonASAPOp::Aggregate { measures, .. } = tree.expect_non_asap() else {
         panic!("expected aggregate")
     };

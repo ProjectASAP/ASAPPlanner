@@ -5,7 +5,7 @@ use asap_types::post_asap::{
     ExactKind, ExactParams, FieldDataType, GroupingStrategy, SummaryUpdate,
 };
 use asap_types::pre_asap::{AggIntent, ColumnRef, DataType, Field, Schema};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 mod physical_common;
 
@@ -30,7 +30,7 @@ async fn sql_filter_projection_example() {
     let root = lower_sql(
         "SELECT l_quantity * 2 AS q2 FROM lineitem WHERE l_quantity > 10",
         &catalog(),
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -53,7 +53,7 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
     let root = lower_sql(
         "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
         &catalog(),
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -123,7 +123,7 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
         "SELECT (SELECT bytes FROM requests) AS v FROM lineitem",
         "SELECT l_quantity NOT IN (SELECT bytes FROM requests) AS present FROM lineitem",
     ] {
-        let root = lower_sql(query, &catalog(), RequestedAccuracy::exact())
+        let root = lower_sql(query, &catalog(), AccuracyTarget::exact())
             .await
             .unwrap();
         root.validate_structure().unwrap();
@@ -150,7 +150,7 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
     let root = lower_sql(
         "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
         &catalog(),
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -248,7 +248,7 @@ async fn sql_window_and_filtered_aggregate_types() {
         "SELECT MIN(l_quantity) OVER (ORDER BY l_quantity ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM lineitem",
         "SELECT SUM(l_quantity) FILTER (WHERE l_quantity < 0) AS s FROM lineitem GROUP BY l_quantity",
     ] {
-        let root = lower_sql(query, &catalog(), RequestedAccuracy::exact()).await.unwrap();
+        let root = lower_sql(query, &catalog(), AccuracyTarget::exact()).await.unwrap();
         root.validate_structure().unwrap();
         assert_eq!(root.schema.fields[0], Field::plain("s", DataType::Int64, true), "{query}");
     }
@@ -282,7 +282,7 @@ async fn batch_planning_replaces_summary_operators() {
                     .map(|query| BatchEntry {
                         query: Query((*query).into()),
                         requirements: QueryRequirements {
-                            accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
+                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::exact()),
                             ..Default::default()
                         },
                         predictability: Predictability::Unknown,

@@ -33,7 +33,6 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
 use asap_types::types::ErrorMetric;
-use asap_types::types::RequestedAccuracy;
 
 /// This crate has no "bind me one tree" public API any more —
 /// `ASAPStrategies::replacements` always returns every candidate, and
@@ -68,7 +67,7 @@ fn distinct_over_time_offers_hll_cardinality_evaluation() {
     // function-specific post-ASAP node or a sample-count rewrite.
     let root = lower_promql(
         "distinct_over_time(cpu_usage{job=\"worker\"}[5m])",
-        RequestedAccuracy::epsilon(0.02),
+        AccuracyTarget::epsilon(0.02),
     )
     .unwrap();
     let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
@@ -87,7 +86,7 @@ fn distinct_over_time_offers_hll_cardinality_evaluation() {
 }
 
 fn lower_search_and_materialize(query: &str) -> Rc<OperatorNode> {
-    let pre = lower_promql(query, RequestedAccuracy::exact()).expect("lowering failed");
+    let pre = lower_promql(query, AccuracyTarget::exact()).expect("lowering failed");
     let space = search_workload(vec![("query", pre)]).unwrap();
     let selection = space.global_selection(&DefaultCostModel);
     selection
@@ -185,7 +184,7 @@ fn dtype<'a>(schema: &'a Schema, name: &str) -> &'a FieldDataType {
 }
 
 fn lower_and_realize(query: &str) -> Rc<OperatorNode> {
-    let pre = lower_promql(query, RequestedAccuracy::exact()).expect("lowering failed");
+    let pre = lower_promql(query, AccuracyTarget::exact()).expect("lowering failed");
     realize(&pre).expect("binding failed")
 }
 
@@ -267,7 +266,7 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 fn grouped_rate_topk_consumes_finalized_rate_values() {
     let root = lower_promql(
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
@@ -330,7 +329,7 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
     }
     let root = lower_promql(
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
@@ -350,7 +349,7 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
 fn weighted_topk_exports_symbolic_evidence_requirements() {
     let root = lower_promql(
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-        RequestedAccuracy::epsilon_delta(0.01, 0.01),
+        AccuracyTarget::epsilon_delta(0.01, 0.01),
     )
     .unwrap();
     let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
@@ -380,7 +379,7 @@ fn weighted_topk_rejects_invalid_population_evidence() {
     }
     let root = lower_promql(
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
@@ -399,7 +398,7 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
         "topk(2, sum by(job)(increase(m[6h])))",
     ] {
-        let root = lower_promql(query, RequestedAccuracy::epsilon_delta(0.01, 0.01)).unwrap();
+        let root = lower_promql(query, AccuracyTarget::epsilon_delta(0.01, 0.01)).unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -541,7 +540,7 @@ fn promql_binary_arithmetic_preserves_nested_structure_and_rejects_modifiers() {
 fn promql_binary_arithmetic_never_relabels_approximate_children_as_exact() {
     let pre = lower_promql(
         "quantile_over_time(0.9, a[1m]) + quantile_over_time(0.9, b[1m])",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .expect("lowering failed");
     let root = realize(&pre).expect("binding failed");
@@ -561,7 +560,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
     // Enforced finite, positive, nonempty windows justify both DDSketch
     // interpolation bounds and a nonzero denominator. Shared state does not
     // require independence for the deterministic ratio bound.
-    let requested = RequestedAccuracy::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative);
+    let requested = AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative);
     let target = requested.target_in(ErrorMetric::Relative);
     let query = lower_promql(
         "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
@@ -632,7 +631,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
         ),
     ];
     for (source, expected_update, expected_family, excluded_labels) in cases {
-        let pre = lower_promql(source, RequestedAccuracy::epsilon_delta(0.01, 0.01))
+        let pre = lower_promql(source, AccuracyTarget::epsilon_delta(0.01, 0.01))
             .expect("lower temporal Top-K");
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
@@ -794,7 +793,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
             vec![("worker", 100.0), ("cron", 30.0)],
         ),
     ] {
-        let pre = lower_promql(query, RequestedAccuracy::epsilon_delta(0.01, 0.01)).unwrap();
+        let pre = lower_promql(query, AccuracyTarget::epsilon_delta(0.01, 0.01)).unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -834,7 +833,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     let pre_asap = lower_promql(
         "quantile(0.99, rate(http_requests_total[5m]))",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .expect("lowering failed");
     let root = realize(&pre_asap).expect("binding failed");
@@ -967,7 +966,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 fn promql_exact_workload_binds_accumulators_not_sketches() {
     let pre_asap = lower_promql(
         "sum by (job) (http_requests_total)",
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .expect("lowering failed");
     let root = realize(&pre_asap).expect("binding failed");
@@ -992,8 +991,8 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
         "group keys pass through verbatim"
     );
 
-    let pre_asap = lower_promql("avg(http_requests_total)", RequestedAccuracy::exact())
-        .expect("lowering failed");
+    let pre_asap =
+        lower_promql("avg(http_requests_total)", AccuracyTarget::exact()).expect("lowering failed");
     let root = realize(&pre_asap).expect("binding failed");
     assert!(
         !root.contains_asap(),
@@ -1005,7 +1004,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
 fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     let original = lower_promql(
         "sum by (service) (count_over_time(metrics[5m]))",
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .expect("lowering failed");
     let original_schema = original.schema.clone();
@@ -1053,7 +1052,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     // sketch must not interpret exact accumulator bytes as input samples.
     let pre = lower_promql(
         "quantile(0.9, sum_over_time(m[1m]))",
-        RequestedAccuracy::epsilon(0.05),
+        AccuracyTarget::epsilon(0.05),
     )
     .unwrap();
     let space = search_workload(vec![("query", pre)]).unwrap();
@@ -1116,7 +1115,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
             ExecutionTiming::QueryTime,
         ),
     ] {
-        let input = lower_promql(query, RequestedAccuracy::epsilon(0.05)).unwrap();
+        let input = lower_promql(query, AccuracyTarget::epsilon(0.05)).unwrap();
         let search = search_workload(vec![("q", input)]).unwrap();
         let choice = search.global_selection(&DefaultCostModel);
         let plan = choice
@@ -1150,7 +1149,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
 fn ddsketch_ratio_without_domain_proof_is_uncertified() {
     let pre = lower_promql(
         "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .unwrap();
     let root = realize(&pre).unwrap();
@@ -1224,7 +1223,7 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
         let evidence = FixtureQuantileDomain { lower, upper };
         let pre = lower_promql(
             "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-            RequestedAccuracy::epsilon(0.01),
+            AccuracyTarget::epsilon(0.01),
         )
         .unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
@@ -1264,7 +1263,7 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
 
     let pre = lower_promql(
         "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .unwrap();
     let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
@@ -1285,7 +1284,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
         };
         let pre = lower_promql(
             "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-            RequestedAccuracy::epsilon(0.01),
+            AccuracyTarget::epsilon(0.01),
         )
         .unwrap();
         let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
@@ -1365,7 +1364,7 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
     }
     let pre = lower_promql(
         "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .unwrap();
     for count in [0, (1u64 << 53) + 1] {
@@ -1384,8 +1383,8 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
 #[test]
 fn without_aggregation_candidates_export_valid_dags() {
     for accuracy in [
-        RequestedAccuracy::exact(),
-        RequestedAccuracy::epsilon_delta(0.01, 0.01),
+        AccuracyTarget::exact(),
+        AccuracyTarget::epsilon_delta(0.01, 0.01),
     ] {
         for query in ["sum without (pod) (m)", "quantile without (pod) (0.5, m)"] {
             let root = lower_promql(query, accuracy.clone()).unwrap();

@@ -37,7 +37,6 @@ use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 
 use asap_types::types::AccuracyTarget;
-use asap_types::types::RequestedAccuracy;
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
@@ -809,7 +808,7 @@ fn physical_export_carries_explicit_timing_for_a_composed_plan() {
 fn promql_max_by_zone_over_quantile_over_time_composes() {
     let expr = lower_promql(
         "max by (zone) (quantile_over_time(0.99, latency[5m]))",
-        RequestedAccuracy::epsilon(0.01),
+        AccuracyTarget::epsilon(0.01),
     )
     .unwrap();
     let space = plan(vec![("q", expr)], &StatsModel);

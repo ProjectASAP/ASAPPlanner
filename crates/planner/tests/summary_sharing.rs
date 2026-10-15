@@ -17,7 +17,7 @@ use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{ErrorMetric, RequestedAccuracy};
+use asap_types::types::{AccuracyTarget, ErrorMetric};
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataWorkload, DurationMs, Evidence, LatencyRequirement,
     PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, Rate,
@@ -28,8 +28,8 @@ const NOW_MS: u64 = 1_700_000_000_000;
 
 /// `epsilon` as a query's requested accuracy; a quantile query's target
 /// names its metric (a rank error).
-fn requested(query: &str, epsilon: f64) -> RequestedAccuracy {
-    let requested = RequestedAccuracy::epsilon(epsilon);
+fn requested(query: &str, epsilon: f64) -> AccuracyTarget {
+    let requested = AccuracyTarget::epsilon(epsilon);
     if query.contains("quantile") {
         requested.with_metric(ErrorMetric::Rank)
     } else {

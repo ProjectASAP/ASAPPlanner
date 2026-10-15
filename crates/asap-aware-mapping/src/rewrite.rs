@@ -437,7 +437,6 @@ mod tests {
     use asap_types::ir::operator_properties::Source;
     use asap_types::pre_asap::schema::{Field, Schema};
     use asap_types::types::AccuracyTarget;
-    use asap_types::types::RequestedAccuracy;
     use std::time::Duration;
 
     use crate::test_support::metric_scan;
@@ -472,10 +471,7 @@ mod tests {
     // Temporal averages expose two single-measure children without closing labels.
     #[test]
     fn temporal_average_components_preserves_schema_and_exposes_sum_count() {
-        let root = lower_promql(
-            "avg_over_time(a{job=\"api\"}[5m])",
-            RequestedAccuracy::exact(),
-        );
+        let root = lower_promql("avg_over_time(a{job=\"api\"}[5m])", AccuracyTarget::exact());
         assert!(SemanticEquivalentRewriteStrategy
             .replacements(&TargetSubDAG::new(&root))
             .is_empty());

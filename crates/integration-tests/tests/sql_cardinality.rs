@@ -4,7 +4,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_physical_operators::values::Value;
 use asap_types::{
     pre_asap::{DataType, Field, Schema},
-    types::RequestedAccuracy,
+    types::AccuracyTarget,
 };
 
 // COUNT(DISTINCT src_ip) skips NULL and keeps the WHERE, Utf8 identities and
@@ -21,7 +21,7 @@ async fn sql_distinct_executes_through_raw_scan_and_native_binding() {
     let root = lower_sql(
         "SELECT COUNT(DISTINCT src_ip) AS sources FROM flows WHERE keep",
         &catalog,
-        RequestedAccuracy::exact(),
+        AccuracyTarget::exact(),
     )
     .await
     .unwrap();

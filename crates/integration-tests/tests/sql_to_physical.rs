@@ -10,7 +10,7 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 use asap_types::{
     post_asap::FieldDataType,
     pre_asap::{DataType, Field, Schema},
@@ -34,10 +34,10 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
         "SELECT service, SUM(value) AS total FROM metrics WHERE value > 1 GROUP BY service",
         "SELECT service, SUM(value) AS total FROM metrics GROUP BY service",
     ] {
-        let logical = lower_sql(query, &catalog, RequestedAccuracy::exact())
+        let logical = lower_sql(query, &catalog, AccuracyTarget::exact())
             .await
             .unwrap();
-        let selected = selected_dag(logical, RequestedAccuracy::exact());
+        let selected = selected_dag(logical, AccuracyTarget::exact());
         let dag = compile_physical_asap_dag(&selected).unwrap();
         let scan = dag
             .nodes

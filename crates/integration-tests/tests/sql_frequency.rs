@@ -6,7 +6,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_physical_operators::values::Value;
 use asap_types::{
     pre_asap::{DataType, Field, Schema},
-    types::RequestedAccuracy,
+    types::AccuracyTarget,
 };
 
 const ENTROPY: &str = "SELECT -SUM(p * LN(p)) FROM (\
@@ -29,7 +29,7 @@ fn rows(sources: &[&str]) -> Vec<Vec<Value>> {
 }
 
 async fn run(sql: &str, sources: &[&str]) -> Option<f64> {
-    let root = lower_sql(sql, &catalog(), RequestedAccuracy::exact())
+    let root = lower_sql(sql, &catalog(), AccuracyTarget::exact())
         .await
         .unwrap();
     let result = physical_common::execute_raw_rows(&root, rows(sources));

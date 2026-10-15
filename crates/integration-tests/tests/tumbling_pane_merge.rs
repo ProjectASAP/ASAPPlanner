@@ -24,14 +24,14 @@ use asap_types::ir::{
     NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
 };
 use asap_types::post_asap::Schema;
-use asap_types::types::{ErrorMetric, RequestedAccuracy};
+use asap_types::types::{AccuracyTarget, ErrorMetric};
 
 const EVALUATION_MS: i64 = 300_000;
 const PANE_MS: i64 = 60_000;
 const PANES: i64 = 5;
 
 /// The selected single-build plan for a 5-minute per-series PromQL query.
-fn single_build(query: &str, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
+fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy.clone()).unwrap();
     let root = promql_rows::with_series_identity(&root).unwrap();
     selected_dag(root, accuracy)
@@ -343,7 +343,7 @@ fn values(rows: &[Vec<Value>]) -> Vec<f64> {
 }
 
 /// Returns the per-series values, which every execution path agrees on.
-fn assert_pane_merge_matches_single_build(query: &str, accuracy: RequestedAccuracy) -> Vec<f64> {
+fn assert_pane_merge_matches_single_build(query: &str, accuracy: AccuracyTarget) -> Vec<f64> {
     let single = single_build(query, accuracy);
     let (panes, pane_builds) = tumbling_panes(&single);
     let expected = execute(&single);
@@ -377,7 +377,7 @@ fn assert_pane_merge_matches_single_build(query: &str, accuracy: RequestedAccura
 #[test]
 fn exact_sum_over_tumbling_panes_matches_single_build() {
     let sums =
-        assert_pane_merge_matches_single_build("sum_over_time(m[5m])", RequestedAccuracy::exact());
+        assert_pane_merge_matches_single_build("sum_over_time(m[5m])", AccuracyTarget::exact());
     assert_eq!(sums, vec![210., 2210.]);
 }
 
@@ -387,7 +387,7 @@ fn exact_sum_over_tumbling_panes_matches_single_build() {
 fn quantile_over_tumbling_panes_matches_single_build() {
     let p99 = assert_pane_merge_matches_single_build(
         "quantile_over_time(0.99, m[5m])",
-        RequestedAccuracy::epsilon(0.05).with_metric(ErrorMetric::Relative),
+        AccuracyTarget::epsilon(0.05).with_metric(ErrorMetric::Relative),
     );
     let mut p99 = p99;
     p99.sort_by(f64::total_cmp);
@@ -405,7 +405,7 @@ fn quantile_over_tumbling_panes_matches_single_build() {
 /// by one pane's minute.
 #[test]
 fn exact_rate_over_tumbling_panes_matches_single_build() {
-    let rates = assert_pane_merge_matches_single_build("rate(m[5m])", RequestedAccuracy::exact());
+    let rates = assert_pane_merge_matches_single_build("rate(m[5m])", AccuracyTarget::exact());
     assert_eq!(rates.len(), 2);
     // 19 counted over 285 s of samples, extrapolated to the 5-min window.
     for rate in rates {
@@ -420,14 +420,14 @@ fn exact_rate_over_tumbling_panes_matches_single_build() {
 fn exact_increase_off_the_pane_boundaries_matches_single_build() {
     PHASE_MS.with(|p| p.set(7_000));
     let increases =
-        assert_pane_merge_matches_single_build("increase(m[5m])", RequestedAccuracy::exact());
+        assert_pane_merge_matches_single_build("increase(m[5m])", AccuracyTarget::exact());
     assert_eq!(increases.len(), 2);
 }
 
 /// The single build of `query`, evaluated at `evaluation_ms` over every
 /// sample, as values.
 fn whole_build_values_at(query: &str, evaluation_ms: i64) -> Vec<f64> {
-    let root = single_build(query, RequestedAccuracy::exact());
+    let root = single_build(query, AccuracyTarget::exact());
     let exported = export(&root, &MaterializationAssignment::default());
     let inputs: BTreeMap<u64, Batch> = exported
         .ranges
@@ -484,6 +484,6 @@ fn offset_counter_window_ends_at_the_offset() {
 #[test]
 fn exact_increase_over_tumbling_panes_matches_single_build() {
     let increases =
-        assert_pane_merge_matches_single_build("increase(m[5m])", RequestedAccuracy::exact());
+        assert_pane_merge_matches_single_build("increase(m[5m])", AccuracyTarget::exact());
     assert_eq!(increases.len(), 2);
 }

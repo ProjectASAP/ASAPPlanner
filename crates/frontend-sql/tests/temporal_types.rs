@@ -1,6 +1,6 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::RequestedAccuracy;
+use asap_types::types::AccuracyTarget;
 fn catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
         "t",
@@ -16,7 +16,7 @@ async fn temporal_subtraction_rejects_unrepresentable_duration() {
         let error = lower_sql(
             "SELECT d - d AS elapsed FROM t",
             &catalog,
-            RequestedAccuracy::exact(),
+            AccuracyTarget::exact(),
         )
         .await
         .unwrap_err();
@@ -33,7 +33,7 @@ async fn date_shifts_keep_their_type() {
         "SELECT d + INTERVAL '30' DAY AS shifted FROM t",
         "SELECT d - CAST('1 day' AS INTERVAL) AS shifted FROM t",
     ] {
-        let node = lower_sql(query, &catalog(), RequestedAccuracy::exact())
+        let node = lower_sql(query, &catalog(), AccuracyTarget::exact())
             .await
             .unwrap();
         assert_eq!(node.schema.fields[0].dtype, DataType::Date);
@@ -46,7 +46,7 @@ async fn interval_cast_lowers_like_interval_literal() {
         "SELECT INTERVAL '1' DAY AS duration FROM t",
         "SELECT CAST('1 day' AS INTERVAL) AS duration FROM t",
     ] {
-        let node = lower_sql(query, &catalog(), RequestedAccuracy::exact())
+        let node = lower_sql(query, &catalog(), AccuracyTarget::exact())
             .await
             .unwrap();
         assert_eq!(node.schema.fields[0].dtype, DataType::Interval);
@@ -62,7 +62,7 @@ async fn nested_temporal_subtraction_is_rejected() {
         "SELECT CASE WHEN true THEN INTERVAL '1 day' ELSE d - d END FROM t",
         "SELECT d FROM t ORDER BY d - d",
     ] {
-        let result = lower_sql(query, &catalog(), RequestedAccuracy::exact()).await;
+        let result = lower_sql(query, &catalog(), AccuracyTarget::exact()).await;
         let error = result.expect_err(&format!("accepted unsupported duration: {query}"));
         assert!(
             error.to_string().contains("unsupported duration type"),
@@ -79,7 +79,7 @@ async fn negative_intervals_keep_their_type() {
         "SELECT -CAST('1 day' AS INTERVAL) AS duration FROM t",
         "SELECT -(INTERVAL '1 day' + INTERVAL '2 days') AS duration FROM t",
     ] {
-        let node = lower_sql(query, &catalog(), RequestedAccuracy::exact())
+        let node = lower_sql(query, &catalog(), AccuracyTarget::exact())
             .await
             .unwrap();
         assert_eq!(node.schema.fields[0].dtype, DataType::Interval, "{query}");
@@ -93,7 +93,7 @@ async fn sql_date_literals_keep_their_type() {
         "SELECT DATE '2024-02-29' FROM t",
         "SELECT DATE '1969-12-31' + INTERVAL '1 day' FROM t",
     ] {
-        let node = lower_sql(query, &catalog(), RequestedAccuracy::exact())
+        let node = lower_sql(query, &catalog(), AccuracyTarget::exact())
             .await
             .unwrap();
         assert_eq!(node.schema.fields[0].dtype, DataType::Date);

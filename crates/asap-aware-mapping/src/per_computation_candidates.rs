@@ -2738,7 +2738,19 @@ fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> Sketc
                 &query,
             )
         })
-        .map_or(target.metric, |guarantee| guarantee.spec.metric);
+        .map(|guarantee| guarantee.spec.metric)
+        .or(target.metric);
+    // The split needs a concrete metric. A summary without an error model
+    // whose intent's target sets none is not split (never a guessed
+    // metric): it stays sized for the whole target, and Stage 3 rejects the
+    // candidate if its composed output then misses the query's target.
+    let Some(metric) = metric else {
+        debug_assert!(
+            target.is_exact(),
+            "sizing {algorithm:?} for a share of an approximate target without a metric"
+        );
+        return whole;
+    };
     equal_share(&target, metric, share).map_or(whole, |share| size(&share))
 }
 
@@ -2936,7 +2948,7 @@ fn statistic(intent: &AggIntent) -> Result<SketchStatistic, PerComputationCandid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::types::RequestedAccuracy;
+    use asap_types::types::AccuracyTarget;
     /// Approximate count keeps one exact option, its accumulator, beside the
     /// universal summary; plain exact execution is not offered.
     #[test]
@@ -2961,7 +2973,7 @@ mod tests {
     mod guarantee_composition {
         use super::*;
         use crate::test_support::lower_promql;
-        use asap_types::types::RequestedAccuracy;
+        use asap_types::types::AccuracyTarget;
 
         fn with_bound(metric: ErrorMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
             AccuracyGuarantee::new(
@@ -2983,7 +2995,7 @@ mod tests {
         }
         /// `query` carrying `guarantee`.
         fn node_over(query: &str, guarantee: AccuracyGuarantee) -> Rc<OperatorNode> {
-            let node = lower_promql(query, RequestedAccuracy::exact());
+            let node = lower_promql(query, AccuracyTarget::exact());
             Rc::new((*node).clone().with_guarantee(Some(guarantee)))
         }
         fn scalar(guarantee: AccuracyGuarantee) -> ScalarExpr {
@@ -3591,7 +3603,7 @@ mod tests {
 
     fn inventory(query: &str) -> PerComputationCandidates<usize> {
         let root =
-            crate::test_support::lower_promql(query, RequestedAccuracy::epsilon_delta(0.01, 0.001));
+            crate::test_support::lower_promql(query, AccuracyTarget::epsilon_delta(0.01, 0.001));
         // Per-series state ranks each series' identity, which the rows carry
         // as a column; a query over aggregated rows is planned over labels.
         let root =
@@ -3704,7 +3716,7 @@ mod tests {
     fn whole_expression_topk_partitions_index_the_heap_input() {
         let root = crate::test_support::lower_promql(
             "topk by (job) (2, sum by (service, job) (rate(m[1m])))",
-            RequestedAccuracy::epsilon(0.1),
+            AccuracyTarget::epsilon(0.1),
         );
         let inventory =
             generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
@@ -3786,7 +3798,7 @@ mod tests {
             ("rate(m[1m])", None),
             ("max_over_time(m[1m])", None),
         ] {
-            let root = crate::test_support::lower_promql(query, RequestedAccuracy::exact());
+            let root = crate::test_support::lower_promql(query, AccuracyTarget::exact());
             assert_eq!(samples_of_metric(&root).as_deref(), metric, "{query}");
         }
     }
@@ -4068,7 +4080,7 @@ mod tests {
                 grouping,
             )
         };
-        let input = |query| crate::test_support::lower_promql(query, RequestedAccuracy::exact());
+        let input = |query| crate::test_support::lower_promql(query, AccuracyTarget::exact());
         let guarantee = |family: &FieldDataType, query| {
             source_distinct_guarantee(family, &SketchStatistic::Cardinality, &input(query))
         };
