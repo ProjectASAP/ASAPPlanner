@@ -56,10 +56,77 @@ impl Operator {
                 value,
                 items,
                 groups,
+                filter: None,
             },
             inputs: vec![input],
             output: schema(fields),
         })
+    }
+    /// One HydraCms state shared by every group, emitted as one row per group
+    /// that reads it. Each row adds its `weight` column's value (1 without
+    /// one) to its `item` value; a row whose weight is NULL adds nothing.
+    pub fn shared_summary_build(
+        input: SchemaRef,
+        family: SummaryFamilyType,
+        item: usize,
+        weight: Option<usize>,
+        groups: Vec<usize>,
+    ) -> Result<Self, Error> {
+        crate::values::validate_family(&family)?;
+        crate::factory::create_hydra_cms(&family).map_err(Error::Invalid)?;
+        validate_groups(&input, &groups)?;
+        if !matches!(
+            plain(&input, item)?,
+            (DataType::Utf8 | DataType::Int64 | DataType::Bool, false)
+        ) {
+            return Err(invalid(
+                "HydraCms items must be non-null Utf8, Int64 or Bool",
+            ));
+        }
+        if let Some(weight) = weight {
+            if !matches!(
+                plain(&input, weight)?.0,
+                DataType::Float64 | DataType::Int64
+            ) {
+                return Err(invalid("HydraCms weights must be Float64 or Int64"));
+            }
+        }
+        let mut fields = groups
+            .iter()
+            .map(|&i| input.fields[i].clone())
+            .collect::<Vec<_>>();
+        fields.push(SummaryField {
+            name: "state".into(),
+            dtype: family.clone(),
+            nullable: false,
+            table: None,
+        });
+        Ok(Self {
+            kind: Kind::SharedSummaryBuild {
+                family,
+                item,
+                weight,
+                groups,
+                filter: None,
+            },
+            inputs: vec![input],
+            output: schema(fields),
+        })
+    }
+    /// Update the summary only from rows where `filter` is true (a filtered
+    /// `SummaryAgg`). Every group still gets a state, so a group with no
+    /// matching row reads as an empty summary.
+    pub fn with_row_filter(mut self, filter: Expression) -> Result<Self, Error> {
+        if filter.dtype(&self.inputs[0])?.0 != DataType::Bool {
+            return Err(invalid("summary filter must be boolean"));
+        }
+        match &mut self.kind {
+            Kind::SummaryBuild { filter: slot, .. }
+            | Kind::KeyedSummaryBuild { filter: slot, .. }
+            | Kind::SharedSummaryBuild { filter: slot, .. } => *slot = Some(Box::new(filter)),
+            _ => return Err(invalid("a row filter needs a summary build")),
+        }
+        Ok(self)
     }
     pub fn keyed_evaluation(
         input: SchemaRef,
@@ -142,6 +209,7 @@ impl Operator {
                 value,
                 time,
                 groups,
+                filter: None,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -240,10 +308,11 @@ pub(super) fn execute<'a>(
             value,
             time,
             groups,
+            filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_summary(input, family, *value, *time, groups, !operator.inputs[0].has_promql_series_identity(), &context).await?,
+                build_summary(input, family, *value, *time, groups, filter.as_deref(), !operator.inputs[0].has_promql_series_identity(), &context).await?,
             )
         })
         .boxed_local()),
@@ -252,10 +321,26 @@ pub(super) fn execute<'a>(
             value,
             items,
             groups,
+            filter,
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_keyed_summary(input, family, *value, items, groups, &context).await?,
+                build_keyed_summary(input, family, *value, items, groups, filter.as_deref(), &context)
+                    .await?,
+            )
+        })
+        .boxed_local()),
+        Kind::SharedSummaryBuild {
+            family,
+            item,
+            weight,
+            groups,
+            filter,
+        } => Ok(futures::stream::once(async move {
+            Batch::try_new(
+                output,
+                build_shared_summary(input, family, *item, *weight, groups, filter.as_deref(), &context)
+                    .await?,
             )
         })
         .boxed_local()),
@@ -302,6 +387,12 @@ pub(super) fn execute<'a>(
                         return Err(invalid("summary value required"));
                     };
                     row[*state] = match query {
+                        // A filtered or NULL-only group's quantile is SQL NULL.
+                        SummaryEvaluation::Sketch(_)
+                            if output.fields[*state].nullable && summary.is_empty() =>
+                        {
+                            Value::Null
+                        }
                         SummaryEvaluation::Sketch(query) => {
                             let value = summary
                                 .estimate(query)
@@ -376,12 +467,14 @@ pub(super) fn execute_merge<'a>(
     .boxed_local())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,
     value: usize,
     time: Option<usize>,
     groups: &[usize],
+    filter: Option<&Expression>,
     emit_empty_global: bool,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
@@ -432,6 +525,9 @@ async fn build_summary(
                 )?;
                 states.insert(key.clone(), state);
             }
+            if !selected(filter, row)? {
+                continue;
+            }
             let (_, updater, memory, overhead, previous) =
                 states.get_mut(&key).expect("inserted group");
             // SQL aggregates ignore NULL samples while retaining the group.
@@ -474,12 +570,20 @@ async fn build_summary(
         })
         .collect())
 }
+/// Whether a row passes a summary build's filter: only a true predicate
+/// does, as with SQL `FILTER (WHERE …)`.
+fn selected(filter: Option<&Expression>, row: &[Value]) -> Result<bool, Error> {
+    filter.map_or(Ok(true), |filter| {
+        Ok(matches!(filter.evaluate(row)?, Value::Bool(true)))
+    })
+}
 async fn merge_summary(
     mut rows: Vec<Vec<Value>>,
     state_column: usize,
     groups: &[usize],
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
+    use crate::summary_kernels::{HydraCms, HydraCmsGroup};
     // Counter states join consecutive windows pairwise, which is exact only
     // in time order: order the inputs by their window start.
     if let Some(Value::Summary { family, .. }) = rows.first().map(|row| &row[state_column]) {
@@ -500,15 +604,63 @@ async fn merge_summary(
     let mut work = Cooperative::new(context);
     let mut memory = context.reserve(0)?;
     let mut retained = 0usize;
+    // States shared by several groups (Hydra grids) are reserved once each.
+    let mut shared = BTreeMap::<usize, usize>::new();
+    // Each distinct pair of Hydra grids merges once, and every group of the
+    // pair reads the one merged grid. The inputs are kept so their addresses
+    // stay unique while they key the memo.
+    type GridPair = (Arc<HydraCms>, Arc<HydraCms>, Arc<HydraCms>);
+    let mut grids = BTreeMap::<(usize, usize), GridPair>::new();
     for row in rows {
         work.checkpoint().await?;
         let Value::Summary { family, state } = &row[state_column] else {
             return Err(invalid("summary state required"));
         };
+        if let Some((id, bytes)) = state.shared_state() {
+            if shared.insert(id, bytes).is_none() {
+                retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
+                memory.resize(retained)?;
+            }
+        }
         let key = group_key(&row, groups)?;
         if let Some((_, expected, existing)) = states.get_mut(&key) {
             if expected != family {
                 return Err(invalid("incompatible summary family"));
+            }
+            if let (Some(left), Some(right)) = (
+                existing.as_any().downcast_ref::<HydraCmsGroup>(),
+                state.as_any().downcast_ref::<HydraCmsGroup>(),
+            ) {
+                if left.group != right.group {
+                    return Err(invalid("HydraCms merge requires the same group"));
+                }
+                let pair = (
+                    Arc::as_ptr(&left.grid) as usize,
+                    Arc::as_ptr(&right.grid) as usize,
+                );
+                let grid = match grids.entry(pair) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.get().2.clone(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let merged = Arc::new(
+                            left.grid
+                                .merge(&right.grid)
+                                .map_err(|e| Error::Operator(e.to_string()))?,
+                        );
+                        let bytes = merged.approx_memory_bytes();
+                        shared.insert(Arc::as_ptr(&merged) as usize, bytes);
+                        retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
+                        memory.resize(retained)?;
+                        entry
+                            .insert((left.grid.clone(), right.grid.clone(), merged))
+                            .2
+                            .clone()
+                    }
+                };
+                *existing = Arc::new(HydraCmsGroup {
+                    grid,
+                    group: left.group.clone(),
+                });
+                continue;
             }
             let old_bytes = existing.approx_memory_bytes();
             // Reserve an estimate for the replacement while both input states remain live.
@@ -558,6 +710,7 @@ async fn build_keyed_summary(
     value: usize,
     items: &[usize],
     groups: &[usize],
+    filter: Option<&Expression>,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
     use crate::{summary_kernels::weighted_frequency::WeightedFrequency, AggregateCore};
@@ -594,6 +747,9 @@ async fn build_keyed_summary(
                     ),
                 );
             }
+            if !selected(filter, row)? {
+                continue;
+            }
             let (_, summary, reservation, overhead) = states.get_mut(&key).unwrap();
             let Value::Float64(weight) = row[value] else {
                 return Err(invalid("weighted frequency weight type"));
@@ -621,4 +777,94 @@ async fn build_keyed_summary(
             labels
         })
         .collect())
+}
+
+async fn build_shared_summary(
+    mut input: Input<'_, Batch>,
+    family: &SummaryFamilyType,
+    item: usize,
+    weight: Option<usize>,
+    groups: &[usize],
+    filter: Option<&Expression>,
+    context: &RunContext,
+) -> Result<Vec<Vec<Value>>, Error> {
+    use crate::summary_kernels::HydraCmsGroup;
+    let mut grid = crate::factory::create_hydra_cms(family).map_err(Error::Invalid)?;
+    let grid_bytes = grid.approx_memory_bytes();
+    let mut memory = context.reserve(grid_bytes)?;
+    let mut retained = grid_bytes;
+    let mut work = Cooperative::new(context);
+    // Group labels and the group's Hydra subpopulation name, an injective
+    // encoding of its typed key.
+    let mut seen = BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, String)>::new();
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        for row in batch.rows() {
+            work.checkpoint().await?;
+            let key = group_key(row, groups)?;
+            if !seen.contains_key(&key) {
+                let name = key
+                    .iter()
+                    .map(|part| part.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let labels = groups.iter().map(|&i| row[i].clone()).collect::<Vec<_>>();
+                retained +=
+                    key_bytes(&key) + labels.iter().map(Value::bytes).sum::<usize>() + name.len();
+                memory.resize(retained)?;
+                seen.insert(key.clone(), (labels, name));
+            }
+            if !selected(filter, row)? {
+                continue;
+            }
+            let weight = match weight.map(|i| &row[i]) {
+                None => 1,
+                Some(Value::Null) => continue,
+                Some(value) => hydra_weight(value)?,
+            };
+            let item = match &row[item] {
+                Value::Utf8(v) => v.to_string(),
+                Value::Int64(v) => v.to_string(),
+                Value::Bool(v) => v.to_string(),
+                _ => return Err(Error::Operator("HydraCms item must be non-null".into())),
+            };
+            grid.count(&seen[&key].1, &item, weight)
+                .map_err(|e| Error::Operator(e.to_string()))?;
+        }
+    }
+    let grid = Arc::new(grid);
+    Ok(seen
+        .into_values()
+        .map(|(mut labels, group)| {
+            labels.push(Value::Summary {
+                family: family.clone(),
+                state: Arc::new(HydraCmsGroup {
+                    grid: grid.clone(),
+                    group,
+                }),
+            });
+            labels
+        })
+        .collect())
+}
+
+/// One row's HydraCms weight. sketchlib's Hydra adds `i32` weights, so a
+/// weight must be a non-negative integer within `i32`.
+fn hydra_weight(value: &Value) -> Result<i32, Error> {
+    let weight = match value {
+        Value::Int64(v) => *v as f64,
+        Value::Float64(v) => *v,
+        _ => return Err(Error::Operator("HydraCms weight type".into())),
+    };
+    if weight < 0.0 {
+        return Err(Error::Operator(format!(
+            "HydraCms weights must be non-negative, got {weight}"
+        )));
+    }
+    if !(weight.is_finite() && weight.fract() == 0.0 && weight <= f64::from(i32::MAX)) {
+        return Err(Error::Operator(format!(
+            "HydraCms weights must be integers within i32 (asap_sketchlib's Hydra adds i32 weights), got {weight}"
+        )));
+    }
+    Ok(weight as i32)
 }

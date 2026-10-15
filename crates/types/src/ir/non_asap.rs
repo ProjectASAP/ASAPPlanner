@@ -529,6 +529,23 @@ impl NonASAPOp {
                         }
                     }
                 }
+                // Over a relation, a quantile is also NULL for a global
+                // aggregate of no row and a group whose values are all NULL.
+                if child.result_kind == OperatorResultKind::Relation {
+                    for (index, measure) in measures.iter().enumerate() {
+                        if matches!(measure, AggIntent::Quantile { .. })
+                            && (offset == 0
+                                || measure
+                                    .input_cols()
+                                    .iter()
+                                    .any(|i| child.schema.fields[*i].nullable))
+                        {
+                            if let Some(field) = output.fields.get_mut(offset + index) {
+                                field.nullable = true;
+                            }
+                        }
+                    }
+                }
                 if child.result_kind == OperatorResultKind::Relation {
                     for (index, measure) in measures.iter().enumerate() {
                         if matches!(
