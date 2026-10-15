@@ -1,9 +1,9 @@
 use crate::summary_kernels::hll_sketch::HllSketchAccumulator;
 use crate::summary_kernels::univmon::UnivMonAccumulator;
+use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
 use crate::summary_kernels::{
-    CountMinSketchAccumulator, CountMinSketchWithHeapAccumulator, CountSketchAccumulator,
-    CountSketchWithHeapAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms,
-    HydraKllSketchAccumulator,
+    CountMinSketchAccumulator, CountMinSketchWithHeapAccumulator, CountSketchWithHeapAccumulator,
+    DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms, HydraKllSketchAccumulator,
 };
 use crate::{AggregateCore, KeyByLabelValues};
 use planner_types::post_asap::{FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams};
@@ -324,29 +324,32 @@ impl AccumulatorUpdater for CmsHeapAccumulatorUpdater {
 }
 
 // ---------------------------------------------------------------------------
-// CountSketchAccumulatorUpdater (real median-of-signed-rows CountSketch)
+// CountSketchAccumulatorUpdater (median-of-signed-rows CountSketch, no heap)
 // ---------------------------------------------------------------------------
 
-/// Keyed point-frequency updater backed by a real `asap_sketchlib::CountSketch`
+/// Keyed point-frequency updater backed by sketchlib's per-row-seeded
+/// weighted frequency kernel in CountSketch mode with no candidate heap
 /// (signed rows, median-of-rows estimator) — distinct math from
-/// `CmsAccumulatorUpdater`'s CMS (min-of-rows).
+/// `CmsAccumulatorUpdater`'s CMS (min-of-rows). Each label value of the key
+/// is one `Utf8` identity, as in the keyed heap build.
 ///
 /// As with bare CMS, each raw Prometheus sample contributes its `value`.
 /// Unit event counting must be selected explicitly by a future typed plan
 /// contract rather than being implied by `SketchAlgorithm::CountSketch`.
 pub struct CountSketchAccumulatorUpdater {
-    acc: CountSketchAccumulator,
+    acc: WeightedFrequency,
     row_num: usize,
     col_num: usize,
 }
 
 impl CountSketchAccumulatorUpdater {
-    pub fn new(row_num: usize, col_num: usize) -> Self {
-        Self {
-            acc: CountSketchAccumulator::new(row_num, col_num),
+    /// Fails for a zero or even `row_num`: the median needs an odd row count.
+    pub fn new(row_num: usize, col_num: usize) -> Result<Self, crate::Error> {
+        Ok(Self {
+            acc: WeightedFrequency::new(FrequencyAlgorithm::CountSketch, col_num, row_num, 0)?,
             row_num,
             col_num,
-        }
+        })
     }
 }
 
@@ -359,13 +362,28 @@ impl AccumulatorUpdater for CountSketchAccumulatorUpdater {
     }
 
     fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
-        self.acc.inner.update(&key.to_semicolon_str(), value);
+        let identity = key
+            .labels
+            .iter()
+            .map(|label| crate::values::Value::Utf8(label.as_str().into()))
+            .collect::<Vec<_>>();
+        // Inputs pass `validate_single_input` (finite) first; only a sum past
+        // `f64::MAX` can fail here.
+        self.acc
+            .update(&identity, value)
+            .expect("CountSketch counter overflow");
     }
 
     impl_clone_accumulator_methods!(acc);
 
     fn reset(&mut self) {
-        self.acc = CountSketchAccumulator::new(self.row_num, self.col_num);
+        self.acc = WeightedFrequency::new(
+            FrequencyAlgorithm::CountSketch,
+            self.col_num,
+            self.row_num,
+            0,
+        )
+        .expect("dimensions validated at construction");
     }
 
     fn is_keyed(&self) -> bool {
@@ -373,8 +391,7 @@ impl AccumulatorUpdater for CountSketchAccumulatorUpdater {
     }
 
     fn memory_usage_bytes(&self) -> usize {
-        std::mem::size_of::<CountSketchAccumulator>()
-            + self.row_num * self.col_num * std::mem::size_of::<f64>()
+        self.acc.approx_memory_bytes()
     }
 }
 
@@ -582,7 +599,7 @@ pub fn create_planner_accumulator(
         }
         (SketchAlgorithm::CountSketch, params @ SketchParams::CountSketch { .. }) => {
             let (r, c) = cms_dims(params);
-            Box::new(CountSketchAccumulatorUpdater::new(r, c))
+            Box::new(CountSketchAccumulatorUpdater::new(r, c).map_err(|e| e.to_string())?)
         }
         (SketchAlgorithm::CmsWithHeap, params @ SketchParams::CmsWithHeap { .. }) => {
             let (r, c, h) = cms_heap_dims(params);
@@ -787,11 +804,12 @@ mod planner_parameter_regression {
                     (s.inner.rows(), s.inner.cols())
                 }
                 SketchAlgorithm::CountSketch => {
-                    let s = state
+                    let (width, depth, _) = state
                         .as_any()
-                        .downcast_ref::<CountSketchAccumulator>()
-                        .unwrap();
-                    (s.inner.rows, s.inner.cols)
+                        .downcast_ref::<WeightedFrequency>()
+                        .unwrap()
+                        .shape();
+                    (depth, width)
                 }
                 SketchAlgorithm::CmsWithHeap => {
                     let s = state
