@@ -560,13 +560,14 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
 /// its own candidates, absorbing the inner target. Applied only when the
 /// inner sum has no other consumer, so absorbing it removes its work, when
 /// neither has a filter or `HAVING` ([`nested_sum_input`]), and when the
-/// outer sum is not itself absorbed (by a whole-expression top-k above
-/// it), so an absorbing target is never absorbed.
+/// outer sum is not itself absorbed (by a whole-expression top-k or a
+/// nested-sum merge above it) and the inner sum absorbs nothing, so an
+/// absorbing target is never absorbed and merges do not stack.
 fn add_nested_sum_candidates(
     targets: &mut [ComputationTarget],
     consumers: &HashMap<*const OperatorNode, Vec<Option<Rc<OperatorNode>>>>,
 ) {
-    let absorbed: HashSet<usize> = targets.iter().filter_map(|t| t.absorbs).collect();
+    let mut absorbed: HashSet<usize> = targets.iter().filter_map(|t| t.absorbs).collect();
     for t in 0..targets.len() {
         let target = &targets[t];
         if absorbed.contains(&t) || target.absorbs.is_some() || !target.having.is_empty() {
@@ -581,12 +582,16 @@ fn add_nested_sum_candidates(
         else {
             continue;
         };
+        // An absorbing target is never absorbed: the inner sum must not
+        // absorb a sum of its own.
         if consumers.get(&Rc::as_ptr(child)).map(Vec::len) != Some(1)
             || !targets[inner].having.is_empty()
+            || targets[inner].absorbs.is_some()
             || nested_sum_input(&target.target).is_none()
         {
             continue;
         }
+        absorbed.insert(inner);
         let target = &mut targets[t];
         target
             .choices
@@ -600,7 +605,8 @@ fn add_nested_sum_candidates(
 /// input rows by column, [`partitions_over`]) of a nested-sum merge of
 /// `target`, or `None` when it does not apply: `target` is a grouped `sum`
 /// (not by `without`) of the value column of a per-series or grouped `sum`
-/// directly beneath it, neither filtered nor with `HAVING`.
+/// directly beneath it, neither filtered nor with `HAVING`, and not grouped
+/// by the metric name a per-series inner sum drops.
 fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggIntent, Reduction)> {
     use asap_types::ir::non_asap::any_measure_filtered;
     let Some(NonASAPOp::Aggregate {
@@ -646,6 +652,19 @@ fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggInten
         Some(column) => *column,
     };
     if summed != value || by.keys().contains(&value) {
+        return None;
+    }
+    // A per-series sum drops the metric name, which the raw rows keep:
+    // grouping them by it would name groups the nested sums leave unnamed.
+    if matches!(inner_reduction, Reduction::PerEntity)
+        && by.keys().iter().any(|&key| {
+            inner
+                .schema
+                .fields
+                .get(key)
+                .is_some_and(|f| f.name == "__name__")
+        })
+    {
         return None;
     }
     let partitions = partitions_over(reduction, &inner.schema, &rows.schema)?;
@@ -4072,6 +4091,51 @@ mod tests {
         ] {
             assert_eq!(nested_sum_target(&inventory(query)), None, "{query}");
         }
+    }
+
+    /// A per-series sum drops the metric name, but the raw samples keep it:
+    /// grouping the merge by `__name__` would answer the metric's name where
+    /// the nested sums answer none, so no merge is offered.
+    #[test]
+    fn nested_sum_merge_never_groups_by_the_dropped_metric_name() {
+        let query = "sum by (__name__) (sum_over_time(m[5m]))";
+        assert_eq!(nested_sum_target(&inventory(query)), None);
+    }
+
+    /// Merges do not stack: in `sum(sum by (job) (sum_over_time(m[5m])))`
+    /// a target that absorbs is never absorbed, and `combinations` counts
+    /// exactly the choices enumeration keeps.
+    #[test]
+    fn nested_sum_merges_do_not_stack() {
+        let inventory = inventory("sum(sum by (job) (sum_over_time(m[5m])))");
+        let absorbed: Vec<usize> = inventory.targets.iter().filter_map(|t| t.absorbs).collect();
+        assert_eq!(absorbed.len(), 1, "one merge");
+        for &a in &absorbed {
+            assert!(
+                inventory.targets[a].absorbs.is_none(),
+                "an absorbed target absorbs"
+            );
+        }
+        let mut enumerated = 0;
+        let mut choice = vec![0; inventory.targets.len()];
+        loop {
+            if !inventory.absorbed_choice_varies(&choice) {
+                enumerated += 1;
+            }
+            let mut carry = true;
+            for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
+                *digit += 1;
+                if *digit < target.choices.candidates.len() {
+                    carry = false;
+                    break;
+                }
+                *digit = 0;
+            }
+            if carry {
+                break;
+            }
+        }
+        assert_eq!(inventory.combinations(), enumerated);
     }
 
     /// `combinations` counts each choice once: picking a whole-expression
