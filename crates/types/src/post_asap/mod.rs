@@ -42,7 +42,7 @@ pub use family_capability::{
 };
 pub use guarantee::{
     AccuracyError, AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator,
-    GuaranteeSource, ProbabilityExpr,
+    GuaranteeSource, ProbabilityExpr, VALUES_PER_RESULT,
 };
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,

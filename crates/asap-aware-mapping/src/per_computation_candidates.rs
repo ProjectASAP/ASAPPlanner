@@ -109,7 +109,7 @@ use crate::accuracy::composition::{
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
 use crate::accuracy::estimators::{hll, univmon};
-use crate::accuracy::{equal_share, AccuracyModel, DefaultAccuracyModel, PropagationStats};
+use crate::accuracy::{per_input_target, AccuracyModel, DefaultAccuracyModel, PropagationStats};
 use crate::function_rules::function_rules;
 use crate::realization::{
     accuracy_budget, accuracy_target, default_size_params, summary_candidates,
@@ -1091,7 +1091,7 @@ pub(crate) fn with_resized_summaries(
 /// rows of, as [`source_distinct_guarantee`] reads it: the source whose
 /// distinct bound gives its failure probability. `None` for a state over
 /// computed rows or several sources.
-pub(crate) fn summary_source(state: &OperatorNode) -> Option<String> {
+pub(crate) fn distinct_bound_source(state: &OperatorNode) -> Option<String> {
     let Some(ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. }) = state.asap()
     else {
         return None;
@@ -2914,7 +2914,7 @@ impl Sizing {
 }
 
 /// `algorithm` sized for one of `share` equal shares of `intent`'s accuracy
-/// requirement ([`equal_share`]), split in the metric of the summary's own
+/// requirement ([`per_input_target`]), split in the metric of the summary's own
 /// bound: a relative error splits multiplicatively.
 fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> SketchKind {
     let target = accuracy_target(intent).unwrap_or_else(AccuracyTarget::exact);
@@ -2950,7 +2950,7 @@ fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> Sketc
         );
         return whole;
     };
-    equal_share(&target, metric, share).map_or(whole, |share| size(&share))
+    per_input_target(&target, metric, share).map_or(whole, |share| size(&share))
 }
 
 /// What a measure's state reads from each row of `input`, resolvable there.

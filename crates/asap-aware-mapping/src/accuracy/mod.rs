@@ -12,7 +12,7 @@ pub mod estimators;
 pub mod evidence;
 pub mod reconciliation;
 
-pub use budget::{equal_share, equal_shares};
+pub use budget::per_input_target;
 pub use evidence::{
     AccuracyEvidenceProvider, NoAccuracyEvidence, OperandDomain, PropagationStats,
     WorkloadAccuracyEvidence,
@@ -152,7 +152,7 @@ fn metric_meets(guarantee: AccuracyMetric, target: AccuracyMetric) -> bool {
 /// does. A whole-result guarantee covers a per-value target (each value is
 /// in the result), but a per-value one does not cover a whole-result
 /// target: it must first be stated over the result's values
-/// ([`whole_result_guarantee`]). The scope bounds only the failure
+/// ([`AccuracyGuarantee::over_whole_result`]). The scope bounds only the failure
 /// probability, so it does not matter for a target without a δ requirement
 /// or for a guarantee that never fails.
 fn scope_meets(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
@@ -172,41 +172,6 @@ pub fn native_target(target: &AccuracyTarget, guarantee: &AccuracyGuarantee) -> 
         .clone()
         .accuracy_metric(guarantee.spec.accuracy_metric)
         .accuracy_scope(AccuracyScope::PerValue)
-}
-
-/// The statistic an unbound number of output values per evaluation is left
-/// as ([`whole_result_guarantee`]); nothing binds it, so the failure
-/// probability stays unknown.
-pub const OUTPUT_VALUES: &str = "output_values_per_evaluation";
-
-/// `guarantee` stated over the whole result of one evaluation, of
-/// `output_values` values (`G`): a per-value failure probability `δ` becomes
-/// `G · δ` by the union bound over the values, whatever their dependence.
-/// The error is unchanged. A guarantee that never fails (`δ = 0`) holds for
-/// every value at once whatever `G`; an unbound `G` (`None`) leaves the
-/// failure probability symbolic in [`OUTPUT_VALUES`]. A whole-result
-/// guarantee is returned as it is.
-pub fn whole_result_guarantee(
-    guarantee: &AccuracyGuarantee,
-    output_values: Option<f64>,
-) -> AccuracyGuarantee {
-    let mut whole = guarantee.clone();
-    if guarantee.spec.accuracy_scope == AccuracyScope::WholeResult {
-        return whole;
-    }
-    whole.spec.accuracy_scope = AccuracyScope::WholeResult;
-    if !guarantee.spec.failure_probability.is_zero() {
-        whole.spec.failure_probability = ProbabilityExpr::Scaled {
-            count: output_values.map_or_else(
-                || BoundExpr::Unknown {
-                    statistic: OUTPUT_VALUES.into(),
-                },
-                |value| BoundExpr::Constant { value },
-            ),
-            inner: Box::new(guarantee.spec.failure_probability.clone()),
-        };
-    }
-    whole
 }
 
 pub(crate) use estimators::topk_capacity;
@@ -305,7 +270,7 @@ mod tests {
 
     /// A per-value guarantee does not meet a whole-result δ target
     /// directly: over `G` output values it holds for all of them with
-    /// δ_whole = G · δ_per ([`whole_result_guarantee`]), and an unbound `G`
+    /// δ_whole = G · δ_per ([`AccuracyGuarantee::over_whole_result`]), and an unbound `G`
     /// leaves it unmet. A whole-result guarantee meets a per-value target
     /// directly.
     #[test]
@@ -318,19 +283,19 @@ mod tests {
         assert!(!model.satisfies(&g, &whole));
         let per_value = whole.clone().accuracy_scope(AccuracyScope::PerValue);
         assert!(model.satisfies(&g, &per_value));
-        let over = |values| whole_result_guarantee(&g, values);
+        let over = |values| g.over_whole_result(values);
         assert_eq!(
-            over(Some(10.0)).spec.accuracy_scope,
+            over(Some(10)).spec.accuracy_scope,
             AccuracyScope::WholeResult
         );
         assert_eq!(
-            over(Some(10.0)).spec.failure_probability.evaluate(),
+            over(Some(10)).spec.failure_probability.evaluate(),
             Some(0.01)
         );
-        assert!(model.satisfies(&over(Some(10.0)), &whole));
-        assert!(!model.satisfies(&over(Some(11.0)), &whole));
+        assert!(model.satisfies(&over(Some(10)), &whole));
+        assert!(!model.satisfies(&over(Some(11)), &whole));
         assert!(!model.satisfies(&over(None), &whole));
-        assert!(model.satisfies(&over(Some(10.0)), &per_value));
+        assert!(model.satisfies(&over(Some(10)), &per_value));
     }
 
     /// The scope bounds only the failure probability: a target without a δ
@@ -351,7 +316,7 @@ mod tests {
             .failure_probability(0.01)
             .accuracy_metric(AccuracyMetric::Relative);
         assert!(model.satisfies(&never_fails, &whole));
-        assert!(model.satisfies(&whole_result_guarantee(&never_fails, None), &whole));
+        assert!(model.satisfies(&never_fails.over_whole_result(None), &whole));
     }
 
     /// A target whose metric the user did not set accepts a guarantee in

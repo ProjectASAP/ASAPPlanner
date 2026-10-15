@@ -384,6 +384,11 @@ pub enum GuaranteeSource {
     },
 }
 
+/// The statistic an unbound number of values per result is left as
+/// ([`AccuracyGuarantee::over_whole_result`]); nothing binds it, so the
+/// failure probability stays unknown.
+pub const VALUES_PER_RESULT: &str = "values_per_result";
+
 /// The machine-readable accuracy statement attached to a finalized
 /// post-ASAP value — see the module docs for its semantics. Its
 /// [`AccuracySpec`] is symbolic, for plan selection to bind; a guarantee a
@@ -457,6 +462,36 @@ impl AccuracyGuarantee {
                 reason: reason.into(),
             }],
         )
+    }
+
+    /// This guarantee stated over the whole result of one evaluation of
+    /// `values_per_result` values (`G`): a per-value failure probability
+    /// `δ` becomes `G · δ` by the union bound over the values, whatever
+    /// their dependence. The error is unchanged. A guarantee that never
+    /// fails (`δ = 0`) holds for every value at once whatever `G`; an
+    /// unbound `G` (`None`) leaves the failure probability symbolic in
+    /// [`VALUES_PER_RESULT`]. A whole-result guarantee is returned as it is.
+    /// Plan selection uses it to check a whole-result target.
+    pub fn over_whole_result(&self, values_per_result: Option<u64>) -> Self {
+        let mut whole = self.clone();
+        if self.spec.accuracy_scope == AccuracyScope::WholeResult {
+            return whole;
+        }
+        whole.spec.accuracy_scope = AccuracyScope::WholeResult;
+        if !self.spec.failure_probability.is_zero() {
+            whole.spec.failure_probability = ProbabilityExpr::Scaled {
+                count: values_per_result.map_or_else(
+                    || BoundExpr::Unknown {
+                        statistic: VALUES_PER_RESULT.into(),
+                    },
+                    |values| BoundExpr::Constant {
+                        value: values as f64,
+                    },
+                ),
+                inner: Box::new(self.spec.failure_probability.clone()),
+            };
+        }
+        whole
     }
 
     /// `true` iff this guarantee promises zero error with certainty.

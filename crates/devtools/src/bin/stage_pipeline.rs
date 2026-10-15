@@ -412,13 +412,11 @@ fn plan_selection_json(
             let queries: Vec<Value> = queries
                 .iter()
                 .map(|accepted| {
-                    accepted.as_ref().map_or(Value::Null, |accepted| {
-                        json!({
-                            "target_metric": accepted.target_metric,
-                            "accepted_metric": accepted.accepted_metric,
-                            "sketches": accepted.sketches,
-                            "summary": accepted.to_string(),
-                        })
+                    json!({
+                        "target_metric": accepted.target_metric,
+                        "accepted_metric": accepted.accepted_metric,
+                        "sketches": accepted.sketches,
+                        "summary": accepted.to_string(),
                     })
                 })
                 .collect();

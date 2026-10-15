@@ -378,7 +378,8 @@ use std::rc::{Rc, Weak};
 
 use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
-    equal_shares, AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
+    per_input_target, AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel,
+    NoAccuracyEvidence,
 };
 use crate::cost_model::{
     raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
@@ -1528,7 +1529,7 @@ impl<'a> ASAPStrategies<'a> {
                 continue;
             };
             let (metric, layer_count) = (local.spec.accuracy_metric, 1 + child_layers);
-            let Some(outer_target) = equal_shares(&target, metric, layer_count, 1) else {
+            let Some(outer_target) = per_input_target(&target, metric, layer_count) else {
                 proposals.rejected.push(RejectedCandidate {
                     strategy: "ASAPStrategies",
                     description: rationale.clone(),
@@ -1543,7 +1544,7 @@ impl<'a> ASAPStrategies<'a> {
                 .and_then(|child| bindable_intent(child))
                 .and_then(accuracy_target);
             let inner_target = (layer_count > 1)
-                .then(|| equal_shares(&target, metric, layer_count, layer_count - 1))
+                .then(|| nested_layers_target(&target, metric, layer_count, layer_count - 1))
                 .flatten();
             let (eps, delta) = accuracy_budget(&outer_target);
             let resized = Realization::Sketch(SketchKind::new(
@@ -1791,7 +1792,7 @@ pub(crate) fn realize_child(
 
 /// [`realize_child`] with every model explicit, plus an optional
 /// `end_to_end_target` for `root`'s own value (issue #172): when an
-/// equal budget split ([`equal_shares`]) hands an approximate child a share of its
+/// equal budget split ([`per_input_target`]) hands an approximate child a share of its
 /// parent's budget, the child is re-enumerated with that share substituted
 /// for its declared `AccuracyTarget` — sizing its sketch (and, recursively,
 /// re-splitting for its own approximate children) under the allocated
@@ -2044,7 +2045,7 @@ fn realize_binary(
             {
                 return Ok(None);
             }
-            let Some(local_target) = equal_shares(target, metric, approximate.len(), 1) else {
+            let Some(local_target) = per_input_target(target, metric, approximate.len()) else {
                 return Ok(None);
             };
             for (operand_index, _) in approximate {
@@ -6548,9 +6549,45 @@ fn walk_children(
     }
 }
 
+/// `shares` of `of` equal shares of `target`, in `metric`'s composition:
+/// the target of a nested sub-DAG holding `shares` of a node's `of`
+/// approximate layers ([`per_input_target`] is one share). `None` for an
+/// exact target or an ε that is not positive and finite.
+fn nested_layers_target(
+    target: &AccuracyTarget,
+    metric: asap_types::types::AccuracyMetric,
+    of: usize,
+    shares: usize,
+) -> Option<AccuracyTarget> {
+    if target.is_exact() || !(target.error.is_finite() && target.error > 0.0) {
+        return None;
+    }
+    let fraction = shares.min(of.max(1)) as f64 / of.max(1) as f64;
+    let error = match metric {
+        asap_types::types::AccuracyMetric::Relative => (1.0 + target.error).powf(fraction) - 1.0,
+        _ => target.error * fraction,
+    };
+    Some(AccuracyTarget {
+        error,
+        failure_probability: target.failure_probability.map(|delta| delta * fraction),
+        ..target.clone()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A nested sub-DAG holding `shares` of `of` approximate layers gets
+    /// that fraction of an additive target's ε and δ.
+    #[test]
+    fn a_nested_sub_dag_gets_its_layers_share_of_the_target() {
+        let target = AccuracyTarget::max_error(0.1).failure_probability(0.02);
+        let rest = nested_layers_target(&target, asap_types::types::AccuracyMetric::ABSOLUTE, 3, 2)
+            .unwrap();
+        assert!((rest.error - 0.1 * 2.0 / 3.0).abs() < 1e-12);
+        assert!((rest.failure_probability.unwrap() - 0.02 * 2.0 / 3.0).abs() < 1e-12);
+    }
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
     use crate::test_support::{
