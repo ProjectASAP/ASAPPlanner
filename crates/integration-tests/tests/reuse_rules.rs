@@ -272,6 +272,11 @@ fn reused(run: &Stage1ToStage3Run<usize>, id: &str) -> Vec<String> {
         .roots
         .as_deref()
         .unwrap_or_default();
+    let roots = logical
+        .iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.roots.as_deref().ok())
+        .unwrap_or_default();
     // A Pass 2 candidate with only one reuse candidate, labelled alone.
     let only = |rollup_candidates, topk_reuse_candidates| Pass2Candidate {
         shared_builds: Vec::new(),
@@ -292,7 +297,7 @@ fn reused(run: &Stage1ToStage3Run<usize>, id: &str) -> Vec<String> {
                 .map(|c| only(Vec::new(), vec![c.clone()])),
         )
         .map(|p| {
-            pass2_label(&p, pass1_roots)
+            pass2_label(&p, pass1_roots, roots)
                 .trim_start_matches(" · ")
                 .to_string()
         })

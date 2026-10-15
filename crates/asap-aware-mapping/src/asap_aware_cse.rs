@@ -185,7 +185,7 @@ fn pair(
 }
 
 /// Every Pass 2 candidate of the identical-expression rule for the
-/// candidate with query roots `roots` and sharing candidates `groups`
+/// candidate with query roots `roots` and sharing candidates `candidates`
 /// ([`sharing_candidates`]): one per non-empty subset of them that gives a
 /// distinct Pass 2 candidate, in binary-counter order of the subsets (the
 /// first sharing candidate the lowest bit). Empty when nothing is
@@ -199,9 +199,9 @@ fn pair(
 /// which repeat when sharing candidates nest.
 pub fn identical_expression_pass2_candidates(
     roots: &[QueryRoot],
-    groups: &[SharingCandidate],
+    candidates: &[SharingCandidate],
 ) -> Vec<IdenticalExpressionPass2Candidate> {
-    let n = groups.len();
+    let n = candidates.len();
     let mut closed_sets = Vec::new();
     // The closed sets in lectic order, from the closure of the empty set
     // (which shares nothing).
@@ -213,7 +213,7 @@ pub fn identical_expression_pass2_candidates(
             }
             let mut candidate: Vec<bool> = (0..n).map(|g| g < i && closed[g]).collect();
             candidate[i] = true;
-            let (shared_roots, merged) = apply(roots, groups, &candidate);
+            let (shared_roots, merged) = apply(roots, candidates, &candidate);
             // Lectic successor: adds nothing below `i` that `closed` lacks.
             if (0..i).all(|g| !merged[g] || closed[g]) {
                 // `merged` is closed: applying it gives the same candidate.
@@ -231,22 +231,22 @@ pub fn identical_expression_pass2_candidates(
         .map(|(subset, roots)| IdenticalExpressionPass2Candidate {
             sharing_candidates: (0..n)
                 .filter(|&g| subset[g])
-                .map(|g| groups[g].clone())
+                .map(|g| candidates[g].clone())
                 .collect(),
             roots,
         })
         .collect()
 }
 
-/// `roots` with the groups in `subset` shared, and the groups that leaves
-/// shared: those whose every node still read became one node (a node below
-/// a shared node other than the one kept is no longer read).
+/// `roots` with the sharing candidates in `subset` shared, and the ones
+/// that leaves shared: those whose every node still read became one node (a
+/// node below a shared node other than the one kept is no longer read).
 fn apply(
     roots: &[QueryRoot],
-    groups: &[SharingCandidate],
+    candidates: &[SharingCandidate],
     subset: &[bool],
 ) -> (Vec<QueryRoot>, Vec<bool>) {
-    let group_of: HashMap<*const OperatorNode, usize> = groups
+    let group_of: HashMap<*const OperatorNode, usize> = candidates
         .iter()
         .enumerate()
         .flat_map(|(index, group)| group.nodes.iter().map(move |n| (Rc::as_ptr(n), index)))
@@ -258,7 +258,7 @@ fn apply(
         shared: HashMap::new(),
     };
     let shared_roots: Vec<QueryRoot> = roots.iter().map(|r| sharing.root(r)).collect();
-    let merged = groups
+    let merged = candidates
         .iter()
         .map(|group| {
             let mut nodes = group.nodes.iter().filter_map(|node| {
@@ -497,7 +497,7 @@ fn all_equal<'a>(mut nodes: impl Iterator<Item = &'a Rc<OperatorNode>>) -> bool 
 pub const MAX_CAPABILITY_SHARING_MEMBERS: usize = 20;
 
 /// Every Pass 2 candidate of the summary-capability rule for the candidate
-/// with query roots `roots` and capability sharing candidates `groups`
+/// with query roots `roots` and capability sharing candidates `candidates`
 /// ([`capability_sharing_candidates`]): one per choice, for each, of no
 /// sharing or one subset of two or more members whose sizes are not all
 /// equal, other than sharing nothing. An error only for one of more than
@@ -507,11 +507,11 @@ pub const MAX_CAPABILITY_SHARING_MEMBERS: usize = 20;
 /// order (the first member the lowest bit).
 pub fn summary_capability_pass2_candidates(
     roots: &[QueryRoot],
-    groups: &[CapabilitySharingCandidate],
+    candidates: &[CapabilitySharingCandidate],
 ) -> Result<Vec<SummaryCapabilityPass2Candidate>, PerComputationCandidateError> {
     // Every subset of a group is a candidate: 2^n of them. Past
     // MAX_CAPABILITY_SHARING_MEMBERS that is no longer a list plan selection can price.
-    if groups
+    if candidates
         .iter()
         .any(|group| group.members.len() > MAX_CAPABILITY_SHARING_MEMBERS)
     {
@@ -520,7 +520,7 @@ pub fn summary_capability_pass2_candidates(
         ));
     }
     // Each group's options: `None` (no sharing), then its subsets.
-    let options: Vec<Vec<Option<Vec<usize>>>> = groups
+    let options: Vec<Vec<Option<Vec<usize>>>> = candidates
         .iter()
         .map(|group| {
             let n = group.members.len();
@@ -534,7 +534,7 @@ pub fn summary_capability_pass2_candidates(
             options
         })
         .collect();
-    let mut choice = vec![0usize; groups.len()];
+    let mut choice = vec![0usize; candidates.len()];
     let mut pass2_candidates = Vec::new();
     loop {
         // Mixed-radix increment, the last group varying fastest.
@@ -552,7 +552,7 @@ pub fn summary_capability_pass2_candidates(
         }
         let shared_builds: Vec<Vec<Rc<OperatorNode>>> = choice
             .iter()
-            .zip(groups.iter().zip(&options))
+            .zip(candidates.iter().zip(&options))
             .filter_map(|(&option, (group, group_options))| {
                 let members = group_options[option].as_ref()?;
                 Some(
@@ -676,8 +676,6 @@ fn sized_for_all(
 pub struct PaneCandidate {
     /// The `SummaryAgg` over `TimeRange(W)` built as panes.
     pub build: Rc<OperatorNode>,
-    /// The queries (indices into the roots) that read the build.
-    pub readers: Vec<usize>,
     /// The width `w` of one pane.
     pub pane_width_ms: u64,
     /// The number of panes, `W / w`, at least two.
@@ -733,7 +731,6 @@ pub fn pane_candidates(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<
             let pane_count = u32::try_from(window_ms / width).ok()?;
             (!readers.is_empty() && pane_count >= 2).then_some(PaneCandidate {
                 build,
-                readers,
                 pane_width_ms: width,
                 pane_count,
             })
@@ -1349,8 +1346,6 @@ pub struct TopKReuseCandidate {
     /// The plain `Aggregate` top-k nodes of one input and partition, in
     /// children-first order; at least two different `k`.
     pub members: Vec<Rc<OperatorNode>>,
-    /// The queries (indices into the roots) that read a member, ascending.
-    pub readers: Vec<usize>,
     /// `Limit(k_max)` over a descending `Sort` of their input, partitioned
     /// as they are: what every member reads in a reuse candidate.
     pub ranking: Rc<OperatorNode>,
@@ -1409,19 +1404,7 @@ pub fn topk_reuse_candidates(roots: &[QueryRoot]) -> Vec<TopKReuseCandidate> {
             }
             let (child, by, _) = exact_topk(&members[0])?;
             let ranking = ranking(child, by, largest)?;
-            let readers = (0..roots.len())
-                .filter(|&q| {
-                    root_operators(&roots[q])
-                        .into_iter()
-                        .flat_map(OperatorNode::reachable)
-                        .any(|node| members.iter().any(|m| Rc::ptr_eq(&node, m)))
-                })
-                .collect();
-            Some(TopKReuseCandidate {
-                members,
-                readers,
-                ranking,
-            })
+            Some(TopKReuseCandidate { members, ranking })
         })
         .collect()
 }
@@ -1734,6 +1717,53 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
+    }
+
+    /// A count over a window, read from a CountSketch built in tumbling
+    /// panes, keeps the guarantee of one build over the window: Pass 1
+    /// offers CountSketch for counts, and its merged counters add.
+    #[test]
+    fn a_count_from_count_sketch_panes_keeps_its_guarantee() {
+        use crate::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        };
+        let root = lower_promql(
+            "count_over_time(m[5m])",
+            asap_types::types::AccuracyTarget::max_error(0.01).failure_probability(0.001),
+        );
+        let inventory = generate_per_computation_candidates(vec![(
+            0,
+            QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
+        )])
+        .unwrap();
+        let choice: Vec<usize> = inventory
+            .targets
+            .iter()
+            .map(|t| {
+                t.choices
+                    .candidates
+                    .iter()
+                    .position(|c| *c == ComputationCandidate::Summary(SketchAlgorithm::CountSketch))
+                    .expect("CountSketch is offered for a count")
+            })
+            .collect();
+        let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let candidates = pane_candidates(&roots, &[Some(60_000)]);
+        let pass2_candidates = window_composition_pass2_candidates(&roots, &candidates).unwrap();
+        let [pass2_candidate] = pass2_candidates.as_slice() else {
+            panic!("one Pass 2 candidate: {pass2_candidates:?}")
+        };
+        let (QueryRoot::Operator(whole), QueryRoot::Operator(paned)) =
+            (&roots[0], &pass2_candidate.roots.as_ref().unwrap()[0])
+        else {
+            panic!("operator roots")
+        };
+        assert!(whole.guarantee.is_some());
+        assert_eq!(paned.guarantee, whole.guarantee);
     }
 
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)

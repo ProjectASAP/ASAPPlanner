@@ -642,3 +642,21 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
         "{summaries:?}"
     );
 }
+
+/// Two sums and two maxima over two metrics share each metric's scan and
+/// range between its own pair of queries: every logical candidate's label
+/// names which queries share each node, so no two labels are the same.
+#[test]
+fn logical_candidate_labels_are_distinct() {
+    let document = document_of(&[
+        "--promql", "sum(a)", "--promql", "max(a)", "--promql", "sum(b)", "--promql", "max(b)",
+    ]);
+    let labels: Vec<&str> = document["stage1_logical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["display_name"].as_str().unwrap())
+        .collect();
+    let distinct: std::collections::HashSet<&str> = labels.iter().copied().collect();
+    assert_eq!(distinct.len(), labels.len(), "{labels:#?}");
+}

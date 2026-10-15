@@ -96,10 +96,30 @@ impl FamilyCapability {
     }
 
     /// The error of `statistic` read from a merged state of this family;
-    /// `None` when the family has no sound merge or does not answer it.
+    /// `None` when the family has no sound merge.
+    ///
+    /// A statistic the family does not answer takes the family's default:
+    /// exact for an exact accumulator, approximate for a heavy-item readout
+    /// (top-k, entropy) of a family with heaps, and otherwise the guarantee
+    /// of one build over the union. Pass 1 offers CountSketch for a count,
+    /// which its row does not answer (the executor has no CountSketch
+    /// evaluation), and this default keeps that candidate's guarantee until
+    /// the realization and the table agree.
     pub fn merged_error(&self, statistic: &SketchStatistic) -> Option<MergedError> {
         self.merge_inputs?;
-        self.readout(statistic)
+        Some(self.readout(statistic).unwrap_or_else(|| {
+            let has_heaps = self
+                .readouts
+                .iter()
+                .any(|&(_, error)| error == MergedError::Approximate);
+            match statistic.kind() {
+                _ if self.readouts.is_empty() => MergedError::Exact,
+                StatisticKind::TopK | StatisticKind::FrequencyEntropy if has_heaps => {
+                    MergedError::Approximate
+                }
+                _ => MergedError::AsIfBuiltOverUnion,
+            }
+        }))
     }
 
     /// The table entry of `statistic`'s kind: its merged error.
