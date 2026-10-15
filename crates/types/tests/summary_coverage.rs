@@ -12,8 +12,8 @@ use asap_types::ir::{
     SchemaDerivationError, TimeRangeKind,
 };
 use asap_types::post_asap::{
-    ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, SketchAlgorithm, SketchKind,
-    SketchParams, SummaryUpdate,
+    ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, MergeInputRule, SketchAlgorithm,
+    SketchKind, SketchParams, SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema, TimeShift};
@@ -211,7 +211,9 @@ fn populations_merge_when_disjoint() {
             latency_where(eq(REGION, "us")),
             latency_where(eq(REGION, "us")),
         ]),
-        CoverageError::PossibleOverlap
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
     );
 }
 
@@ -268,7 +270,9 @@ fn qualified_columns_stay_distinct() {
             kll(filter(scan(), eq(1, "us")), "latency"),
             kll(filter(scan(), eq(2, "eu")), "latency"),
         ]),
-        CoverageError::PossibleOverlap
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
     );
 }
 
@@ -297,7 +301,9 @@ fn time_panes_merge_and_keep_gaps() {
     assert_eq!(gapped.coverage().unwrap().selection.len(), 2);
     assert_eq!(
         rejected(vec![first.clone(), first]),
-        CoverageError::PossibleOverlap
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
     );
 }
 
@@ -317,7 +323,43 @@ fn counter_panes_merge_only_disjoint_in_time() {
     let by_job = |job| increase_pane(0, vec![Predicate(eq(2, job))]);
     assert_eq!(
         rejected(vec![by_job("api"), by_job("web")]),
-        CoverageError::NotDisjointInTime
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::DisjointInTime,
+        }
+    );
+}
+
+/// A day of one-minute panes (1,440 inputs) merges into one window, in
+/// either order: the inputs' windows are sorted and only neighbours are
+/// compared, so the check is O(n log n), not all pairs. A pane listed
+/// twice still overlaps.
+#[test]
+fn a_day_of_minute_panes_merges_into_one_window() {
+    const PANES: i64 = 1_440;
+    let day = relative(-PANES * 60_000, 0);
+    let newest_first: Vec<_> = (0..PANES).map(|i| pane(i * 60_000, vec![])).collect();
+    let oldest_first: Vec<_> = newest_first.iter().rev().cloned().collect();
+    for panes in [newest_first.clone(), oldest_first] {
+        let merged = merge(panes).unwrap();
+        merged.validate_structure().unwrap();
+        let selection = merged.coverage().unwrap().selection;
+        assert_eq!(selection.len(), 1);
+        assert_eq!(selection[0].relative_time, day);
+    }
+    let counters: Vec<_> = (0..PANES)
+        .map(|i| increase_pane(i * 60_000, vec![]))
+        .collect();
+    assert_eq!(
+        merge(counters).unwrap().coverage().unwrap().selection[0].relative_time,
+        day
+    );
+    let mut repeated = newest_first;
+    repeated.push(pane(30 * 60_000, vec![]));
+    assert_eq!(
+        rejected(repeated),
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
     );
 }
 
@@ -346,7 +388,9 @@ fn value_ranges_merge_when_disjoint() {
     merge(vec![latency(CompareOpKind::Lt), latency(CompareOpKind::Ge)]).unwrap();
     assert_eq!(
         rejected(vec![latency(CompareOpKind::Le), latency(CompareOpKind::Ge)]),
-        CoverageError::PossibleOverlap
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
     );
 }
 
@@ -443,7 +487,9 @@ fn merges_nest() {
     merge(vec![us_eu.clone(), latency_where(eq(REGION, "apac"))]).unwrap();
     assert_eq!(
         rejected(vec![us_eu, latency_where(eq(REGION, "eu"))]),
-        CoverageError::PossibleOverlap
+        CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint,
+        }
     );
 }
 
@@ -478,7 +524,9 @@ fn forged_merges_fail_validation() {
     assert!(matches!(
         forged.validate_structure(),
         Err(SchemaDerivationError::Coverage(
-            CoverageError::PossibleOverlap
+            CoverageError::InputsOverlap {
+                required: MergeInputRule::Disjoint,
+            }
         ))
     ));
 }

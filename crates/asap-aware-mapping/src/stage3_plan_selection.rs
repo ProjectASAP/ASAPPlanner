@@ -4073,8 +4073,8 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-        let sites = crate::asap_aware_cse::pane_sites(&roots, &[Some(u64::from(MINUTE))]);
-        let roots = crate::asap_aware_cse::window_composition_variants(&roots, &sites)
+        let sites = crate::asap_aware_cse::pane_candidates(&roots, &[Some(u64::from(MINUTE))]);
+        let roots = crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &sites)
             .unwrap()
             .pop()
             .unwrap()

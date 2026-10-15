@@ -684,7 +684,7 @@ fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
 /// one only when the family-capability table gives the family a sound merge.
 pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
     let state = &input.fields[summary_column(input)?].dtype;
-    if FamilyCapability::of(state).merge.is_none() {
+    if FamilyCapability::of(state).merge_inputs.is_none() {
         return Err(invalid(format!(
             "summary merge over {state:?} is unsupported: the family has no sound merge"
         )));

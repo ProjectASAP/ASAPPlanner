@@ -1374,10 +1374,14 @@ pub enum Constraint {
 
 impl SummaryCoverage {
     /// Computes the coverage of a summary node from its sub-DAG (§4.2.2).
-    /// Errors: `NotSummary` for a node that is not a `SummaryAgg` or
-    /// `SummaryMerge`, or a merge input that has no coverage; for a merge, `EmptyMerge` (no inputs),
+    /// Errors: `NotSummary` for a node that is not a `SummaryAgg`,
+    /// `PaneChain` or `SummaryMerge`; `PaneChainExpansion` for a `PaneChain`
+    /// that does not expand to one build over its whole window; for a
+    /// merge, an input's own error, `EmptyMerge` (no inputs),
     /// `DefinitionMismatch` (inputs compute different things) or
-    /// `PossibleOverlap` (inputs may share rows).
+    /// `InputsOverlap { required }` (inputs not proven disjoint, or disjoint
+    /// in time for counter states, as the family's `MergeInputRule`
+    /// requires).
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
 }
 ```

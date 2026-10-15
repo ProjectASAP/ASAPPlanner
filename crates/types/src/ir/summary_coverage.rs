@@ -11,7 +11,7 @@
 //! `definition` as a residual, so two states are merged only when they
 //! compute the same thing over disjoint rows.
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 use std::rc::Rc;
 
@@ -21,7 +21,7 @@ use super::asap::ASAPOp;
 use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 use super::scalar::{Predicate, ScalarExpr};
-use crate::post_asap::family_capability::{FamilyCapability, SelectionRelation};
+use crate::post_asap::family_capability::{FamilyCapability, MergeInputRule};
 use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
 use crate::pre_asap::schema::{ColumnId, Schema};
 
@@ -66,84 +66,154 @@ pub enum Constraint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CoverageError {
+    /// The node is not a summary state (`SummaryAgg`, `PaneChain` or
+    /// `SummaryMerge`): a caller bug, or bad input when it is a merge's
+    /// input.
     #[error("coverage is derived only for SummaryAgg, PaneChain and SummaryMerge")]
     NotSummary,
+    /// A `PaneChain` that does not expand to one build over its whole
+    /// window (its window overflows, or the build does not derive): bad
+    /// input.
+    #[error("pane chain does not expand to one build over its whole window: {reason}")]
+    PaneChainExpansion { reason: String },
+    /// A `SummaryMerge` without inputs: bad input.
     #[error("summary merge requires at least one input")]
     EmptyMerge,
+    /// The inputs of a `SummaryMerge` compute different things: bad input.
     #[error("summary merge inputs compute different things")]
     DefinitionMismatch,
+    /// The inputs of a `SummaryMerge` are not proven to relate as the
+    /// family's merge requires (disjoint, or disjoint in time for counter
+    /// states): bad input.
     #[error(
-        "summary merge inputs are not proven disjoint and the family counts shared rows twice"
+        "summary merge inputs are not proven {}, which the family's merge requires",
+        match required {
+            MergeInputRule::DisjointInTime => "disjoint in time",
+            _ => "disjoint",
+        }
     )]
-    PossibleOverlap,
-    #[error("summary merge inputs are not proven disjoint in time, which counter states need")]
-    NotDisjointInTime,
+    InputsOverlap { required: MergeInputRule },
 }
+
+/// Coverage already derived during one validation, by node address. The
+/// nodes must stay alive while it is in use.
+pub(crate) type CoverageMemo = HashMap<*const OperatorNode, SummaryCoverage>;
 
 impl SummaryCoverage {
     /// Coverage of a `SummaryAgg`, `PaneChain` or `SummaryMerge`. A chain
     /// covers what one build over its whole window does. A merge fails unless
     /// every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
-    /// ([`SelectionRelation::OverlapAllowed`] in the family-capability
+    /// ([`MergeInputRule::MayOverlap`] in the family-capability
     /// table) may also merge overlapping selections, and a counter family
-    /// ([`SelectionRelation::DisjointInTime`]) needs disjoint time windows.
+    /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
-        match node.asap() {
-            Some(ASAPOp::SummaryAgg { .. }) => Ok(of_summary_agg(node)),
+        Self::derive_memoized(node, &mut CoverageMemo::new())
+    }
+
+    /// [`derive`](Self::derive), reusing and recording the coverage of
+    /// every summary state in `memo`, so validating a DAG derives each
+    /// state once.
+    pub(crate) fn derive_memoized(
+        node: &OperatorNode,
+        memo: &mut CoverageMemo,
+    ) -> Result<Self, CoverageError> {
+        let key = node as *const OperatorNode;
+        if let Some(coverage) = memo.get(&key) {
+            return Ok(coverage.clone());
+        }
+        let coverage = match node.asap() {
+            Some(ASAPOp::SummaryAgg { .. }) => of_summary_agg(node),
             // Back-to-back panes cover the whole window one build over it
             // would.
-            Some(ASAPOp::PaneChain { .. }) => Ok(of_summary_agg(
-                &super::pane_chain::whole_window_build(node)
-                    .map_err(|_| CoverageError::NotSummary)?,
-            )),
+            Some(ASAPOp::PaneChain { .. }) => of_summary_agg(
+                &super::pane_chain::whole_window_build(node).map_err(|error| {
+                    CoverageError::PaneChainExpansion {
+                        reason: error.to_string(),
+                    }
+                })?,
+            ),
             Some(ASAPOp::SummaryMerge { children }) => {
                 let inputs = children
                     .iter()
-                    .map(|child| child.coverage().ok_or(CoverageError::NotSummary))
+                    .map(|child| Self::derive_memoized(child, memo))
                     .collect::<Result<Vec<_>, _>>()?;
-                let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
-                let relation = match first.definition.asap() {
-                    Some(ASAPOp::SummaryAgg { family, .. }) => {
-                        FamilyCapability::of(family).merge.map(|m| m.inputs)
-                    }
-                    _ => None,
-                };
-                let mut proven = HashSet::new();
-                for (i, input) in inputs.iter().enumerate() {
-                    if !same_definition(&first.definition, &input.definition, &mut proven) {
-                        return Err(CoverageError::DefinitionMismatch);
-                    }
-                    let any_pair = |separated: fn(&SelectionBox, &SelectionBox) -> bool| {
-                        inputs[..i].iter().any(|other| {
-                            input
-                                .selection
-                                .iter()
-                                .any(|a| other.selection.iter().any(|b| !separated(a, b)))
-                        })
-                    };
-                    match relation {
-                        Some(SelectionRelation::OverlapAllowed) => {}
-                        Some(SelectionRelation::DisjointInTime) => {
-                            if any_pair(SelectionBox::disjoint_in_time) {
-                                return Err(CoverageError::NotDisjointInTime);
-                            }
-                        }
-                        Some(SelectionRelation::Disjoint) | None => {
-                            if any_pair(SelectionBox::disjoint) {
-                                return Err(CoverageError::PossibleOverlap);
-                            }
-                        }
-                    }
-                }
-                Ok(Self {
-                    definition: Rc::clone(&first.definition),
-                    selection: union(inputs.iter().flat_map(|c| c.selection.clone()).collect()),
-                })
+                of_merge(&inputs)?
             }
-            _ => Err(CoverageError::NotSummary),
+            _ => return Err(CoverageError::NotSummary),
+        };
+        memo.insert(key, coverage.clone());
+        Ok(coverage)
+    }
+}
+
+/// The coverage of a merge of states covering `inputs`.
+fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError> {
+    let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
+    let mut proven = HashSet::new();
+    if !inputs
+        .iter()
+        .all(|input| same_definition(&first.definition, &input.definition, &mut proven))
+    {
+        return Err(CoverageError::DefinitionMismatch);
+    }
+    // A family without a merge is checked as the strictest rule; the
+    // executor rejects the merge itself.
+    let required = match first.definition.asap() {
+        Some(ASAPOp::SummaryAgg { family, .. }) => FamilyCapability::of(family).merge_inputs,
+        _ => None,
+    }
+    .unwrap_or(MergeInputRule::Disjoint);
+    let separated: fn(&SelectionBox, &SelectionBox) -> bool = match required {
+        MergeInputRule::MayOverlap => |_, _| true,
+        MergeInputRule::DisjointInTime => SelectionBox::disjoint_in_time,
+        MergeInputRule::Disjoint => SelectionBox::disjoint,
+    };
+    // Windows in time order, each ending before the next starts, are
+    // pairwise disjoint in time, and so pairwise disjoint: O(b log b) for
+    // b boxes. Otherwise, every pair of boxes of different inputs.
+    if required != MergeInputRule::MayOverlap
+        && !windows_ordered_apart(inputs)
+        && inputs.iter().enumerate().any(|(i, input)| {
+            inputs[..i].iter().any(|other| {
+                input
+                    .selection
+                    .iter()
+                    .any(|a| other.selection.iter().any(|b| !separated(a, b)))
+            })
+        })
+    {
+        return Err(CoverageError::InputsOverlap { required });
+    }
+    Ok(SummaryCoverage {
+        definition: Rc::clone(&first.definition),
+        selection: union(inputs.iter().flat_map(|c| c.selection.clone()).collect()),
+    })
+}
+
+/// Whether the time windows of every box of `inputs` are pairwise apart:
+/// sorted by start, each ends before the next starts. `false` when a box
+/// has no time window or two windows overlap, boxes of one input included.
+fn windows_ordered_apart(inputs: &[SummaryCoverage]) -> bool {
+    let mut windows = Vec::new();
+    for selection_box in inputs.iter().flat_map(|input| &input.selection) {
+        match &selection_box.relative_time {
+            Some(window) => windows.push(window),
+            None => return false,
         }
     }
+    // A lower bound's position: unbounded first, then by value, an
+    // included value before the excluded one.
+    let start = |(lower, _): &&(Bound<i64>, Bound<i64>)| match lower {
+        Bound::Unbounded => (false, 0, false),
+        Bound::Included(at) => (true, *at, false),
+        Bound::Excluded(at) => (true, *at, true),
+    };
+    windows.sort_by_key(start);
+    windows.windows(2).all(|pair| {
+        let ((_, upper), (lower, _)) = (pair[0], pair[1]);
+        ends_before(upper, lower, |a: &i64, b: &i64| Some(a.cmp(b)))
+    })
 }
 
 /// Structural equality ignoring planning metadata (`timing`, `guarantee`).

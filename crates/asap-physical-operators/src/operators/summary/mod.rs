@@ -1,5 +1,5 @@
 use super::*;
-use planner_types::post_asap::{FamilyCapability, SelectionRelation};
+use planner_types::post_asap::{FamilyCapability, MergeInputRule};
 /// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SummaryEvaluation {
@@ -591,14 +591,12 @@ async fn merge_summary(
     // Counter states join consecutive windows pairwise, which is exact only
     // in time order: order the inputs by their window start.
     if let Some(Value::Summary { family, .. }) = rows.first().map(|row| &row[state_column]) {
-        if FamilyCapability::of(family).merge.map(|m| m.inputs)
-            == Some(SelectionRelation::DisjointInTime)
-        {
+        if FamilyCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
             rows.sort_by_cached_key(|row| match &row[state_column] {
                 Value::Summary { state, .. } => state
                     .as_any()
                     .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
-                    .and_then(|state| state.counter_window_start()),
+                    .and_then(|state| state.earliest_sample_ms()),
                 _ => None,
             });
         }
