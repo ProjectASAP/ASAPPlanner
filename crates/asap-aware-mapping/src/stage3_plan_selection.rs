@@ -192,6 +192,7 @@ pub struct CandidateCost {
     pub unit: &'static str,
     pub source: &'static str,
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
+    /// One per query, in workload order: its latency per evaluation.
     pub latency: Vec<QueryLatency>,
 }
 
@@ -200,11 +201,18 @@ pub struct CandidateCost {
 /// from ingestion time, then the query's own work, each on a full core.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QueryLatency {
+    /// Milliseconds to merge the ingest workers' partial copies of the
+    /// newest window of the largest ingestion-time state the query reads;
+    /// 0 when ingestion fits on one core or the query reads none.
     pub compaction_ms: f64,
+    /// Milliseconds of the query-time work the query reaches, each node
+    /// once.
     pub query_ms: f64,
 }
 
 impl QueryLatency {
+    /// `compaction_ms + query_ms`: what is checked against the query's
+    /// `max_latency_ms`.
     pub fn total_ms(&self) -> f64 {
         self.compaction_ms + self.query_ms
     }
@@ -1661,8 +1669,9 @@ fn price(
     let latency = query_latencies(dag, &nodes, &output, &work_ms, calibration);
     // A MatAtQuery state is held for one evaluation: from its build until
     // the longest query reading it finishes, about that query's latency.
+    let reach = query_reach(dag, &nodes);
     for (id, (state, per_second)) in held {
-        let evaluation_ms = query_reach(dag, &nodes)
+        let evaluation_ms = reach
             .iter()
             .zip(&latency)
             .filter(|(reached, _)| reached.contains(&id))

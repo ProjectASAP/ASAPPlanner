@@ -192,11 +192,11 @@ pub(crate) fn hydra_cms_shape(
 /// build reads raw samples (`$population`, `$timestamp`, `value`), which carry
 /// none of the query's columns for the filter predicate to read, so only a
 /// query-time build can apply it. The ingestion-time compiler and the
-/// binding of any ingestion-timed `SummaryAgg` apply this check. Planner-side
-/// timing validation (materialization timings, Stage 2 eligibility) does not
-/// apply it yet: until it gains a check or a `PruneReason`, a plan placing a
-/// filtered `SummaryAgg` at ingestion is accepted by the planner and rejected
-/// here at compile time.
+/// binding of any ingestion-timed `SummaryAgg` apply this check. The planner
+/// applies the same rule: Stage 2 never offers `MatAtIngestion` for a
+/// filtered build (`IngestionPruneReason::Filtered`), and materialization
+/// timing rejects an explicit one (`FilteredSummaryAtIngestion`). This check
+/// guards plans that did not come from the planner.
 pub fn validate_ingestion_time_summary<C>(
     filter: Option<&planner_types::ir::Predicate<C>>,
 ) -> Result<(), String> {
