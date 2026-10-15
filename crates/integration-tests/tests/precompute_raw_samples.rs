@@ -277,6 +277,14 @@ fn evaluations(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
         SketchAlgorithm::Hll | SketchAlgorithm::Kmv => {
             vec![state.estimate(&SketchStatistic::Cardinality).unwrap()]
         }
+        SketchAlgorithm::UnivMon => [
+            SketchStatistic::Cardinality,
+            SketchStatistic::FrequencyL2,
+            SketchStatistic::FrequencyEntropy,
+        ]
+        .iter()
+        .map(|statistic| state.estimate(statistic).unwrap())
+        .collect(),
         other => panic!("unexpected unkeyed sketch {other:?}"),
     }
 }
@@ -314,8 +322,7 @@ fn check(
     let stored_only = matches!(family, FieldDataType::Sketch(kind, _)
         if kind.algorithm() == &asap_types::post_asap::SketchAlgorithm::Cms);
     if stored_only || asap_physical_operators::capability::validate_native_family(family).is_err() {
-        // Families without a native state (e.g. UnivMon), or with native
-        // stored state only (plain CMS), are outside precompute execution;
+        // Families without a native state, or with native stored state only (plain CMS), are outside precompute execution;
         // their compile must fail.
         assert!(precompute::compile(dag, &[source], &[root]).is_err());
         return Err(format!("{family:?}"));
@@ -331,7 +338,7 @@ fn check(
             &input.item,
             matches!(
                 kind.algorithm(),
-                SketchAlgorithm::Hll | SketchAlgorithm::Kmv
+                SketchAlgorithm::Hll | SketchAlgorithm::Kmv | SketchAlgorithm::UnivMon
             ),
         ) {
             // Keyed heaps: every item's estimated weight is its exact
@@ -391,6 +398,9 @@ fn check(
 fn raw_sample_summaries_compile_and_match_their_kernels() {
     let exact = RequestedAccuracy::exact();
     let sketch = RequestedAccuracy::epsilon(0.02);
+    // A UnivMon sized for a distinct count at ε = 0.02 holds a heap of
+    // millions of keys on each of its 19 layers, past the default 64 MiB.
+    let distinct = RequestedAccuracy::epsilon_delta(0.2, 0.1);
     let queries = [
         ("sum_over_time(m[5m])", &exact),
         ("count_over_time(m[5m])", &exact),
@@ -404,7 +414,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
         ("quantile_over_time(0.9, m[5m])", &sketch),
         ("sum by (service) (quantile_over_time(0.9, m[5m]))", &sketch),
         ("quantile by (service) (0.9, m)", &sketch),
-        ("distinct_over_time(m[5m])", &sketch),
+        ("distinct_over_time(m[5m])", &distinct),
         ("count(m)", &sketch),
         ("topk(2, m)", &sketch),
         (
@@ -456,6 +466,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
         "DDSketch",
         "Hll",
         "Kmv",
+        "UnivMon",
         // The whole-expression heaps over raw samples.
         "CmsWithHeap",
         "CountSketchWithHeap",

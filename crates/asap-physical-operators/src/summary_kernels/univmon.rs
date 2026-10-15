@@ -90,6 +90,27 @@ impl UnivMonAccumulator {
         Ok(())
     }
 
+    /// One occurrence of a typed identity. A finite Float64 is a sample
+    /// ([`Self::insert_sample`]); Bool, Int64 and Utf8 keep their type as
+    /// type-tagged key bytes, since converting Int64 to Float64 would collapse
+    /// neighbouring keys above 2^53. NULL is skipped.
+    pub fn insert_value(&mut self, value: &crate::values::Value) -> Result<(), Error> {
+        use crate::values::Value;
+        match value {
+            Value::Null => return Ok(()),
+            Value::Float64(number) if number.is_finite() => return self.insert_sample(*number),
+            Value::Bool(_) | Value::Int64(_) | Value::Utf8(_) => {}
+            _ => return Err("unsupported UnivMon identity type or non-finite sample".into()),
+        }
+        let key = value.key()?;
+        self.inner
+            .bucket_size
+            .checked_add(1)
+            .ok_or("UnivMon count overflow")?;
+        self.inner.insert(&DataInput::Bytes(&key), 1);
+        Ok(())
+    }
+
     fn compatible(&self, other: &Self) -> bool {
         (
             self.inner.heap_size,
@@ -127,16 +148,28 @@ impl UnivMonAccumulator {
 }
 
 impl AggregateCore for UnivMonAccumulator {
+    /// Counters and heap slots of every layer, plus the bytes of the
+    /// variable-length keys the heaps retain.
     fn approx_memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(
-            self.inner.layer_size.saturating_mul(
-                self.inner
-                    .sketch_row
-                    .saturating_mul(self.inner.sketch_col)
-                    .saturating_mul(16)
-                    .saturating_add(self.inner.heap_size.saturating_mul(256)),
-            ),
-        )
+        let key_bytes = (0..self.inner.layer_size)
+            .flat_map(|layer| self.inner.hh_layers[layer].heap())
+            .map(|item| match &item.key {
+                asap_sketchlib::HeapItem::String(key) => key.capacity(),
+                asap_sketchlib::HeapItem::Bytes(key) => key.capacity(),
+                _ => 0,
+            })
+            .fold(0usize, usize::saturating_add);
+        key_bytes
+            .saturating_add(std::mem::size_of::<Self>())
+            .saturating_add(
+                self.inner.layer_size.saturating_mul(
+                    self.inner
+                        .sketch_row
+                        .saturating_mul(self.inner.sketch_col)
+                        .saturating_mul(16)
+                        .saturating_add(self.inner.heap_size.saturating_mul(256)),
+                ),
+            )
     }
     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
         Box::new(self.clone())
@@ -247,5 +280,66 @@ mod tests {
         // A non-power-of-two width rounds its bits up: 11 · (11 + 1) = 132.
         assert!(UnivMonAccumulator::new(4, 11, 2047, 1).is_err());
         assert!(UnivMonAccumulator::new(4, 10, 2047, 1).is_ok());
+    }
+
+    // Typed keys stay distinct, and merge, when entered as type-tagged bytes:
+    // Int64 identities above 2^53 do not collapse.
+    #[test]
+    fn typed_keys_merge_and_stay_distinct() {
+        use crate::values::Value;
+        for keys in [
+            [
+                Value::Utf8("192.0.2.1".into()),
+                Value::Utf8("192.0.2.2".into()),
+            ],
+            [
+                Value::Int64(9_007_199_254_740_992),
+                Value::Int64(9_007_199_254_740_993),
+            ],
+            [Value::Bool(false), Value::Bool(true)],
+        ] {
+            let mut left = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+            let mut right = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+            for _ in 0..2 {
+                left.insert_value(&keys[0]).unwrap();
+                right.insert_value(&keys[1]).unwrap();
+            }
+            left.insert_value(&Value::Null).unwrap();
+            left.merge_in_place(&right).unwrap();
+            for (statistic, expected) in [
+                (count(), 4.0),
+                (SketchStatistic::Cardinality, 2.0),
+                (SketchStatistic::FrequencyL2, 8.0_f64.sqrt()),
+                (SketchStatistic::FrequencyEntropy, 1.0),
+            ] {
+                let estimate = left.estimate(&statistic).unwrap();
+                assert!(
+                    (estimate - expected).abs() < 0.01,
+                    "{keys:?} {statistic:?}: {estimate}"
+                );
+            }
+        }
+    }
+
+    // A non-finite sample or an unsupported identity type is an error.
+    #[test]
+    fn rejects_non_finite_and_untyped_identities() {
+        use crate::values::Value;
+        let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+        assert!(state.insert_value(&Value::Float64(f64::INFINITY)).is_err());
+        assert!(state.insert_value(&Value::Timestamp(1)).is_err());
+    }
+
+    // Retained variable-length identities count toward the state's memory.
+    #[test]
+    fn memory_accounts_for_string_identities() {
+        let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+        let empty = state.approx_memory_bytes();
+        state
+            .insert_value(&crate::values::Value::Utf8("x".repeat(4096).into()))
+            .unwrap();
+        assert!(state.approx_memory_bytes() >= empty + 4096);
+        state.clear();
+        assert_eq!(state.approx_memory_bytes(), empty);
     }
 }
