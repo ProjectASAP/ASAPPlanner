@@ -249,13 +249,15 @@ pub fn compile_exact_evaluation(
         SummaryEvaluation::Exact(ExactEvaluation {
             statistic,
             lookback_ms: None,
+            offset_ms: 0,
         }),
     )?;
     if matches!(
         statistic,
         crate::Statistic::Rate | crate::Statistic::Increase
     ) {
-        evaluation = evaluation.with_counter_lookback(
+        evaluation = evaluation.with_counter_window(
+            0,
             i64::try_from(lookback_ms).map_err(|_| invalid("counter lookback exceeds Int64"))?,
         )?;
     }

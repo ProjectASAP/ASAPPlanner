@@ -124,13 +124,21 @@ fn replace(
     )
 }
 
-/// Two series, four positive samples per minute in [0, 5m).
+thread_local! {
+    /// How far after each 15-s step the samples fall (0: on the pane
+    /// boundaries).
+    static PHASE_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// Two series, four positive samples per minute in [0, 5m), each
+/// [`PHASE_MS`] after its 15-s step.
 fn samples() -> Vec<(&'static str, i64, f64)> {
+    let phase = PHASE_MS.with(|p| p.get());
     let mut rows = vec![];
     for (s, series) in ["a", "b"].into_iter().enumerate() {
         for minute in 0..PANES {
             for j in 0..4 {
-                let ts = minute * PANE_MS + j * 15_000;
+                let ts = minute * PANE_MS + j * 15_000 + phase;
                 rows.push((series, ts, (s * 100) as f64 + (minute * 4 + j + 1) as f64));
             }
         }
@@ -389,6 +397,85 @@ fn quantile_over_tumbling_panes_matches_single_build() {
             (estimate - exact).abs() <= 0.05 * exact,
             "{estimate} vs {exact}"
         );
+    }
+}
+
+/// Exact counter Rate over 5 merged 1-minute panes equals one 5-minute
+/// build: the merged increase is divided by the whole 5-minute window, not
+/// by one pane's minute.
+#[test]
+fn exact_rate_over_tumbling_panes_matches_single_build() {
+    let rates = assert_pane_merge_matches_single_build("rate(m[5m])", RequestedAccuracy::exact());
+    assert_eq!(rates.len(), 2);
+    // 19 counted over 285 s of samples, extrapolated to the 5-min window.
+    for rate in rates {
+        assert!((rate - 20.0 / 300.0).abs() < 1e-9, "{rate}");
+    }
+}
+
+/// With samples off the pane boundaries, Increase extrapolates to the
+/// start of the whole 5-minute window, as one build does, not to the start
+/// of the newest pane.
+#[test]
+fn exact_increase_off_the_pane_boundaries_matches_single_build() {
+    PHASE_MS.with(|p| p.set(7_000));
+    let increases =
+        assert_pane_merge_matches_single_build("increase(m[5m])", RequestedAccuracy::exact());
+    assert_eq!(increases.len(), 2);
+}
+
+/// The single build of `query`, evaluated at `evaluation_ms` over every
+/// sample, as values.
+fn whole_build_values_at(query: &str, evaluation_ms: i64) -> Vec<f64> {
+    let root = single_build(query, RequestedAccuracy::exact());
+    let exported = export(&root, &MaterializationAssignment::default());
+    let inputs: BTreeMap<u64, Batch> = exported
+        .ranges
+        .iter()
+        .map(|&(id, _)| {
+            let schema = schema_of(&exported.dag, id);
+            let rows = samples()
+                .into_iter()
+                .map(|(series, ts, value)| {
+                    let labels = BTreeMap::from([
+                        ("__name__".to_string(), "m".to_string()),
+                        ("series".to_string(), series.to_string()),
+                    ]);
+                    promql_rows::series_row(&schema, &labels, ts, value).unwrap()
+                })
+                .collect();
+            (id, Batch::try_new(schema, rows).unwrap())
+        })
+        .collect();
+    let plan = compile(
+        &exported.dag,
+        contracts(&inputs),
+        &[exported.dag.roots[0] as u64],
+    )
+    .unwrap();
+    values(&run(
+        &plan,
+        inputs,
+        Scope::Query {
+            evaluation_time_ms: evaluation_ms,
+            revision: 1,
+        },
+    ))
+}
+
+/// A counter over `[5m] offset 1m` evaluated a minute later reads the same
+/// window as one without the offset: the counter window ends at the
+/// evaluation time minus the offset, not at the evaluation time.
+#[test]
+fn offset_counter_window_ends_at_the_offset() {
+    PHASE_MS.with(|p| p.set(7_000));
+    for function in ["rate", "increase"] {
+        let plain = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS);
+        let shifted = whole_build_values_at(
+            &format!("{function}(m[5m] offset 1m)"),
+            EVALUATION_MS + PANE_MS,
+        );
+        assert_eq!(shifted, plain, "{function}");
     }
 }
 

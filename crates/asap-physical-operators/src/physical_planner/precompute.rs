@@ -385,6 +385,7 @@ fn fragment(
                 SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
                     lookback_ms: None,
+                    offset_ms: 0,
                 }),
             )?;
             let output = read.schema();
