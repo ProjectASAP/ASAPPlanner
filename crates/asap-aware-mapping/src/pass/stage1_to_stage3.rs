@@ -290,8 +290,15 @@ fn pass2_candidates(roots: &[QueryRoot]) -> Vec<Pass2> {
                 format!("{:?} for {}", group.family, queries.join(", "))
             })
             .collect();
-        found.push(&summaries, Vec::new(), &variant.roots);
-        found.identical_variants(&summaries, &variant.roots);
+        match variant.roots {
+            Ok(roots) => {
+                found.push(&summaries, Vec::new(), &roots);
+                found.identical_variants(&summaries, &roots);
+            }
+            // Listed as a candidate that cannot be composed; the other
+            // variants go on.
+            Err(error) => found.out.push((summaries, Vec::new(), Err(error))),
+        }
     }
     found.out
 }

@@ -304,11 +304,12 @@ pub struct SharedSummary {
 
 /// A Pass 2 candidate of the summary-capability rule: the candidate's
 /// roots with the builds in `shared` made one build each, sized for all
-/// their consumers, and every guarantee composed again.
-#[derive(Debug, Clone)]
+/// their consumers, and every guarantee composed again; the error when
+/// that composition fails, which leaves the other variants unaffected.
+#[derive(Debug)]
 pub struct SummaryCapabilityVariant {
     pub shared: Vec<SharedSummary>,
-    pub roots: Vec<QueryRoot>,
+    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
 
 /// The summary-capability groups of the candidate with query roots
@@ -430,19 +431,27 @@ fn all_equal<'a>(mut nodes: impl Iterator<Item = &'a Rc<OperatorNode>>) -> bool 
 /// with query roots `roots` and groups `groups` ([`capability_groups`]):
 /// one per choice, for each group, of no sharing or one subset of two or
 /// more members whose sizes are not all equal, other than sharing nothing.
+/// An error only for a group of more than 63 members; a variant whose
+/// composition fails carries its own error.
 /// The first group varies slowest; within a group, subsets come in
 /// binary-counter order (the first member the lowest bit).
 pub fn summary_capability_variants(
     roots: &[QueryRoot],
     groups: &[CapabilityGroup],
 ) -> Result<Vec<SummaryCapabilityVariant>, PerComputationCandidateError> {
+    // One 64-bit mask enumerates the subsets of at most 63 members.
+    if groups.iter().any(|group| group.members.len() > 63) {
+        return Err(PerComputationCandidateError::Unsupported(
+            "a summary-capability group of more than 63 summary builds",
+        ));
+    }
     // Each group's options: `None` (no sharing), then its subsets.
     let options: Vec<Vec<Option<Vec<usize>>>> = groups
         .iter()
         .map(|group| {
             let n = group.members.len();
             let mut options = vec![None];
-            for mask in 1u64..(1u64 << n.min(63)) {
+            for mask in 1u64..(1u64 << n) {
                 let members: Vec<usize> = (0..n).filter(|&m| mask >> m & 1 == 1).collect();
                 if members.len() >= 2 && !all_equal(members.iter().map(|&m| &group.members[m])) {
                     options.push(Some(members));
@@ -476,8 +485,16 @@ pub fn summary_capability_variants(
                     .map(|members| SharedSummary { group, members })
             })
             .collect();
-        if let Some(roots) = share_summaries(roots, groups, &shared)? {
-            variants.push(SummaryCapabilityVariant { shared, roots });
+        match share_summaries(roots, groups, &shared) {
+            Ok(None) => {}
+            Ok(Some(roots)) => variants.push(SummaryCapabilityVariant {
+                shared,
+                roots: Ok(roots),
+            }),
+            Err(error) => variants.push(SummaryCapabilityVariant {
+                shared,
+                roots: Err(error),
+            }),
         }
     }
     Ok(variants)
@@ -910,11 +927,14 @@ mod tests {
                 members: vec![0, 1]
             }]
         );
-        let shared = kll_builds(&variants[0].roots);
+        let shared = kll_builds(variants[0].roots.as_ref().unwrap());
         assert_eq!(shared.len(), 1, "one KLL serves both");
         assert_eq!(shared[0].1, own[1].1);
-        assert!(root_bound(&variants[0].roots[0]) < root_bound(&roots[0]));
-        assert_eq!(root_bound(&variants[0].roots[1]), root_bound(&roots[1]));
+        assert!(root_bound(&variants[0].roots.as_ref().unwrap()[0]) < root_bound(&roots[0]));
+        assert_eq!(
+            root_bound(&variants[0].roots.as_ref().unwrap()[1]),
+            root_bound(&roots[1])
+        );
     }
 
     /// Three consumers at three targets: every subset of two or more of
@@ -940,9 +960,29 @@ mod tests {
             [vec![0, 1], vec![0, 2], vec![1, 2], vec![0, 1, 2]]
         );
         for variant in &variants {
-            let builds = kll_builds(&variant.roots);
+            let builds = kll_builds(variant.roots.as_ref().unwrap());
             assert_eq!(builds.len(), 4 - variant.shared[0].members.len());
         }
+    }
+
+    /// A group of more than 63 members has more subsets than one 64-bit
+    /// mask enumerates: an error, not a silent skip.
+    #[test]
+    fn a_group_past_63_members_is_an_error() {
+        let roots = chose(
+            &[
+                ("quantile_over_time(0.5, lat[5m])", 0.01),
+                ("quantile_over_time(0.99, lat[5m])", 0.001),
+            ],
+            SketchAlgorithm::Kll,
+        );
+        let mut groups = capability_groups(&roots);
+        let members = groups[0].members.clone();
+        groups[0].members = members.iter().cycle().take(64).cloned().collect();
+        assert!(matches!(
+            summary_capability_variants(&roots, &groups),
+            Err(PerComputationCandidateError::Unsupported(_))
+        ));
     }
 
     /// Equal targets give identical builds, which are the

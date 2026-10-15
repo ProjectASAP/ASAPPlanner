@@ -170,8 +170,12 @@ pub(crate) fn column_collision(cols: u32) -> f64 {
 /// each sized alone with one of `params` (Pass 2's summary-capability
 /// rule): each parameter's largest value, except where a smaller value is
 /// stricter, where it takes the smallest (a KLL's failure probability,
-/// DDSketch's α). Every sizing formula is monotonic in its parameters, so
-/// the shared state meets each consumer's target. `None` for no parameters,
+/// DDSketch's α). Not every bound is monotone in its parameters (a Count
+/// Sketch's collision bound is tighter at a power-of-two width than one
+/// column wider), so the shared state is not assumed to meet each
+/// consumer's target: the summary-capability rule composes every guarantee
+/// above it again, and plan selection checks each consumer against the
+/// shared state. `None` for no parameters,
 /// parameters of different algorithms, or a shared UnivMon the library
 /// would not build ([`univmon::hash_independent`]).
 pub(crate) fn shared_size_params(params: &[&SketchParams]) -> Option<SketchParams> {
