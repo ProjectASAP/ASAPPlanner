@@ -489,6 +489,16 @@ mod tests {
         }
     }
 
+    /// The library builds at most 20 rows, so a 21-row UnivMon certifies
+    /// nothing even though its hashes fit the budget (21 · (3 + 1) = 84 ≤
+    /// 128 at 8 columns).
+    #[test]
+    fn univmon_past_twenty_rows_is_not_hash_independent() {
+        assert!(hash_independent(20, 8, 1));
+        assert!(!hash_independent(21, 8, 1));
+        assert!(l2(&univmon(1, 21, 8, 1, None)).is_none());
+    }
+
     /// Each distinct-count heap meets its target once the source's bound
     /// is bound, and one fewer key does not.
     #[test]
