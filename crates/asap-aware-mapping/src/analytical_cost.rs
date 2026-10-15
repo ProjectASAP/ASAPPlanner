@@ -165,6 +165,14 @@ pub struct ResourceCalibration {
     pub cost_per_retained_byte_second: f64,
     #[serde(default = "default_horizon_s")]
     pub horizon_s: f64,
+    /// Milliseconds one CPU operation takes on one core: plan selection's
+    /// latency check reads it (0: work takes no time).
+    #[serde(default)]
+    pub ms_per_cpu_op: f64,
+    /// Milliseconds scanning one byte takes on one core, for the latency
+    /// check.
+    #[serde(default)]
+    pub ms_per_scan_byte: f64,
     pub version: String,
 }
 
@@ -185,6 +193,8 @@ impl ResourceCalibration {
                 "cost_per_retained_byte_second",
                 self.cost_per_retained_byte_second,
             ),
+            ("ms_per_cpu_op", self.ms_per_cpu_op),
+            ("ms_per_scan_byte", self.ms_per_scan_byte),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(AnalyticalCostError::InvalidCalibration(name, value));

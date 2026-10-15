@@ -221,7 +221,7 @@ pub(crate) fn cms_summary(query: &str) -> OperatorNode {
     let run = crate::pass::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],
         &[Some(target)],
-        &[asap_types::workload::QueryRecurrence::Unknown],
+        &[asap_types::workload::QueryRecurrence::Unknown.into()],
         &DataWorkload::default(),
         crate::PlanningModels::builtin(),
     )

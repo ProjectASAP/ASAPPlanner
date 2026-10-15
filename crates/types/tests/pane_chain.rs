@@ -161,6 +161,48 @@ fn expansion_merges_the_panes() {
     assert!(expand_pane_chains(&chain).is_err());
 }
 
+/// Expanding a timed chain carries its timing and materialization onto its
+/// panes: a chain materialized at ingestion time expands into panes each
+/// built and stored at ingestion time, over ranges and shifts that run at
+/// ingestion time too, while the merge reading them stays at query time.
+/// An unmaterialized chain expands into query-time panes.
+#[test]
+fn expansion_carries_the_chains_timing_onto_its_panes() {
+    use asap_types::ir::{
+        apply_materialization_timings, Materialization, MaterializationAssignment, Medium,
+        TimingMemo,
+    };
+    use asap_types::post_asap::ExecutionTiming;
+    let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
+    for (materialization, timing) in [
+        (at_ingestion, ExecutionTiming::IngestionTime),
+        (Materialization::NotMaterialized, ExecutionTiming::QueryTime),
+    ] {
+        let chain = chain(shifted(scan(), MINUTE as i64));
+        let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: merge(vec![Rc::clone(&chain)]),
+            query: SketchStatistic::Quantile { q: 0.99 },
+        }))
+        .unwrap();
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&chain, materialization);
+        let timed =
+            apply_materialization_timings(&estimate, &assignment, &mut TimingMemo::new()).unwrap();
+        let expanded = expand_pane_chains(&timed).unwrap();
+        let merged = expanded.children()[0];
+        assert_eq!(merged.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(merged.children().len(), 5);
+        for pane in merged.children() {
+            assert_eq!(pane.timing, Some(timing), "{materialization:?}");
+            assert_eq!(pane.materialization, materialization);
+            for below in OperatorNode::reachable(pane).iter().skip(1) {
+                assert_eq!(below.timing, Some(timing), "{}", below.operator.kind_name());
+                assert_eq!(below.materialization, Materialization::NotMaterialized);
+            }
+        }
+    }
+}
+
 /// A chain needs a positive width and count, and reads the instant vector
 /// a range selector would.
 #[test]

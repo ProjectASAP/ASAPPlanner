@@ -11,6 +11,8 @@
 //! over weights proven non-negative; a query without one constrains nothing.
 //! A miss rejects the candidate as invalid, with a reason; only this stage
 //! discards valid candidates.
+//! A candidate whose evaluation of some query takes longer than that
+//! query's latency bound is rejected as invalid too ("Latency" below).
 //! Every valid candidate is priced node by node over its physical DAG, and
 //! the cheapest is selected. The rest are reported valid but costlier.
 //! Selection prices every candidate it is given; a search that avoids
@@ -31,21 +33,30 @@
 //!   it, counted without looking through a materialized node: a node below
 //!   one is computed when that node is. Stage 2 does not duplicate a shared
 //!   node, so a shared `NotMaterialized` input costs what reading it
-//!   separately does (#509 Example 4).
+//!   separately does (#509 Example 4); it offers the node built once per
+//!   evaluation (`MatAtQuery`) as another candidate.
 //! * A `MatAtQuery` node is computed once for all the queries that reach
 //!   it, at their combined rate: queries repeating at the same interval are
 //!   evaluated together, so each distinct interval counts once.
 //! * A `MatAtIngestion` node runs as data arrives: it is priced over one
 //!   second of arriving rows, once per second, whatever its readers' rates.
+//!   A tumbling-pane chain maintained this way updates only its newest
+//!   pane: each arriving row is placed in it and updates it.
 //! * A query repeating every `I` ms runs `1000 / I` times per second, and an
 //!   estimated rate runs at that rate. One-off, scheduled and unknown
 //!   queries are spread over the calibration's `horizon_s` (default
 //!   3600 s): `invocations / horizon_s` per second.
 //!
-//! Memory is charged only as state kept between computations: a
-//! materialized node's state, `cost_per_retained_byte_second` per byte per
-//! second, once for `MatAtQuery` and twice for `MatAtIngestion` (the window
-//! being built and the completed one queries read). Memory a computation
+//! Memory is charged only as state kept between computations, at
+//! `cost_per_retained_byte_second` per byte per second. A `MatAtIngestion`
+//! node keeps its state every second: twice for a whole window (the window
+//! being built and the completed one queries read) and `N + 1` panes for a
+//! chain of `N` (the `N` the query merges and the one being built). A
+//! `MatAtQuery` node's state is reused only within one evaluation, so it is
+//! held only while that evaluation runs: its bytes times the latency of the
+//! longest query reading it, once per evaluation, which is close to nothing.
+//! Keeping it across evaluations comes later, charged by its retention.
+//! Memory a computation
 //! holds only while it runs is not charged, and `cost_per_retained_byte` is
 //! ignored: peak capacity belongs to cost model 2 (#683). A computation is
 //! charged for its CPU operations and scanned bytes only.
@@ -67,8 +78,24 @@
 //! illustrative, not calibrated: a binary, join or concat node is priced from
 //! its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
-//! bad declared rates. Latency bounds and deployment capabilities are not
-//! checked yet.
+//! bad declared rates. Deployment capabilities are not checked yet.
+//!
+//! ## Latency
+//!
+//! Following the sketch-bench RQE cost model (§5, batch latency), a query's
+//! latency per evaluation is its longest chain of work, each step on a
+//! full core of elastic CPU (no queueing): the compaction of the newest
+//! window of an ingestion-time state it reads, then its own query-time
+//! work. Its own work is the sum, over every query-time node it reaches
+//! (shared ones included, each once), of one computation's CPU operations
+//! and scanned bytes timed by the calibration's `ms_per_cpu_op` and
+//! `ms_per_scan_byte`. A state whose ingestion work needs `k` cores keeps
+//! `k` partial copies of its newest window, and compacting them takes
+//! `(k − 1)` one-operation merges for each of its states per window; with
+//! one core there is nothing to compact. A query with
+//! `LatencyRequirement::ExplicitMaxMs(bound)` whose latency is above the
+//! bound makes the candidate invalid, with the latency as the reason.
+//! [`CandidateCost::latency`] reports every query's latency.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -89,7 +116,9 @@ use asap_types::post_asap::{
 };
 use asap_types::pre_asap::{AggIntent, DataType, Reduction, ScalarValue, Schema};
 use asap_types::types::{AccuracyScope, AccuracyTarget};
-use asap_types::workload::{DataWorkload, MetricType, QueryRecurrence, RepeatedDemand};
+use asap_types::workload::{
+    DataWorkload, LatencyRequirement, MetricType, QueryDemand, QueryRecurrence, RepeatedDemand,
+};
 use thiserror::Error;
 
 use crate::accuracy::composition::{
@@ -120,7 +149,8 @@ pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
 /// The coefficients plan selection prices with until a deployment is
 /// calibrated: 1 ns of CPU per operation, 0.1 ns per scanned byte,
 /// 1 GB kept for a second costs 1/8 vCPU (125 CPU-ms), and one-off work is
-/// spread over one hour.
+/// spread over one hour. The latency check takes the same times: one cost
+/// unit is one millisecond of one core.
 pub fn illustrative_calibration() -> ResourceCalibration {
     ResourceCalibration {
         cost_per_cpu_op: 1e-6,
@@ -129,6 +159,8 @@ pub fn illustrative_calibration() -> ResourceCalibration {
         cost_per_retained_byte: 0.0,
         cost_per_retained_byte_second: 1.25e-7,
         horizon_s: crate::analytical_cost::DEFAULT_HORIZON_S,
+        ms_per_cpu_op: 1e-6,
+        ms_per_scan_byte: 1e-7,
         version: "illustrative-v2".into(),
     }
 }
@@ -153,13 +185,50 @@ pub struct NodeCost {
 }
 
 /// Whole-workload cost of one candidate: one entry per DAG node, `total` is
-/// their sum.
+/// their sum. `latency[i]` is query `i`'s latency per evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateCost {
     pub total: f64,
     pub unit: &'static str,
     pub source: &'static str,
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
+    pub latency: Vec<QueryLatency>,
+}
+
+/// One query's latency per evaluation, its longest chain of work (module
+/// doc, "Latency"): the compaction of the newest window of a state it reads
+/// from ingestion time, then the query's own work, each on a full core.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QueryLatency {
+    pub compaction_ms: f64,
+    pub query_ms: f64,
+}
+
+impl QueryLatency {
+    pub fn total_ms(&self) -> f64 {
+        self.compaction_ms + self.query_ms
+    }
+}
+
+/// The first query whose latency is over its bound, as a rejection reason.
+fn latency_violation(cost: &CandidateCost, demand: &[QueryDemand]) -> Option<String> {
+    cost.latency
+        .iter()
+        .zip(demand)
+        .enumerate()
+        .find_map(|(query, (latency, demand))| match demand.response_latency {
+            LatencyRequirement::ExplicitMaxMs(bound) if latency.total_ms() > bound => {
+                Some(format!(
+                    "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms) \
+                 is over its {bound} ms bound",
+                    query + 1,
+                    latency.total_ms(),
+                    latency.compaction_ms,
+                    latency.query_ms
+                ))
+            }
+            _ => None,
+        })
 }
 
 /// A candidate that was not selected. `valid == false`: it failed a check;
@@ -259,13 +328,14 @@ pub enum SelectionError {
 }
 
 /// Stage 3 (plan selection): reject candidates that miss a query's accuracy
-/// target, price the rest per second and select the cheapest (the first on
-/// ties). `targets[i]` is the requirement of `candidate.roots[i]` (`None`
-/// imposes none) and `recurrence[i]` how often it is evaluated.
+/// target or latency bound, price the rest per second and select the
+/// cheapest (the first on ties). `targets[i]` is the requirement of
+/// `candidate.roots[i]` (`None` imposes none) and `demand[i]` how it is
+/// demanded: how often it is evaluated and its latency bound.
 pub fn select_plan(
     cands: &[PhysicalCandidate],
     targets: &[Option<AccuracyTarget>],
-    recurrence: &[QueryRecurrence],
+    demand: &[QueryDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Selection, SelectionError> {
@@ -273,6 +343,7 @@ pub fn select_plan(
     let mut accepted = BTreeMap::new();
     let mut rejected = Vec::new();
     let mut best: Option<(String, f64, Vec<QueryRoot>)> = None;
+    let recurrence: Vec<QueryRecurrence> = demand.iter().map(|d| d.recurrence.clone()).collect();
     for candidate in cands {
         if candidate.roots.len() != targets.len() || candidate.roots.len() != recurrence.len() {
             return Err(SelectionError::TargetCount {
@@ -302,13 +373,21 @@ pub fn select_plan(
         };
         let calibration = illustrative_calibration();
         let cost =
-            price(&candidate.dag, recurrence, data, &calibration).map_err(|(node, error)| {
+            price(&candidate.dag, &recurrence, data, &calibration).map_err(|(node, error)| {
                 SelectionError::Cost {
                     candidate: candidate.id.clone(),
                     node,
                     error,
                 }
             })?;
+        if let Some(reason) = latency_violation(&cost, demand) {
+            rejected.push(Rejection {
+                id: candidate.id.clone(),
+                valid: false,
+                reason,
+            });
+            continue;
+        }
         if best
             .as_ref()
             .is_none_or(|(_, total, _)| cheaper(cost.total, *total))
@@ -1229,6 +1308,12 @@ fn price(
         computations(dag, recurrence, calibration.horizon_s).map_err(|error| (first, error))?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
+    // Each node's work in ms on one core: one computation at query time,
+    // one second of arriving rows at ingestion time.
+    let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
+    // MatAtQuery state, held only while one evaluation runs: (bytes, per
+    // second), charged once the evaluations' latencies are known.
+    let mut held: HashMap<PhysicalASAPNodeId, (u64, f64)> = HashMap::new();
     for node in &dag.nodes {
         let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
         let inputs: Vec<_> = dag
@@ -1520,6 +1605,11 @@ fn price(
             ),
         };
         let estimate = estimate.map_err(|error| (node.id, error))?;
+        work_ms.insert(
+            node.id,
+            estimate.cpu_ops() * calibration.ms_per_cpu_op
+                + estimate.scan_bytes() as f64 * calibration.ms_per_scan_byte,
+        );
         // A computation is charged for its CPU work and scanned bytes; memory
         // only as kept state, below.
         let cost = estimate
@@ -1528,15 +1618,28 @@ fn price(
         let (multiplier, per_second) = multipliers[&node.id];
         let mut cost = cost * per_second;
         let mut detail = format!("{detail}; x {per_second:.4}/s");
-        // State kept between computations: the window being built and the
-        // completed one at ingestion time, the kept output at query time.
-        // The state is what the node holds: its output, or the values an
-        // exact aggregate keeps per group when that is more.
+        // State kept between computations: at ingestion time, the window
+        // being built and the completed ones queries read (a chain of N
+        // panes keeps N + 1), every second. At query time the output is
+        // reused only within one evaluation, so it is held only while that
+        // evaluation runs (charged below, once latencies are known). The
+        // state is what the node holds: its output, or the values an exact
+        // aggregate keeps per group when that is more.
         let state = out.bytes.max(estimate.peak_memory_bytes());
-        let kept = match node.materialization {
-            Materialization::NotMaterialized => 0,
-            Materialization::MatAtIngestion(_) => 2 * state,
-            _ => state,
+        let kept = match (node.materialization, &node.payload) {
+            (Materialization::NotMaterialized, _) => 0,
+            (Materialization::MatAtQuery(_), _) => {
+                held.insert(node.id, (state, per_second));
+                0
+            }
+            (
+                Materialization::MatAtIngestion(_),
+                Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }),
+            ) => {
+                let panes = u64::from(*pane_count).max(1);
+                state / panes * (panes + 1)
+            }
+            (Materialization::MatAtIngestion(_), _) => 2 * state,
         };
         if kept > 0 {
             cost += calibration.cost_per_retained_byte_second * kept as f64;
@@ -1556,12 +1659,123 @@ fn price(
             },
         );
     }
+    let latency = query_latencies(dag, &nodes, &output, &work_ms, calibration);
+    // A MatAtQuery state is held for one evaluation: from its build until
+    // the longest query reading it finishes, about that query's latency.
+    for (id, (state, per_second)) in held {
+        let evaluation_ms = query_reach(dag, &nodes)
+            .iter()
+            .zip(&latency)
+            .filter(|(reached, _)| reached.contains(&id))
+            .map(|(_, l)| l.total_ms())
+            .fold(0.0, f64::max);
+        let byte_seconds = state as f64 * evaluation_ms / 1_000.0 * per_second;
+        let node = per_node.get_mut(&id).expect("every node is priced");
+        node.cost += calibration.cost_per_retained_byte_second * byte_seconds;
+        node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
+        if !node.cost.is_finite() {
+            return Err((id, AnalyticalCostError::Overflow));
+        }
+    }
     Ok(CandidateCost {
         total: per_node.values().map(|n| n.cost).sum(),
         unit: COST_UNIT,
         source: COST_SOURCE,
         per_node,
+        latency,
     })
+}
+
+/// Each query's latency per evaluation (module doc, "Latency"): the sum of
+/// the query-time work it reaches, each node once, plus the longest
+/// compaction among the ingestion-time states it reads. Compacting a
+/// state's newest window merges, for each of its `I` states per window,
+/// the `k` ingest workers' partial copies, `(k − 1)·I` merges of one
+/// operation each, where `k` is the cores its ingestion work takes, at
+/// least one.
+fn query_latencies(
+    dag: &PhysicalASAPDAG,
+    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+    output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
+    work_ms: &HashMap<PhysicalASAPNodeId, f64>,
+    calibration: &ResourceCalibration,
+) -> Vec<QueryLatency> {
+    let inputs = |id: PhysicalASAPNodeId| {
+        dag.edges
+            .iter()
+            .filter(move |e| e.consumer == id)
+            .map(|e| e.producer)
+    };
+    let at_ingestion =
+        |id: PhysicalASAPNodeId| nodes[&id].output_state.timing == ExecutionTiming::IngestionTime;
+    let compaction_ms = |state: PhysicalASAPNodeId| {
+        let mut ingest_ms_per_s = 0.0;
+        let mut seen = HashSet::new();
+        let mut stack = vec![state];
+        while let Some(id) = stack.pop() {
+            if seen.insert(id) {
+                ingest_ms_per_s += work_ms[&id];
+                stack.extend(inputs(id));
+            }
+        }
+        let workers = (ingest_ms_per_s / 1_000.0).ceil().max(1.0);
+        let panes = match &nodes[&state].payload {
+            Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count).max(1),
+            _ => 1,
+        };
+        let states = (output[&state].rows / panes) as f64;
+        (workers - 1.0) * states * calibration.ms_per_cpu_op
+    };
+    query_starts(dag)
+        .into_iter()
+        .map(|start| {
+            let mut latency = QueryLatency {
+                compaction_ms: 0.0,
+                query_ms: 0.0,
+            };
+            let mut seen = HashSet::new();
+            let mut stack = start;
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                if at_ingestion(id) {
+                    latency.compaction_ms = latency.compaction_ms.max(compaction_ms(id));
+                    continue;
+                }
+                latency.query_ms += work_ms[&id];
+                stack.extend(inputs(id));
+            }
+            latency
+        })
+        .collect()
+}
+
+/// The nodes each query reaches at query time, in workload order: its walk
+/// from its roots, stopping at (and including) ingestion-time nodes.
+fn query_reach(
+    dag: &PhysicalASAPDAG,
+    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+) -> Vec<HashSet<PhysicalASAPNodeId>> {
+    query_starts(dag)
+        .into_iter()
+        .map(|mut stack| {
+            let mut seen = HashSet::new();
+            while let Some(id) = stack.pop() {
+                if seen.insert(id)
+                    && nodes[&id].output_state.timing != ExecutionTiming::IngestionTime
+                {
+                    stack.extend(
+                        dag.edges
+                            .iter()
+                            .filter(|e| e.consumer == id)
+                            .map(|e| e.producer),
+                    );
+                }
+            }
+            seen
+        })
+        .collect()
 }
 
 /// The windows, in milliseconds, read above the scan `scan` at query time:
@@ -1757,8 +1971,12 @@ mod tests {
     use asap_types::workload::{Evidence, Rate};
 
     /// `n` queries repeating every 10 s, as Example 1's panels do.
-    fn every_10s(n: usize) -> Vec<QueryRecurrence> {
+    fn recurrences(n: usize) -> Vec<QueryRecurrence> {
         vec![repeating(10_000); n]
+    }
+
+    fn every_10s(n: usize) -> Vec<QueryDemand> {
+        vec![repeating(10_000).into(); n]
     }
 
     /// A query repeating every `interval_ms`.
@@ -1831,7 +2049,9 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-                let mut candidate = optimize_physical_asap("L", &roots).unwrap();
+                let mut candidate = optimize_physical_asap("L", &roots, &[], &data())
+                    .unwrap()
+                    .remove(0);
                 candidate.id = format!("P{}", index + 1);
                 candidate
             })
@@ -2200,8 +2420,11 @@ mod tests {
         let mut candidate = optimize_physical_asap(
             "L",
             &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
+            &[],
+            &data(),
         )
-        .unwrap();
+        .unwrap()
+        .remove(0);
         let [outer, inner] = candidate.dag.roots[..] else {
             panic!("two roots")
         };
@@ -2210,7 +2433,7 @@ mod tests {
             cost_per_retained_byte_second: 0.0,
             ..illustrative_calibration()
         };
-        let cost = price(&candidate.dag, &every_10s(2), &data(), &calibration).unwrap();
+        let cost = price(&candidate.dag, &recurrences(2), &data(), &calibration).unwrap();
         let multipliers: BTreeMap<_, _> = cost
             .per_node
             .iter()
@@ -2232,7 +2455,7 @@ mod tests {
             .find(|n| n.id == inner)
             .unwrap();
         node.materialization = Materialization::MatAtQuery(asap_types::ir::Medium::Memory);
-        let stored = price(&candidate.dag, &every_10s(2), &data(), &calibration).unwrap();
+        let stored = price(&candidate.dag, &recurrences(2), &data(), &calibration).unwrap();
         for (id, c) in &stored.per_node {
             assert_eq!(c.multiplier, 1, "node {id} is computed once");
             let once = cost.per_node[id].cost / multipliers[id] as f64;
@@ -2273,7 +2496,9 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-                let mut candidate = optimize_physical_asap("L", &roots).unwrap();
+                let mut candidate = optimize_physical_asap("L", &roots, &[], &data())
+                    .unwrap()
+                    .remove(0);
                 candidate.id = format!("P{}", index + 1);
                 candidate
             })
@@ -2565,7 +2790,9 @@ mod tests {
     }
 
     /// `candidates` with every state node (a summary build or an exact
-    /// aggregate) kept at query time, so selection charges its kept bytes.
+    /// aggregate) kept at ingestion time, so selection charges its kept
+    /// bytes every second (a `MatAtQuery` state is held only for one
+    /// evaluation).
     fn keeping_state(mut candidates: Vec<PhysicalCandidate>) -> Vec<PhysicalCandidate> {
         for candidate in &mut candidates {
             for node in &mut candidate.dag.nodes {
@@ -2575,7 +2802,7 @@ mod tests {
                         | Payload::NonASAP(NonASAPOp::Aggregate { .. })
                 ) {
                     node.materialization =
-                        Materialization::MatAtQuery(asap_types::ir::Medium::Memory);
+                        Materialization::MatAtIngestion(asap_types::ir::Medium::Memory);
                 }
             }
         }
@@ -2939,7 +3166,7 @@ mod tests {
         let run = crate::pass::run_stage1_to_stage3(
             vec![(0, QueryRoot::Operator(root))],
             &[Some(selected.clone())],
-            &[QueryRecurrence::Unknown],
+            &[QueryRecurrence::Unknown.into()],
             data,
             models,
         )
@@ -3503,7 +3730,10 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-        optimize_physical_asap("L1", &roots).unwrap().dag
+        optimize_physical_asap("L1", &roots, &[], &data())
+            .unwrap()
+            .remove(0)
+            .dag
     }
 
     /// A time shift is free and does not change what the scan below it
@@ -3578,9 +3808,12 @@ mod tests {
         ));
     }
 
-    /// Kept state is charged per byte per second: twice the state's bytes at
-    /// ingestion time (the window being built and the completed one), once
-    /// at query time; state computed and dropped within a query has none.
+    /// Kept state is charged per byte per second: at ingestion time, twice
+    /// the state's bytes (the window being built and the completed one) for
+    /// every second. At query time the state is reused only within one
+    /// evaluation, so it is held only while that evaluation runs: its bytes
+    /// times the evaluation's latency, once per evaluation. State computed
+    /// and dropped within a query has none.
     #[test]
     fn kept_state_is_charged_per_byte_per_second() {
         let cost = |dag: &PhysicalASAPDAG, w| {
@@ -3588,9 +3821,9 @@ mod tests {
                 cost_per_retained_byte_second: w,
                 ..illustrative_calibration()
             };
-            price(dag, &every_10s(1), &data(), &calibration).unwrap()
+            price(dag, &recurrences(1), &data(), &calibration).unwrap()
         };
-        for (materialization, windows) in [(AT_INGESTION, 2.0), (AT_QUERY, 1.0)] {
+        for materialization in [AT_INGESTION, AT_QUERY] {
             let dag = kll_dag(materialization);
             let build = node_of(&dag, is_build);
             let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
@@ -3600,9 +3833,20 @@ mod tests {
                 unreachable!()
             };
             // One state per series: data() declares 10 000.
-            let kept = windows * 10_000.0 * summary_shape(family).1 as f64;
+            let state = 10_000.0 * summary_shape(family).1 as f64;
+            let byte_seconds = if materialization == AT_INGESTION {
+                2.0 * state
+            } else {
+                let evaluation_s = with.latency[0].total_ms() / 1_000.0;
+                assert!(evaluation_s > 0.0 && evaluation_s < 1.0, "{evaluation_s}");
+                state * evaluation_s * with.per_node[&build].per_second
+            };
             let term = with.per_node[&build].cost - without.per_node[&build].cost;
-            assert!(close(term, 1.25e-7 * kept), "{materialization:?}: {term}");
+            assert!(
+                close(term, 1.25e-7 * byte_seconds),
+                "{materialization:?}: {term} vs {}",
+                1.25e-7 * byte_seconds
+            );
             assert!(close(with.total - without.total, term));
         }
         let transient = kll_dag(Materialization::NotMaterialized);
@@ -3621,15 +3865,16 @@ mod tests {
         ] {
             let target = AccuracyTarget::exact();
             let root = lower_promql(query, target);
-            let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
+            let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data())
                 .unwrap()
+                .remove(0)
                 .dag;
             let total = |per_computation_memory| {
                 let calibration = ResourceCalibration {
                     cost_per_retained_byte: per_computation_memory,
                     ..illustrative_calibration()
                 };
-                price(&dag, &every_10s(1), &data(), &calibration)
+                price(&dag, &recurrences(1), &data(), &calibration)
                     .unwrap()
                     .total
             };
@@ -3642,7 +3887,7 @@ mod tests {
                     cost_per_retained_byte: per_computation_memory,
                     ..illustrative_calibration()
                 };
-                price(&dag, &every_10s(1), &data(), &calibration)
+                price(&dag, &recurrences(1), &data(), &calibration)
                     .unwrap()
                     .total
             };
@@ -3657,8 +3902,9 @@ mod tests {
     fn kept_exact_state_is_charged_by_the_values_it_keeps() {
         let kept = |query: &str| {
             let root = lower_promql(query, AccuracyTarget::exact());
-            let mut dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
+            let mut dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data())
                 .unwrap()
+                .remove(0)
                 .dag;
             let aggregate = dag
                 .nodes
@@ -3672,7 +3918,7 @@ mod tests {
                     cost_per_retained_byte_second: w,
                     ..illustrative_calibration()
                 };
-                price(&dag, &every_10s(1), &data(), &calibration)
+                price(&dag, &recurrences(1), &data(), &calibration)
                     .unwrap()
                     .per_node[&id]
                     .cost
@@ -3692,14 +3938,18 @@ mod tests {
     #[test]
     fn rates_follow_per_consumer_charging() {
         let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
-        let one = optimize_physical_asap("L", &[QueryRoot::Operator(root.clone())])
+        let one = optimize_physical_asap("L", &[QueryRoot::Operator(root.clone())], &[], &data())
             .unwrap()
+            .remove(0)
             .dag;
         let mut two = optimize_physical_asap(
             "L",
             &[QueryRoot::Operator(root.clone()), QueryRoot::Operator(root)],
+            &[],
+            &data(),
         )
         .unwrap()
+        .remove(0)
         .dag;
         let without_memory = ResourceCalibration {
             cost_per_retained_byte_second: 0.0,
@@ -3710,15 +3960,15 @@ mod tests {
                 .unwrap()
                 .total
         };
-        let single = total(&one, &every_10s(1));
+        let single = total(&one, &recurrences(1));
         let mixed = [repeating(10_000), repeating(20_000)];
-        assert!(close(total(&two, &every_10s(2)), 2.0 * single));
+        assert!(close(total(&two, &recurrences(2)), 2.0 * single));
         assert!(close(total(&two, &mixed), 1.5 * single));
         assert_eq!(two.roots[0], two.roots[1], "one root node for both queries");
         for node in &mut two.nodes {
             node.materialization = AT_QUERY;
         }
-        assert!(close(total(&two, &every_10s(2)), single));
+        assert!(close(total(&two, &recurrences(2)), single));
         assert!(close(total(&two, &mixed), 1.5 * single));
     }
 
@@ -3727,8 +3977,9 @@ mod tests {
     #[test]
     fn one_off_recurrence_is_spread_over_the_horizon() {
         let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
-        let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)])
+        let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data())
             .unwrap()
+            .remove(0)
             .dag;
         let horizon = illustrative_calibration().horizon_s;
         assert_eq!(horizon, 3_600.0);
@@ -3762,7 +4013,207 @@ mod tests {
                 ..illustrative_calibration()
             },
         ] {
-            assert!(price(&dag, &every_10s(1), &data(), &calibration).is_err());
+            assert!(price(&dag, &recurrences(1), &data(), &calibration).is_err());
         }
+    }
+
+    // ── Stage 2 materialization and the latency check ────────────────────
+
+    const MINUTE: u32 = 60_000;
+
+    fn every_minute() -> QueryDemand {
+        QueryDemand {
+            recurrence: repeating(MINUTE),
+            predictability: asap_types::workload::Predictability::Predictable { known_at: None },
+            response_latency: LatencyRequirement::Unspecified,
+        }
+    }
+
+    /// [`data`] arriving at `rows_per_s`.
+    fn arriving(rows_per_s: f64) -> DataWorkload {
+        DataWorkload {
+            arrival: asap_types::workload::DataArrival::ContinuouslyIngesting,
+            ingestion_rate: Evidence {
+                value: Some(Rate(rows_per_s)),
+                ..Default::default()
+            },
+            ..data()
+        }
+    }
+
+    /// The physical candidates of a per-series p99 over 5 min with its KLL
+    /// in five 1-min tumbling panes, every minute over data arriving at
+    /// `rows_per_s`: rebuilt at query time (B2), then maintained at
+    /// ingestion time (B1).
+    fn pane_candidates(rows_per_s: f64) -> Vec<PhysicalCandidate> {
+        let root = lower_promql(
+            "quantile_over_time(0.99, m[5m])",
+            AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank),
+        );
+        let inventory = crate::per_computation_candidates::generate_per_computation_candidates(
+            vec![(0, QueryRoot::Operator(root))],
+        )
+        .unwrap();
+        let kll = inventory.targets[0]
+            .choices
+            .candidates
+            .iter()
+            .position(|c| {
+                matches!(
+                    c,
+                    crate::per_computation_candidates::ComputationCandidate::Summary(
+                        SketchAlgorithm::Kll
+                    )
+                )
+            })
+            .unwrap();
+        let roots: Vec<_> =
+            crate::per_computation_candidates::compose_logical_candidate(&inventory, &[kll])
+                .unwrap()
+                .into_iter()
+                .map(|(_, root)| root)
+                .collect();
+        let sites = crate::asap_aware_cse::pane_sites(&roots, &[Some(u64::from(MINUTE))]);
+        let roots = crate::asap_aware_cse::window_composition_variants(&roots, &sites)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .roots
+            .unwrap();
+        let mut candidates =
+            optimize_physical_asap("L1", &roots, &[every_minute()], &arriving(rows_per_s)).unwrap();
+        for (k, c) in candidates.iter_mut().enumerate() {
+            c.id = format!("P1-m{k}");
+        }
+        assert_eq!(candidates.len(), 2);
+        candidates
+    }
+
+    fn is_chain(payload: &Payload) -> bool {
+        matches!(payload, Payload::ASAP(ASAPOp::PaneChain { .. }))
+    }
+
+    /// #509 Example 4, B1: maintained at ingestion time, a chain of N panes
+    /// pays the update of the newest pane only, one second of arriving rows
+    /// once per second, and keeps N + 1 panes (the N the query merges and
+    /// the one being built) per series.
+    #[test]
+    fn a_chain_at_ingestion_pays_the_newest_pane_and_keeps_n_plus_one_panes() {
+        let candidates = pane_candidates(10_000.0);
+        let dag = &candidates[1].dag;
+        let chain = node_of(dag, is_chain);
+        let Payload::ASAP(ASAPOp::PaneChain {
+            family, pane_count, ..
+        }) = &dag.nodes.iter().find(|n| n.id == chain).unwrap().payload
+        else {
+            unreachable!()
+        };
+        assert_eq!(*pane_count, 5);
+        let (depth, state_bytes) = summary_shape(family);
+        let recurrence = [repeating(MINUTE)];
+        let without_memory = ResourceCalibration {
+            cost_per_retained_byte_second: 0.0,
+            ..illustrative_calibration()
+        };
+        let work = &price(dag, &recurrence, &arriving(10_000.0), &without_memory)
+            .unwrap()
+            .per_node[&chain];
+        assert_eq!(work.per_second, 1.0);
+        assert!(
+            close(work.cost, 10_000.0 * (depth + 1.0) * 1e-6),
+            "{work:?}"
+        );
+        let with_memory = &price(
+            dag,
+            &recurrence,
+            &arriving(10_000.0),
+            &illustrative_calibration(),
+        )
+        .unwrap()
+        .per_node[&chain];
+        let kept = 6 * 10_000 * state_bytes;
+        assert!(
+            close(with_memory.cost - work.cost, 1.25e-7 * kept as f64),
+            "{with_memory:?}"
+        );
+        assert!(with_memory.detail.contains(&format!("keeps {kept} bytes")));
+    }
+
+    /// The latency check (S6, sketch-bench cost model §5): a query's
+    /// latency is its query-time work on one core. Rebuilding the panes at
+    /// query time (B2) takes longer than merging the maintained ones (B1);
+    /// with a bound between the two, B2 is rejected as invalid with its
+    /// latency and B1 is selected.
+    #[test]
+    fn a_candidate_over_a_querys_latency_bound_is_rejected_with_its_latency() {
+        let candidates = pane_candidates(10_000.0);
+        let latency = |c: &PhysicalCandidate| {
+            let cost = price(
+                &c.dag,
+                &[repeating(MINUTE)],
+                &arriving(10_000.0),
+                &illustrative_calibration(),
+            )
+            .unwrap();
+            cost.latency[0]
+        };
+        let (b2, b1) = (latency(&candidates[0]), latency(&candidates[1]));
+        assert_eq!((b2.compaction_ms, b1.compaction_ms), (0.0, 0.0));
+        assert!(b1.query_ms < b2.query_ms, "{b1:?} vs {b2:?}");
+        let bound = (b1.query_ms + b2.query_ms) / 2.0;
+        let demand = QueryDemand {
+            response_latency: LatencyRequirement::ExplicitMaxMs(bound),
+            ..every_minute()
+        };
+        let selection = select_plan(
+            &candidates,
+            &[None],
+            &[demand],
+            &arriving(10_000.0),
+            PlanningModels::builtin(),
+        )
+        .unwrap();
+        assert_eq!(selection.selected, candidates[1].id);
+        let rejected = &selection.rejected[0];
+        assert_eq!(rejected.id, candidates[0].id);
+        assert!(!rejected.valid);
+        assert!(
+            rejected.reason.starts_with(&format!(
+                "q1: latency {:.1} ms per evaluation (compaction 0.0 ms + query",
+                b2.total_ms()
+            )) && rejected
+                .reason
+                .ends_with(&format!("is over its {bound} ms bound")),
+            "{}",
+            rejected.reason
+        );
+        assert!(!selection.costs.contains_key(&candidates[0].id));
+    }
+
+    /// When a maintained state's ingestion work needs more than one core,
+    /// its `k` workers' partial copies of the newest window are merged
+    /// before the query reads it: `(k − 1)` merges of one operation for
+    /// each of its states per window, on the query's chain.
+    #[test]
+    fn ingestion_work_over_one_core_adds_the_newest_windows_compaction() {
+        let latency = |rows_per_s: f64| {
+            let candidates = pane_candidates(rows_per_s);
+            price(
+                &candidates[1].dag,
+                &[repeating(MINUTE)],
+                &arriving(rows_per_s),
+                &illustrative_calibration(),
+            )
+            .unwrap()
+            .latency[0]
+        };
+        assert_eq!(latency(10_000.0).compaction_ms, 0.0);
+        let fast = latency(1e10);
+        // 10,000 series, one state each per window, 1 ns per merge.
+        let merges = fast.compaction_ms / (10_000.0 * 1e-6);
+        assert!(
+            merges >= 1.0 && (merges - merges.round()).abs() < 1e-6,
+            "{fast:?}"
+        );
     }
 }

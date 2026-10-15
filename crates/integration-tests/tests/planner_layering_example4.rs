@@ -164,7 +164,7 @@ fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() 
 
 /// The shared EH candidate yields A1 (query time, kept), A2 (ingestion time) and A3 (not materialized).
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materialization (MatAtQuery within one batch) is in place"]
 fn stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options() {
     let found: BTreeSet<_> = eh_options(&run_promql(&once())).into_keys().collect();
     assert_eq!(
@@ -175,7 +175,7 @@ fn stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_optio
 
 /// With data at rest, A2 is not generated; A1 and A3 remain.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materialization (MatAtQuery within one batch) is in place"]
 fn stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option() {
     let found: BTreeSet<_> = eh_options(&run_promql(&at_rest())).into_keys().collect();
     assert_eq!(found, BTreeSet::from([MatAtQuery, NotMaterialized]));
@@ -183,7 +183,7 @@ fn stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option()
 
 /// A materialized shared EH is one build node read by all five queries, charged once.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materialization (MatAtQuery within one batch) is in place"]
 fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers() {
     let run = run_promql(&once());
     for (m, (id, build)) in eh_options(&run) {
@@ -213,7 +213,7 @@ fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_con
 /// `NotMaterialized` node once per consuming query), so it costs more than A1,
 /// which builds it once.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materialization (MatAtQuery within one batch) is in place"]
 fn stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once() {
     let run = run_promql(&once());
     let options = eh_options(&run);
@@ -228,7 +228,7 @@ fn stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once() 
 
 /// As given (run once, ad hoc), A1 is the cheapest of the three: A2 maintains years of history for one batch.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materialization (MatAtQuery within one batch) is in place"]
 fn stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
     let run = run_promql(&once());
     let options = eh_options(&run);
@@ -240,7 +240,7 @@ fn stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
 
 /// Repeated monthly and predictable, A2's maintenance is shared by many batches, so A2 gains on A1.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634), materialization enumeration (#604) and MatAtQuery (#625)"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materialization (MatAtQuery within one batch) is in place"]
 fn stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
     let ratio = |workload: PlanningWorkload| {
         let run = run_promql(&workload);
@@ -255,7 +255,7 @@ fn stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
 
 /// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, kept).
 #[test]
-#[ignore = "needs tumbling windows (#601), materialization enumeration (#604) and MatAtQuery panes (#625)"]
+#[ignore = "needs B3: panes built at query time and kept across evaluations (G9, #625)"]
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options() {
     let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), tumbling(), 1)
         .into_keys()
@@ -268,7 +268,6 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_op
 
 /// B1 builds the tumbling KLLs at ingestion time and merges and estimates at query time.
 #[test]
-#[ignore = "needs tumbling windows (#601) and materialization enumeration (#604)"]
 fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time() {
     let run = run_promql(&pattern_b());
     let (id, build) = options_of(&run, tumbling(), 1)[&MatAtIngestion].clone();
@@ -291,9 +290,27 @@ fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_quer
     }
 }
 
+/// Implementer test (until B3, G9): the tumbling KLL candidate yields B1
+/// (maintained at ingestion time) and B2 (rebuilt at every evaluation);
+/// both are priced, and B2's evaluation stays within the 200 ms bound.
+#[test]
+fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
+    let run = run_promql(&pattern_b());
+    let options = options_of(&run, tumbling(), 1);
+    assert_eq!(
+        options.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([MatAtIngestion, NotMaterialized])
+    );
+    for (id, _) in options.values() {
+        assert!(run.cost(id).is_some(), "{id} is priced");
+        let latency = run.selection.costs[id].latency[0].total_ms();
+        assert!(latency <= 200.0, "{id}: {latency} ms");
+    }
+}
+
 /// B3 runs nothing at ingestion time; it keeps the tumbling KLLs it builds at query time.
 #[test]
-#[ignore = "needs tumbling windows (#601) and MatAtQuery panes (#625)"]
+#[ignore = "needs B3: panes built at query time and kept across evaluations (G9, #625)"]
 fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
     let run = run_promql(&pattern_b());
     let (id, _) = options_of(&run, tumbling(), 1)[&MatAtQuery].clone();
@@ -306,7 +323,7 @@ fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
 
 /// The sliding-window KLL is kept from ingestion time or from query time; not materializing it is the no-window plan.
 #[test]
-#[ignore = "needs sliding windows (no PR yet) and materialization enumeration (#604)"]
+#[ignore = "needs sliding windows (no PR yet)"]
 fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options() {
     let found: BTreeSet<_> = options_of(&run_promql(&pattern_b()), sliding(), 1)
         .into_keys()
@@ -316,7 +333,7 @@ fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_optio
 
 /// B2 rebuilds all five tumbling KLLs at every evaluation, so it costs at least B1 and B3.
 #[test]
-#[ignore = "needs tumbling windows (#601), materialization enumeration (#604) and MatAtQuery panes (#625)"]
+#[ignore = "needs B3: panes built at query time and kept across evaluations (G9, #625)"]
 fn stage3_plan_selection_b_rebuilding_every_window_costs_most() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);
@@ -328,7 +345,7 @@ fn stage3_plan_selection_b_rebuilding_every_window_costs_most() {
 
 /// Repeating over arriving data, the built-in models pick B1 among the tumbling options.
 #[test]
-#[ignore = "needs tumbling windows (#601), materialization enumeration (#604) and MatAtQuery panes (#625)"]
+#[ignore = "the built-in model contradicts it: B1 keeps 6 panes of 1M per-series KLLs (107 GB) for 13,326.5 cost/s, B2 rebuilds them for 2.183; needs B3 (G9) and the model-relative rewrite (Q49, G9)"]
 fn stage3_plan_selection_b_prefers_ingestion_time_tumbling_windows() {
     let run = run_promql(&pattern_b());
     let options = options_of(&run, tumbling(), 1);

@@ -16,6 +16,7 @@ use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 use super::operator_properties::TimeShift;
 use super::SchemaDerivationError;
+use crate::post_asap::ExecutionTiming;
 
 fn invalid(message: &str) -> SchemaDerivationError {
     SchemaDerivationError::InvalidScalarSignature(message.into())
@@ -151,15 +152,32 @@ fn build_over(
 /// `root` with every `PaneChain` expanded into its panes: a `SummaryMerge`
 /// reads each pane of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs. Every other node keeps its
-/// guarantee, timing and materialization. The panes are new nodes without
-/// timing or materialization: a chain's own materialization is dropped, so
-/// expansion runs before timings are applied, and materializing panes
-/// (keeping all but the newest between evaluations) is left to Stage 2
-/// (G8). A chain read by anything but a `SummaryMerge` is an error.
+/// guarantee, timing and materialization. Each pane takes its chain's
+/// timing and materialization, and the range and shift it reads take the
+/// chain's timing: a chain materialized at ingestion time expands into
+/// panes each built and stored at ingestion time. Expanding before timings
+/// are applied leaves the panes untimed. A chain read by anything but a
+/// `SummaryMerge` is an error.
 pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     expand(root, &mut HashMap::new())
+}
+
+/// The untimed `node` with `timing` written into it and into every untimed
+/// node below it: the nodes [`pane`] created, over the chain's input, which
+/// the timing pass already timed.
+fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode {
+    OperatorNode::with_schema(
+        node.operator.map_children(|child| match child.timing {
+            Some(_) => Rc::clone(child),
+            None => Rc::new(timed_like(child, timing)),
+        }),
+        node.schema.clone(),
+    )
+    .with_guarantee(node.guarantee.clone())
+    .with_materialization(node.materialization)
+    .with_timing(Some(timing))
 }
 
 fn expand(
@@ -179,7 +197,14 @@ fn expand(
                 match child.asap() {
                     Some(ASAPOp::PaneChain { pane_count, .. }) => {
                         for index in 0..*pane_count {
-                            inputs.push(Rc::new(pane(child, index)?));
+                            let pane = Rc::new(pane(child, index)?);
+                            inputs.push(match child.timing {
+                                Some(timing) => Rc::new(
+                                    timed_like(&pane, timing)
+                                        .with_materialization(child.materialization),
+                                ),
+                                None => pane,
+                            });
                         }
                     }
                     _ => inputs.push(expand(child, memo)?),

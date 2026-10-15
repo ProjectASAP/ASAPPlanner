@@ -26,7 +26,8 @@
 //!    candidates; every distinct candidate once; the independent candidate
 //!    is kept;
 //! 2. Stage 2, physical ASAP-aware optimization of every Stage 1 candidate
-//!    ([`optimize_physical_asap`]);
+//!    ([`optimize_physical_asap`]): one physical candidate per
+//!    materialization assignment of its summary builds;
 //! 3. Stage 3, plan selection over the physical candidates ([`select_plan`]).
 //!
 //! Stage 0, the query-language frontends, runs before it (the `asap-planner`
@@ -45,7 +46,9 @@ use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{DataWorkload, QueryLanguage, QueryRecurrence, RepeatedDemand};
+use asap_types::workload::{
+    DataWorkload, QueryDemand, QueryLanguage, QueryRecurrence, RepeatedDemand,
+};
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::asap_aware_cse::{
@@ -54,8 +57,8 @@ use crate::asap_aware_cse::{
     window_composition_variants, MAX_REUSE_SITES,
 };
 use crate::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
-    PerComputationCandidateError, PerComputationCandidates,
+    compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidateError,
+    PerComputationCandidates,
 };
 use crate::stage2_physical_asap_optimization::{optimize_physical_asap, PhysicalCandidate};
 use crate::stage3_plan_selection::{select_plan, Selection, SelectionError};
@@ -68,9 +71,6 @@ use crate::PlanningModels;
 pub struct LogicalCandidate {
     /// `L<n>`, numbered in enumeration order.
     pub id: String,
-    /// Human-readable name of the candidate, e.g. "Q1 exact · Q2 CMS+heap", used only for
-    /// display.
-    pub display_name: String,
     pub choice: Vec<usize>,
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
@@ -100,9 +100,6 @@ pub struct Pass2Candidate {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrunedCandidate {
     pub from_logical: String,
-    /// Human-readable name of the candidate, e.g. "Q1 exact · Q2 CMS+heap", used only for
-    /// display.
-    pub display_name: String,
     pub reason: String,
 }
 
@@ -124,8 +121,9 @@ pub struct Stage1ToStage3Run<Id> {
     /// order: each composed Pass 1 candidate, followed by its Pass 2
     /// candidates.
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
-    /// Stage 2: one physical candidate (`P<n>` from `L<n>`) per Stage 1
-    /// candidate that composed and was implemented.
+    /// Stage 2: the physical candidates of each Stage 1 candidate that
+    /// composed and was implemented, one per materialization assignment:
+    /// `P<n>` (nothing materialized), then `P<n>-m<k>`, from `L<n>`.
     pub stage2_physical_asap_optimization: Vec<PhysicalCandidate>,
     /// Stage 2: the Stage 1 candidates Stage 2 could not implement, with the
     /// reasons.
@@ -157,13 +155,14 @@ impl<Id> Stage1ToStage3Run<Id> {
 
 /// Run Stage 1 → Stage 2 → Stage 3 over the frontends' `roots`, enumerating every
 /// whole-workload candidate. `targets[i]` is the accuracy
-/// requirement of `roots[i]` (`None` imposes none). Only a Pass 1 failure is
+/// requirement of `roots[i]` (`None` imposes none) and `demand[i]` how it is
+/// demanded (recurrence, predictability, latency bound). Only a Pass 1 failure is
 /// an error; a candidate that does not compose or cannot be implemented is
 /// listed with its reason, and a failed selection is reported in the run.
 pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
     targets: &[Option<AccuracyTarget>],
-    recurrence: &[QueryRecurrence],
+    demand: &[QueryDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
@@ -171,7 +170,7 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     Ok(run_stage1_to_stage3_from_pass1(
         per_computation,
         targets,
-        recurrence,
+        demand,
         data,
         models,
     ))
@@ -180,8 +179,6 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
 /// One Stage 1 candidate in enumeration order, before Stage 2 numbers it.
 #[derive(Debug)]
 pub struct Stage1Candidate {
-    /// Human-readable name, used only for display.
-    pub display_name: String,
     /// The Pass 1 choice (`targets[t].choices.candidates[choice[t]]`); a
     /// Pass 2 candidate has its Pass 1 candidate's.
     pub choice: Vec<usize>,
@@ -225,7 +222,6 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
     recurrence: &[QueryRecurrence],
 ) -> impl Iterator<Item = Stage1Candidate> + 'a {
     let interval_ms: Vec<Option<u64>> = recurrence.iter().map(fixed_interval_ms).collect();
-    let query_of_target = query_of_target(per_computation);
     let mut choice = Some(vec![0; per_computation.targets.len()]);
     let mut queue = std::collections::VecDeque::new();
     let mut position = 0usize;
@@ -240,7 +236,6 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
             if skip {
                 continue;
             }
-            let display_name = display_name(per_computation, &query_of_target, &this);
             let roots = compose_logical_candidate(per_computation, &this)
                 .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
             let from = position + queue.len();
@@ -249,7 +244,6 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
                 Err(_) => Vec::new(),
             };
             queue.push_back(Stage1Candidate {
-                display_name: display_name.clone(),
                 choice: this.clone(),
                 roots,
                 pass2_of: None,
@@ -265,21 +259,7 @@ pub fn stage1_logical_asap_optimization<'a, Id: Clone>(
                 roots,
             } in pass2
             {
-                let mut name = display_name.clone();
-                if !summaries.is_empty() {
-                    name += &format!(" · one {}", summaries.join(", one "));
-                }
-                if !panes.is_empty() {
-                    name += &format!(" · {}", panes.join(", "));
-                }
-                if !reused.is_empty() {
-                    name += &format!(" · {}", reused.join(", "));
-                }
-                if !shared.is_empty() {
-                    name += &format!(" · shared {}", shared.join(", "));
-                }
                 queue.push_back(Stage1Candidate {
-                    display_name: name,
                     choice: this.clone(),
                     roots,
                     pass2_of: Some(Pass2Of {
@@ -597,6 +577,15 @@ fn state_name(build: &OperatorNode) -> String {
     }
 }
 
+/// A sketch algorithm's name, e.g. "CMS+heap" or "Kll".
+fn sketch_name(algorithm: &SketchAlgorithm) -> String {
+    match algorithm {
+        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
+        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// `ms` in the largest whole unit: "1m", "10s", "250ms".
 fn duration_name(ms: u64) -> String {
     match ms {
@@ -632,22 +621,25 @@ fn readers_of(roots: &[QueryRoot], node: &Rc<OperatorNode>) -> Vec<usize> {
 pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     targets: &[Option<AccuracyTarget>],
-    recurrence: &[QueryRecurrence],
+    demand: &[QueryDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
-    let stage1 = stage1_logical_asap_optimization(&per_computation, recurrence).collect();
-    run_stage2_and_stage3(per_computation, stage1, targets, recurrence, data, models)
+    let recurrence: Vec<_> = demand.iter().map(|d| d.recurrence.clone()).collect();
+    let stage1 = stage1_logical_asap_optimization(&per_computation, &recurrence).collect();
+    run_stage2_and_stage3(per_computation, stage1, targets, demand, data, models)
 }
 
 /// Stage 2 and Stage 3 over `stage1`, the Stage 1 candidates of
 /// `per_computation` in enumeration order (all of them, or the ones a caller
-/// enumerated): candidate `n` (from 1) is `L<n>`, implemented as `P<n>`.
+/// enumerated): candidate `n` (from 1) is `L<n>`, implemented as `P<n>`
+/// with nothing materialized and as `P<n>-m<k>` (`k` from 1) for each other
+/// materialization assignment.
 pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     stage1: Vec<Stage1Candidate>,
     targets: &[Option<AccuracyTarget>],
-    recurrence: &[QueryRecurrence],
+    demand: &[QueryDemand],
     data: &DataWorkload,
     models: PlanningModels<'_>,
 ) -> Stage1ToStage3Run<Id> {
@@ -660,15 +652,18 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         let number = index + 1;
         let id = format!("L{number}");
         if let Ok(roots) = &candidate.roots {
-            match optimize_physical_asap(&id, roots) {
-                Ok(mut implemented) => {
-                    implemented.id = format!("P{number}");
-                    implemented.display_name = candidate.display_name.clone();
-                    physical.push(implemented);
+            match optimize_physical_asap(&id, roots, demand, data) {
+                Ok(implemented) => {
+                    for (k, mut p) in implemented.into_iter().enumerate() {
+                        p.id = match k {
+                            0 => format!("P{number}"),
+                            k => format!("P{number}-m{k}"),
+                        };
+                        physical.push(p);
+                    }
                 }
                 Err(error) => pruned.push(PrunedCandidate {
                     from_logical: id.clone(),
-                    display_name: candidate.display_name.clone(),
                     reason: error.to_string(),
                 }),
             }
@@ -685,12 +680,11 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
         }
         logical.push(LogicalCandidate {
             id,
-            display_name: candidate.display_name,
             choice: candidate.choice,
             roots: candidate.roots,
         });
     }
-    let selection = select_plan(&physical, targets, recurrence, data, models);
+    let selection = select_plan(&physical, targets, demand, data, models);
     let selected_logical = selection.as_ref().ok().and_then(|selection| {
         let from = &physical
             .iter()
@@ -733,103 +727,10 @@ fn next_choice<Id>(inventory: &PerComputationCandidates<Id>, choice: &mut [usize
     false
 }
 
-/// `query_of_target[t]`: the index of the query root that first reads target
-/// `t` (the first root, in input order, from which the target is reachable).
-/// [`display_name`] lists each target's choice under that query.
-fn query_of_target<Id>(inventory: &PerComputationCandidates<Id>) -> Vec<usize> {
-    inventory
-        .targets
-        .iter()
-        .map(|target| {
-            inventory
-                .roots
-                .iter()
-                .position(|(_, root)| {
-                    root_operators(root).into_iter().any(|node| {
-                        OperatorNode::reachable(node)
-                            .iter()
-                            .any(|n| Rc::ptr_eq(n, &target.target))
-                    })
-                })
-                .expect("every target is reached from a root")
-        })
-        .collect()
-}
-
 fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     match root {
         QueryRoot::Operator(node) => vec![node],
         QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
-}
-
-/// A human-readable name of a candidate, e.g. "Q1 exact · Q2 CMS+heap"
-/// (exact accumulators are listed in parentheses), used only for display in
-/// the `stage_pipeline` devtool and the viewer; planning never reads it.
-fn display_name<Id>(
-    inventory: &PerComputationCandidates<Id>,
-    query_of_target: &[usize],
-    choice: &[usize],
-) -> String {
-    // Targets a chosen whole-expression candidate absorbs are not computed.
-    let absorbed: Vec<usize> = inventory
-        .targets
-        .iter()
-        .zip(choice)
-        .filter(|(target, &index)| target.choices.candidates[index].absorbs_inner())
-        .filter_map(|(target, _)| target.absorbs)
-        .collect();
-    (0..inventory.roots.len())
-        .map(|query| {
-            let mut sketches = Vec::new();
-            let mut accumulators = Vec::new();
-            for (t, (target, (&target_query, &index))) in inventory
-                .targets
-                .iter()
-                .zip(query_of_target.iter().zip(choice))
-                .enumerate()
-            {
-                if target_query != query || absorbed.contains(&t) {
-                    continue;
-                }
-                match &target.choices.candidates[index] {
-                    ComputationCandidate::Exact => {}
-                    ComputationCandidate::ExactAccumulator { kind, .. } => {
-                        accumulators.push(format!("{kind:?} acc"))
-                    }
-                    ComputationCandidate::AvgAsSumCount => {
-                        accumulators.push("Sum/Count acc".into())
-                    }
-                    ComputationCandidate::NestedSumMerge => {
-                        accumulators.push("nested Sum acc".into())
-                    }
-                    ComputationCandidate::Summary(algorithm)
-                    | ComputationCandidate::WholeExpression(algorithm) => {
-                        sketches.push(sketch_name(algorithm))
-                    }
-                }
-            }
-            let mut text = format!("Q{} ", query + 1);
-            text += &if sketches.is_empty() {
-                "exact".to_string()
-            } else {
-                sketches.join(" + ")
-            };
-            if !accumulators.is_empty() {
-                text += &format!(" ({})", accumulators.join(", "));
-            }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
-/// A sketch algorithm's display name, e.g. "CMS+heap" or "Kll".
-fn sketch_name(algorithm: &SketchAlgorithm) -> String {
-    match algorithm {
-        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-        other => format!("{other:?}"),
     }
 }
 
@@ -875,13 +776,13 @@ impl OptimizationPass for Stage1ToStage3Pass {
             .entries()
             .map(|entry| Some(entry.requirements.accuracy.requested()))
             .collect();
-        let recurrence: Vec<_> = workload
+        let demand: Vec<_> = workload
             .query_workload()
             .entries()
-            .map(|entry| entry.recurrence)
+            .map(|entry| QueryDemand::from(&entry))
             .collect();
         let data = workload.data_workload().cloned().unwrap_or_default();
-        let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, input.models)?;
+        let run = run_stage1_to_stage3(roots, &targets, &demand, &data, input.models)?;
         let selection = run.stage3_plan_selection?;
         let roots = selection.plan.clone();
         let mut output = PlanOutput::new(Vec::new());

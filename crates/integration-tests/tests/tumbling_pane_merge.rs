@@ -291,7 +291,40 @@ fn execute_retained(root: &Rc<OperatorNode>, panes: &[Rc<OperatorNode>]) -> Vec<
     for pane in panes {
         assignment.set(pane, Materialization::MatAtIngestion(Medium::Memory));
     }
-    let exported = export(root, &assignment);
+    execute_retained_as(root, &assignment)
+}
+
+/// The planner's pane chain maintained at ingestion time, as Stage 2's B1
+/// option assigns it (`MatAtIngestion` on the chain), then expanded: each
+/// pane carries the chain's timing and materialization, so the panes are
+/// built in ingestion runs and merged in the query run.
+fn execute_maintained_chain(planned: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
+    let chain = OperatorNode::reachable(planned)
+        .into_iter()
+        .find(|n| matches!(n.asap(), Some(ASAPOp::PaneChain { .. })))
+        .expect("a pane chain");
+    let mut assignment = MaterializationAssignment::default();
+    assignment.set(&chain, Materialization::MatAtIngestion(Medium::Memory));
+    let timed =
+        apply_materialization_timings(planned, &assignment, &mut TimingMemo::new()).unwrap();
+    let expanded = expand_pane_chains(&timed).unwrap();
+    for pane in OperatorNode::reachable(&expanded)
+        .iter()
+        .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+    {
+        assert_eq!(
+            pane.materialization,
+            Materialization::MatAtIngestion(Medium::Memory)
+        );
+    }
+    execute_retained_as(&expanded, &MaterializationAssignment::default())
+}
+
+fn execute_retained_as(
+    root: &Rc<OperatorNode>,
+    assignment: &MaterializationAssignment,
+) -> Vec<Vec<Value>> {
+    let exported = export(root, assignment);
     let inputs = raw_inputs(&exported);
     let contracts = contracts(&inputs);
     let mut retained = BTreeMap::new();
@@ -366,6 +399,11 @@ fn assert_pane_merge_matches_single_build(query: &str, accuracy: AccuracyTarget)
         render(&execute(&expanded)),
         expected,
         "the planner's pane chain, expanded"
+    );
+    assert_eq!(
+        render(&execute_maintained_chain(&planned)),
+        expected,
+        "the planner's pane chain, maintained at ingestion time"
     );
     let unexpanded = compile_at_query_time(&planned).err().unwrap_or_default();
     assert!(unexpanded.contains("PaneChain"), "{unexpanded}");

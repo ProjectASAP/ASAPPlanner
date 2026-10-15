@@ -44,7 +44,7 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
         &workload
             .query_workload
             .entries()
-            .map(|entry| entry.recurrence)
+            .map(|entry| asap_types::workload::QueryDemand::from(&entry))
             .collect::<Vec<_>>(),
         &workload.data_workload.unwrap(),
         PlanningModels::builtin(),

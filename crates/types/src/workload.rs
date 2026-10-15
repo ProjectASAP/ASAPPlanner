@@ -402,6 +402,51 @@ pub struct QueryWorkloadEntry {
     pub time_selection: TimeSelection,
 }
 
+/// How one query is demanded, as planning reads it: its recurrence, how far
+/// ahead it is known, and its response-latency bound. Physical ASAP-aware
+/// optimization reads the recurrence and predictability (whether state may
+/// be kept from ingestion time); plan selection reads the recurrence (how
+/// often each node runs) and the latency bound.
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::{LatencyRequirement, Predictability, QueryDemand, QueryRecurrence};
+///
+/// // Anything not declared: unknown predictability, no latency bound.
+/// let demand = QueryDemand::from(QueryRecurrence::Unknown);
+/// assert_eq!(demand.predictability, Predictability::Unknown);
+/// assert_eq!(demand.response_latency, LatencyRequirement::Unspecified);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryDemand {
+    pub recurrence: QueryRecurrence,
+    pub predictability: Predictability,
+    pub response_latency: LatencyRequirement,
+}
+
+impl From<&QueryWorkloadEntry> for QueryDemand {
+    fn from(entry: &QueryWorkloadEntry) -> Self {
+        Self {
+            recurrence: entry.recurrence.clone(),
+            predictability: entry.predictability.clone(),
+            response_latency: entry.requirements.response_latency,
+        }
+    }
+}
+
+/// A query known only by its recurrence: unknown predictability and no
+/// latency bound.
+impl From<QueryRecurrence> for QueryDemand {
+    fn from(recurrence: QueryRecurrence) -> Self {
+        Self {
+            recurrence,
+            predictability: Predictability::Unknown,
+            response_latency: LatencyRequirement::Unspecified,
+        }
+    }
+}
+
 impl From<&BatchEntry> for QueryWorkloadEntry {
     fn from(entry: &BatchEntry) -> Self {
         Self {

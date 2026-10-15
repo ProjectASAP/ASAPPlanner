@@ -110,8 +110,14 @@ async fn check_every_choice(
             }
         };
         let roots: Vec<_> = composed.into_iter().map(|(_, root)| root).collect();
-        let candidate = optimize_physical_asap("L1", &roots)
-            .unwrap_or_else(|e| panic!("{sql}, choice {choice:?} pruned: {e}"));
+        let candidate = optimize_physical_asap(
+            "L1",
+            &roots,
+            &[],
+            &asap_types::workload::DataWorkload::default(),
+        )
+        .unwrap_or_else(|e| panic!("{sql}, choice {choice:?} pruned: {e}"))
+        .remove(0);
         let QueryRoot::Operator(physical) = &candidate.roots[0] else {
             panic!("operator root")
         };
