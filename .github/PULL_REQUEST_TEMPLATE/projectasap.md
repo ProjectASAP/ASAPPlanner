@@ -12,10 +12,11 @@ What is the core algorithm, interface, or design decision? Keep this top-down.
 
 ## Key code interfaces added / modified
 
-List every public interface this PR adds, changes, or removes: types, functions,
-methods, traits, fields, enum variants, module paths, CLI flags, and wire, file,
-or document formats. Give each as a short signature excerpt with its crate or
-module path and one line on what changed. Write "None" if no interface changes.
+Group by source file, with links to the files at a fixed commit. Under each group,
+put one fenced code block holding the real declarations: types with their fields
+or variants, and function/method/trait signatures with bodies elided. Add short
+comments for what changed (`// new`, `// was X`, `// removed`). End with a short
+usage snippet when it helps. Write "None" if no interface changes.
 
 ## Before this PR
 
