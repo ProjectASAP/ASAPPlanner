@@ -78,7 +78,7 @@ pub(super) fn local_guarantee(
 /// UnivMon's heap, and KMV's `k` at the relative error it was sized for
 /// (#694). Other parameters are returned as they are: DDSketch never fails;
 /// classic HLL's failure probability comes from its source's distinct bound
-/// ([`hll::precision_for`]); Theta is calibrated at a fixed 99%; a KMV not
+/// ([`hll::min_precision`]); Theta is calibrated at a fixed 99%; a KMV not
 /// sized for a relative error and an L2 or entropy UnivMon are not
 /// enlarged.
 pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
@@ -587,10 +587,10 @@ mod tests {
     /// source's distinct bound meets the target, up to 18.
     #[test]
     fn classic_hll_precision_grows_for_its_failure_probability() {
-        let p = hll::precision_for(4, 0.05, 64, 0.01);
+        let p = hll::min_precision(0.05, 0.01, 64, 4);
         assert!(p > 4);
         assert!(hll::classic_failure_probability(p, 0.05, 64) <= 0.01);
         assert!(hll::classic_failure_probability(p - 1, 0.05, 64) > 0.01);
-        assert_eq!(hll::precision_for(12, 0.05, 4096, 1e-30), 12);
+        assert_eq!(hll::min_precision(0.05, 1e-30, 4096, 12), 12);
     }
 }
