@@ -290,3 +290,89 @@ fn exact_topk_reuse_is_selected_when_the_ranking_is_computed_once() {
         ["top-k for Q1, Q2 from one top-10"]
     );
 }
+
+/// Query `q`'s root in the physical candidate Stage 2 made of `logical`.
+fn physical_root(run: &Stage1ToStage3Run<usize>, logical: &str, q: usize) -> Rc<OperatorNode> {
+    let candidate = run
+        .stage2_physical_asap_optimization
+        .iter()
+        .find(|c| c.from_logical == logical)
+        .unwrap_or_else(|| panic!("{logical} is implemented"));
+    match &candidate.roots[q] {
+        QueryRoot::Operator(node) => Rc::clone(node),
+        QueryRoot::Scalar(_) => panic!("operator root"),
+    }
+}
+
+/// Every Stage 1 candidate of `query` executes to the same rows.
+fn every_candidate_answers_alike(query: &str) {
+    let run = plan(&[query], QueryRecurrence::Unknown);
+    assert!(run.stage2_pruned.is_empty(), "{:?}", run.stage2_pruned);
+    let answers: Vec<(String, Vec<String>)> = run
+        .stage1_logical_asap_optimization
+        .iter()
+        .map(|c| (c.id.clone(), execute(&physical_root(&run, &c.id, 0))))
+        .collect();
+    for (id, answer) in &answers[1..] {
+        assert_eq!(answer, &answers[0].1, "{query}: {id} differs from L1");
+    }
+}
+
+/// A per-series sum drops the metric name, so grouping by `__name__` over
+/// the nested sums groups every series under the empty name; a merge over
+/// the raw samples would group them under `m`. Every candidate answers as
+/// the nested sums.
+#[test]
+fn nested_sum_by_the_metric_name_answers_as_the_nested_sums() {
+    every_candidate_answers_alike("sum by (__name__) (sum_over_time(m[5m]))");
+    every_candidate_answers_alike("sum by (job) (sum_over_time(m[5m]))");
+}
+
+/// Every reuse candidate of `queries` executes, query by query, to the rows
+/// of the candidate it reuses from.
+fn reuse_answers_alike(queries: &[&str]) {
+    let run = plan(queries, repeating());
+    assert!(run.stage2_pruned.is_empty(), "{:?}", run.stage2_pruned);
+    let reused: Vec<_> = run
+        .stage1_pass2
+        .iter()
+        .filter(|p| !p.reused.is_empty())
+        .collect();
+    assert!(!reused.is_empty(), "{queries:?}");
+    for candidate in reused {
+        for q in 0..queries.len() {
+            assert_eq!(
+                execute(&physical_root(&run, &candidate.id, q)),
+                execute(&physical_root(&run, &candidate.from_logical, q)),
+                "{queries:?} Q{}: {:?}",
+                q + 1,
+                candidate.reused
+            );
+        }
+    }
+}
+
+/// Coarse sums (over merged nested sums), minima and maxima rolled up from
+/// the finer ones answer as computed from the raw samples.
+#[test]
+fn rollups_answer_as_the_coarse_computations() {
+    for queries in [
+        [
+            "sum by (job) (sum_over_time(m[5m]))",
+            "sum by (job, series) (sum_over_time(m[5m]))",
+        ],
+        ["min by (job) (m)", "min by (job, series) (m)"],
+        ["max by (job) (m)", "max by (job, series) (m)"],
+    ] {
+        reuse_answers_alike(&queries);
+    }
+}
+
+/// Top-k read from one larger ranking answer as computed alone.
+#[test]
+fn exact_topk_reuse_answers_as_each_topk() {
+    reuse_answers_alike(&[
+        "topk by (job) (1, sum_over_time(m[5m]))",
+        "topk by (job) (2, sum_over_time(m[5m]))",
+    ]);
+}
