@@ -25,7 +25,6 @@ fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
                 predictability: Default::default(),
                 invocations: 1,
                 execute_at: None,
-                time_selection: Default::default(),
             }]),
             repeating_queries: None,
         },

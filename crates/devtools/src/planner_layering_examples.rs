@@ -4,10 +4,9 @@
 
 use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence, EvidenceSource,
-    MetricType, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
-    QueryTimeScope, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
-    SqlDialect, TimeSelection, TimestampMs,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence, EvidenceSource, MetricType,
+    PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, Rate,
+    RepeatedDemand, RepeatingEntry, RepetitionInterval, SqlDialect, TimestampMs,
 };
 
 pub fn declared<T>(value: T) -> Evidence<T> {
@@ -28,14 +27,12 @@ pub const T_MS: u64 = 1_767_225_600_000;
 pub fn shared_data_workload(arrival: DataArrival) -> DataWorkload {
     DataWorkload {
         data_ingestion_interval: declared(DurationMs(15_000)),
-        ingestion_volume: Evidence::default(),
         // Data at rest has no ingestion (`validate` rejects a positive rate).
         ingestion_rate: match arrival {
             DataArrival::AtRest => Evidence::default(),
             _ => declared(Rate(1_000_000.0 / 15.0)),
         },
         input_cardinality: declared(1_000_000),
-        distribution: declared(DataDistribution::Zipf),
         stream_norms: Evidence::default(),
         max_distinct_per_evaluation: Evidence::default(),
         arrival,
@@ -58,11 +55,6 @@ pub fn example1() -> PlanningWorkload {
             max_latency_ms,
         },
         predictability: Predictability::Predictable { known_at: None },
-        time_selection: TimeSelection {
-            scope: QueryTimeScope::RealTime,
-            lookback: Some(DurationMs(MINUTE_MS)),
-            as_of: None,
-        },
     };
     PlanningWorkload {
         query_workload: QueryWorkload {
@@ -137,11 +129,6 @@ pub fn example2() -> PlanningWorkload {
                             max_latency_ms: None,
                         },
                         predictability: Predictability::Predictable { known_at: None },
-                        time_selection: TimeSelection {
-                            scope: QueryTimeScope::RealTime,
-                            lookback: Some(DurationMs(MINUTE_MS)),
-                            as_of: None,
-                        },
                     })
                     .collect(),
             ),
@@ -154,7 +141,8 @@ pub fn example2() -> PlanningWorkload {
     }
 }
 
-/// Pattern A's five queries: (PromQL, `lookback`, T − `as_of`).
+/// Pattern A's five queries: (PromQL, its range window in ms, its offset
+/// before T in ms); the window and offset restate the query text.
 pub const PATTERN_A: [(&str, u64, u64); 5] = [
     ("quantile_over_time(0.99, latency_ms[5y])", 5 * YEAR_MS, 0),
     ("quantile_over_time(0.99, latency_ms[1y])", YEAR_MS, 0),
@@ -201,17 +189,12 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
             Some(
                 PATTERN_A
                     .iter()
-                    .map(|&(query, lookback, before_t)| BatchEntry {
+                    .map(|&(query, ..)| BatchEntry {
                         query: Query(query.into()),
                         requirements: pattern_a_requirements(),
                         predictability: Predictability::AdHoc,
                         invocations: 1,
                         execute_at: Some(TimestampMs(T_MS)),
-                        time_selection: TimeSelection {
-                            scope: QueryTimeScope::Longitudinal,
-                            lookback: Some(DurationMs(lookback)),
-                            as_of: Some(TimestampMs(T_MS - before_t)),
-                        },
                     })
                     .collect(),
             ),
@@ -222,7 +205,7 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
             Some(
                 PATTERN_A
                     .iter()
-                    .map(|&(query, lookback, _)| RepeatingEntry {
+                    .map(|&(query, ..)| RepeatingEntry {
                         query: Query(query.into()),
                         demand: RepeatedDemand::FixedInterval(RepetitionInterval(
                             (30 * 24 * 60 * MINUTE_MS) as u32,
@@ -230,11 +213,6 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
                         requirements: pattern_a_requirements(),
                         predictability: Predictability::Predictable {
                             known_at: Some(TimestampMs(T_MS)),
-                        },
-                        time_selection: TimeSelection {
-                            scope: QueryTimeScope::Longitudinal,
-                            lookback: Some(DurationMs(lookback)),
-                            as_of: None,
                         },
                     })
                     .collect(),
@@ -273,11 +251,6 @@ pub fn pattern_b() -> PlanningWorkload {
                     max_latency_ms: Some(200.0),
                 },
                 predictability: Predictability::Predictable { known_at: None },
-                time_selection: TimeSelection {
-                    scope: QueryTimeScope::RealTime,
-                    lookback: Some(DurationMs(PATTERN_B_WINDOW_MS)),
-                    as_of: None,
-                },
             }]),
         },
         data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),

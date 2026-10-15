@@ -133,12 +133,14 @@ fn stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time() {
 /// A materialized output is kept for as long as its consumers read: it covers every reader's lookback and offset.
 #[test]
 fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() {
+    // Each query's range window and offset, as its PromQL text states them.
+    let windows: Vec<u64> = PATTERN_A.iter().map(|(_, window, _)| *window).collect();
     let offsets: Vec<u64> = PATTERN_A.iter().map(|(_, _, before_t)| *before_t).collect();
-    for (workload, offsets) in [
-        (once(), offsets.clone()),
-        (monthly(), offsets.clone()),
-        (at_rest(), offsets),
-        (pattern_b(), vec![0]),
+    for (workload, windows, offsets) in [
+        (once(), windows.clone(), offsets.clone()),
+        (monthly(), windows.clone(), offsets.clone()),
+        (at_rest(), windows, offsets),
+        (pattern_b(), vec![PATTERN_B_WINDOW_MS], vec![0]),
     ] {
         let run = run_promql(&workload);
         for p in &run.physical {
@@ -148,7 +150,7 @@ fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() 
                 }
                 let need = readers(p.dag(), &p.query_roots, n.id)
                     .into_iter()
-                    .map(|q| lookback_ms(&workload, q) + offsets[q])
+                    .map(|q| windows[q] + offsets[q])
                     .max()
                     .unwrap_or(0);
                 let kept = retention_ms(p, n.id).unwrap_or_else(|| {

@@ -35,7 +35,7 @@ pub fn lower_promql_with_data_ingestion_interval(
 ) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, PromqlError> {
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
-        QueryRequirements, QueryWorkload, TimeSelection,
+        QueryRequirements, QueryWorkload,
     };
 
     let workload = PlanningWorkload {
@@ -50,7 +50,6 @@ pub fn lower_promql_with_data_ingestion_interval(
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },

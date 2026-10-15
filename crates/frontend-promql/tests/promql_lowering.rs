@@ -12,7 +12,7 @@ use asap_types::pre_asap::{
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+    QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
 use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
@@ -1174,7 +1174,6 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
-                    time_selection: TimeSelection::default(),
                 },
                 BatchEntry {
                     query: Query("quantile_over_time(0.9, b[5m])".into()),
@@ -1185,7 +1184,6 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
-                    time_selection: TimeSelection::default(),
                 },
             ]),
             repeating_queries: None,
@@ -1214,7 +1212,6 @@ fn batch_rejects_non_promql_language() {
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },

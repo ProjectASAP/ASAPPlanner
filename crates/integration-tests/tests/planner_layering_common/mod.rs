@@ -561,12 +561,6 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
     }
 }
 
-pub fn lookback_ms(workload: &PlanningWorkload, query: usize) -> u64 {
-    let entry = workload.query_workload.entries().nth(query).expect("entry");
-    let asap_types::workload::DurationMs(ms) = entry.time_selection.lookback.expect("lookback");
-    ms
-}
-
 // ── Materialization ──────────────────────────────────────────────────────
 
 /// A node's materialization option (#509 "Materialization"), without its

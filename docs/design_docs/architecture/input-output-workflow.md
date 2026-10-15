@@ -15,7 +15,7 @@ Post-ASAP alternatives for the workload.
 | Input | Fields | Required |
 |---|---|---:|
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
-| `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | No implicit default. Set `None` when unavailable for non-PromQL workloads; PromQL requires `Some(DataWorkload)` with a nonzero ingestion interval. |
+| `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion and cardinality | No implicit default. Set `None` when unavailable for non-PromQL workloads; PromQL requires `Some(DataWorkload)` with a nonzero ingestion interval. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; `now_ms` and, when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering; `now_ms` is required for PromQL lowering |
 | Planning models | Candidate cost/ranking and accuracy composition/checking | Used by the relevant APIs; built-in `DefaultCostModel` and `DefaultAccuracyModel` are available |
 | External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization depends on them; absence is not proof |
@@ -160,7 +160,6 @@ struct BatchEntry {
     predictability: Predictability,
     invocations: u64,
     execute_at: Option<TimestampMs>,
-    time_selection: TimeSelection,
 }
 ```
 
@@ -171,7 +170,6 @@ struct BatchEntry {
 | `predictability` | Yes as a field; `Unknown` is allowed | Whether the query is ad hoc, known in advance, or unknown. `known_at` records when a predictable query became known. | A report known at 10:00 and scheduled for 11:00 could have its summary prepared before execution. `AdHoc` or `Unknown` does not establish that eligibility. |
 | `invocations` | Yes, nonzero | Number of executions in this finite batch. | Ten executions can amortize one summary build differently from one execution. |
 | `execute_at` | Optional | Known execution time. | The prepared case above also needs an execution time; without it no preparation window can be established. |
-| `time_selection` | Yes | Whether the query follows current data or a historical interval, its lookback, and any fixed upper bound. | A moving five-minute window can require deletion/window support that a fixed historical interval does not. |
 
 ##### `repeating_queries: Option<Vec<RepeatingEntry>>`
 
@@ -181,7 +179,6 @@ struct RepeatingEntry {
     demand: RepeatedDemand,
     requirements: QueryRequirements,
     predictability: Predictability,
-    time_selection: TimeSelection,
 }
 ```
 
@@ -191,21 +188,17 @@ struct RepeatingEntry {
 | `demand` | Yes | A nonzero fixed interval, fixed interval with evaluation phase, nonempty explicit schedule, or evidence-backed estimated rate. | A query every minute produces more expected reads over a horizon than one every hour. |
 | `requirements` | Yes | Accuracy and response-latency requirements. | An exact dashboard query cannot use an approximate summary solely because it is cheaper. |
 | `predictability` | Yes as a field; `Unknown` is allowed | Records whether future executions are known in advance; independent of recurrence. | Current planner code does not use this field for repeating entries; set `Unknown` if no predictability claim is available. |
-| `time_selection` | Yes | Event-time scope, optional lookback, and optional fixed `as_of` time. | A live five-minute lookback differs from a fixed historical range when checking maintenance capabilities. |
 
 ##### Shared entry fields
 
-`BatchEntry` and `RepeatingEntry` both contain `QueryRequirements`,
-`Predictability`, and `TimeSelection`. The nested requirement and time-selection
-fields expand as follows:
+`BatchEntry` and `RepeatingEntry` both contain `QueryRequirements` and
+`Predictability`. The event time a query reads (its range and offset) is in
+its query text. The nested requirement fields expand as follows:
 
 | Structure | Field | Meaning |
 |---|---|---|
 | `QueryRequirements` | `accuracy` | An `AccuracyTarget`; omitted, it is `AccuracyTarget::exact()`. Set ε (and δ) when approximation is allowed. |
 | `QueryRequirements` | `max_latency_ms` | An optional finite, non-negative maximum in milliseconds for one evaluation; omitted, there is no bound. |
-| `TimeSelection` | `scope` | `RealTime`, `Longitudinal`, `Mixed`, or `Unknown`. |
-| `TimeSelection` | `lookback` | Optional event-time duration selected before the upper bound. |
-| `TimeSelection` | `as_of` | Optional fixed upper-bound timestamp; `None` means planning/evaluation time. |
 
 Frontend lowering produces one Pre-ASAP `Rc<OperatorNode>` root for each normalized
 query entry. The caller must retain each root's association with its workload
@@ -220,10 +213,8 @@ entry for later recurrence and materialization planning.
 struct DataWorkload {
     arrival: DataArrival,
     data_ingestion_interval: Evidence<DurationMs>,
-    ingestion_volume: Evidence<u64>,
     ingestion_rate: Evidence<Rate>,
     input_cardinality: Evidence<u64>,
-    distribution: Evidence<DataDistribution>,
 }
 ```
 
@@ -231,10 +222,8 @@ struct DataWorkload {
 |---|---:|---|
 | `arrival` | Present; may be `Unknown` | Distinguishes data at rest, continuously ingesting data, and mixed data. Continuous-maintenance decisions are limited when unknown. |
 | `data_ingestion_interval` | Required and nonzero for PromQL; otherwise optional | Sampling cadence for each PromQL source. Bare instant selectors use it as their explicit selection horizon. |
-| `ingestion_volume` | Optional evidence | Total ingestion volume when known. Dependent resource estimates remain unavailable when absent or stale. |
 | `ingestion_rate` | Optional evidence | Updates per second used to price continuous maintenance. It must be finite and non-negative; at-rest data cannot declare a positive rate. |
 | `input_cardinality` | Optional evidence | Input row/sample count used by applicable sizing, accuracy, or cost rules. |
-| `distribution` | Optional evidence | `Zipf`, `Uniform`, or `Bursty` key distribution used only by rules that explicitly consume it. |
 
 ##### `Evidence<T>` fields
 

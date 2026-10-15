@@ -356,7 +356,6 @@ mod tests {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
-                    time_selection: TimeSelection::default(),
                 }]),
                 repeating_queries: None,
             },

@@ -7,7 +7,7 @@ use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+    QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
 pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
@@ -23,7 +23,6 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },

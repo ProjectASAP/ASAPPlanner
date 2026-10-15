@@ -3047,8 +3047,7 @@ mod tests {
     fn comparison_scope() -> ComparisonScope {
         use asap_types::ir::operator_properties::Source;
         use asap_types::workload::{
-            DurationMs, QueryRecurrence, QueryTimeScope, RepeatedDemand, RepetitionInterval,
-            TimeSelection, TimestampMs,
+            DurationMs, QueryRecurrence, RepeatedDemand, RepetitionInterval, TimestampMs,
         };
 
         ComparisonScope {
@@ -3058,11 +3057,6 @@ mod tests {
             recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
                 RepetitionInterval(10_000),
             )),
-            time_selection: TimeSelection {
-                scope: QueryTimeScope::Longitudinal,
-                lookback: Some(DurationMs(300_000)),
-                as_of: Some(TimestampMs(1_000)),
-            },
             sources: vec![ScanSelection {
                 source: Source::Table {
                     table_ref: "metrics".into(),
@@ -3085,7 +3079,7 @@ mod tests {
     #[test]
     fn comparison_rejects_different_snapshot_predicate_time_or_horizon() {
         use asap_types::ir::{Predicate, ScalarExpr};
-        use asap_types::workload::{DurationMs, TimestampMs};
+        use asap_types::workload::DurationMs;
 
         let raw = comparison_scope();
         assert_eq!(validate_comparison_scopes(&raw, &raw).unwrap(), 6);
@@ -3104,15 +3098,6 @@ mod tests {
         assert_eq!(
             validate_comparison_scopes(&raw, &candidate),
             Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
-        );
-
-        candidate = raw.clone();
-        candidate.time_selection.as_of = Some(TimestampMs(2_000));
-        assert_eq!(
-            validate_comparison_scopes(&raw, &candidate),
-            Err(AnalyticalCostError::ComparisonScopeMismatch(
-                "time_selection"
-            ))
         );
 
         candidate = raw.clone();

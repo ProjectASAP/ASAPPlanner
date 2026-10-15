@@ -8,7 +8,7 @@ use asap_types::pre_asap::ScalarValue;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+    QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
 pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
@@ -24,7 +24,6 @@ pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },
