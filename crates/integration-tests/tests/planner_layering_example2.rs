@@ -496,10 +496,10 @@ fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 
 // ── Physical ASAP-aware optimization ─────────────────────────────────────
 
-/// No candidate is discarded before plan selection: logical candidates map one-to-one onto physical ones.
+/// No candidate is discarded before plan selection: each logical candidate keeps one physical candidate with nothing materialized, plus one per other materialization assignment.
 #[test]
 fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
-    assert_one_physical_candidate_per_logical(&pipeline());
+    assert_one_unmaterialized_physical_candidate_per_logical(&pipeline());
 }
 
 /// Physical ASAP-aware optimization keeps the shared UnivMon as one build node read by all three queries.
@@ -954,11 +954,14 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
         .iter()
         .map(|e| Some(e.requirements.accuracy.requested()))
         .collect();
-    let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
+    let demand: Vec<_> = entries
+        .iter()
+        .map(asap_types::workload::QueryDemand::from)
+        .collect();
     let selection = select_plan(
         &kmv,
         &targets,
-        &recurrence,
+        &demand,
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
     )

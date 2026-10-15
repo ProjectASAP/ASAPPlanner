@@ -255,9 +255,10 @@ async fn sql_window_and_filtered_aggregate_types() {
 }
 
 /// A real query batch replaces each SUM by its exact accumulator state,
-/// retains two result roots, and executes both selected plans. Each query
-/// reads its own state until Pass 2 shares identical producers (#580). No
-/// replacement dag is constructed by the test.
+/// retains two result roots, and executes both selected plans. Pass 2
+/// shares the identical state, and building it once per evaluation for both
+/// queries (`MatAtQuery`) is the cheapest plan, so both roots read one
+/// state. No replacement dag is constructed by the test.
 #[tokio::test]
 async fn batch_planning_replaces_summary_operators() {
     use asap_aware_mapping::pass::PlanningModels;
@@ -317,8 +318,14 @@ async fn batch_planning_replaces_summary_operators() {
         .into_iter()
         .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
         .collect();
-    assert_eq!(states.len(), 2, "one SUM state per query");
-    for ((plan, expected), state) in output.plans.iter().zip([31.0, 60.0]).zip(&states) {
+    let [state] = &states[..] else {
+        panic!("one SUM state for both queries: {states:?}")
+    };
+    assert!(matches!(
+        state.materialization,
+        asap_types::ir::Materialization::MatAtQuery(_)
+    ));
+    for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
         let root = &plan.root;
         root.validate_structure().unwrap();
         assert!(OperatorNode::reachable(root)
@@ -367,22 +374,28 @@ async fn batch_planning_replaces_summary_operators() {
             rows
         );
     }
-    // The batch exports as one physical DAG: a root per query and each
-    // query's SUM state.
+    // The batch exports as one physical DAG: a root per query and the one
+    // SUM state, with the materialization the selected plan assigned it.
     let workload_dag = output.execution_timed_dag().unwrap();
     assert_eq!(workload_dag.roots.len(), 2);
     assert_ne!(workload_dag.roots[0], workload_dag.roots[1]);
-    assert_eq!(
-        workload_dag
-            .nodes
-            .iter()
-            .filter(|n| matches!(
+    let states: Vec<_> = workload_dag
+        .nodes
+        .iter()
+        .filter(|n| {
+            matches!(
                 n.payload,
                 asap_types::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
                     asap_types::ir::ASAPOp::SummaryAgg { .. }
                 )
-            ))
-            .count(),
-        2
-    );
+            )
+        })
+        .collect();
+    let [state] = &states[..] else {
+        panic!("one SUM state: {states:?}")
+    };
+    assert!(matches!(
+        state.materialization,
+        asap_types::ir::Materialization::MatAtQuery(_)
+    ));
 }

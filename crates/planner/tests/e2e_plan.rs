@@ -143,7 +143,7 @@ async fn facade_plans_match_run_stage1_to_stage3() {
     let recurrence: Vec<_> = workload
         .query_workload
         .entries()
-        .map(|entry| entry.recurrence)
+        .map(|entry| asap_types::workload::QueryDemand::from(&entry))
         .collect();
     let run = run_stage1_to_stage3(roots, &targets, &recurrence, &data, models).unwrap();
     let selection = run
