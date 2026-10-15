@@ -20,7 +20,7 @@ use asap_types::pre_asap::AggIntent;
 
 /// Layers `asap_sketchlib` builds: layer `i` hashes at seed index `i`, and
 /// seed 19 picks the layers a key reaches.
-pub(crate) const MAX_LAYERS: u8 = 19;
+pub(crate) const MAX_LAYERS: u8 = asap_sketchlib::sketch_framework::univmon::MAX_LAYER_SIZE as u8;
 /// Rows the executor builds an L2 sketch with: the deepest odd shape under
 /// its 20-row limit.
 const MAX_L2_ROWS: u32 = 19;
@@ -91,19 +91,13 @@ pub(super) fn guarantee(
     }
 }
 
-/// Whether `asap_sketchlib` builds this shape with independent hashes: at
-/// most [`MAX_LAYERS`] layers, and `rows · (⌈log2 cols⌉ + 1) ≤ 128`.
+/// Whether `asap_sketchlib` builds this shape, with independent hashes: at
+/// most [`MAX_LAYERS`] layers and 20 rows, and `rows · (⌈log2 cols⌉ + 1) ≤
+/// 128` ([`asap_sketchlib::UnivMon::check_shape`]; the heap size is not part
+/// of the hash rules).
 pub(crate) fn hash_independent(rows: u32, cols: u32, layers: u8) -> bool {
-    rows >= 1
-        && cols >= 1
-        && (1..=MAX_LAYERS).contains(&layers)
-        && rows.saturating_mul(column_bits(cols) + 1) <= HASH_BITS
-}
-
-/// `⌈log2 cols⌉`, the column bits a row reads.
-fn column_bits(cols: u32) -> u32 {
-    cols.checked_next_power_of_two()
-        .map_or(u32::BITS, u32::trailing_zeros)
+    asap_sketchlib::UnivMon::check_shape(1, rows as usize, cols as usize, usize::from(layers))
+        .is_ok()
 }
 
 /// The relative error of the L2 norm at `cols` columns. Per row, the
@@ -493,6 +487,16 @@ mod tests {
             );
             assert!(!meets(&l2(&params).unwrap(), eps, delta), "{params:?}");
         }
+    }
+
+    /// The library builds at most 20 rows, so a 21-row UnivMon certifies
+    /// nothing even though its hashes fit the budget (21 · (3 + 1) = 84 ≤
+    /// 128 at 8 columns).
+    #[test]
+    fn univmon_past_twenty_rows_is_not_hash_independent() {
+        assert!(hash_independent(20, 8, 1));
+        assert!(!hash_independent(21, 8, 1));
+        assert!(l2(&univmon(1, 21, 8, 1, None)).is_none());
     }
 
     /// Each distinct-count heap meets its target once the source's bound

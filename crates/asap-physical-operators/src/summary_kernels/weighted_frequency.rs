@@ -64,19 +64,22 @@ impl WeightedFrequency {
                     depth,
                     heap_size,
                 },
-            ) if depth % 2 == 1 => (FrequencyAlgorithm::CountSketch, *width, *depth, *heap_size),
+            ) => (FrequencyAlgorithm::CountSketch, *width, *depth, *heap_size),
             _ => {
                 return Err(Error::Invalid(
-                    "unsupported weighted frequency family or depth".into(),
+                    "unsupported weighted frequency family".into(),
                 ))
             }
         };
-        if width == 0 || depth == 0 || capacity == 0 {
+        // A heap family needs a heap; the shape rules are the kernel's.
+        if capacity == 0 {
             return Err(Error::Invalid(
-                "invalid weighted frequency dimensions".into(),
+                "weighted frequency heap capacity is 0".into(),
             ));
         }
-        Ok((algorithm, width as usize, depth as usize, capacity as usize))
+        let (width, depth) = (width as usize, depth as usize);
+        Kernel::check_shape(algorithm, width, depth).map_err(adapt_error)?;
+        Ok((algorithm, width, depth, capacity as usize))
     }
 
     /// Algorithm and `(width, depth, capacity)` shape, so a deployment can check
@@ -96,6 +99,23 @@ impl WeightedFrequency {
         Kernel::new(algorithm, width, depth, capacity)
             .map(|inner| Self { inner })
             .map_err(adapt_error)
+    }
+    /// Adds `weight` to the identity tuple of `labels`, one `Utf8` identity
+    /// per label, as the DAG's keyed build keys a label vector.
+    pub(crate) fn update_labels(&mut self, labels: &[String], weight: f64) -> Result<(), Error> {
+        let identity = labels
+            .iter()
+            .map(|label| FrequencyIdentity::Utf8(label.clone()))
+            .collect::<Vec<_>>();
+        self.inner.update(&identity, weight).map_err(adapt_error)
+    }
+    /// The kernel's weight rule: finite, and nonnegative for Count-Min.
+    pub(crate) fn check_weight(&self, weight: f64) -> Result<(), WeightedFrequencyError> {
+        self.inner.check_weight(weight)
+    }
+    /// Empties the state in place, keeping its algorithm and shape.
+    pub(crate) fn clear(&mut self) {
+        self.inner.clear();
     }
     pub fn update(&mut self, values: &[Value], weight: f64) -> Result<(), Error> {
         let values = values.iter().map(identity).collect::<Result<Vec<_>, _>>()?;

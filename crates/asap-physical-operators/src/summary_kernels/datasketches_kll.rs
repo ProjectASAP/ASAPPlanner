@@ -33,11 +33,6 @@ impl std::fmt::Debug for DatasketchesKLLAccumulator {
     }
 }
 
-// SAFETY: `KllSketch` owns its buffers and has no interior mutability; the
-// accumulator is only mutated through `&mut self`.
-unsafe impl Send for DatasketchesKLLAccumulator {}
-unsafe impl Sync for DatasketchesKLLAccumulator {}
-
 impl AggregateCore for DatasketchesKLLAccumulator {
     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
         Box::new(self.clone())

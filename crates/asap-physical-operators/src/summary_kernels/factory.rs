@@ -2,8 +2,8 @@ use crate::summary_kernels::hll_sketch::HllSketchAccumulator;
 use crate::summary_kernels::univmon::UnivMonAccumulator;
 use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
 use crate::summary_kernels::{
-    CountMinSketchAccumulator, CountMinSketchWithHeapAccumulator, CountSketchWithHeapAccumulator,
-    DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms, HydraKllSketchAccumulator,
+    CountMinSketchAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms,
+    HydraKllSketchAccumulator,
 };
 use crate::{AggregateCore, KeyByLabelValues};
 use planner_types::post_asap::{FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams};
@@ -241,104 +241,6 @@ impl AccumulatorUpdater for CmsAccumulatorUpdater {
 }
 
 // ---------------------------------------------------------------------------
-// CmsHeapAccumulatorUpdater — value-weighted / count-weighted top-k
-// ---------------------------------------------------------------------------
-
-/// What quantity the top-k heap ranks keys by.
-///
-/// These are DIFFERENT query semantics and must be chosen explicitly:
-///
-/// * [`TopkWeight::Value`] — accumulate **Σ of the datapoint value** per key.
-///   This answers "top-k <group-by> by total <metric>" (e.g. "top-k hosts by
-///   total CPU"). The heap value is the summed metric value, so the read-side
-///   reducer's "sort heap descending by value" yields the correct ranking.
-///
-/// * [`TopkWeight::Count`] — accumulate **+1 per event** per key (occurrence
-///   frequency), the textbook heavy-hitter / frequency-top-k semantics
-///   ("which keys appear most often").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopkWeight {
-    /// Σ datapoint value per key (value-weighted top-k).
-    Value,
-    /// +1 per event per key (count-weighted / frequency top-k).
-    Count,
-}
-
-/// Keyed top-k updater backed by a real `CountMinSketchWithHeap` (a CMS
-/// matrix PLUS a size-`heap_size` top-k heap). Unlike the heap-LESS
-/// `CmsAccumulatorUpdater`, this enumerates top-k keys at read time
-/// (`get_topk_keys` / `topk_heap_items`), which is what `topk(...)` queries
-/// need.
-///
-/// The key is the frequency item supplied by the operator (e.g. a `host`
-/// value), not a group-by population. The accumulated quantity is selected
-/// by [`TopkWeight`]:
-///   * `Value` → `inner.update(key, value)` adds the datapoint value (Σ value).
-///   * `Count` → `inner.update(key, 1.0)` adds one per event (Σ count).
-///
-/// `create_planner_accumulator` builds Planner `CmsWithHeap` and
-/// `CountSketchWithHeap` families with [`WeightedFrequencyUpdater`] instead.
-pub struct CmsHeapAccumulatorUpdater {
-    acc: CountMinSketchWithHeapAccumulator,
-    row_num: usize,
-    col_num: usize,
-    heap_size: usize,
-    weight: TopkWeight,
-}
-
-impl CmsHeapAccumulatorUpdater {
-    pub fn new(row_num: usize, col_num: usize, heap_size: usize, weight: TopkWeight) -> Self {
-        Self {
-            acc: CountMinSketchWithHeapAccumulator::new(row_num, col_num, heap_size),
-            row_num,
-            col_num,
-            heap_size,
-            weight,
-        }
-    }
-}
-
-impl AccumulatorUpdater for CmsHeapAccumulatorUpdater {
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) {
-        debug_assert!(
-            false,
-            "update_single called on keyed updater; use update_keyed"
-        );
-    }
-
-    fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
-        // Heap key = the group-by label-value vector (e.g. `host`), joined the
-        // same way the read-side `get_topk_keys` splits it back apart (`;`).
-        let weighted = match self.weight {
-            // Σ value: feed the datapoint value. sketchlib's CMS-heap
-            // `update(key, w)` adds `w.round()` occurrences of `key`, so the
-            // heap value accumulates the (rounded) summed metric value.
-            TopkWeight::Value => value,
-            // Σ count: one occurrence per event, regardless of value.
-            TopkWeight::Count => 1.0,
-        };
-        self.acc.inner.update(&key.to_semicolon_str(), weighted);
-    }
-
-    impl_clone_accumulator_methods!(acc);
-
-    fn reset(&mut self) {
-        self.acc =
-            CountMinSketchWithHeapAccumulator::new(self.row_num, self.col_num, self.heap_size);
-    }
-
-    fn is_keyed(&self) -> bool {
-        true
-    }
-
-    fn memory_usage_bytes(&self) -> usize {
-        std::mem::size_of::<CountMinSketchWithHeapAccumulator>()
-            + self.row_num * self.col_num * std::mem::size_of::<f64>()
-            + self.heap_size * (std::mem::size_of::<asap_sketchlib::CmsHeapItem>() + 32)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // WeightedFrequencyUpdater (CountSketch, Count-Min with heap, CountSketch with heap)
 // ---------------------------------------------------------------------------
 
@@ -354,15 +256,11 @@ impl AccumulatorUpdater for CmsHeapAccumulatorUpdater {
 /// accepts nonnegative ones and rejects a negative input at validation.
 pub struct WeightedFrequencyUpdater {
     acc: WeightedFrequency,
-    algorithm: FrequencyAlgorithm,
-    width: usize,
-    depth: usize,
-    capacity: usize,
 }
 
 impl WeightedFrequencyUpdater {
-    /// Fails for a zero dimension, or an even CountSketch `depth` (the median
-    /// needs an odd row count).
+    /// Fails for a shape `asap_sketchlib` refuses: a zero dimension, or an
+    /// even CountSketch `depth` (the median needs an odd row count).
     pub fn new(
         algorithm: FrequencyAlgorithm,
         width: usize,
@@ -371,23 +269,16 @@ impl WeightedFrequencyUpdater {
     ) -> Result<Self, crate::Error> {
         Ok(Self {
             acc: WeightedFrequency::new(algorithm, width, depth, capacity)?,
-            algorithm,
-            width,
-            depth,
-            capacity,
         })
     }
 }
 
 impl AccumulatorUpdater for WeightedFrequencyUpdater {
+    /// The kernel's own weight rule: finite, and nonnegative for Count-Min.
     fn validate_single_input(&self, value: f64) -> Result<(), String> {
-        if !value.is_finite() {
-            Err("accumulator input must be finite".into())
-        } else if self.algorithm == FrequencyAlgorithm::Cms && value < 0.0 {
-            Err("Count-Min input must be nonnegative".into())
-        } else {
-            Ok(())
-        }
+        self.acc
+            .check_weight(value)
+            .map_err(|error| error.to_string())
     }
 
     fn update_single(&mut self, _value: f64, _timestamp_ms: i64) {
@@ -398,23 +289,17 @@ impl AccumulatorUpdater for WeightedFrequencyUpdater {
     }
 
     fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
-        let identity = key
-            .labels
-            .iter()
-            .map(|label| crate::values::Value::Utf8(label.as_str().into()))
-            .collect::<Vec<_>>();
         // Inputs pass `validate_single_input` first; only a sum past
         // `f64::MAX` can fail here.
         self.acc
-            .update(&identity, value)
+            .update_labels(&key.labels, value)
             .expect("weighted frequency counter overflow");
     }
 
     impl_clone_accumulator_methods!(acc);
 
     fn reset(&mut self) {
-        self.acc = WeightedFrequency::new(self.algorithm, self.width, self.depth, self.capacity)
-            .expect("dimensions validated at construction");
+        self.acc.clear();
     }
 
     fn is_keyed(&self) -> bool {
@@ -423,70 +308,6 @@ impl AccumulatorUpdater for WeightedFrequencyUpdater {
 
     fn memory_usage_bytes(&self) -> usize {
         self.acc.approx_memory_bytes()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CountSketchWithHeapAccumulatorUpdater (real CountSketch + top-k heap)
-// ---------------------------------------------------------------------------
-
-/// `create_planner_accumulator` builds Planner `CountSketchWithHeap` families
-/// with [`WeightedFrequencyUpdater`] instead.
-///
-/// Keyed top-k updater backed by a real `CountSketchWithHeap` (signed-row
-/// CountSketch matrix PLUS a size-`heap_size` top-k heap). Distinct math from
-/// `CmsHeapAccumulatorUpdater`'s CMS-with-heap (min-of-rows); shares the same
-/// [`TopkWeight`] semantics and heap payload shape.
-pub struct CountSketchWithHeapAccumulatorUpdater {
-    acc: CountSketchWithHeapAccumulator,
-    row_num: usize,
-    col_num: usize,
-    heap_size: usize,
-    weight: TopkWeight,
-}
-
-impl CountSketchWithHeapAccumulatorUpdater {
-    pub fn new(row_num: usize, col_num: usize, heap_size: usize, weight: TopkWeight) -> Self {
-        Self {
-            acc: CountSketchWithHeapAccumulator::new(row_num, col_num, heap_size),
-            row_num,
-            col_num,
-            heap_size,
-            weight,
-        }
-    }
-}
-
-impl AccumulatorUpdater for CountSketchWithHeapAccumulatorUpdater {
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) {
-        debug_assert!(
-            false,
-            "update_single called on keyed updater; use update_keyed"
-        );
-    }
-
-    fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
-        let weighted = match self.weight {
-            TopkWeight::Value => value,
-            TopkWeight::Count => 1.0,
-        };
-        self.acc.inner.update(&key.to_semicolon_str(), weighted);
-    }
-
-    impl_clone_accumulator_methods!(acc);
-
-    fn reset(&mut self) {
-        self.acc = CountSketchWithHeapAccumulator::new(self.row_num, self.col_num, self.heap_size);
-    }
-
-    fn is_keyed(&self) -> bool {
-        true
-    }
-
-    fn memory_usage_bytes(&self) -> usize {
-        std::mem::size_of::<CountSketchWithHeapAccumulator>()
-            + self.row_num * self.col_num * std::mem::size_of::<f64>()
-            + self.heap_size * (std::mem::size_of::<asap_sketchlib::CsHeapItem>() + 32)
     }
 }
 
