@@ -192,9 +192,9 @@ class CandidateRowTests(unittest.TestCase):
 
     def test_accuracy_text_reads_the_target_json(self):
         text = lambda target: self.js.call("accuracyText", target)
-        self.assertEqual(text({"error": 0.0, "failure_probability": 0.0, "scope": "whole_result"}), "exact")
-        self.assertEqual(text({"error": 0.01, "scope": "whole_result"}), "ε=0.01 (metric not set)")
-        self.assertEqual(text({"metric": "rank", "error": 0.01, "failure_probability": 0.001, "scope": "whole_result"}), "ε=0.01, δ=0.001 (rank)")
+        self.assertEqual(text({"error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}), "exact")
+        self.assertEqual(text({"error": 0.01, "accuracy_scope": "whole_result"}), "ε=0.01 (metric not set)")
+        self.assertEqual(text({"accuracy_metric": "rank", "error": 0.01, "failure_probability": 0.001, "accuracy_scope": "whole_result"}), "ε=0.01, δ=0.001 (rank)")
         self.assertEqual(self.js.call("accuracyText", {"error": 0.01}, "relative"), "ε=0.01 (metric not set; default relative)")
         self.assertEqual(text(None), "")
 

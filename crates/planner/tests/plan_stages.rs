@@ -12,7 +12,7 @@ use asap_types::workload::{
 const NOW_MS: u64 = 1_700_000_000_000;
 
 fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
-    let target = AccuracyTarget::epsilon(epsilon);
+    let target = AccuracyTarget::max_error(epsilon);
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,

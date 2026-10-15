@@ -62,7 +62,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
 {
   "format": "asap-stage-pipeline/v1",
   "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
-                "requirements": { "accuracy": { "error": 0.0, "failure_probability": 0.0, "scope": "whole_result" },
+                "requirements": { "accuracy": { "error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result" },
                                   "repeat_interval_ms": 10000 } }] },
   "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
   "stage1_logical_asap_optimization": {
@@ -92,7 +92,7 @@ time column). The server runs `stage_pipeline` with `--sql`, `--promql`,
   and standalone scalar queries in `scalar_roots` as `[query position,
   expr]`.
 - A query's `requirements.accuracy` is its accuracy target's own JSON
-  (`metric` omitted when not set, `failure_probability` omitted without a
+  (`accuracy_metric` omitted when not set, `failure_probability` omitted without a
   δ). An approximate target without a metric also has
   `requirements.default_metric`, the metric the query's result is naturally
   stated in (null for a quantile), for display only.

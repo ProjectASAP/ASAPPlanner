@@ -20,7 +20,7 @@ use asap_types::{
 use std::rc::Rc;
 
 fn approximate() -> AccuracyTarget {
-    AccuracyTarget::epsilon_delta(0.05, 0.01)
+    AccuracyTarget::max_error(0.05).failure_probability(0.01)
 }
 fn candidates_for(intent: AggIntent) -> Vec<ComputationCandidate> {
     computation_candidates_for_intent(&intent)
@@ -300,9 +300,10 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(summary))]),
         Err(PerComputationCandidateError::ContainsAsap)
     ));
-    let epsilon_delta = |epsilon, delta| AccuracyTarget::epsilon_delta(epsilon, delta);
+    let epsilon_delta =
+        |epsilon, delta| AccuracyTarget::max_error(epsilon).failure_probability(delta);
     for target in [
-        AccuracyTarget::epsilon(f64::NAN),
+        AccuracyTarget::max_error(f64::NAN),
         epsilon_delta(0.0, 0.01),
         epsilon_delta(-0.1, 0.01),
         epsilon_delta(1.0, 0.01),
@@ -378,7 +379,7 @@ fn summary_candidates_are_unsized() {
         accuracy: approximate(),
     });
     let tight = candidates_for(AggIntent::Count {
-        accuracy: AccuracyTarget::epsilon_delta(0.0001, 0.0001),
+        accuracy: AccuracyTarget::max_error(0.0001).failure_probability(0.0001),
     });
     assert_eq!(loose, tight);
 }

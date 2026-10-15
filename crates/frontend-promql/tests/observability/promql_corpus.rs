@@ -92,7 +92,7 @@ fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
 
 #[test]
 fn binding_is_total_over_the_entire_corpus() {
-    let accuracy = AccuracyTarget::epsilon(0.01);
+    let accuracy = AccuracyTarget::max_error(0.01);
     let docs = bind_tally(DOCS, accuracy.clone());
     let td = bind_tally(TESTDATA, accuracy);
     eprintln!("docs corpus post-ASAP binding:     {docs:?}");

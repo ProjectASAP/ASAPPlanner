@@ -71,7 +71,7 @@ fn benchmark_corpora_are_total_and_report_coverage() {
             total += 1;
             // Approximate accuracy exercises the sketch-replacement boundary
             // used by the existing post-ASAP corpus binding test.
-            match lower_promql(query, AccuracyTarget::epsilon(0.01)) {
+            match lower_promql(query, AccuracyTarget::max_error(0.01)) {
                 Ok(expr) => {
                     lowered += 1;
                     match logical_plan(&expr) {
@@ -119,7 +119,7 @@ fn kubernetes_mixin_aggregates_over_topk_compose() {
         r#"sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_throttled_periods_total{container!="", job="cadvisor", } [5m]) ) ) / on (cluster, namespace, pod, container, instance) group_left sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_periods_total{job="cadvisor", } [5m]) ) ) > ( 25 / 100 )"#,
         r#"histogram_quantile(0.99, sum by (cluster, instance, le) ( topk by (cluster, instance, le, operation_type) (1, rate(kubelet_pod_worker_duration_seconds_bucket{job="kubelet"}[5m]) ) ) ) * on(cluster, instance) group_left(node) topk by (cluster, instance, node) (1, kubelet_node_name{job="kubelet"} ) > 60"#,
     ] {
-        let root = lower_promql(query, AccuracyTarget::epsilon(0.01)).unwrap();
+        let root = lower_promql(query, AccuracyTarget::max_error(0.01)).unwrap();
         if let Err(error) = logical_plan(&root) {
             panic!("{query}: {error}");
         }

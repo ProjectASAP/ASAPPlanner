@@ -24,7 +24,7 @@ use asap_types::ir::{
     NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
 };
 use asap_types::post_asap::Schema;
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::{AccuracyMetric, AccuracyTarget};
 
 const EVALUATION_MS: i64 = 300_000;
 const PANE_MS: i64 = 60_000;
@@ -425,7 +425,7 @@ fn exact_sum_over_tumbling_panes_matches_single_build() {
 fn quantile_over_tumbling_panes_matches_single_build() {
     let p99 = assert_pane_merge_matches_single_build(
         "quantile_over_time(0.99, m[5m])",
-        AccuracyTarget::epsilon(0.05).with_metric(ErrorMetric::Relative),
+        AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative),
     );
     let mut p99 = p99;
     p99.sort_by(f64::total_cmp);

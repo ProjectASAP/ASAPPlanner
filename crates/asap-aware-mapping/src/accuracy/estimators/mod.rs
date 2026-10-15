@@ -36,7 +36,7 @@ fn bounded_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
-    metric: ErrorMetric,
+    metric: AccuracyMetric,
     bound: f64,
     delta: ProbabilityExpr,
     contract: &str,

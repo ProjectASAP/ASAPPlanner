@@ -1688,8 +1688,9 @@ mod tests {
             .map(|(i, (q, epsilon))| {
                 let root = lower_promql(
                     q,
-                    asap_types::types::AccuracyTarget::epsilon_delta(*epsilon, 0.01)
-                        .with_metric(asap_types::types::ErrorMetric::Rank),
+                    asap_types::types::AccuracyTarget::max_error(*epsilon)
+                        .failure_probability(0.01)
+                        .accuracy_metric(asap_types::types::AccuracyMetric::Rank),
                 );
                 (
                     i,
@@ -2298,7 +2299,7 @@ mod tests {
             .map(|(i, q)| {
                 let root = lower_promql(
                     q,
-                    asap_types::types::AccuracyTarget::epsilon_delta(0.01, 0.01),
+                    asap_types::types::AccuracyTarget::max_error(0.01).failure_probability(0.01),
                 );
                 (i, QueryRoot::Operator(root))
             })

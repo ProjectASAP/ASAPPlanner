@@ -244,7 +244,7 @@ fn inner_aggregate(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
 async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     let pre_asap = lower(
         "SELECT approx_percentile_cont(latency, 0.99) AS p99 FROM metrics",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await;
     let Some(NonASAPOp::Project {
@@ -443,7 +443,7 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
          (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
           FROM metrics GROUP BY service) t \
          WHERE t.p > 100 ORDER BY t.p DESC LIMIT 5",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await;
     let space = search_workload(vec![("query", Rc::clone(&pre_asap))]).unwrap();
@@ -496,7 +496,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
          (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
           FROM metrics WHERE service = 'api' GROUP BY service) t \
          WHERE t.p > 100",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await;
     let expected_read_predicate = {
@@ -639,7 +639,7 @@ async fn sql_filter_preserves_local_fallback_boundary_for_unsupported_child() {
 async fn sql_quantile_binds_kll_sketch_over_named_column() {
     let pre_asap = lower(
         "SELECT approx_percentile_cont(latency, 0.99) FROM metrics",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await;
     let agg = inner_aggregate(&pre_asap);
@@ -741,7 +741,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     let pre_asap = lower(
         "SELECT COUNT(DISTINCT service) FROM metrics",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await;
     let agg = inner_aggregate(&pre_asap);

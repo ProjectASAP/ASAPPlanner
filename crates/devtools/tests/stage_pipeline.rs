@@ -611,7 +611,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let unset = document_of(&query);
     assert_eq!(
         unset["workload"]["queries"][0]["requirements"]["accuracy"],
-        serde_json::json!({"error": 0.01, "scope": "whole_result"})
+        serde_json::json!({"error": 0.01, "accuracy_scope": "whole_result"})
     );
     // A quantile has no single default metric to show.
     assert!(unset["workload"]["queries"][0]["requirements"]

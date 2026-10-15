@@ -59,7 +59,7 @@ pub enum QueryLanguage {
 /// Independent accuracy and response-latency constraints attached to one
 /// query in the workload.
 ///
-/// JSON: `{"accuracy": {"error": 0.01, "metric": "rank"}, "max_latency_ms":
+/// JSON: `{"accuracy": {"error": 0.01, "accuracy_metric": "rank"}, "max_latency_ms":
 /// 200.0}`. An omitted `accuracy` is [`AccuracyTarget::exact`] and an
 /// omitted `max_latency_ms` imposes no bound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -780,7 +780,7 @@ mod tests {
         assert_eq!(
             empty,
             serde_json::json!({"accuracy": {"error": 0.0, "failure_probability": 0.0,
-                "scope": "whole_result"}, "max_latency_ms": null})
+                "accuracy_scope": "whole_result"}, "max_latency_ms": null})
         );
         let bounded = serde_json::to_value(
             parse(r#"{"accuracy": {"error": 0.01}, "max_latency_ms": 200.0}"#).unwrap(),
@@ -962,7 +962,7 @@ mod tests {
                     query: Query("rate(requests_total[5m])".into()),
                     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyTarget::epsilon_delta(0.01, 0.001),
+                        accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.001),
                         max_latency_ms: Some(100.0),
                     },
                     predictability: Predictability::Predictable { known_at: None },

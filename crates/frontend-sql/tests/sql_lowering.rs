@@ -1459,7 +1459,7 @@ async fn median_threads_the_accuracy_target() {
     let qe = lower_sql(
         "SELECT approx_median(latency) FROM metrics",
         &catalog(),
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await
     .expect("approx_median should lower");

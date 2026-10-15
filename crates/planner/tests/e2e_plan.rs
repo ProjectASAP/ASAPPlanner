@@ -10,7 +10,7 @@ use asap_aware_mapping::pass::{
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability,
     Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
@@ -21,7 +21,7 @@ const NOW_MS: u64 = 1_700_000_000_000;
 
 fn approximate() -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyTarget::epsilon(0.01),
+        accuracy: AccuracyTarget::max_error(0.01),
         max_latency_ms: None,
     }
 }
@@ -31,7 +31,8 @@ fn approximate() -> QueryRequirements {
 fn approximate_for(sql: &str) -> QueryRequirements {
     let mut requirements = approximate();
     if sql.contains("percentile") {
-        requirements.accuracy = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank);
+        requirements.accuracy =
+            AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank);
     }
     requirements
 }

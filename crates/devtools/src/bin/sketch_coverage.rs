@@ -219,7 +219,7 @@ fn parse_ingestion_interval() -> u64 {
 async fn main() {
     let epsilon = parse_epsilon();
     let interval_ms = parse_ingestion_interval();
-    let accuracy = AccuracyTarget::epsilon(epsilon);
+    let accuracy = AccuracyTarget::max_error(epsilon);
     let mut results = Vec::new();
 
     // ── PromQL corpora — same set as `variant_coverage` ──

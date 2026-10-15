@@ -18,7 +18,7 @@ pub(super) fn generic_guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::Relative,
+        AccuracyMetric::Relative,
         relative_standard_error(*precision),
         ProbabilityExpr::Unknown {
             statistic: "hll_estimator_failure_probability".into(),
@@ -96,7 +96,7 @@ pub(crate) fn classic_guarantee(
     let relative_error = classic_relative_error(precision, relative_error);
     let statistic = classic_failure_statistic(precision, relative_error, source);
     Some(AccuracyGuarantee::new(
-        ErrorMetric::Relative,
+        AccuracyMetric::Relative,
         BoundExpr::Constant {
             value: relative_error,
         },
@@ -162,7 +162,7 @@ impl ClassicHllConfidence {
     pub fn guarantee(&self, precision: u8) -> Option<AccuracyGuarantee> {
         let delta = self.failure_probability(precision)?;
         Some(AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             BoundExpr::Constant {
                 value: self.relative_error,
             },
@@ -491,15 +491,17 @@ mod tests {
                 &SketchStatistic::Cardinality,
             )
             .unwrap();
-        assert_eq!(g.spec.metric, ErrorMetric::Relative);
+        assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
         assert_eq!(g.spec.failure_probability.evaluate(), None);
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative)
+            &AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative)
         ));
         assert!(!DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative)
+            &AccuracyTarget::max_error(0.01)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Relative)
         ));
     }
 }

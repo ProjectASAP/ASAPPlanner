@@ -15,7 +15,7 @@ pub(super) fn guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::ABSOLUTE_STREAM_L1,
+        AccuracyMetric::ABSOLUTE_STREAM_L1,
         std::f64::consts::E / f64::from(*width),
         ProbabilityExpr::Constant {
             value: (-f64::from(*depth)).exp(),
@@ -54,12 +54,13 @@ mod tests {
                 &SketchStatistic::Cardinality,
             )
             .unwrap();
-        assert_eq!(g.spec.metric, ErrorMetric::ABSOLUTE_STREAM_L1);
+        assert_eq!(g.spec.accuracy_metric, AccuracyMetric::ABSOLUTE_STREAM_L1);
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon_delta(0.01, 0.001)
-                .with_metric(ErrorMetric::ABSOLUTE_STREAM_L1)
-                .with_scope(asap_types::types::AccuracyScope::PerValue)
+            &AccuracyTarget::max_error(0.01)
+                .failure_probability(0.001)
+                .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1)
+                .accuracy_scope(asap_types::types::AccuracyScope::PerValue)
         ));
     }
 
@@ -80,6 +81,9 @@ mod tests {
                 &SketchStatistic::TopK { k: 10 },
             )
             .expect("heap sketch still provides per-key frequency intervals");
-        assert_eq!(topk_frequency.spec.metric, ErrorMetric::ABSOLUTE_STREAM_L1);
+        assert_eq!(
+            topk_frequency.spec.accuracy_metric,
+            AccuracyMetric::ABSOLUTE_STREAM_L1
+        );
     }
 }

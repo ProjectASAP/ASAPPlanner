@@ -397,10 +397,10 @@ fn check(
 #[test]
 fn raw_sample_summaries_compile_and_match_their_kernels() {
     let exact = AccuracyTarget::exact();
-    let sketch = AccuracyTarget::epsilon(0.02);
+    let sketch = AccuracyTarget::max_error(0.02);
     // A UnivMon sized for a distinct count at ε = 0.02 holds a heap of
     // millions of keys on each of its 19 layers, past the default 64 MiB.
-    let distinct = AccuracyTarget::epsilon_delta(0.2, 0.1);
+    let distinct = AccuracyTarget::max_error(0.2).failure_probability(0.1);
     let queries = [
         ("sum_over_time(m[5m])", &exact),
         ("count_over_time(m[5m])", &exact),

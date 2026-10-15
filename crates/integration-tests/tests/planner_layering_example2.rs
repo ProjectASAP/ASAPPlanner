@@ -59,8 +59,8 @@ fn panel(query: &str, (epsilon, delta): (f64, f64), scope: AccuracyScope) -> Rep
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
         requirements: QueryRequirements {
             accuracy: AccuracyTarget {
-                scope,
-                ..AccuracyTarget::epsilon_delta(epsilon, delta)
+                accuracy_scope: scope,
+                ..AccuracyTarget::max_error(epsilon).failure_probability(delta)
             },
             max_latency_ms: None,
         },
@@ -678,8 +678,8 @@ fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound
             .as_mut()
             .expect("repeating queries")[0];
         q1.requirements.accuracy = AccuracyTarget {
-            scope: AccuracyScope::PerValue,
-            ..AccuracyTarget::epsilon_delta(0.02, delta)
+            accuracy_scope: AccuracyScope::PerValue,
+            ..AccuracyTarget::max_error(0.02).failure_probability(delta)
         };
         let run = run_stages(&workload, lower_promql(&workload));
         for id in q1_only_candidates(&run, "Kmv") {

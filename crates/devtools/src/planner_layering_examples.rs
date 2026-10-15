@@ -2,7 +2,7 @@
 //! (`docs/design_docs/proposals/planner-layering.md`), shared by
 //! `stage_pipeline` and the planner-layering acceptance tests.
 
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataDistribution, DataWorkload, DurationMs, Evidence, EvidenceSource,
     MetricType, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
@@ -72,7 +72,7 @@ pub fn example1() -> PlanningWorkload {
                 panel(EXAMPLE1_Q1, AccuracyTarget::exact(), None),
                 panel(
                     EXAMPLE1_Q2,
-                    AccuracyTarget::epsilon_delta(0.01, 0.001),
+                    AccuracyTarget::max_error(0.01).failure_probability(0.001),
                     Some(100.0),
                 ),
             ]),
@@ -133,7 +133,7 @@ pub fn example2() -> PlanningWorkload {
                         query: Query((*query).into()),
                         demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
                         requirements: QueryRequirements {
-                            accuracy: AccuracyTarget::epsilon_delta(epsilon, delta),
+                            accuracy: AccuracyTarget::max_error(epsilon).failure_probability(delta),
                             max_latency_ms: None,
                         },
                         predictability: Predictability::Predictable { known_at: None },
@@ -187,7 +187,9 @@ pub enum PatternARecurrence {
 
 fn pattern_a_requirements() -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyTarget::epsilon_delta(0.005, 0.01).with_metric(ErrorMetric::Rank),
+        accuracy: AccuracyTarget::max_error(0.005)
+            .failure_probability(0.01)
+            .accuracy_metric(AccuracyMetric::Rank),
         max_latency_ms: None,
     }
 }
@@ -265,8 +267,9 @@ pub fn pattern_b() -> PlanningWorkload {
                     PATTERN_B_INTERVAL_MS as u32,
                 )),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01)
-                        .with_metric(ErrorMetric::Rank),
+                    accuracy: AccuracyTarget::max_error(0.01)
+                        .failure_probability(0.01)
+                        .accuracy_metric(AccuracyMetric::Rank),
                     max_latency_ms: Some(200.0),
                 },
                 predictability: Predictability::Predictable { known_at: None },

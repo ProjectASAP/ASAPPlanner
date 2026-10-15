@@ -79,7 +79,7 @@ use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
 use asap_types::pre_asap::{
     ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
 };
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::AccuracyTarget;
 
 /// Every scalar expression this front end builds follows PromQL's numeric rules.
 const PROMQL: ExprSemantics = ExprSemantics::Promql;
@@ -785,7 +785,7 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
                     keys,
                     AggIntent::TopK {
                         k: k as usize,
-                        accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                        accuracy: current_accuracy(),
                     },
                     child,
                 ));
@@ -852,7 +852,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         let func = AggIntent::Quantile {
             col: None,
             q: phi,
-            accuracy: current_accuracy().for_quantile(),
+            accuracy: current_accuracy(),
         };
         return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
     }
@@ -923,7 +923,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
                 let intent = AggIntent::Quantile {
                     col: None,
                     q: phi,
-                    accuracy: current_accuracy().for_quantile(),
+                    accuracy: current_accuracy(),
                 };
                 Unresolved::Aggregate {
                     reduction: reduction_for(&[], intent.is_per_series()),
@@ -1691,7 +1691,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     reduction: Reduction::Reduce(keys.into()),
                     measures: vec![AggIntent::TopK {
                         k: k as usize,
-                        accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                        accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
                     filters: vec![],
@@ -1733,7 +1733,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     reduction: Reduction::Reduce(keys.into()),
                     measures: vec![AggIntent::TopK {
                         k: k as usize,
-                        accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+                        accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
                     filters: vec![],
@@ -1884,7 +1884,7 @@ fn ingestion_lookback(child: Unresolved) -> Unresolved {
 /// Count vector elements regardless of their sample values.
 fn count() -> AggIntent<ColumnRef> {
     AggIntent::Count {
-        accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+        accuracy: current_accuracy(),
     }
 }
 
@@ -1892,20 +1892,20 @@ fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
     match f {
         InnerFunc::FrequencyL2 => AggIntent::FrequencyL2 {
             col: None,
-            accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE),
+            accuracy: current_accuracy(),
         },
         InnerFunc::FrequencyEntropy => AggIntent::FrequencyEntropy {
             col: None,
-            accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE),
+            accuracy: current_accuracy(),
         },
         InnerFunc::Cardinality => AggIntent::Cardinality {
             cols: vec![],
-            accuracy: current_accuracy().target_in(ErrorMetric::Relative),
+            accuracy: current_accuracy(),
         },
         InnerFunc::Quantile(q) => AggIntent::Quantile {
             col: None,
             q: *q,
-            accuracy: current_accuracy().for_quantile(),
+            accuracy: current_accuracy(),
         },
         InnerFunc::Avg => AggIntent::Avg { col: None },
         InnerFunc::Min => AggIntent::Min { col: None },
@@ -1920,7 +1920,7 @@ fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
             population: true,
         },
         InnerFunc::Count => AggIntent::Count {
-            accuracy: current_accuracy().target_in(ErrorMetric::ABSOLUTE_STREAM_L1),
+            accuracy: current_accuracy(),
         },
         InnerFunc::Rate => AggIntent::Rate,
         InnerFunc::IRate => AggIntent::IRate,
@@ -1962,7 +1962,7 @@ fn outer_intent(o: &OuterIntent) -> AggIntent<ColumnRef> {
         OuterIntent::Quantile(q) => AggIntent::Quantile {
             col: None,
             q: *q,
-            accuracy: current_accuracy().for_quantile(),
+            accuracy: current_accuracy(),
         },
         OuterIntent::Group => AggIntent::Group,
     }
