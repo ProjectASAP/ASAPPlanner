@@ -208,7 +208,7 @@ fn family_capability_table() {
                     distinct_failure_probability: None,
                 },
             ),
-            Some((Disjoint, Approximate)),
+            Some((Disjoint, SameAsUnionBuild)),
             false,
         ),
         // KMV keeps the k smallest hashes under one shared seed: the merge
@@ -296,11 +296,12 @@ fn family_capability_table() {
     }
 }
 
-/// Heap readouts (distinct count, entropy, top-k) of a merged state are
-/// approximate: each part's heaps keep only that part's heavy items. At the
-/// pinned `asap_sketchlib`, UnivMon's L2 and distinct count also read the
-/// merged heaps, so every UnivMon readout is approximate after a merge.
-/// Counter readouts of a heap family (point counts) keep their guarantee.
+/// Heap readouts (entropy, top-k) of a merged state are approximate: each
+/// part's heaps keep only that part's heavy items. UnivMon's L2 reads layer
+/// 0's Count Sketch, which adds, and its distinct count's bound holds for
+/// any heap that keeps `min(|S_j|, k)` of a layer's keys, as the merge's
+/// does, so both keep the guarantee of one build over the union. Counter
+/// readouts of a heap family (point counts) keep their guarantee.
 #[test]
 fn merged_error_depends_on_the_readout() {
     use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
@@ -318,18 +319,14 @@ fn merged_error_depends_on_the_readout() {
             distinct_failure_probability: None,
         },
     ));
-    for readout in [
-        FrequencyL2,
-        point(),
-        Cardinality,
-        FrequencyEntropy,
-        TopK { k: 5 },
+    for (readout, error) in [
+        (FrequencyL2, MergedError::SameAsUnionBuild),
+        (point(), MergedError::SameAsUnionBuild),
+        (Cardinality, MergedError::SameAsUnionBuild),
+        (FrequencyEntropy, MergedError::Approximate),
+        (TopK { k: 5 }, MergedError::Approximate),
     ] {
-        assert_eq!(
-            univmon.merged_error(&readout),
-            Some(MergedError::Approximate),
-            "{readout:?}"
-        );
+        assert_eq!(univmon.merged_error(&readout), Some(error), "{readout:?}");
     }
     let heap = FamilyCapability::of(&cms_with_heap());
     assert_eq!(
