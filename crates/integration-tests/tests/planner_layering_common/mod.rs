@@ -16,8 +16,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
+use asap_aware_mapping::stage3_plan_selection::PlanSelectionSettings;
 use asap_aware_mapping::stage3_plan_selection::Selection;
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
+use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
@@ -33,6 +34,12 @@ pub type Payload = Operator<NodeId>;
 /// Lower and plan a PromQL workload.
 pub fn run_promql(workload: &PlanningWorkload) -> Run {
     run_stages(workload, lower_promql(workload))
+}
+
+/// Lower and plan a PromQL workload, selecting under `settings` (a cost
+/// model other than the default).
+pub fn run_promql_under(workload: &PlanningWorkload, settings: &PlanSelectionSettings) -> Run {
+    run_stages_under(workload, lower_promql(workload), settings)
 }
 
 /// Whether `form` answers a query window by merging several summaries.
@@ -129,7 +136,7 @@ impl Run {
     }
 
     pub fn cost(&self, id: &str) -> Option<f64> {
-        self.selection.costs.get(id).map(|c| c.total)
+        self.selection.costs.get(id).and_then(|c| c.cost_per_second)
     }
 
     pub fn physical(&self, id: &str) -> &Physical {
@@ -167,7 +174,19 @@ fn logical(id: String, roots: Vec<QueryRoot>) -> Logical {
 /// entry's recurrence and predictability and the data arrival (Example 4);
 /// plan selection also reads the latency bounds.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    let run = run_planning_stages(workload, roots, None).expect("planning stages run");
+    run_stages_under(workload, roots, &PlanSelectionSettings::default())
+}
+
+/// [`run_stages`], selecting under `settings`.
+pub fn run_stages_under(
+    workload: &PlanningWorkload,
+    roots: Vec<QueryRoot>,
+    settings: &PlanSelectionSettings,
+) -> Run {
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    let run = run_planning_stages_over(roots, &entries, &data, None, settings)
+        .expect("planning stages run");
     let logical_candidates = run
         .stage1_logical_asap_optimization
         .into_iter()
@@ -497,9 +516,13 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
         let nodes: BTreeSet<_> = p.dag().nodes.iter().map(|n| n.id).collect();
         let charged: BTreeSet<_> = cost.per_node.keys().copied().collect();
         assert_eq!(charged, nodes, "{}", p.id);
-        let sum: f64 = cost.per_node.values().map(|c| c.cost).sum();
+        let sum: f64 = cost
+            .per_node
+            .values()
+            .map(|c| c.cost_per_second.unwrap())
+            .sum();
         assert!(
-            (cost.total - sum).abs() <= 1e-9 * sum.abs().max(1.0),
+            (cost.cost_per_second.unwrap() - sum).abs() <= 1e-9 * sum.abs().max(1.0),
             "{}",
             p.id
         );

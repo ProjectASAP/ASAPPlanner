@@ -9,7 +9,7 @@ use asap_aware_mapping::per_computation_candidates::PerComputationCandidates;
 use asap_aware_mapping::stage2_physical_asap_optimization::{
     physical_candidate_count, PhysicalCandidate,
 };
-use asap_aware_mapping::stage3_plan_selection::{Selection, SelectionError};
+use asap_aware_mapping::stage3_plan_selection::{PlanSelectionSettings, Selection, SelectionError};
 use asap_aware_mapping::PlanningModels;
 use asap_types::ir::schema_support::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
@@ -143,17 +143,25 @@ pub fn run_planning_stages(
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    run_planning_stages_over(roots, &entries, &data, max_combinations)
+    run_planning_stages_over(
+        roots,
+        &entries,
+        &data,
+        max_combinations,
+        &PlanSelectionSettings::default(),
+    )
 }
 
 /// [`run_planning_stages`] over roots lowered from any mix of query
 /// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
 /// (its accuracy target, latency bound, recurrence and predictability).
+/// Plan selection compares candidates under `plan_selection`'s cost model.
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     max_combinations: Option<usize>,
+    plan_selection: &PlanSelectionSettings,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
     let per_computation =
@@ -185,7 +193,7 @@ pub fn run_planning_stages_over(
         stage1,
         entries,
         data,
-        PlanningModels::builtin(),
+        PlanningModels::builtin().with_plan_selection(plan_selection),
     );
     for candidate in &run.stage1_logical_asap_optimization {
         if let Ok(roots) = &candidate.roots {
