@@ -4,25 +4,26 @@
 //!
 //! ## Materialization
 //!
-//! Each summary build (a `SummaryAgg` or a `PaneChain`) is one unit whose
+//! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
+//! materialization candidate ([`MaterializationCandidate`]) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
-//! Each unit has up to three options:
+//! Each has up to three options:
 //!
 //! * `NotMaterialized`: rebuilt at query time by every query that reads it;
 //! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
-//!   queries, when the unit is eligible ([`IngestionPruneReason`]);
+//!   queries, when the build is eligible ([`IngestionPruneReason`]);
 //! * `MatAtQuery(Memory)`: built once per evaluation for every query that
-//!   reads it, offered for a unit two or more queries read. State is reused
+//!   reads it, offered for a build two or more queries read. State is reused
 //!   only within one evaluation; keeping it across evaluations comes later.
 //!
-//! A unit at ingestion time needs every unit below it at ingestion time too
+//! A build at ingestion time needs every build below it at ingestion time too
 //! (#509 Algorithm 3, line 13); such assignments are not generated. Every
 //! other combination of options is one physical candidate, the
 //! all-`NotMaterialized` one first: nothing is capped. A node that one
 //! query reads at ingestion time and another at query time is copied, one
 //! copy per phase ([`split_shared_by_phase`]).
 //!
-//! A unit may run at ingestion time (S4) only when:
+//! A build may run at ingestion time (S4) only when:
 //!
 //! * the data workload is continuously ingesting or mixed (unknown arrival
 //!   counts as not ingesting);
@@ -122,7 +123,7 @@ pub enum PhysicalASAPOptimizationError {
 }
 
 /// Why a summary build cannot be materialized at ingestion time (S4).
-/// Stage 2 bookkeeping, like [`MaterializationUnit`].
+/// Stage 2 bookkeeping, like [`MaterializationCandidate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IngestionPruneReason {
     /// The data workload is at rest, or its arrival is unknown.
@@ -145,8 +146,11 @@ pub(crate) enum IngestionPruneReason {
     UpstreamAtQueryTime(String),
 }
 
-/// Stage 2's enumeration bookkeeping: one summary build Stage 2 may decide
-/// to store, with the options it has. For example, over one metric:
+/// One summary build Stage 2 may store, with its materialization options.
+/// It is not a whole-workload plan like [`PhysicalCandidate`]: it is Stage
+/// 2's enumeration bookkeeping, and the physical candidates are the
+/// combinations of the materialization candidates' options. For example,
+/// over one metric:
 ///
 /// ```text
 /// q1: quantile_over_time(0.99, latency[5m])   every 1m
@@ -154,22 +158,22 @@ pub(crate) enum IngestionPruneReason {
 /// ```
 ///
 /// If Stage 1 chose KLL panes for q1 and exact max panes for q2, Stage 2
-/// finds two units:
+/// finds two materialization candidates:
 ///
-/// | unit              | readers | options                          |
-/// |-------------------|---------|----------------------------------|
-/// | Kll ×5 panes (q1) | q1      | NotMaterialized, MatAtIngestion  |
-/// | Max acc ×5 panes  | q2      | NotMaterialized, MatAtIngestion  |
+/// | materialization candidate | readers | options                         |
+/// |---------------------------|---------|---------------------------------|
+/// | Kll ×5 panes (q1)         | q1      | NotMaterialized, MatAtIngestion |
+/// | Max acc ×5 panes (q2)     | q2      | NotMaterialized, MatAtIngestion |
 ///
-/// A unit read by two or more queries also gets `MatAtQuery` (built once
-/// per evaluation and reused). The physical candidates are the product of
-/// the units' options, here 2 × 2 = 4, less the assignments that put a
-/// unit at ingestion time over one that is not; Stage 3 prices each.
+/// One read by two or more queries also gets `MatAtQuery` (built once per
+/// evaluation and reused). The physical candidates are the product of the
+/// options, here 2 × 2 = 4, less the assignments that put a build at
+/// ingestion time over one that is not; Stage 3 prices each.
 /// `at_ingestion` records why ingestion is ruled out when it is (e.g.
-/// `Filtered`, `NotRepeated`). The result each candidate carries is its
-/// assignment ([`PhysicalCandidate::materialization`]).
+/// `Filtered`, `NotRepeated`). Each physical candidate carries the
+/// resulting assignment ([`PhysicalCandidate::materialization`]).
 #[derive(Debug, Clone)]
-pub(crate) struct MaterializationUnit {
+pub(crate) struct MaterializationCandidate {
     /// The build in the implemented DAG.
     pub(crate) node: Rc<OperatorNode>,
     /// The queries (indices into the roots) that read it.
@@ -178,7 +182,7 @@ pub(crate) struct MaterializationUnit {
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
 }
 
-impl MaterializationUnit {
+impl MaterializationCandidate {
     /// Its options, `NotMaterialized` first: `MatAtIngestion` when eligible,
     /// `MatAtQuery` when two or more queries read it.
     pub(crate) fn options(&self) -> Vec<Materialization> {
@@ -195,7 +199,7 @@ impl MaterializationUnit {
 
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
 /// (physical operator implementation), then one physical candidate per
-/// materialization assignment of its units, the all-`NotMaterialized` one
+/// materialization assignment of its mat_candidates, the all-`NotMaterialized` one
 /// first. `demand[i]` is how query `i` (`roots[i]`) is demanded; a missing
 /// entry is unknown. `id` is left empty for the caller to name. Sharing between `roots` is preserved: one memo serves the whole
 /// workload.
@@ -207,18 +211,18 @@ pub fn optimize_physical_asap(
 ) -> Result<Vec<PhysicalCandidate>, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
-    let units = materialization_units(&implemented, demand, data);
+    let mat_candidates = materialization_candidates(&implemented, demand, data);
     let mut candidates = Vec::new();
-    for assignment in materialization_assignments(&units) {
-        let materialized: Vec<_> = units
+    for assignment in materialization_assignments(&mat_candidates) {
+        let materialized: Vec<_> = mat_candidates
             .iter()
             .zip(&assignment)
             .filter(|(_, m)| **m != Materialization::NotMaterialized)
-            .map(|(unit, m)| (unit, *m))
+            .map(|(mat_candidate, m)| (mat_candidate, *m))
             .collect();
         let mut options = MaterializationAssignment::with_default(Materialization::NotMaterialized);
-        for (unit, materialization) in &materialized {
-            options.set(&unit.node, *materialization);
+        for (mat_candidate, materialization) in &materialized {
+            options.set(&mat_candidate.node, *materialization);
         }
         let operators: Vec<Rc<OperatorNode>> = implemented
             .iter()
@@ -270,7 +274,10 @@ pub fn physical_candidate_count(
 ) -> Result<usize, PhysicalASAPOptimizationError> {
     let mut memo = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
-    Ok(materialization_assignments(&materialization_units(&implemented, demand, data)).count())
+    Ok(
+        materialization_assignments(&materialization_candidates(&implemented, demand, data))
+            .count(),
+    )
 }
 
 /// The operator nodes `root` reads.
@@ -283,11 +290,11 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 
 /// Every summary build of `roots` (implemented), in discovery order, with
 /// its readers and whether it may run at ingestion time.
-pub(crate) fn materialization_units(
+pub(crate) fn materialization_candidates(
     roots: &[QueryRoot],
     demand: &[QueryDemand],
     data: &DataWorkload,
-) -> Vec<MaterializationUnit> {
+) -> Vec<MaterializationCandidate> {
     let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
     let mut readers: HashMap<*const OperatorNode, Vec<usize>> = HashMap::new();
     for (query, root) in roots.iter().enumerate() {
@@ -309,24 +316,24 @@ pub(crate) fn materialization_units(
             }
         }
     }
-    let below = units_below(&nodes);
+    let below = candidates_below(&nodes);
     nodes
         .iter()
         .enumerate()
-        .map(|(u, node)| {
+        .map(|(c, node)| {
             let readers = readers[&Rc::as_ptr(node)].clone();
             let at_ingestion = ingestion_eligibility(node, &readers, demand, data).and_then(|()| {
-                // Only this unit and the units below it at ingestion time.
+                // Only this build and the builds below it at ingestion time.
                 let mut trial =
                     MaterializationAssignment::with_default(Materialization::NotMaterialized);
-                for &v in below[u].iter().chain([&u]) {
+                for &v in below[c].iter().chain([&c]) {
                     trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
                 }
                 apply_materialization_timings(node, &trial, &mut TimingMemo::new())
                     .map(|_| ())
                     .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
             });
-            MaterializationUnit {
+            MaterializationCandidate {
                 node: Rc::clone(node),
                 readers,
                 at_ingestion,
@@ -376,7 +383,7 @@ fn ingestion_eligibility(
     let (family, chain) = match node.asap() {
         Some(ASAPOp::SummaryAgg { family, .. }) => (family, false),
         Some(ASAPOp::PaneChain { family, .. }) => (family, true),
-        _ => unreachable!("a unit is a summary build"),
+        _ => unreachable!("a materialization candidate is a summary build"),
     };
     if matches!(
         family,
@@ -427,7 +434,7 @@ fn ingestion_eligibility(
 }
 
 /// For each of `nodes`, the indices of the others below it.
-fn units_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
+fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
     nodes
         .iter()
         .map(|node| {
@@ -442,16 +449,16 @@ fn units_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// Every assignment of an option to each unit (mixed radix, the last unit
-/// varying fastest, all `NotMaterialized` first) in which every unit below
-/// an ingestion-time unit is at ingestion time too.
+/// Every assignment of an option to each materialization candidate (mixed
+/// radix, the last varying fastest, all `NotMaterialized` first) in which
+/// every build below an ingestion-time build is at ingestion time too.
 fn materialization_assignments(
-    units: &[MaterializationUnit],
+    mat_candidates: &[MaterializationCandidate],
 ) -> impl Iterator<Item = Vec<Materialization>> + '_ {
-    let options: Vec<Vec<Materialization>> = units.iter().map(|u| u.options()).collect();
-    let nodes: Vec<_> = units.iter().map(|u| Rc::clone(&u.node)).collect();
-    let below = units_below(&nodes);
-    let mut digits = Some(vec![0usize; units.len()]);
+    let options: Vec<Vec<Materialization>> = mat_candidates.iter().map(|c| c.options()).collect();
+    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
+    let below = candidates_below(&nodes);
+    let mut digits = Some(vec![0usize; mat_candidates.len()]);
     std::iter::from_fn(move || loop {
         let current = digits.as_mut()?;
         let assignment: Vec<Materialization> = current
@@ -473,8 +480,8 @@ fn materialization_assignments(
             digits = None;
         }
         let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
-        let down_closed = assignment.iter().enumerate().all(|(u, m)| {
-            !at_ingestion(m) || below[u].iter().all(|&v| at_ingestion(&assignment[v]))
+        let down_closed = assignment.iter().enumerate().all(|(c, m)| {
+            !at_ingestion(m) || below[c].iter().all(|&v| at_ingestion(&assignment[v]))
         });
         if down_closed {
             return Some(assignment);
@@ -1028,7 +1035,7 @@ mod tests {
 
     /// S4: maintaining state at ingestion time needs arriving data and
     /// queries that repeat and are predictable; otherwise the chain only
-    /// runs at query time, and the unit says why.
+    /// runs at query time, and the materialization candidate says why.
     #[test]
     fn ingestion_time_needs_arriving_data_and_repeated_predictable_queries() {
         use IngestionPruneReason as Why;
@@ -1060,9 +1067,9 @@ mod tests {
             assert_eq!(candidates.len(), 1, "{why:?}");
             let mut memo = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
-            let units = materialization_units(&implemented, &[demand], &data);
-            assert_eq!(units.len(), 1);
-            assert_eq!(units[0].at_ingestion, Err(why));
+            let mat_candidates = materialization_candidates(&implemented, &[demand], &data);
+            assert_eq!(mat_candidates.len(), 1);
+            assert_eq!(mat_candidates[0].at_ingestion, Err(why));
         }
     }
 
@@ -1076,8 +1083,9 @@ mod tests {
             let roots = [in_panes(summary_root(query))];
             let mut memo = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
-            let units = materialization_units(&implemented, &[every_minute()], &arriving());
-            assert_eq!(units[0].at_ingestion, Ok(()), "{query}");
+            let mat_candidates =
+                materialization_candidates(&implemented, &[every_minute()], &arriving());
+            assert_eq!(mat_candidates[0].at_ingestion, Ok(()), "{query}");
             let candidates =
                 optimize_physical_asap("L1", &roots, &[every_minute()], &arriving()).unwrap();
             assert_eq!(candidates.len(), 2, "{query}");
@@ -1103,8 +1111,11 @@ mod tests {
             let roots = [root];
             let mut memo = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
-            let units = materialization_units(&implemented, &[every_minute()], &data);
-            assert_eq!(units[0].at_ingestion, Err(Why::CounterNeedsTimeOrder));
+            let mat_candidates = materialization_candidates(&implemented, &[every_minute()], &data);
+            assert_eq!(
+                mat_candidates[0].at_ingestion,
+                Err(Why::CounterNeedsTimeOrder)
+            );
         }
     }
 
@@ -1137,17 +1148,20 @@ mod tests {
             }),
             ..every_minute()
         };
-        let units = |root: &QueryRoot, demand: QueryDemand| {
+        let mat_candidates = |root: &QueryRoot, demand: QueryDemand| {
             let mut memo = HashMap::new();
             let implemented =
                 map_roots(std::slice::from_ref(root), &mut |n| implement(n, &mut memo)).unwrap();
-            materialization_units(&implemented, &[demand], &arriving())
+            materialization_candidates(&implemented, &[demand], &arriving())
                 .remove(0)
                 .at_ingestion
         };
-        assert_eq!(units(&root, at(MINUTE as u32)), Ok(()));
-        assert_eq!(units(&root, every_minute()), Err(Why::WindowNotFixed));
-        assert_eq!(units(&root, at(30_000)), Err(Why::WindowNotFixed));
+        assert_eq!(mat_candidates(&root, at(MINUTE as u32)), Ok(()));
+        assert_eq!(
+            mat_candidates(&root, every_minute()),
+            Err(Why::WindowNotFixed)
+        );
+        assert_eq!(mat_candidates(&root, at(30_000)), Err(Why::WindowNotFixed));
         let candidates = optimize_physical_asap(
             "L1",
             std::slice::from_ref(&root),
@@ -1193,7 +1207,7 @@ mod tests {
             .with_guarantee(build.guarantee.clone()),
         );
         assert_eq!(
-            units(&QueryRoot::Operator(filtered), at(MINUTE as u32)),
+            mat_candidates(&QueryRoot::Operator(filtered), at(MINUTE as u32)),
             Err(Why::Filtered)
         );
     }
