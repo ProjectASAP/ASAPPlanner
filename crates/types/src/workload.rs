@@ -552,10 +552,14 @@ pub struct DataWorkload {
     /// Upper bound per source (PromQL metric or SQL table name) on the
     /// distinct items any one distinct-count summary over the source's own
     /// rows counts in one complete evaluation, including every merged pane.
-    /// A filter or a shorter window only lowers it. The deployment must
+    /// One bound serves every query over the source, so it must hold for
+    /// the longest evaluation window any of them uses; a filter or a
+    /// shorter window only lowers it. Each group's own items count
+    /// separately: the bound is per output row. The deployment must
     /// enforce it; an observed distinct count is not a bound. Plan selection
-    /// binds it to give classic HLL its failure probability; a source
-    /// without a bound leaves that probability unknown.
+    /// binds it to give classic HLL (and a distinct-count UnivMon) its
+    /// failure probability per output row; a source without a bound leaves
+    /// that probability unknown. KMV's guarantee needs no bound.
     #[serde(default)]
     pub max_distinct_per_evaluation: Evidence<BTreeMap<String, u64>>,
     /// Declared type of each metric, by metric name (Prometheus `# TYPE`

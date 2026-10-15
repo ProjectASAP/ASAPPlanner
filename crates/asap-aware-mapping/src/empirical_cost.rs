@@ -366,9 +366,9 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
                 )
         }
         (SketchAlgorithm::Kll, SketchParams::Kll { k, .. })
-        | (SketchAlgorithm::Kmv, SketchParams::Kmv { k })
+        | (SketchAlgorithm::Kmv, SketchParams::Kmv { k, .. })
         | (SketchAlgorithm::Theta, SketchParams::Theta { k }) => *k > 0,
-        (SketchAlgorithm::Hll, SketchParams::Hll { precision }) => (4..=18).contains(precision),
+        (SketchAlgorithm::Hll, SketchParams::Hll { precision, .. }) => (4..=18).contains(precision),
         (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }) => {
             alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0
         }
@@ -675,7 +675,10 @@ mod tests {
             .value = f64::NAN;
         assert!(bad.validate().is_err());
         let mut bad = artifact.clone();
-        bad.records[0].params = SketchParams::Hll { precision: 14 };
+        bad.records[0].params = SketchParams::Hll {
+            precision: 14,
+            relative_error: None,
+        };
         assert!(bad.validate().is_err());
         let mut bad = artifact.clone();
         bad.records[0].provenance.repetitions = 0;

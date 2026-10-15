@@ -333,7 +333,13 @@ mod tests {
                 heap_size: 10,
             },
         );
-        let hll = sketch(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 });
+        let hll = sketch(
+            SketchAlgorithm::Hll,
+            SketchParams::Hll {
+                precision: 12,
+                relative_error: None,
+            },
+        );
         for (family, yes, no) in [
             (
                 &kll,

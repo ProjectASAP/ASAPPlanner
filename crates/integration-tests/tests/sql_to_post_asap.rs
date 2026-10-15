@@ -735,9 +735,10 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 /// — unlike `Quantile`/`Count`/`TopK`, its preferred candidate is HLL, not
 /// KLL/CMS (`realization::summary_candidates`), so this exercises a
 /// distinct branch of the sketch-vs-exact decision than the quantile test
-/// above.
+/// above. HLL is sized from ε and the default δ = 0.01 (#694): `m ≥
+/// 1/(2ε²δ)` reaches precision 18, the largest.
 #[tokio::test]
-async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
+async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     let pre_asap = lower(
         "SELECT COUNT(DISTINCT service) FROM metrics",
         RequestedAccuracy::epsilon(0.01),
@@ -772,7 +773,13 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     assert_eq!(
         family,
         &FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
+            SketchKind::new(
+                SketchAlgorithm::Hll,
+                SketchParams::Hll {
+                    precision: 18,
+                    relative_error: Some(0.01)
+                }
+            ),
             GroupingStrategy::default()
         )
     );

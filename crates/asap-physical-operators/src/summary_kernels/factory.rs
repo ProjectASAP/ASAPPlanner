@@ -626,13 +626,13 @@ pub fn create_planner_accumulator(
                     .map_err(|e| e.to_string())?,
             )
         }
-        (SketchAlgorithm::Hll, SketchParams::Hll { precision }) => Box::new(HllUpdater {
+        (SketchAlgorithm::Hll, SketchParams::Hll { precision, .. }) => Box::new(HllUpdater {
             acc: HllSketchAccumulator::new(
                 asap_sketchlib::HllVariant::Regular,
                 u32::from(*precision),
             ),
         }),
-        (SketchAlgorithm::Kmv, SketchParams::Kmv { k }) => {
+        (SketchAlgorithm::Kmv, SketchParams::Kmv { k, .. }) => {
             Box::new(crate::summary_kernels::kmv::KmvAccumulator::new(*k))
         }
         (

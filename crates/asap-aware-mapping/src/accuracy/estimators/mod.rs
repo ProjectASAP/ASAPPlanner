@@ -74,11 +74,13 @@ pub(super) fn local_guarantee(
 /// on enlarged, never reduced, so that each value it answers fails with
 /// probability at most `delta` and its error bound is unchanged or smaller
 /// (#669b): Count-Min's depth, Count Sketch's depth (the binomial tail of
-/// its median), KLL's failure probability (its δ scale) and a distinct
-/// count UnivMon's heap. Other parameters are returned as they are:
-/// DDSketch never fails; classic HLL's failure probability comes from its
-/// source's distinct bound ([`hll::precision_for`]); KMV and Theta are
-/// calibrated at a fixed 99%; an L2 or entropy UnivMon is not enlarged.
+/// its median), KLL's failure probability (its δ scale), a distinct count
+/// UnivMon's heap, and KMV's `k` at the relative error it was sized for
+/// (#694). Other parameters are returned as they are: DDSketch never fails;
+/// classic HLL's failure probability comes from its source's distinct bound
+/// ([`hll::precision_for`]); Theta is calibrated at a fixed 99%; a KMV not
+/// sized for a relative error and an L2 or entropy UnivMon are not
+/// enlarged.
 pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
     if !(delta > 0.0 && delta < 1.0) {
         return params.clone();
@@ -111,6 +113,13 @@ pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> Ske
             heap_size: *heap_size,
         },
         SketchParams::Kll { .. } => kll::with_failure_probability(params, delta),
+        SketchParams::Kmv {
+            k,
+            relative_error: Some(eps),
+        } => SketchParams::Kmv {
+            k: (*k).max(cardinality::kmv_k(*eps, delta)),
+            relative_error: Some(*eps),
+        },
         SketchParams::UnivMon { .. } => univmon::with_failure_probability(params, delta),
         _ => params.clone(),
     }
@@ -130,7 +139,8 @@ pub(crate) fn size_params(
             depth: cms::cms_depth(delta),
         },
         SketchAlgorithm::Hll => SketchParams::Hll {
-            precision: hll::hll_precision(eps),
+            precision: hll::hll_precision(eps, delta),
+            relative_error: Some(eps),
         },
         SketchAlgorithm::CmsWithHeap => {
             let k = match intent {
@@ -148,10 +158,11 @@ pub(crate) fn size_params(
         // them; sized here so that wiring is local.
         SketchAlgorithm::DDSketch => ddsketch::size_params(eps),
         SketchAlgorithm::Theta => SketchParams::Theta {
-            k: cardinality::kmv_k_99(eps),
+            k: cardinality::theta_k_99(eps),
         },
         SketchAlgorithm::Kmv => SketchParams::Kmv {
-            k: cardinality::kmv_k_99(eps),
+            k: cardinality::kmv_k(eps, delta),
+            relative_error: Some(eps),
         },
         SketchAlgorithm::CountSketch => {
             let width = count_sketch::count_sketch_width(eps);
@@ -308,13 +319,32 @@ pub(crate) fn shared_size_params(params: &[&SketchParams]) -> Option<SketchParam
                 depth: depth.max(*d),
                 heap_size: heap_size.max(*h),
             },
-            (P::Hll { precision }, P::Hll { precision: p }) => P::Hll {
+            (
+                P::Hll {
+                    precision,
+                    relative_error,
+                },
+                P::Hll {
+                    precision: p,
+                    relative_error: e,
+                },
+            ) => P::Hll {
                 precision: precision.max(*p),
+                relative_error: min_recorded(relative_error, *e),
             },
             (P::DDSketch { alpha }, P::DDSketch { alpha: a }) => P::DDSketch {
                 alpha: alpha.min(*a),
             },
-            (P::Kmv { k }, P::Kmv { k: k2 }) => P::Kmv { k: k.max(*k2) },
+            (
+                P::Kmv { k, relative_error },
+                P::Kmv {
+                    k: k2,
+                    relative_error: e,
+                },
+            ) => P::Kmv {
+                k: k.max(*k2),
+                relative_error: min_recorded(relative_error, *e),
+            },
             (P::Theta { k }, P::Theta { k: k2 }) => P::Theta { k: k.max(*k2) },
             _ => return None,
         })
@@ -421,7 +451,13 @@ mod shared_size_tests {
             Some(SketchParams::DDSketch { alpha: 0.001 })
         );
         assert_eq!(
-            shared_size_params(&[&kll(200, None), &SketchParams::Hll { precision: 12 }]),
+            shared_size_params(&[
+                &kll(200, None),
+                &SketchParams::Hll {
+                    precision: 12,
+                    relative_error: None
+                }
+            ]),
             None
         );
         assert_eq!(shared_size_params(&[]), None);
@@ -551,10 +587,10 @@ mod tests {
     /// source's distinct bound meets the target, up to 18.
     #[test]
     fn classic_hll_precision_grows_for_its_failure_probability() {
-        let p = hll::precision_for(4, 64, 0.01);
+        let p = hll::precision_for(4, 0.05, 64, 0.01);
         assert!(p > 4);
-        assert!(hll::classic_failure_probability(p, 64) <= 0.01);
-        assert!(hll::classic_failure_probability(p - 1, 64) > 0.01);
-        assert_eq!(hll::precision_for(12, 4096, 1e-30), 12);
+        assert!(hll::classic_failure_probability(p, 0.05, 64) <= 0.01);
+        assert!(hll::classic_failure_probability(p - 1, 0.05, 64) > 0.01);
+        assert_eq!(hll::precision_for(12, 0.05, 4096, 1e-30), 12);
     }
 }
