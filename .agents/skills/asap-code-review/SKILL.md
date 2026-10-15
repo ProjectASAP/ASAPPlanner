@@ -45,8 +45,30 @@ for example:
   `guarantee.over_whole_result(values_per_result: Option<u64>)`. Trade-off: a
   method on a public type, but a count that cannot be fractional.
 
-The author picks; the reviewer does not decide. These options do not replace
-correctness findings and are listed after them.
+The author picks; the reviewer does not decide.
+
+Required step: review the implementation's performance complexity
+(efficiency) as well. For the new or changed code paths, check:
+
+- Time and space complexity: quadratic or exponential loops, subset
+  enumeration, recomputation inside loops (for example a reachability walk
+  per node), unnecessary clones of DAGs or roots, and eager enumeration that
+  could be lazy or capped.
+- Allocations on hot paths.
+- How the cost scales with the number of queries, candidates and series.
+
+Each efficiency finding states the complexity, a realistic input size at which
+it hurts, and a concrete cheaper alternative. When the cheaper alternative has
+a trade-off, give the author choices here too.
+
+Review output format, in this order:
+
+1. **Findings**: correctness, regressions and other defects, by severity.
+2. **Interface simplifications (author's choice)**: the options above.
+3. **Efficiency**: complexity, the input size where it hurts, the
+   alternative, and choices where there is a trade-off.
+
+Write "None" under a section with nothing to report.
 
 Check that tests exercise the changed behavior, including relevant unit and
 end-to-end paths. For a bug fix, verify that a regression test would fail without
@@ -56,6 +78,6 @@ For materially affected quality attributes—maintainability, debuggability,
 scalability, understandability, extensibility, performance, and operability—ask
 for measurable evidence where practical. Do not invent numerical precision.
 
-Report findings first, ordered by severity, with precise file and line
-references. State concrete impact and a viable correction. Keep summaries brief;
+Report findings first (section 1 above), ordered by severity, with precise
+file and line references. State concrete impact and a viable correction. Keep summaries brief;
 if no actionable findings remain, say so and identify any material testing gap.
