@@ -250,12 +250,12 @@ class PlanEndpointTests(unittest.TestCase):
         way a plan is selected, and Stage 3 reports the metric it accepted."""
         query = {"name": "p99", "language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
         named = post_plan({"queries": [query], "epsilon": 0.01, "metric": "rank"})
-        self.assertEqual(named["workload"]["queries"][0]["requirements"]["accuracy"]["metric"], "rank")
+        self.assertEqual(named["workload"]["queries"][0]["requirements"]["accuracy"]["accuracy_metric"], "rank")
         selected = named["stage3_plan_selection"]["selected"]
         self.assertIsNotNone(selected)
         self.assertTrue(named["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric rank; accepted "))
         unnamed = post_plan({"queries": [query], "epsilon": 0.01})
-        self.assertNotIn("metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
+        self.assertNotIn("accuracy_metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
         selected = unnamed["stage3_plan_selection"]["selected"]
         self.assertIsNotNone(selected)
         self.assertTrue(unnamed["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric not set; accepted "))

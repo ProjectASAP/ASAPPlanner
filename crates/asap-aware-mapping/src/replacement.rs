@@ -378,7 +378,8 @@ use std::rc::{Rc, Weak};
 
 use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
-    equal_shares, AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel, NoAccuracyEvidence,
+    per_input_target, AccuracyEvidenceProvider, AccuracyModel, DefaultAccuracyModel,
+    NoAccuracyEvidence,
 };
 use crate::cost_model::{
     raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
@@ -1527,8 +1528,8 @@ impl<'a> ASAPStrategies<'a> {
             else {
                 continue;
             };
-            let (metric, layer_count) = (local.spec.metric, 1 + child_layers);
-            let Some(outer_target) = equal_shares(target, metric, layer_count, 1) else {
+            let (metric, layer_count) = (local.spec.accuracy_metric, 1 + child_layers);
+            let Some(outer_target) = per_input_target(&target, metric, layer_count) else {
                 proposals.rejected.push(RejectedCandidate {
                     strategy: "ASAPStrategies",
                     description: rationale.clone(),
@@ -1543,7 +1544,7 @@ impl<'a> ASAPStrategies<'a> {
                 .and_then(|child| bindable_intent(child))
                 .and_then(accuracy_target);
             let inner_target = (layer_count > 1)
-                .then(|| equal_shares(target, metric, layer_count, layer_count - 1))
+                .then(|| nested_layers_target(&target, metric, layer_count, layer_count - 1))
                 .flatten();
             let (eps, delta) = accuracy_budget(&outer_target);
             let resized = Realization::Sketch(SketchKind::new(
@@ -1554,7 +1555,7 @@ impl<'a> ASAPStrategies<'a> {
             ));
             // Identical to the as-declared composition already recorded
             // above — nothing new to propose.
-            if resized == realization && inner_target.as_ref() == declared_child_target {
+            if resized == realization && inner_target == declared_child_target {
                 continue;
             }
             let note = GuaranteeSource::BudgetAllocation {
@@ -1636,7 +1637,7 @@ impl Proposals {
 fn per_value(target: &AccuracyTarget) -> AccuracyTarget {
     target
         .clone()
-        .with_scope(asap_types::types::AccuracyScope::PerValue)
+        .accuracy_scope(asap_types::types::AccuracyScope::PerValue)
 }
 
 /// The `child` of a [`bindable_intent`]-shaped `Aggregate`.
@@ -1791,7 +1792,7 @@ pub(crate) fn realize_child(
 
 /// [`realize_child`] with every model explicit, plus an optional
 /// `end_to_end_target` for `root`'s own value (issue #172): when an
-/// equal budget split ([`equal_shares`]) hands an approximate child a share of its
+/// equal budget split ([`per_input_target`]) hands an approximate child a share of its
 /// parent's budget, the child is re-enumerated with that share substituted
 /// for its declared `AccuracyTarget` — sizing its sketch (and, recursively,
 /// re-splitting for its own approximate children) under the allocated
@@ -2033,7 +2034,7 @@ fn realize_binary(
             .filter_map(|(index, guarantee)| {
                 guarantee
                     .filter(|guarantee| !guarantee.is_exact())
-                    .map(|guarantee| (index, guarantee.spec.metric))
+                    .map(|guarantee| (index, guarantee.spec.accuracy_metric))
             })
             .collect::<Vec<_>>();
         if !approximate.is_empty() {
@@ -2044,7 +2045,7 @@ fn realize_binary(
             {
                 return Ok(None);
             }
-            let Some(local_target) = equal_shares(target, metric, approximate.len(), 1) else {
+            let Some(local_target) = per_input_target(target, metric, approximate.len()) else {
                 return Ok(None);
             };
             for (operand_index, _) in approximate {
@@ -2823,7 +2824,7 @@ fn construct_summary_agg(
             ));
         }
         if let (Some(n), FieldDataType::Sketch(kind, grouping)) = (bound, &family) {
-            let (eps, delta) = accuracy_budget(accuracy_target(intent).expect("TopK target"));
+            let (eps, delta) = accuracy_budget(&accuracy_target(intent).expect("TopK target"));
             let params = default_size_params(
                 kind.algorithm().clone(),
                 intent,
@@ -3033,7 +3034,7 @@ fn construct_summary_agg(
             // contributions that already violate the target reject it here.
             if !estimator.satisfies(
                 &score.optimistic_floor(),
-                &crate::accuracy::native_target(target, &score),
+                &crate::accuracy::native_target(&target, &score),
             ) {
                 return Err(RealizationError::PhysicalRealization(
                     "weighted TopK scores miss accuracy target",
@@ -3058,7 +3059,7 @@ fn construct_summary_agg(
             };
             if !estimator.satisfies(
                 &joint.optimistic_floor(),
-                &crate::accuracy::native_target(target, &joint),
+                &crate::accuracy::native_target(&target, &joint),
             ) {
                 return Err(RealizationError::PhysicalRealization(
                     "weighted TopK joint guarantee misses target",
@@ -3482,10 +3483,10 @@ fn compose_guarantee(
         // its requested target.
         if !accuracy.satisfies(
             &guarantee.optimistic_floor(),
-            &crate::accuracy::native_target(target, &guarantee),
+            &crate::accuracy::native_target(&target, &guarantee),
         ) {
             return Err(AccuracyError::TargetNotSatisfied {
-                metric: guarantee.spec.metric,
+                metric: guarantee.spec.accuracy_metric,
                 bound: guarantee.spec.error.evaluate(),
                 failure_probability: guarantee.spec.failure_probability.evaluate(),
                 target: target.clone(),
@@ -6150,14 +6151,14 @@ pub fn search_workload_with_targets<'s, Id>(
                     .as_ref()
                     .map(|g| {
                         (
-                            g.spec.metric,
+                            g.spec.accuracy_metric,
                             g.spec.error.evaluate(),
                             g.spec.failure_probability.evaluate(),
                         )
                     })
-                    .unwrap_or((asap_types::post_asap::ErrorMetric::ABSOLUTE, None, None)),
+                    .unwrap_or((asap_types::post_asap::AccuracyMetric::ABSOLUTE, None, None)),
                 Replacement::ExactComposition(_) => {
-                    (asap_types::post_asap::ErrorMetric::ABSOLUTE, None, None)
+                    (asap_types::post_asap::AccuracyMetric::ABSOLUTE, None, None)
                 }
             };
             RejectedCandidate {
@@ -6185,7 +6186,7 @@ fn strictest_sibling_accuracy(
     root: &OperatorNode,
     siblings: &[Rc<OperatorNode>],
 ) -> Option<AccuracyTarget> {
-    fn approximate(intent: &AggIntent) -> Option<&AccuracyTarget> {
+    fn approximate(intent: &AggIntent) -> Option<AccuracyTarget> {
         accuracy_target(intent).filter(|accuracy| !accuracy.is_exact())
     }
     let Some(NonASAPOp::Aggregate {
@@ -6198,7 +6199,7 @@ fn strictest_sibling_accuracy(
         return None;
     };
     let intent = bindable_intent(root)?;
-    let own = accuracy_budget(approximate(intent)?);
+    let own = accuracy_budget(&approximate(intent)?);
     let (mut eps, mut delta) = own;
     for sibling in siblings {
         let Some(NonASAPOp::Aggregate {
@@ -6220,14 +6221,14 @@ fn strictest_sibling_accuracy(
             (AggIntent::Quantile { col, .. }, AggIntent::Quantile { col: other_col, .. }) => {
                 col == other_col
             }
-            _ => override_accuracy(intent, accuracy) == *other,
+            _ => override_accuracy(intent, &accuracy) == override_accuracy(other, &accuracy),
         };
         if same_intent
             && sibling_reduction == reduction
             && sibling_filters == filters
             && (Rc::ptr_eq(sibling_child, child) || sibling_child == child)
         {
-            let (sibling_eps, sibling_delta) = accuracy_budget(accuracy);
+            let (sibling_eps, sibling_delta) = accuracy_budget(&accuracy);
             eps = eps.min(sibling_eps);
             delta = delta.min(sibling_delta);
         }
@@ -6235,9 +6236,9 @@ fn strictest_sibling_accuracy(
     if (eps, delta) == own {
         None
     } else if delta == DEFAULT_DELTA {
-        Some(AccuracyTarget::epsilon(eps))
+        Some(AccuracyTarget::max_error(eps))
     } else {
-        Some(AccuracyTarget::epsilon_delta(eps, delta))
+        Some(AccuracyTarget::max_error(eps).failure_probability(delta))
     }
 }
 
@@ -6548,9 +6549,77 @@ fn walk_children(
     }
 }
 
+/// `shares` of `of` equal shares of `target`, in `metric`'s composition:
+/// the target of a nested sub-DAG holding `shares` of a node's `of`
+/// approximate layers ([`per_input_target`] is one share). `None` for an
+/// exact target or an ε that is not positive and finite.
+fn nested_layers_target(
+    target: &AccuracyTarget,
+    metric: asap_types::types::AccuracyMetric,
+    of: usize,
+    shares: usize,
+) -> Option<AccuracyTarget> {
+    if target.is_exact() || !(target.error.is_finite() && target.error > 0.0) {
+        return None;
+    }
+    let fraction = shares.min(of.max(1)) as f64 / of.max(1) as f64;
+    let error = match metric {
+        asap_types::types::AccuracyMetric::Relative => (1.0 + target.error).powf(fraction) - 1.0,
+        _ => target.error * fraction,
+    };
+    Some(AccuracyTarget {
+        error,
+        failure_probability: target.failure_probability.map(|delta| delta * fraction),
+        ..target.clone()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Siblings that differ only in their written targets share the
+    /// strictest one: two `count by (job)` (or distinct-count) siblings at
+    /// ε = 0.05 and 0.01, with no metric set, size the looser one for 0.01.
+    #[test]
+    fn identical_count_and_distinct_siblings_share_the_strictest_target() {
+        let scan = crate::test_support::metric_scan(&["job"]);
+        for intent in [
+            |accuracy| AggIntent::Count { accuracy },
+            |accuracy| AggIntent::Cardinality {
+                cols: vec![],
+                accuracy,
+            },
+        ] {
+            let sibling = |error| {
+                crate::test_support::agg(
+                    vec![2],
+                    intent(AccuracyTarget::max_error(error)),
+                    scan.clone(),
+                )
+            };
+            let (loose, strict) = (sibling(0.05), sibling(0.01));
+            assert_eq!(
+                strictest_sibling_accuracy(&loose, &[loose.clone(), strict.clone()]),
+                Some(AccuracyTarget::max_error(0.01))
+            );
+            assert_eq!(
+                strictest_sibling_accuracy(&strict, &[loose, strict.clone()]),
+                None
+            );
+        }
+    }
+
+    /// A nested sub-DAG holding `shares` of `of` approximate layers gets
+    /// that fraction of an additive target's ε and δ.
+    #[test]
+    fn a_nested_sub_dag_gets_its_layers_share_of_the_target() {
+        let target = AccuracyTarget::max_error(0.1).failure_probability(0.02);
+        let rest = nested_layers_target(&target, asap_types::types::AccuracyMetric::ABSOLUTE, 3, 2)
+            .unwrap();
+        assert!((rest.error - 0.1 * 2.0 / 3.0).abs() < 1e-12);
+        assert!((rest.failure_probability.unwrap() - 0.02 * 2.0 / 3.0).abs() < 1e-12);
+    }
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
     use crate::test_support::{
@@ -6595,7 +6664,7 @@ mod tests {
 
         let (estimate, query) = assemble(
             "quantile_over_time(0.99, m[1m])",
-            AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank),
+            AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank),
         );
         assert!(estimate.contains_asap());
         assert!(Rc::ptr_eq(&estimate, &query));
@@ -6648,7 +6717,7 @@ mod tests {
         };
         let intent = AggIntent::TopK {
             k: 5,
-            accuracy: AccuracyTarget::epsilon(0.01),
+            accuracy: AccuracyTarget::max_error(0.01),
         };
         let family = FieldDataType::Sketch(
             SketchKind::new(
@@ -6689,7 +6758,7 @@ mod tests {
     fn search_rejects_a_root_with_an_asap_operator() {
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
-            AccuracyTarget::epsilon(0.01),
+            AccuracyTarget::max_error(0.01),
         );
         let space = search_workload(vec![("q", root)]).unwrap();
         let summary = space
@@ -6731,7 +6800,10 @@ mod tests {
     fn rate_candidate_inventories_have_no_timing_only_duplicates() {
         for (query, accuracy) in [
             ("sum by(job)(rate(m[1m]))", AccuracyTarget::exact()),
-            ("topk by(job)(2, rate(m[1m]))", AccuracyTarget::epsilon(0.1)),
+            (
+                "topk by(job)(2, rate(m[1m]))",
+                AccuracyTarget::max_error(0.1),
+            ),
         ] {
             let root = lower_promql(query, accuracy);
             let inventory = search_workload(vec![(0usize, root)])
@@ -6958,7 +7030,7 @@ mod tests {
     fn approximate_temporal_topk_admits_exact_maintained_values() {
         let root = lower_promql(
             "topk by(job)(1,count_over_time(a[5m]))",
-            AccuracyTarget::epsilon_delta(0.01, 0.01),
+            AccuracyTarget::max_error(0.01).failure_probability(0.01),
         );
         let planning_inputs =
             CandidatePlanningInputs::with_default_accuracy(&crate::cost_model::DefaultCostModel);
@@ -7028,9 +7100,10 @@ mod tests {
                 })
             }
         }
-        let requested =
-            AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative);
-        let target = requested.target_in(ErrorMetric::Relative);
+        let requested = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.01)
+            .accuracy_metric(AccuracyMetric::Relative);
+        let target = requested.clone().accuracy_metric(AccuracyMetric::Relative);
         let inputs = CandidatePlanningInputs {
             evidence: &Domain,
             ..CandidatePlanningInputs::with_default_accuracy(&DefaultCostModel)
@@ -7050,8 +7123,8 @@ mod tests {
     // Missing domain proof permits an uncertified direct quantile ratio only.
     #[test]
     fn quantile_ratio_without_input_proof_has_no_root_guarantee() {
-        let requested = AccuracyTarget::epsilon_delta(0.01, 0.01);
-        let target = requested.target_in(ErrorMetric::Relative);
+        let requested = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+        let target = requested.clone().accuracy_metric(AccuracyMetric::Relative);
         let root = lower_promql(
             "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
             requested.clone(),
@@ -7142,12 +7215,12 @@ mod tests {
         AggIntent::Quantile {
             col: None,
             q,
-            accuracy: AccuracyTarget::epsilon(e),
+            accuracy: AccuracyTarget::max_error(e),
         }
     }
 
     fn eps(e: f64) -> AccuracyTarget {
-        AccuracyTarget::epsilon(e)
+        AccuracyTarget::max_error(e)
     }
 
     // ── realizations_for_intent / sizing ───────────────────────────────
@@ -7426,7 +7499,7 @@ mod tests {
     #[test]
     fn epsilon_delta_sizes_cms_depth() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::epsilon_delta(0.001, 0.001),
+            accuracy: AccuracyTarget::max_error(0.001).failure_probability(0.001),
         };
         assert_eq!(
             preferred(&intent),
@@ -7794,7 +7867,7 @@ mod tests {
     fn fitting_cardinality() -> AggIntent {
         AggIntent::Cardinality {
             cols: vec![],
-            accuracy: AccuracyTarget::epsilon(0.05),
+            accuracy: AccuracyTarget::max_error(0.05),
         }
     }
 
@@ -7825,7 +7898,7 @@ mod tests {
             vec![2],
             AggIntent::Cardinality {
                 cols: vec![],
-                accuracy: AccuracyTarget::epsilon_delta(0.05, 0.01),
+                accuracy: AccuracyTarget::max_error(0.05).failure_probability(0.01),
             },
             metric_scan(&["job"]),
         );
@@ -8119,7 +8192,7 @@ mod tests {
     #[test]
     fn single_bindable_aggregate_keeps_unprovable_hydra_candidates() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
+            accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.01),
         };
         let root = agg(vec![2], intent, metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]).unwrap();
@@ -8210,7 +8283,11 @@ mod tests {
 
         let root = agg(vec![2], fitting_cardinality(), metric_scan(&["job"]));
         let targeted = search_workload_with_targets(
-            vec![("q", root, Some(AccuracyTarget::epsilon_delta(0.01, 0.01)))],
+            vec![(
+                "q",
+                root,
+                Some(AccuracyTarget::max_error(0.01).failure_probability(0.01)),
+            )],
             &default_strategies(),
             &DefaultAccuracyModel,
         )
@@ -8563,7 +8640,7 @@ mod tests {
         fn first_grouping(estimated_count: usize) -> GroupingStrategy {
             let model = EstimatedSubpopulations(estimated_count);
             let intent = AggIntent::Count {
-                accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
+                accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.01),
             };
             let root = agg(vec![2, 3], intent, metric_scan(&["tenant_id", "endpoint"]));
             let strategies = default_strategies_with(&model);
@@ -9858,7 +9935,7 @@ mod tests {
     fn explicit_empty_by_aggregate_realizes_summary_agg_with_reduce_reduction() {
         let intent = AggIntent::Cardinality {
             cols: vec![],
-            accuracy: AccuracyTarget::epsilon(0.01),
+            accuracy: AccuracyTarget::max_error(0.01),
         };
         let q = agg(vec![], intent, metric_scan(&["job"]));
         let root = realize(&q).unwrap();
@@ -9938,7 +10015,7 @@ mod tests {
         for (cols, want) in cases {
             let intent = AggIntent::Cardinality {
                 cols: cols.clone(),
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             };
             let root = realize(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
             let bound = find_summary_input(&root)
@@ -10057,7 +10134,7 @@ mod tests {
             vec![2],
             AggIntent::TopK {
                 k: 5,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             metric_scan(&["job"]),
         );
@@ -10070,7 +10147,7 @@ mod tests {
         let inner = agg(
             vec![2],
             AggIntent::Count {
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             metric_scan(&["job"]),
         );
@@ -10078,7 +10155,7 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 5,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             inner,
         );
@@ -10120,7 +10197,7 @@ mod tests {
         let inner = agg(
             vec![2],
             AggIntent::Count {
-                accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
+                accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.01),
             },
             metric_scan(&["job"]),
         );
@@ -10128,7 +10205,7 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 5,
-                accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
+                accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.01),
             },
             inner,
         );
@@ -10153,7 +10230,7 @@ mod tests {
         let inner = agg(
             vec![2],
             AggIntent::Count {
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             metric_scan(&["service"]),
         );
@@ -10161,7 +10238,7 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 10,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             inner,
         );
@@ -10227,7 +10304,7 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 5,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             inner,
         );
@@ -10301,7 +10378,7 @@ mod tests {
             vec![2],
             AggIntent::TopK {
                 k: 5,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             inner,
         );
@@ -10344,7 +10421,7 @@ mod tests {
         let inner = agg(
             vec![2, 3],
             AggIntent::Count {
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             metric_scan(&["service", "region"]),
         );
@@ -10352,7 +10429,7 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 10,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             inner,
         );
@@ -10394,7 +10471,7 @@ mod tests {
         let inner = agg(
             vec![2, 3, 4],
             AggIntent::Count {
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             metric_scan(&["service", "method", "region"]),
         );
@@ -10404,7 +10481,7 @@ mod tests {
             vec![2],
             AggIntent::TopK {
                 k: 10,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             inner,
         );
@@ -10476,7 +10553,7 @@ mod tests {
 
     // ── Accuracy guarantees and fail-closed composition (issue #172) ─────
 
-    use asap_types::post_asap::ErrorMetric;
+    use asap_types::post_asap::AccuracyMetric;
 
     /// A test-only `AccuracyModel` that *registers* a rule the default
     /// deliberately lacks — a sketch over rank-bounded inputs composes
@@ -10501,19 +10578,21 @@ mod tests {
             local: Option<&AccuracyGuarantee>,
             stats: &PropagationStats,
         ) -> Result<AccuracyGuarantee, AccuracyError> {
-            let rank = |g: &AccuracyGuarantee| g.is_exact() || g.spec.metric == ErrorMetric::Rank;
+            let rank = |g: &AccuracyGuarantee| {
+                g.is_exact() || g.spec.accuracy_metric == AccuracyMetric::Rank
+            };
             if let (CompositionOperator::ApproximateAggregate, true, Some(local)) =
                 (op, inputs.iter().all(rank), local)
             {
                 let relabel = |g: &AccuracyGuarantee| {
                     let mut g = g.clone();
-                    g.spec.metric = ErrorMetric::ABSOLUTE;
+                    g.spec.accuracy_metric = AccuracyMetric::ABSOLUTE;
                     g
                 };
                 let inputs: Vec<_> = inputs.iter().map(relabel).collect();
                 let mut out =
                     DefaultAccuracyModel.propagate(op, &inputs, Some(&relabel(local)), stats)?;
-                out.spec.metric = local.spec.metric;
+                out.spec.accuracy_metric = local.spec.accuracy_metric;
                 return Ok(out);
             }
             DefaultAccuracyModel.propagate(op, inputs, local, stats)
@@ -10528,7 +10607,7 @@ mod tests {
         AggIntent::Quantile {
             col: None,
             q,
-            accuracy: AccuracyTarget::epsilon(eps),
+            accuracy: AccuracyTarget::max_error(eps),
         }
     }
 
@@ -10564,7 +10643,7 @@ mod tests {
                 matches!(
                     &rejection.error,
                     AccuracyError::UnsupportedComposition { input_metrics, .. }
-                        if input_metrics == &vec![ErrorMetric::Rank]
+                        if input_metrics == &vec![AccuracyMetric::Rank]
                 ),
                 "{:?}",
                 rejection.error
@@ -10589,13 +10668,13 @@ mod tests {
         assert!(proposals.rejected.iter().all(|r| matches!(
             &r.error,
             AccuracyError::UnsupportedComposition { input_metrics, local_metric, .. }
-                if input_metrics == &vec![ErrorMetric::Relative]
-                    && *local_metric == Some(ErrorMetric::Rank)
+                if input_metrics == &vec![AccuracyMetric::Relative]
+                    && *local_metric == Some(AccuracyMetric::Rank)
         )));
         assert!(proposals.candidates.iter().all(|candidate| matches!(
             &candidate.replacement,
             Replacement::SubDAG(node)
-                if node.guarantee.as_ref().is_some_and(|g| g.spec.metric == ErrorMetric::Relative)
+                if node.guarantee.as_ref().is_some_and(|g| g.spec.accuracy_metric == AccuracyMetric::Relative)
         )));
     }
 
@@ -10610,7 +10689,7 @@ mod tests {
             .guarantee
             .as_ref()
             .expect("a evaluation carries a guarantee");
-        assert_eq!(guarantee.spec.metric, ErrorMetric::Rank);
+        assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Rank);
         assert_eq!(
             guarantee.spec.error.evaluate(),
             Some(crate::accuracy::estimators::kll::kll_rank_error_99(269))
@@ -10690,7 +10769,7 @@ mod tests {
             ) && node.guarantee.as_ref().is_some_and(|guarantee| {
                 DefaultAccuracyModel.satisfies(
                     guarantee,
-                    &crate::accuracy::native_target(&AccuracyTarget::epsilon(0.1), guarantee),
+                    &crate::accuracy::native_target(&AccuracyTarget::max_error(0.1), guarantee),
                 )
             })
         }));
@@ -10716,7 +10795,7 @@ mod tests {
                 node.guarantee.as_ref().is_some_and(|g| {
                     DefaultAccuracyModel.satisfies(
                         g,
-                        &crate::accuracy::native_target(&AccuracyTarget::epsilon(0.1), g),
+                        &crate::accuracy::native_target(&AccuracyTarget::max_error(0.1), g),
                     )
                 })
             }
@@ -10752,7 +10831,7 @@ mod tests {
             vec![(
                 "q",
                 Rc::clone(&q),
-                Some(AccuracyTarget::epsilon(0.001).with_metric(ErrorMetric::Rank)),
+                Some(AccuracyTarget::max_error(0.001).accuracy_metric(AccuracyMetric::Rank)),
             )],
             &default_strategies(),
             &DefaultAccuracyModel,
@@ -10777,7 +10856,7 @@ mod tests {
             vec![(
                 "q",
                 Rc::clone(&q),
-                Some(AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank)),
+                Some(AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank)),
             )],
             &default_strategies(),
             &DefaultAccuracyModel,
@@ -10812,7 +10891,7 @@ mod tests {
         let inner = agg(
             vec![2],
             AggIntent::Count {
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             metric_scan(&["job"]),
         );
@@ -10820,12 +10899,12 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 10,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             inner,
         );
         let space = search_workload_with_targets(
-            vec![("q", Rc::clone(&q), Some(AccuracyTarget::epsilon(0.01)))],
+            vec![("q", Rc::clone(&q), Some(AccuracyTarget::max_error(0.01)))],
             &default_strategies(),
             &DefaultAccuracyModel,
         )
@@ -10924,7 +11003,7 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 2,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             agg(vec![2], AggIntent::Sum { col: None }, raw.clone()),
         );
@@ -10962,7 +11041,7 @@ mod tests {
             AggIntent::Quantile {
                 q: 0.9,
                 col: None,
-                accuracy: AccuracyTarget::epsilon(0.01),
+                accuracy: AccuracyTarget::max_error(0.01),
             },
             metric_scan(&["job"]),
         );

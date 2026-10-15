@@ -30,7 +30,7 @@ pub(super) fn guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::Rank,
+        AccuracyMetric::Rank,
         kll_rank_error_99(*k) * scale,
         ProbabilityExpr::Constant { value: delta },
         contract,
@@ -200,17 +200,18 @@ mod tests {
                 &SketchStatistic::Quantile { q: 0.99 },
             )
             .unwrap();
-        assert_eq!(g.spec.metric, ErrorMetric::Rank);
+        assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Rank);
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank)
+            &AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank)
         ));
         assert_eq!(g.spec.failure_probability.evaluate(), Some(0.01));
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon_delta(0.01, 0.01)
-                .with_metric(ErrorMetric::Rank)
-                .with_scope(asap_types::types::AccuracyScope::PerValue)
+            &AccuracyTarget::max_error(0.01)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Rank)
+                .accuracy_scope(asap_types::types::AccuracyScope::PerValue)
         ));
         assert_eq!(g.approximate_layer_count(), 1);
         assert!(g.provenance.iter().any(|source| matches!(
@@ -241,9 +242,10 @@ mod tests {
         .unwrap();
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon_delta(0.01, 0.001)
-                .with_metric(ErrorMetric::Rank)
-                .with_scope(asap_types::types::AccuracyScope::PerValue)
+            &AccuracyTarget::max_error(0.01)
+                .failure_probability(0.001)
+                .accuracy_metric(AccuracyMetric::Rank)
+                .accuracy_scope(asap_types::types::AccuracyScope::PerValue)
         ));
         assert_eq!(g.spec.failure_probability.evaluate(), Some(0.001));
     }

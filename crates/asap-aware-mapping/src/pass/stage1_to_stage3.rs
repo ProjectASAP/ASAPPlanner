@@ -693,7 +693,9 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
             .as_ref()
             .ok()?;
         // As Stage 3 sized it for its queries' failure probabilities.
-        let sized = crate::stage3_plan_selection::sized_roots(roots, targets, data).ok()?;
+        let sized =
+            crate::stage3_plan_selection::resize_for_failure_probability(roots, targets, data)
+                .ok()?;
         Some(crate::stage3_plan_selection::with_confirmed_weights(
             &sized, data,
         ))

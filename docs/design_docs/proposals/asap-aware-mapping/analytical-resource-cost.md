@@ -213,10 +213,9 @@ normalized workload, lowered query IR, and freshness-aware statistics:
 | Cost concept | Canonical source |
 |---|---|
 | Source row cardinality | Fresh `DataWorkload.input_cardinality: Evidence<u64>`. |
-| Data distribution | Fresh `DataWorkload.distribution: Evidence<DataDistribution>`. |
-| Arrival and update rate | `DataWorkload.arrival`, `ingestion_volume`, and `ingestion_rate`. |
+| Arrival and update rate | `DataWorkload.arrival` and `ingestion_rate`. |
 | Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |
-| Event-time range | `QueryWorkloadEntry.time_selection`. |
+| Event-time range | The query text (its range and offset). |
 | Accuracy and latency requirements | `QueryWorkloadEntry.requirements`. |
 | Operator shape, grouping keys, and constants such as Top-K limit and offset | Lowered query and selected physical plan. |
 
@@ -327,7 +326,6 @@ canonical workload and query terms rather than defining parallel strings:
 | Arrival mode | `DataArrival`; this model accepts only `AtRest`. |
 | Planning instant and finite horizon | `TimestampMs` and `DurationMs`. |
 | Invocation schedule | `QueryRecurrence`; the evaluation count is derived, not copied. |
-| Event-time coverage | `TimeSelection`. |
 | Logical sources | the existing query-IR `Source`, one per scan. |
 | Source selection | canonical bound `Predicate` values for ordinary scans and symbolic `InfoMatcher` values for info-metric scans. |
 | Physical source contents | provider-owned `source_snapshot_id` per source. |

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
 use crate::pre_asap::AggIntent;
 
-/// The stream norm an [`ErrorMetric::Absolute`] error is stated in
+/// The stream norm an [`AccuracyMetric::Absolute`] error is stated in
 /// multiples of. A scaled error `ε` means `|estimate − truth| ≤ ε · ‖f‖`,
 /// where `f` is the frequency vector of the one stream the estimate's
 /// summaries read: `‖f‖₁` for Count-Min, `‖f‖₂` for Count Sketch. Two scaled
@@ -35,7 +35,7 @@ pub enum NormScale {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(into = "MetricName", from = "MetricName")]
-pub enum ErrorMetric {
+pub enum AccuracyMetric {
     /// `|estimate − truth| ≤ ε`: in the value's own units when `scale` is
     /// `None`, or in multiples of a stream norm ([`NormScale`]).
     Absolute { scale: Option<NormScale> },
@@ -48,7 +48,7 @@ pub enum ErrorMetric {
     Rank,
 }
 
-impl ErrorMetric {
+impl AccuracyMetric {
     /// Absolute error in the value's own units.
     pub const ABSOLUTE: Self = Self::Absolute { scale: None };
     /// Absolute error in multiples of the stream's L1 norm (Count-Min).
@@ -61,7 +61,7 @@ impl ErrorMetric {
     };
 }
 
-/// The wire name of an [`ErrorMetric`].
+/// The wire name of an [`AccuracyMetric`].
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MetricName {
@@ -72,23 +72,23 @@ enum MetricName {
     Rank,
 }
 
-impl From<ErrorMetric> for MetricName {
-    fn from(metric: ErrorMetric) -> Self {
+impl From<AccuracyMetric> for MetricName {
+    fn from(metric: AccuracyMetric) -> Self {
         match metric {
-            ErrorMetric::Absolute { scale: None } => Self::Absolute,
-            ErrorMetric::Absolute {
+            AccuracyMetric::Absolute { scale: None } => Self::Absolute,
+            AccuracyMetric::Absolute {
                 scale: Some(NormScale::StreamL1),
             } => Self::AbsoluteStreamL1,
-            ErrorMetric::Absolute {
+            AccuracyMetric::Absolute {
                 scale: Some(NormScale::StreamL2),
             } => Self::AbsoluteStreamL2,
-            ErrorMetric::Relative => Self::Relative,
-            ErrorMetric::Rank => Self::Rank,
+            AccuracyMetric::Relative => Self::Relative,
+            AccuracyMetric::Rank => Self::Rank,
         }
     }
 }
 
-impl From<MetricName> for ErrorMetric {
+impl From<MetricName> for AccuracyMetric {
     fn from(name: MetricName) -> Self {
         match name {
             MetricName::Absolute => Self::ABSOLUTE,
@@ -118,47 +118,51 @@ pub enum AccuracyScope {
 /// The outer shape of an accuracy guarantee
 /// ([`crate::post_asap::AccuracyGuarantee`]):
 /// `Pr[err_metric(estimate, truth) > error] ≤ failure_probability` over the
-/// values `scope` names. An [`AccuracyTarget`] has the same fields, with
+/// values `accuracy_scope` names. An [`AccuracyTarget`] has the same fields, with
 /// concrete numbers and an optional metric.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccuracySpec<E, P> {
-    pub metric: ErrorMetric,
-    /// ε, in `metric`'s units.
+    pub accuracy_metric: AccuracyMetric,
+    /// ε, in `accuracy_metric`'s units.
     pub error: E,
     /// δ.
     pub failure_probability: P,
-    pub scope: AccuracyScope,
+    pub accuracy_scope: AccuracyScope,
 }
 
 /// An accuracy requirement, as a workload, a caller or a frontend states
 /// it: `Pr[err_metric(estimate, truth) > error] ≤ failure_probability` over
-/// the values `scope` names.
+/// the values `accuracy_scope` names.
 ///
-/// `metric: None` means the user did not set one: plan selection then
-/// accepts a guarantee in any metric whose ε, δ and scope meet this
+/// `accuracy_metric: None` means the user did not set one: plan selection
+/// then accepts a guarantee in any metric whose ε, δ and scope meet this
 /// target's, and reports the metric it accepted. A set metric accepts only
 /// guarantees in that metric (or convertible to it with evidence).
 /// `failure_probability: None` imposes no δ requirement (sizing then uses
 /// the planner's default δ). Exact is `error = 0`,
 /// `failure_probability = Some(0)`, whatever the metric.
 ///
-/// JSON: `{"metric": "rank", "error": 0.01, "failure_probability": 0.001,
-/// "scope": "whole_result"}`; every field but `error` may be omitted
-/// (`scope` defaults to `whole_result`). Exact is
+/// Built with [`Self::exact`] or [`Self::max_error`] plus the optional
+/// builders [`Self::failure_probability`], [`Self::accuracy_metric`] and
+/// [`Self::accuracy_scope`].
+///
+/// JSON: `{"accuracy_metric": "rank", "error": 0.01, "failure_probability":
+/// 0.001, "accuracy_scope": "whole_result"}`; every field but `error` may be
+/// omitted (`accuracy_scope` defaults to `whole_result`). Exact is
 /// `{"error": 0.0, "failure_probability": 0.0}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccuracyTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metric: Option<ErrorMetric>,
+    pub accuracy_metric: Option<AccuracyMetric>,
     /// ε, in the metric's units.
     pub error: f64,
     /// δ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_probability: Option<f64>,
     #[serde(default = "whole_result")]
-    pub scope: AccuracyScope,
+    pub accuracy_scope: AccuracyScope,
 }
 
 fn whole_result() -> AccuracyScope {
@@ -169,73 +173,51 @@ impl AccuracyTarget {
     /// No approximation permitted.
     pub const fn exact() -> Self {
         Self {
-            metric: None,
+            accuracy_metric: None,
             error: 0.0,
             failure_probability: Some(0.0),
-            scope: AccuracyScope::WholeResult,
+            accuracy_scope: AccuracyScope::WholeResult,
         }
     }
 
-    /// Error at most `epsilon`, with no δ requirement and no metric set.
-    /// [`Self::with_metric`] sets one.
-    pub const fn epsilon(epsilon: f64) -> Self {
+    /// Error at most `error` over the whole result, with no δ requirement
+    /// and no metric set.
+    pub const fn max_error(error: f64) -> Self {
         Self {
-            metric: None,
-            error: epsilon,
+            accuracy_metric: None,
+            error,
             failure_probability: None,
-            scope: AccuracyScope::WholeResult,
+            accuracy_scope: AccuracyScope::WholeResult,
         }
     }
 
-    /// Error at most `epsilon` with probability at least `1 − delta`, and
-    /// no metric set. [`Self::with_metric`] sets one.
-    pub const fn epsilon_delta(epsilon: f64, delta: f64) -> Self {
+    /// This target, met with probability at least `1 − failure_probability`.
+    pub const fn failure_probability(self, failure_probability: f64) -> Self {
         Self {
-            failure_probability: Some(delta),
-            ..Self::epsilon(epsilon)
-        }
-    }
-
-    /// This target with its metric set to `metric`.
-    pub fn with_metric(self, metric: ErrorMetric) -> Self {
-        Self {
-            metric: Some(metric),
+            failure_probability: Some(failure_probability),
             ..self
         }
     }
 
-    /// This target over `scope`.
-    pub fn with_scope(self, scope: AccuracyScope) -> Self {
-        Self { scope, ..self }
+    /// This target with its error stated in `accuracy_metric`.
+    pub const fn accuracy_metric(self, accuracy_metric: AccuracyMetric) -> Self {
+        Self {
+            accuracy_metric: Some(accuracy_metric),
+            ..self
+        }
+    }
+
+    /// This target over `accuracy_scope`.
+    pub const fn accuracy_scope(self, accuracy_scope: AccuracyScope) -> Self {
+        Self {
+            accuracy_scope,
+            ..self
+        }
     }
 
     /// Whether this target permits no approximation.
     pub fn is_exact(&self) -> bool {
         self.error == 0.0 && self.failure_probability == Some(0.0)
-    }
-
-    /// This target's ε, δ and scope, stated in `metric`: the target an
-    /// aggregate intent's summary is sized against, in the intent's own
-    /// metric. An exact target stays [`Self::exact`]: exact is exact in
-    /// every metric.
-    pub fn target_in(&self, metric: ErrorMetric) -> Self {
-        if self.is_exact() {
-            return Self::exact().with_scope(self.scope);
-        }
-        self.clone().with_metric(metric)
-    }
-
-    /// The target a quantile intent is sized against: the set metric, or
-    /// `Rank` when none is set. A summary is sized in its own native terms
-    /// (#690 §4), so only ε, δ and the scope matter there; the query's own
-    /// metric, set or not, is checked at its root.
-    ///
-    /// The other intents with a target are stated in their own metric with
-    /// [`Self::target_in`]: an L1-scaled absolute error for counts and top-k
-    /// frequencies, a relative error for distinct counts, and an absolute
-    /// value error for frequency moments.
-    pub fn for_quantile(&self) -> Self {
-        self.target_in(self.metric.unwrap_or(ErrorMetric::Rank))
     }
 }
 
@@ -248,22 +230,24 @@ impl AccuracyTarget {
 ///
 /// Used only to size and to display: a target whose metric is not set
 /// accepts a guarantee in any metric (#690).
-pub fn default_metric_for_root(root: &QueryRoot) -> Option<ErrorMetric> {
+pub fn default_metric_for_root(root: &QueryRoot) -> Option<AccuracyMetric> {
     match root {
         QueryRoot::Operator(node) => node_metric(node),
         QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node))
         | QueryRoot::Scalar(ScalarExpr::ScalarSubquery(node)) => node_metric(node),
-        QueryRoot::Scalar(_) => Some(ErrorMetric::ABSOLUTE),
+        QueryRoot::Scalar(_) => Some(AccuracyMetric::ABSOLUTE),
     }
 }
 
 /// The default metric of an intent's value, `None` for a quantile and for
 /// intents without a listed default.
-fn intent_metric(intent: &AggIntent) -> Option<ErrorMetric> {
+fn intent_metric(intent: &AggIntent) -> Option<AccuracyMetric> {
     match intent {
-        AggIntent::Count { .. } | AggIntent::TopK { .. } => Some(ErrorMetric::ABSOLUTE_STREAM_L1),
+        AggIntent::Count { .. } | AggIntent::TopK { .. } => {
+            Some(AccuracyMetric::ABSOLUTE_STREAM_L1)
+        }
         AggIntent::Cardinality { .. } | AggIntent::FrequencyL2 { .. } => {
-            Some(ErrorMetric::Relative)
+            Some(AccuracyMetric::Relative)
         }
         _ => None,
     }
@@ -271,9 +255,9 @@ fn intent_metric(intent: &AggIntent) -> Option<ErrorMetric> {
 
 /// The metric of `node`'s values, looking through operators that only
 /// select, order or rename rows.
-fn node_metric(node: &OperatorNode) -> Option<ErrorMetric> {
+fn node_metric(node: &OperatorNode) -> Option<AccuracyMetric> {
     let Operator::NonASAP(op) = &node.operator else {
-        return Some(ErrorMetric::ABSOLUTE);
+        return Some(AccuracyMetric::ABSOLUTE);
     };
     match op {
         NonASAPOp::Filter { child, .. }
@@ -295,7 +279,7 @@ fn node_metric(node: &OperatorNode) -> Option<ErrorMetric> {
             .collect::<Option<Vec<_>>>()
             .map(|metrics| match metrics.split_first() {
                 Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
-                _ => ErrorMetric::ABSOLUTE,
+                _ => AccuracyMetric::ABSOLUTE,
             }),
         NonASAPOp::Aggregate { measures, .. } => {
             let mut metrics = Vec::new();
@@ -304,17 +288,19 @@ fn node_metric(node: &OperatorNode) -> Option<ErrorMetric> {
                     AggIntent::Quantile { .. } | AggIntent::HistogramQuantile { .. } => {
                         return None
                     }
-                    intent => metrics.push(intent_metric(intent).unwrap_or(ErrorMetric::ABSOLUTE)),
+                    intent => {
+                        metrics.push(intent_metric(intent).unwrap_or(AccuracyMetric::ABSOLUTE))
+                    }
                 }
             }
             // Measures with different default metrics share one value-unit
             // statement.
             Some(match metrics.split_first() {
                 Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
-                _ => ErrorMetric::ABSOLUTE,
+                _ => AccuracyMetric::ABSOLUTE,
             })
         }
-        _ => Some(ErrorMetric::ABSOLUTE),
+        _ => Some(AccuracyMetric::ABSOLUTE),
     }
 }
 
@@ -322,10 +308,10 @@ fn node_metric(node: &OperatorNode) -> Option<ErrorMetric> {
 /// projections, `CASE` value branches, joins and operators that only
 /// select, order or rename rows, down to an aggregate's measure. A group
 /// key or any other expression is absolute.
-fn column_metric(node: &OperatorNode, column: usize) -> Option<ErrorMetric> {
+fn column_metric(node: &OperatorNode, column: usize) -> Option<AccuracyMetric> {
     use crate::ir::operator_properties::JoinKind;
     let Operator::NonASAP(op) = &node.operator else {
-        return Some(ErrorMetric::ABSOLUTE);
+        return Some(AccuracyMetric::ABSOLUTE);
     };
     match op {
         NonASAPOp::Filter { child, .. }
@@ -351,15 +337,15 @@ fn column_metric(node: &OperatorNode, column: usize) -> Option<ErrorMetric> {
                         ScalarExpr::Cast { expr, .. }
                             if matches!(**expr, ScalarExpr::Literal(_)) => {}
                         ScalarExpr::Column(id) => metrics.push(column_metric(child, *id)?),
-                        _ => return Some(ErrorMetric::ABSOLUTE),
+                        _ => return Some(AccuracyMetric::ABSOLUTE),
                     }
                 }
                 Some(match metrics.split_first() {
                     Some((first, rest)) if rest.iter().all(|metric| metric == first) => *first,
-                    _ => ErrorMetric::ABSOLUTE,
+                    _ => AccuracyMetric::ABSOLUTE,
                 })
             }
-            _ => Some(ErrorMetric::ABSOLUTE),
+            _ => Some(AccuracyMetric::ABSOLUTE),
         },
         NonASAPOp::Join {
             kind:
@@ -380,11 +366,11 @@ fn column_metric(node: &OperatorNode, column: usize) -> Option<ErrorMetric> {
             let keys = node.schema.fields.len().saturating_sub(measures.len());
             match column.checked_sub(keys).and_then(|m| measures.get(m)) {
                 Some(AggIntent::Quantile { .. } | AggIntent::HistogramQuantile { .. }) => None,
-                Some(intent) => Some(intent_metric(intent).unwrap_or(ErrorMetric::ABSOLUTE)),
-                None => Some(ErrorMetric::ABSOLUTE),
+                Some(intent) => Some(intent_metric(intent).unwrap_or(AccuracyMetric::ABSOLUTE)),
+                None => Some(AccuracyMetric::ABSOLUTE),
             }
         }
-        _ => Some(ErrorMetric::ABSOLUTE),
+        _ => Some(AccuracyMetric::ABSOLUTE),
     }
 }
 
@@ -426,7 +412,7 @@ mod tests {
         AggIntent::Quantile {
             col: None,
             q: 0.99,
-            accuracy: AccuracyTarget::epsilon(0.01),
+            accuracy: AccuracyTarget::max_error(0.01),
         }
     }
 
@@ -441,25 +427,28 @@ mod tests {
         let read = |value: serde_json::Value| serde_json::from_value::<AccuracyTarget>(value);
         assert_eq!(
             read(json!({"error": 0.01})).unwrap(),
-            AccuracyTarget::epsilon(0.01)
+            AccuracyTarget::max_error(0.01)
         );
         assert_eq!(
             read(json!({"error": 0.0, "failure_probability": 0.0})).unwrap(),
             AccuracyTarget::exact()
         );
-        let rank = AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank);
+        let rank = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::Rank);
         assert_eq!(
-            read(json!({"metric": "rank", "error": 0.01, "failure_probability": 0.001})).unwrap(),
+            read(json!({"accuracy_metric": "rank", "error": 0.01, "failure_probability": 0.001}))
+                .unwrap(),
             rank
         );
         assert_eq!(
             serde_json::to_value(&rank).unwrap(),
-            json!({"metric": "rank", "error": 0.01, "failure_probability": 0.001,
-                   "scope": "whole_result"})
+            json!({"accuracy_metric": "rank", "error": 0.01, "failure_probability": 0.001,
+                   "accuracy_scope": "whole_result"})
         );
         assert_eq!(
-            serde_json::to_value(AccuracyTarget::epsilon(0.01)).unwrap(),
-            json!({"error": 0.01, "scope": "whole_result"})
+            serde_json::to_value(AccuracyTarget::max_error(0.01)).unwrap(),
+            json!({"error": 0.01, "accuracy_scope": "whole_result"})
         );
         for old in [
             json!("Exact"),
@@ -475,15 +464,15 @@ mod tests {
     #[test]
     fn metric_wire_names() {
         for (metric, name) in [
-            (ErrorMetric::ABSOLUTE, "absolute"),
-            (ErrorMetric::ABSOLUTE_STREAM_L1, "absolute_stream_l1"),
-            (ErrorMetric::ABSOLUTE_STREAM_L2, "absolute_stream_l2"),
-            (ErrorMetric::Relative, "relative"),
-            (ErrorMetric::Rank, "rank"),
+            (AccuracyMetric::ABSOLUTE, "absolute"),
+            (AccuracyMetric::ABSOLUTE_STREAM_L1, "absolute_stream_l1"),
+            (AccuracyMetric::ABSOLUTE_STREAM_L2, "absolute_stream_l2"),
+            (AccuracyMetric::Relative, "relative"),
+            (AccuracyMetric::Rank, "rank"),
         ] {
             assert_eq!(serde_json::to_value(metric).unwrap(), name);
             assert_eq!(
-                serde_json::from_value::<ErrorMetric>(name.into()).unwrap(),
+                serde_json::from_value::<AccuracyMetric>(name.into()).unwrap(),
                 metric
             );
         }
@@ -501,41 +490,47 @@ mod tests {
             metric(AggIntent::Count {
                 accuracy: exact.clone()
             }),
-            ErrorMetric::ABSOLUTE_STREAM_L1
+            AccuracyMetric::ABSOLUTE_STREAM_L1
         );
-        assert_eq!(metric(AggIntent::Sum { col: None }), ErrorMetric::ABSOLUTE);
+        assert_eq!(
+            metric(AggIntent::Sum { col: None }),
+            AccuracyMetric::ABSOLUTE
+        );
         assert_eq!(
             metric(AggIntent::TopK {
                 k: 5,
                 accuracy: exact.clone()
             }),
-            ErrorMetric::ABSOLUTE_STREAM_L1
+            AccuracyMetric::ABSOLUTE_STREAM_L1
         );
         assert_eq!(
             metric(AggIntent::Cardinality {
                 cols: vec![],
                 accuracy: exact.clone()
             }),
-            ErrorMetric::Relative
+            AccuracyMetric::Relative
         );
         assert_eq!(
             metric(AggIntent::FrequencyL2 {
                 col: None,
                 accuracy: exact.clone()
             }),
-            ErrorMetric::Relative
+            AccuracyMetric::Relative
         );
         assert_eq!(
             metric(AggIntent::FrequencyEntropy {
                 col: None,
                 accuracy: exact.clone()
             }),
-            ErrorMetric::ABSOLUTE
+            AccuracyMetric::ABSOLUTE
         );
-        assert_eq!(metric(AggIntent::Avg { col: None }), ErrorMetric::ABSOLUTE);
+        assert_eq!(
+            metric(AggIntent::Avg { col: None }),
+            AccuracyMetric::ABSOLUTE
+        );
         assert_eq!(
             default_metric_for_root(&QueryRoot::Scalar(ScalarExpr::literal_f64(1.0))),
-            Some(ErrorMetric::ABSOLUTE)
+            Some(AccuracyMetric::ABSOLUTE)
         );
     }
 
@@ -593,18 +588,21 @@ mod tests {
             }))
         };
         let metric = |root: QueryRoot| default_metric_for_root(&root).unwrap();
-        assert_eq!(metric(guard(ScalarExpr::Column(0))), ErrorMetric::Relative);
+        assert_eq!(
+            metric(guard(ScalarExpr::Column(0))),
+            AccuracyMetric::Relative
+        );
         // The count's column, or arithmetic over the statistic.
         assert_eq!(
             metric(guard(ScalarExpr::Column(1))),
-            ErrorMetric::ABSOLUTE_STREAM_L1
+            AccuracyMetric::ABSOLUTE_STREAM_L1
         );
         assert_eq!(
             metric(guard(ScalarExpr::Negative {
                 expr: Box::new(ScalarExpr::Column(0)),
                 semantics: crate::ir::ExprSemantics::Sql,
             })),
-            ErrorMetric::ABSOLUTE
+            AccuracyMetric::ABSOLUTE
         );
     }
 
@@ -621,17 +619,19 @@ mod tests {
     #[test]
     fn exact_targets() {
         assert!(AccuracyTarget::exact().is_exact());
-        assert_eq!(AccuracyTarget::exact().metric, None);
+        assert_eq!(AccuracyTarget::exact().accuracy_metric, None);
         assert!(AccuracyTarget::exact()
-            .with_metric(ErrorMetric::Rank)
+            .accuracy_metric(AccuracyMetric::Rank)
             .is_exact());
-        assert!(!AccuracyTarget::epsilon(0.0).is_exact());
+        assert!(!AccuracyTarget::max_error(0.0).is_exact());
         assert_eq!(
-            AccuracyTarget::epsilon_delta(0.01, 0.001).failure_probability,
+            AccuracyTarget::max_error(0.01)
+                .failure_probability(0.001)
+                .failure_probability,
             Some(0.001)
         );
         assert_eq!(
-            AccuracyTarget::epsilon(0.01).scope,
+            AccuracyTarget::max_error(0.01).accuracy_scope,
             AccuracyScope::WholeResult
         );
     }

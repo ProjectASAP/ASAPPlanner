@@ -7,7 +7,7 @@ use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Query, QueryLanguage,
-    QueryRequirements, QueryWorkload, TimeSelection,
+    QueryRequirements, QueryWorkload,
 };
 
 const INTERVAL: Duration = Duration::from_secs(15);
@@ -29,7 +29,6 @@ fn workload(language: QueryLanguage, query: &str) -> PlanningWorkload {
                 predictability: Default::default(),
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },

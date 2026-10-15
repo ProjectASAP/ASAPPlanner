@@ -16,7 +16,7 @@ pub(super) fn guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::ABSOLUTE_STREAM_L2,
+        AccuracyMetric::ABSOLUTE_STREAM_L2,
         (3.0 / f64::from(*width)).sqrt(),
         ProbabilityExpr::Constant {
             value: count_sketch_failure_probability(*width, *depth)?,
@@ -87,12 +87,16 @@ mod tests {
                 },
             )
             .expect("CountSketch has a parameter-derived L2 guarantee");
-        assert_eq!(guarantee.spec.metric, ErrorMetric::ABSOLUTE_STREAM_L2);
+        assert_eq!(
+            guarantee.spec.accuracy_metric,
+            AccuracyMetric::ABSOLUTE_STREAM_L2
+        );
         assert!(DefaultAccuracyModel.satisfies(
             &guarantee,
-            &AccuracyTarget::epsilon_delta(0.01, 0.01)
-                .with_metric(ErrorMetric::ABSOLUTE_STREAM_L2)
-                .with_scope(asap_types::types::AccuracyScope::PerValue)
+            &AccuracyTarget::max_error(0.01)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L2)
+                .accuracy_scope(asap_types::types::AccuracyScope::PerValue)
         ));
     }
 

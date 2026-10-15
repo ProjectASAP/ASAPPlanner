@@ -12,7 +12,7 @@ use asap_types::types::AccuracyTarget;
 const INTERVAL: Duration = Duration::from_secs(15);
 
 fn lower(query: &str) -> Rc<OperatorNode> {
-    lower_metricsql(query, AccuracyTarget::epsilon(0.01), INTERVAL).unwrap()
+    lower_metricsql(query, AccuracyTarget::max_error(0.01), INTERVAL).unwrap()
 }
 
 #[test]

@@ -80,7 +80,7 @@ use asap_devtools::SqlCatalog;
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::QueryRoot;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{default_metric_for_root, AccuracyTarget, ErrorMetric};
+use asap_types::types::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, RepeatedDemand, SqlDialect,
@@ -170,7 +170,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut queries: Vec<(QueryLanguage, String, Option<String>)> = Vec::new();
     let mut tables = Vec::new();
     let (mut epsilon, mut delta, mut interval_ms) = (None, None, 15_000u64);
-    let mut metric: Option<ErrorMetric> = None;
+    let mut metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
     let mut out = None;
@@ -240,13 +240,15 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         (None, false) => {
             let accuracy = match (epsilon, delta) {
                 (None, None) => AccuracyTarget::exact(),
-                (Some(epsilon), None) => AccuracyTarget::epsilon(epsilon),
-                (Some(epsilon), Some(delta)) => AccuracyTarget::epsilon_delta(epsilon, delta),
+                (Some(epsilon), None) => AccuracyTarget::max_error(epsilon),
+                (Some(epsilon), Some(delta)) => {
+                    AccuracyTarget::max_error(epsilon).failure_probability(delta)
+                }
                 (None, Some(_)) => return Err("--delta needs --epsilon".into()),
             };
             let accuracy = match metric {
                 Some(_) if epsilon.is_none() => return Err("--metric needs --epsilon".into()),
-                Some(metric) => accuracy.with_metric(metric),
+                Some(metric) => accuracy.accuracy_metric(metric),
                 None => accuracy,
             };
             let catalog = sql_catalog(&tables)?;
@@ -410,13 +412,11 @@ fn plan_selection_json(
             let queries: Vec<Value> = queries
                 .iter()
                 .map(|accepted| {
-                    accepted.as_ref().map_or(Value::Null, |accepted| {
-                        json!({
-                            "target_metric": accepted.target_metric,
-                            "accepted_metric": accepted.accepted_metric,
-                            "sketches": accepted.sketches,
-                            "summary": accepted.to_string(),
-                        })
+                    json!({
+                        "target_metric": accepted.target_metric,
+                        "accepted_metric": accepted.accepted_metric,
+                        "sketches": accepted.sketches,
+                        "summary": accepted.to_string(),
                     })
                 })
                 .collect();
@@ -483,7 +483,7 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
         let Ok(target) = serde_json::from_value::<AccuracyTarget>(accuracy.clone()) else {
             continue;
         };
-        if target.metric.is_none() && !target.is_exact() {
+        if target.accuracy_metric.is_none() && !target.is_exact() {
             query["requirements"]["default_metric"] = json!(default_metric_for_root(root));
         }
     }
@@ -565,7 +565,6 @@ fn query_batch(
                         predictability: Default::default(),
                         invocations: 1,
                         execute_at: None,
-                        time_selection: Default::default(),
                     })
                     .collect(),
             ),

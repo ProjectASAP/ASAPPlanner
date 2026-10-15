@@ -5,7 +5,7 @@ use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlLowerer};
 use asap_types::{
     ir::{NonASAPOp, OperatorNode},
     pre_asap::{AggIntent, DataType, Field, Schema},
-    types::{AccuracyTarget, ErrorMetric},
+    types::AccuracyTarget,
 };
 use std::rc::Rc;
 
@@ -81,7 +81,7 @@ async fn declines_non_equivalent_frequency_shapes() {
 /// The L2 intent carries the query's accuracy target, not a default.
 #[tokio::test]
 async fn frequency_l2_preserves_accuracy_target() {
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let node = lower_sql(CAST_COUNT, &catalog(false), target.clone())
         .await
         .unwrap();
@@ -94,16 +94,14 @@ async fn frequency_l2_preserves_accuracy_target() {
     let NonASAPOp::Aggregate { measures, .. } = left.expect_non_asap() else {
         panic!("aggregate");
     };
-    assert!(
-        matches!(&measures[0], AggIntent::FrequencyL2 { accuracy, .. } if *accuracy == target.target_in(ErrorMetric::Relative))
-    );
+    assert!(matches!(&measures[0], AggIntent::FrequencyL2 { accuracy, .. } if *accuracy == target));
 }
 
 /// An approximate L2 estimate never decides whether SQL returns NULL: the
 /// empty-input guard is an exact count.
 #[tokio::test]
 async fn frequency_empty_input_guard_uses_an_exact_count() {
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let node = lower_sql(CAST_COUNT, &catalog(false), target)
         .await
         .unwrap();
@@ -127,7 +125,7 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
 async fn batch_lowering_recognizes_frequency_l2() {
     use asap_types::workload::{
         BatchEntry, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
-        SqlDialect, TimeSelection,
+        SqlDialect,
     };
     let workload = QueryWorkload {
         language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
@@ -140,7 +138,6 @@ async fn batch_lowering_recognizes_frequency_l2() {
             predictability: Predictability::Unknown,
             invocations: 1,
             execute_at: None,
-            time_selection: TimeSelection::default(),
         }]),
         repeating_queries: None,
     };
@@ -156,7 +153,7 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
         generate_per_computation_candidates, ComputationCandidate,
     };
     use asap_types::ir::QueryRoot;
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(CAST_COUNT, &catalog(false), target)
         .await
         .unwrap();

@@ -289,7 +289,6 @@ async fn batch_planning_replaces_summary_operators() {
                         predictability: Predictability::Unknown,
                         invocations: 2,
                         execute_at: None,
-                        time_selection: TimeSelection::default(),
                     })
                     .collect(),
             ),

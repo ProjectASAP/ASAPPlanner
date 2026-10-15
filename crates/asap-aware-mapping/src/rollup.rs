@@ -662,7 +662,7 @@ mod tests {
     fn approximate_count_does_not_roll_up_via_sum() {
         let scan = metric_scan();
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::epsilon(0.01),
+            accuracy: AccuracyTarget::max_error(0.01),
         };
         let fine = agg(vec![2, 3], intent.clone(), &scan);
         let coarse = agg(vec![2], intent, &scan);
@@ -718,7 +718,7 @@ mod tests {
     #[test]
     fn workload_search_does_not_roll_up_approximate_count() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::epsilon(0.01),
+            accuracy: AccuracyTarget::max_error(0.01),
         };
         let fine = agg(vec![2, 3], intent.clone(), &metric_scan());
         let coarse = agg(vec![2], intent, &metric_scan());

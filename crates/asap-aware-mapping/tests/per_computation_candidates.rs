@@ -20,7 +20,7 @@ use asap_types::{
 use std::rc::Rc;
 
 fn approximate() -> AccuracyTarget {
-    AccuracyTarget::epsilon_delta(0.05, 0.01)
+    AccuracyTarget::max_error(0.05).failure_probability(0.01)
 }
 fn candidates_for(intent: AggIntent) -> Vec<ComputationCandidate> {
     computation_candidates_for_intent(&intent)
@@ -180,7 +180,8 @@ fn scalar_root_producers_are_discovered_once() {
 
 /// #509 Example 1 Q1 is exact: each target's one exact option is its exact
 /// accumulator state (grouped sum, rate); no plain exact form and no summary.
-/// One ImplicitExact PromQL query lowered through the workload frontend.
+/// One PromQL query with the default exact target, lowered through the
+/// workload frontend.
 fn exact_promql(query: &str) -> Vec<QueryRoot> {
     use asap_types::workload::{
         BatchEntry, PlanningWorkload, Query, QueryLanguage, QueryRequirements, QueryWorkload,
@@ -197,7 +198,6 @@ fn exact_promql(query: &str) -> Vec<QueryRoot> {
                 predictability: Default::default(),
                 invocations: 1,
                 execute_at: None,
-                time_selection: Default::default(),
             }]),
             repeating_queries: None,
         },
@@ -300,9 +300,10 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(summary))]),
         Err(PerComputationCandidateError::ContainsAsap)
     ));
-    let epsilon_delta = |epsilon, delta| AccuracyTarget::epsilon_delta(epsilon, delta);
+    let epsilon_delta =
+        |epsilon, delta| AccuracyTarget::max_error(epsilon).failure_probability(delta);
     for target in [
-        AccuracyTarget::epsilon(f64::NAN),
+        AccuracyTarget::max_error(f64::NAN),
         epsilon_delta(0.0, 0.01),
         epsilon_delta(-0.1, 0.01),
         epsilon_delta(1.0, 0.01),
@@ -378,7 +379,7 @@ fn summary_candidates_are_unsized() {
         accuracy: approximate(),
     });
     let tight = candidates_for(AggIntent::Count {
-        accuracy: AccuracyTarget::epsilon_delta(0.0001, 0.0001),
+        accuracy: AccuracyTarget::max_error(0.0001).failure_probability(0.0001),
     });
     assert_eq!(loose, tight);
 }
@@ -660,7 +661,7 @@ fn global_aggregate_having_stays_above() {
     }
 }
 
-/// #509 Example 1 Q2 under ImplicitExact: the top-k's one option is plain
+/// #509 Example 1 Q2 under the default exact target: the top-k's one option is plain
 /// `Exact`, its heap summaries pruned `RequiresExact`; `sum_over_time` gets
 /// its exact Sum accumulator.
 #[test]

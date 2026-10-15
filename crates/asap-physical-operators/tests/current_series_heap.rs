@@ -311,7 +311,6 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },

@@ -109,7 +109,7 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
 fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     let node = plan(
         "quantile_over_time(0.5, data[5m]) / quantile_over_time(0.9, data[5m])",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     );
     assert!(
         matches!(node.operator, Operator::NonASAP(NonASAPOp::BinaryOp { .. }))
@@ -151,7 +151,7 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
         "quantile(0.9, avg_over_time(a[5m]))",
         "quantile(0.9, avg_over_time(a[5m]) + avg_over_time(b[5m]))",
     ] {
-        let accuracy = AccuracyTarget::epsilon(0.01);
+        let accuracy = AccuracyTarget::max_error(0.01);
         let pre = lower_promql(query, accuracy.clone()).unwrap();
         let node = logical_candidates(pre, accuracy)
             .into_iter()
@@ -180,7 +180,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
         } else {
             "topk(1, sum_over_time(up[5m]))"
         };
-        let accuracy = AccuracyTarget::epsilon(0.01);
+        let accuracy = AccuracyTarget::max_error(0.01);
         let pre = lower_promql(query, accuracy.clone()).unwrap();
         let candidates = logical_candidates(pre, accuracy);
         // The heap state each summarized candidate builds.
@@ -272,7 +272,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    let accuracy = AccuracyTarget::epsilon(0.01);
+    let accuracy = AccuracyTarget::max_error(0.01);
     let pre = lower_promql(
         "sum by (job) (topk by (job, instance) (1, rate(m[5m])))",
         accuracy.clone(),

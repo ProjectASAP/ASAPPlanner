@@ -10,18 +10,18 @@ use asap_aware_mapping::pass::{
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability,
     Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, SqlDialect, TimeSelection,
+    RepetitionInterval, SqlDialect,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
 
 fn approximate() -> QueryRequirements {
     QueryRequirements {
-        accuracy: AccuracyTarget::epsilon(0.01),
+        accuracy: AccuracyTarget::max_error(0.01),
         max_latency_ms: None,
     }
 }
@@ -31,7 +31,8 @@ fn approximate() -> QueryRequirements {
 fn approximate_for(sql: &str) -> QueryRequirements {
     let mut requirements = approximate();
     if sql.contains("percentile") {
-        requirements.accuracy = AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Rank);
+        requirements.accuracy =
+            AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank);
     }
     requirements
 }
@@ -43,7 +44,6 @@ fn batch(sql: &str) -> BatchEntry {
         predictability: Predictability::AdHoc,
         invocations: 1,
         execute_at: None,
-        time_selection: TimeSelection::default(),
     }
 }
 
@@ -175,7 +175,6 @@ async fn lowers_repeating_sql_entries_too() {
             demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
             requirements: approximate_for("approx_percentile_cont"),
             predictability: Predictability::Unknown,
-            time_selection: TimeSelection::default(),
         }]),
     );
     let catalog = lineitem_catalog();
@@ -316,7 +315,6 @@ async fn each_plan_carries_its_selected_root() {
                 demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
                 requirements: approximate(),
                 predictability: Predictability::Unknown,
-                time_selection: TimeSelection::default(),
             }]),
         },
         data_workload: Some(DataWorkload {

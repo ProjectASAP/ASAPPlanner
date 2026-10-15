@@ -93,7 +93,7 @@ impl DefaultAccuracyModel {
             .collect();
         deltas.push(local.spec.failure_probability.clone());
         AccuracyGuarantee::new(
-            local.spec.metric,
+            local.spec.accuracy_metric,
             BoundExpr::Sum { terms },
             ProbabilityExpr::UnionBound { terms: deltas },
             composed_provenance(op, inputs, local, rule),
@@ -134,7 +134,7 @@ impl DefaultAccuracyModel {
             .collect();
         deltas.push(local.spec.failure_probability.clone());
         AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             BoundExpr::Sum { terms },
             ProbabilityExpr::UnionBound { terms: deltas },
             composed_provenance(op, inputs, local, "relative_cross_term_union_bound"),
@@ -168,7 +168,7 @@ impl DefaultAccuracyModel {
         };
         let exact_local = AccuracyGuarantee::exact("deterministic Lipschitz transformation");
         AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE,
+            AccuracyMetric::ABSOLUTE,
             bound,
             delta,
             composed_provenance(
@@ -202,12 +202,12 @@ impl DefaultAccuracyModel {
             let absolute =
                 absolute_bound(input).ok_or_else(|| AccuracyError::UnsupportedComposition {
                     operator: op.clone(),
-                    input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
+                    input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
                     local_metric: None,
                     reason: format!(
                         "input {i} carries a {:?} guarantee, which has no registered \
                          conversion to an absolute value error",
-                        input.spec.metric
+                        input.spec.accuracy_metric
                     ),
                 })?;
             if let BoundExpr::Product { factors } = &absolute {
@@ -231,7 +231,7 @@ impl DefaultAccuracyModel {
             "exact_sum_union_bound",
         ));
         Ok(AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE,
+            AccuracyMetric::ABSOLUTE,
             BoundExpr::Product {
                 factors: vec![count.clone(), BoundExpr::Sum { terms }],
             },
@@ -257,11 +257,11 @@ impl DefaultAccuracyModel {
         }
         if inputs
             .iter()
-            .any(|input| input.spec.metric != ErrorMetric::ABSOLUTE)
+            .any(|input| input.spec.accuracy_metric != AccuracyMetric::ABSOLUTE)
         {
             return Err(AccuracyError::UnsupportedComposition {
                 operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
+                input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
                 local_metric: None,
                 reason: "exact average requires AbsoluteValue input guarantees".into(),
             });
@@ -276,7 +276,7 @@ impl DefaultAccuracyModel {
             "exact_average_union_bound",
         ));
         Ok(AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE,
+            AccuracyMetric::ABSOLUTE,
             BoundExpr::Max {
                 terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
             },
@@ -306,14 +306,14 @@ impl DefaultAccuracyModel {
         if all_relative(inputs) {
             return Self::relative_fold(op, inputs, stats, false, "exact_extremum_relative");
         }
-        let metric = inputs[0].spec.metric;
+        let metric = inputs[0].spec.accuracy_metric;
         if inputs
             .iter()
-            .any(|g| g.spec.metric != ErrorMetric::ABSOLUTE)
+            .any(|g| g.spec.accuracy_metric != AccuracyMetric::ABSOLUTE)
         {
             return Err(AccuracyError::UnsupportedComposition {
                 operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
+                input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
                 local_metric: None,
                 reason: "exact max/min requires AbsoluteValue input guarantees".into(),
             });
@@ -361,7 +361,7 @@ impl DefaultAccuracyModel {
         if needs_sign && stats.values_non_negative == Some(false) {
             return Err(AccuracyError::UnsupportedComposition {
                 operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
+                input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
                 local_metric: None,
                 reason: "relative error of a sum over signed values is unbounded".into(),
             });
@@ -407,7 +407,7 @@ impl DefaultAccuracyModel {
             rule,
         ));
         Ok(AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             bound,
             ProbabilityExpr::Scaled {
                 count,
@@ -432,14 +432,14 @@ impl DefaultAccuracyModel {
     ) -> Result<AccuracyGuarantee, AccuracyError> {
         let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
             operator: op.clone(),
-            input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
+            input_metrics: inputs.iter().map(|g| g.spec.accuracy_metric).collect(),
             local_metric: None,
             reason,
         };
         if inputs.len() != 2
-            || inputs
-                .iter()
-                .any(|input| input.spec.metric != ErrorMetric::Relative && !input.is_exact())
+            || inputs.iter().any(|input| {
+                input.spec.accuracy_metric != AccuracyMetric::Relative && !input.is_exact()
+            })
         {
             return Err(unsupported(
                 "division needs two relative-value or exact guarantees".into(),
@@ -510,7 +510,7 @@ impl DefaultAccuracyModel {
             }
         }
         Ok(AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             BoundExpr::Constant {
                 value: (numerator + denominator) / (1.0 - denominator),
             },
@@ -558,7 +558,7 @@ fn all_relative(inputs: &[AccuracyGuarantee]) -> bool {
     !inputs.is_empty()
         && inputs
             .iter()
-            .all(|g| g.spec.metric == ErrorMetric::Relative)
+            .all(|g| g.spec.accuracy_metric == AccuracyMetric::Relative)
 }
 
 /// `stats.input_row_count` as a bound factor, or an `Unknown` leaf named by
@@ -578,8 +578,8 @@ fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) ->
     }
 }
 
-/// `input` with a Count-Min ([`ErrorMetric::ABSOLUTE_STREAM_L1`]) or Count Sketch
-/// ([`ErrorMetric::ABSOLUTE_STREAM_L2`]) bound restated as an additive absolute
+/// `input` with a Count-Min ([`AccuracyMetric::ABSOLUTE_STREAM_L1`]) or Count Sketch
+/// ([`AccuracyMetric::ABSOLUTE_STREAM_L2`]) bound restated as an additive absolute
 /// error: the normalized bound times its stream norm, a symbolic statistic
 /// until bound. The norm is the one `norm` names ([`StreamNorm`]), which
 /// plan selection can bind; without one (a weight computed from the
@@ -590,8 +590,8 @@ pub(crate) fn additive_as_absolute(
     norm: Option<&StreamNorm>,
 ) -> AccuracyGuarantee {
     if !matches!(
-        input.spec.metric,
-        ErrorMetric::ABSOLUTE_STREAM_L1 | ErrorMetric::ABSOLUTE_STREAM_L2
+        input.spec.accuracy_metric,
+        AccuracyMetric::ABSOLUTE_STREAM_L1 | AccuracyMetric::ABSOLUTE_STREAM_L2
     ) || input.is_exact()
     {
         return input;
@@ -628,7 +628,7 @@ pub(crate) fn additive_as_absolute(
         provenance,
         ..input
     };
-    absolute.spec.metric = ErrorMetric::ABSOLUTE;
+    absolute.spec.accuracy_metric = AccuracyMetric::ABSOLUTE;
     absolute.spec.error = bound;
     absolute
 }
@@ -653,14 +653,14 @@ fn unknown_statistics(bound: &BoundExpr, found: &mut dyn FnMut(&str)) {
 /// normalized metric by the (unknown) statistic it is normalized by. `None`
 /// for a metric with no such conversion (`Rank`).
 fn absolute_bound(input: &AccuracyGuarantee) -> Option<BoundExpr> {
-    let normalizer = match input.spec.metric {
-        ErrorMetric::ABSOLUTE => return Some(input.spec.error.clone()),
-        ErrorMetric::Relative => "true_value_magnitude",
-        ErrorMetric::ABSOLUTE_STREAM_L1 => STREAM_L1_NORM,
-        ErrorMetric::ABSOLUTE_STREAM_L2 => STREAM_L2_NORM,
+    let normalizer = match input.spec.accuracy_metric {
+        AccuracyMetric::ABSOLUTE => return Some(input.spec.error.clone()),
+        AccuracyMetric::Relative => "true_value_magnitude",
+        AccuracyMetric::ABSOLUTE_STREAM_L1 => STREAM_L1_NORM,
+        AccuracyMetric::ABSOLUTE_STREAM_L2 => STREAM_L2_NORM,
         // `Rank` has no distribution-free conversion to a value error; a
         // metric this crate does not know has no registered conversion.
-        ErrorMetric::Rank | _ => return None,
+        AccuracyMetric::Rank | _ => return None,
     };
     if input.spec.error.is_zero() {
         return Some(BoundExpr::Zero);
@@ -744,21 +744,23 @@ pub(super) fn propagate(
         });
     }
 
-    let input_metrics: Vec<ErrorMetric> = inputs.iter().map(|g| g.spec.metric).collect();
+    let input_metrics: Vec<AccuracyMetric> =
+        inputs.iter().map(|g| g.spec.accuracy_metric).collect();
     let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
         operator: op.clone(),
         input_metrics: input_metrics.clone(),
-        local_metric: local.map(|g| g.spec.metric),
+        local_metric: local.map(|g| g.spec.accuracy_metric),
         reason,
     };
     // An exact input is compatible with every metric; only approximate
     // inputs constrain the rule.
     let approximate: Vec<&AccuracyGuarantee> = inputs.iter().filter(|g| !g.is_exact()).collect();
-    let same_metric = |metric: ErrorMetric| approximate.iter().all(|g| g.spec.metric == metric);
+    let same_metric =
+        |metric: AccuracyMetric| approximate.iter().all(|g| g.spec.accuracy_metric == metric);
 
     match op {
         CompositionOperator::CheckedRelativeDivision => {
-            if inputs.len() != 2 || local.is_some() || !same_metric(ErrorMetric::Relative) {
+            if inputs.len() != 2 || local.is_some() || !same_metric(AccuracyMetric::Relative) {
                 return Err(unsupported(
                     "checked division requires two exact/relative-value operands".into(),
                 ));
@@ -777,7 +779,7 @@ pub(super) fn propagate(
                 return Err(unsupported("invalid relative division bounds".into()));
             }
             Ok(AccuracyGuarantee::new(
-                ErrorMetric::Relative,
+                AccuracyMetric::Relative,
                 BoundExpr::Constant {
                     value: (a + b) / (1.0 - b) + 4.0 * f64::EPSILON,
                 },
@@ -799,10 +801,10 @@ pub(super) fn propagate(
             let local = local.ok_or_else(|| {
                 unsupported("approximate operator has no local guarantee to compose".into())
             })?;
-            if !same_metric(local.spec.metric) {
+            if !same_metric(local.spec.accuracy_metric) {
                 return Err(unsupported(format!(
                     "no registered cross-metric rule from {input_metrics:?} to {:?}",
-                    local.spec.metric
+                    local.spec.accuracy_metric
                 )));
             }
             // A distinct count over approximate values is not within the
@@ -813,14 +815,14 @@ pub(super) fn propagate(
                     "no registered rule for a distinct count over approximate values".into(),
                 ));
             }
-            match local.spec.metric {
-                ErrorMetric::ABSOLUTE => Ok(DefaultAccuracyModel::additive(
+            match local.spec.accuracy_metric {
+                AccuracyMetric::ABSOLUTE => Ok(DefaultAccuracyModel::additive(
                     op,
                     inputs,
                     local,
                     "additive_union_bound",
                 )),
-                ErrorMetric::Relative => {
+                AccuracyMetric::Relative => {
                     if stats.values_non_negative == Some(false) {
                         return Err(unsupported(
                             "relative-error composition cannot use a known signed input".into(),
@@ -838,7 +840,7 @@ pub(super) fn propagate(
                             statistic: VALUES_NON_NEGATIVE.into(),
                         });
                         return Ok(AccuracyGuarantee::new(
-                            ErrorMetric::Relative,
+                            AccuracyMetric::Relative,
                             BoundExpr::Unknown {
                                 statistic: VALUES_NON_NEGATIVE.into(),
                             },
@@ -850,12 +852,12 @@ pub(super) fn propagate(
                     }
                     Ok(DefaultAccuracyModel::multiplicative(op, inputs, local))
                 }
-                ErrorMetric::Rank
-                | ErrorMetric::ABSOLUTE_STREAM_L1
-                | ErrorMetric::ABSOLUTE_STREAM_L2
+                AccuracyMetric::Rank
+                | AccuracyMetric::ABSOLUTE_STREAM_L1
+                | AccuracyMetric::ABSOLUTE_STREAM_L2
                 | _ => Err(unsupported(format!(
                     "no registered same-metric composition rule for {:?} over {:?}",
-                    local.spec.metric, local.spec.metric
+                    local.spec.accuracy_metric, local.spec.accuracy_metric
                 ))),
             }
         }
@@ -865,12 +867,12 @@ pub(super) fn propagate(
                     "Lipschitz constant {constant} is not a finite non-negative number"
                 )));
             }
-            if inputs.len() != 1 || !same_metric(ErrorMetric::ABSOLUTE) {
+            if inputs.len() != 1 || !same_metric(AccuracyMetric::ABSOLUTE) {
                 return Err(unsupported(
                     "Lipschitz rule is registered for exactly one AbsoluteValue input".into(),
                 ));
             }
-            if local.is_some_and(|g| g.spec.metric != ErrorMetric::ABSOLUTE) {
+            if local.is_some_and(|g| g.spec.accuracy_metric != AccuracyMetric::ABSOLUTE) {
                 return Err(unsupported(
                     "Lipschitz rule needs an AbsoluteValue local guarantee".into(),
                 ));
@@ -942,7 +944,7 @@ pub(super) fn propagate(
             // membership and hence the values are unknown.
             let metric = approximate
                 .first()
-                .map_or(ErrorMetric::ABSOLUTE, |score| score.spec.metric);
+                .map_or(AccuracyMetric::ABSOLUTE, |score| score.spec.accuracy_metric);
             if !same_metric(metric) {
                 return Err(unsupported(
                     "top-k selection needs scores of one metric".into(),
@@ -1003,7 +1005,7 @@ mod tests {
     use asap_types::pre_asap::AggIntent;
     fn abs(bound: f64, delta: f64) -> AccuracyGuarantee {
         AccuracyGuarantee::new(
-            ErrorMetric::ABSOLUTE,
+            AccuracyMetric::ABSOLUTE,
             BoundExpr::Constant { value: bound },
             ProbabilityExpr::Constant { value: delta },
             vec![],
@@ -1011,7 +1013,7 @@ mod tests {
     }
     fn rel(bound: f64) -> AccuracyGuarantee {
         AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             BoundExpr::Constant { value: bound },
             ProbabilityExpr::Zero,
             vec![],
@@ -1025,9 +1027,9 @@ mod tests {
             contract: "enforced test population".into(),
         }
     }
-    fn with_metric(metric: ErrorMetric, bound: f64) -> AccuracyGuarantee {
+    fn with_metric(metric: AccuracyMetric, bound: f64) -> AccuracyGuarantee {
         let mut g = abs(bound, 0.0);
-        g.spec.metric = metric;
+        g.spec.accuracy_metric = metric;
         g
     }
     #[test]
@@ -1039,7 +1041,7 @@ mod tests {
             .unwrap();
         assert!((g.spec.error.evaluate().unwrap() - 0.02 / 0.99).abs() < 1e-14);
         let mut rank = inputs[0].clone();
-        rank.spec.metric = ErrorMetric::Rank;
+        rank.spec.accuracy_metric = AccuracyMetric::Rank;
         assert!(DefaultAccuracyModel
             .propagate(&op, &[rank.clone(), rank], None, &Default::default())
             .is_err());
@@ -1135,7 +1137,7 @@ mod tests {
             .unwrap();
         assert_eq!(out.spec.error.evaluate(), Some(0.05));
         assert_eq!(out.spec.failure_probability.evaluate(), Some(0.01));
-        assert_eq!(out.spec.metric, ErrorMetric::ABSOLUTE);
+        assert_eq!(out.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
     }
     #[test]
     fn additive_bounds_and_delta_union_bound_compose() {
@@ -1171,7 +1173,7 @@ mod tests {
             .unwrap();
         // 0.1 + 0.2 + 0.1·0.2 = 0.32, not 0.3.
         assert!((out.spec.error.evaluate().unwrap() - 0.32).abs() < 1e-12);
-        assert_eq!(out.spec.metric, ErrorMetric::Relative);
+        assert_eq!(out.spec.accuracy_metric, AccuracyMetric::Relative);
     }
     #[test]
     fn relative_error_without_sign_knowledge_remains_symbolic() {
@@ -1201,8 +1203,8 @@ mod tests {
         let err = DefaultAccuracyModel
             .propagate(
                 &CompositionOperator::ApproximateAggregate,
-                &[with_metric(ErrorMetric::Relative, 0.01)],
-                Some(&with_metric(ErrorMetric::ABSOLUTE_STREAM_L1, 0.01)),
+                &[with_metric(AccuracyMetric::Relative, 0.01)],
+                Some(&with_metric(AccuracyMetric::ABSOLUTE_STREAM_L1, 0.01)),
                 &PropagationStats::default(),
             )
             .unwrap_err();
@@ -1210,15 +1212,15 @@ mod tests {
             err,
             AccuracyError::UnsupportedComposition {
                 input_metrics,
-                local_metric: Some(ErrorMetric::ABSOLUTE_STREAM_L1),
+                local_metric: Some(AccuracyMetric::ABSOLUTE_STREAM_L1),
                 ..
-            } if input_metrics == vec![ErrorMetric::Relative]
+            } if input_metrics == vec![AccuracyMetric::Relative]
         ));
         // Quantile rank error under value-additive logic.
         let err = DefaultAccuracyModel
             .propagate(
                 &CompositionOperator::ApproximateAggregate,
-                &[with_metric(ErrorMetric::Rank, 0.01)],
+                &[with_metric(AccuracyMetric::Rank, 0.01)],
                 Some(&abs(0.01, 0.0)),
                 &PropagationStats::default(),
             )
@@ -1230,8 +1232,8 @@ mod tests {
         let err = DefaultAccuracyModel
             .propagate(
                 &CompositionOperator::ApproximateAggregate,
-                &[with_metric(ErrorMetric::Rank, 0.01)],
-                Some(&with_metric(ErrorMetric::Rank, 0.01)),
+                &[with_metric(AccuracyMetric::Rank, 0.01)],
+                Some(&with_metric(AccuracyMetric::Rank, 0.01)),
                 &PropagationStats::default(),
             )
             .unwrap_err();
@@ -1260,7 +1262,7 @@ mod tests {
                 &PropagationStats::default(),
             )
             .unwrap();
-        assert_eq!(out.spec.metric, ErrorMetric::ABSOLUTE);
+        assert_eq!(out.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert_eq!(
             out.spec.error.evaluate(),
             None,
@@ -1270,7 +1272,7 @@ mod tests {
             s,
             GuaranteeSource::UnavailableStatistic { statistic } if statistic == "input_row_count"
         )));
-        assert!(!DefaultAccuracyModel.satisfies(&out, &AccuracyTarget::epsilon(1.0)));
+        assert!(!DefaultAccuracyModel.satisfies(&out, &AccuracyTarget::max_error(1.0)));
 
         let known = PropagationStats {
             input_row_count: Some(4),
@@ -1319,7 +1321,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(out.spec.metric, ErrorMetric::Relative);
+        assert_eq!(out.spec.accuracy_metric, AccuracyMetric::Relative);
         assert_eq!(out.spec.error.evaluate(), Some(0.02));
         assert_eq!(out.spec.failure_probability.evaluate(), Some(0.0));
     }
@@ -1345,10 +1347,10 @@ mod tests {
                 )
             };
             let known = with(Some(true)).unwrap();
-            assert_eq!(known.spec.metric, ErrorMetric::Relative);
+            assert_eq!(known.spec.accuracy_metric, AccuracyMetric::Relative);
             assert_eq!(known.spec.error.evaluate(), Some(0.01), "{op:?}");
             let unknown = with(None).unwrap();
-            assert_eq!(unknown.spec.metric, ErrorMetric::Relative);
+            assert_eq!(unknown.spec.accuracy_metric, AccuracyMetric::Relative);
             assert_eq!(
                 unknown.spec.error,
                 BoundExpr::Unknown {
@@ -1404,7 +1406,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(out.spec.metric, ErrorMetric::ABSOLUTE);
+        assert_eq!(out.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert_eq!(out.spec.error.evaluate(), Some(0.25));
         assert_eq!(out.spec.failure_probability.evaluate(), Some(0.04));
     }
@@ -1455,7 +1457,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(certified.spec.metric, ErrorMetric::ABSOLUTE);
+        assert_eq!(certified.spec.accuracy_metric, AccuracyMetric::ABSOLUTE);
         assert_eq!(certified.spec.error.evaluate(), Some(0.1));
         assert_eq!(certified.spec.failure_probability.evaluate(), Some(0.005));
 

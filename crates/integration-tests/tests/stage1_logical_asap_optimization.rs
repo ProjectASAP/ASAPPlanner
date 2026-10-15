@@ -31,7 +31,7 @@ use futures::StreamExt;
 mod physical_common;
 
 fn accuracy() -> AccuracyTarget {
-    AccuracyTarget::epsilon_delta(0.01, 0.01)
+    AccuracyTarget::max_error(0.01).failure_probability(0.01)
 }
 
 async fn sql(query: &str) -> QueryRoot {
@@ -62,7 +62,6 @@ fn promql(query: &str) -> QueryRoot {
                 predictability: Default::default(),
                 invocations: 1,
                 execute_at: None,
-                time_selection: Default::default(),
             }]),
             repeating_queries: None,
         },

@@ -1,8 +1,8 @@
 //! Structurally identical summary producers chosen by different queries are
-//! shared: one `Rc<OperatorNode>` across their plans. The planner pipeline
-//! plans no such sharing until Pass 2 (ASAP-aware CSE), and plan selection
-//! prefers raw plans while every summary runs at query time (#580); the
-//! sharing tests are ignored until then.
+//! shared: one `Rc<OperatorNode>` across their plans, planned by Pass 2
+//! (ASAP-aware CSE). Three tests stay ignored: with the built-in cost model,
+//! plan selection still selects an exact plan for at least one of their
+//! queries (#580).
 
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
@@ -17,11 +17,11 @@ use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, Rate, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, SqlDialect, TimeSelection,
+    RepetitionInterval, SqlDialect,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -29,9 +29,9 @@ const NOW_MS: u64 = 1_700_000_000_000;
 /// `epsilon` as a query's requested accuracy; a quantile query's target
 /// names its metric (a rank error).
 fn requested(query: &str, epsilon: f64) -> AccuracyTarget {
-    let requested = AccuracyTarget::epsilon(epsilon);
+    let requested = AccuracyTarget::max_error(epsilon);
     if query.contains("quantile") {
-        requested.with_metric(ErrorMetric::Rank)
+        requested.accuracy_metric(AccuracyMetric::Rank)
     } else {
         requested
     }
@@ -51,7 +51,6 @@ fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
         demand: RepeatedDemand::FixedInterval(RepetitionInterval(600_000)),
         requirements: requirements(query, epsilon),
         predictability: Predictability::Unknown,
-        time_selection: TimeSelection::default(),
     }
 }
 

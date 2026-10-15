@@ -6,9 +6,7 @@ use asap_aware_mapping::physical_operator_statistics::{
     ComparisonScope, EdgeStatistics, OperatorStatistics, ScanSelection, UnaryEdgeStatistics,
 };
 use asap_types::ir::operator_properties::Source;
-use asap_types::workload::{
-    DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
-};
+use asap_types::workload::{DataArrival, DurationMs, QueryRecurrence, TimestampMs};
 use std::collections::HashMap;
 
 fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
@@ -27,11 +25,6 @@ fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
         recurrence: QueryRecurrence::OneTime {
             invocations: 3,
             execute_at: None,
-        },
-        time_selection: TimeSelection {
-            scope: QueryTimeScope::Longitudinal,
-            lookback: Some(DurationMs(1000)),
-            as_of: Some(TimestampMs(100)),
         },
         sources: vec![coverage.clone()],
     };

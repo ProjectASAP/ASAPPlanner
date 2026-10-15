@@ -128,7 +128,7 @@ async fn project_above_and_scan_below_a_summary_are_both_non_asap_nodes() {
 async fn exact_aggregate_and_sketch_share_one_scan() {
     let root = plan(
         "SELECT avg(l_extendedprice), approx_percentile_cont(l_discount, 0.99) FROM lineitem",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await;
     let exact = find_all(&root, |node| {
@@ -162,7 +162,7 @@ async fn each_side_of_union_all_holds_a_summary_estimate() {
     let root = plan(
         "SELECT approx_distinct(l_partkey) FROM lineitem \
          UNION ALL SELECT approx_distinct(l_suppkey) FROM lineitem",
-        AccuracyTarget::epsilon(0.01),
+        AccuracyTarget::max_error(0.01),
     )
     .await;
     // The SQL front end lowers UNION ALL to `SetOp { all: true }`.

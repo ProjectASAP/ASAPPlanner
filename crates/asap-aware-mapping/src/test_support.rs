@@ -7,7 +7,7 @@ use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+    QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
 pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
@@ -23,7 +23,6 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,
-                time_selection: TimeSelection::default(),
             }]),
             repeating_queries: None,
         },
@@ -216,7 +215,7 @@ pub(crate) fn time_and_export(
 pub(crate) fn cms_summary(query: &str) -> OperatorNode {
     use asap_types::ir::{ASAPOp, QueryRoot};
     use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
-    let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
+    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_promql(query, target.clone());
     let run = crate::pass::run_stage1_to_stage3(
         vec![(0, QueryRoot::Operator(root))],

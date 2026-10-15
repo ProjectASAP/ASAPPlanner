@@ -18,7 +18,7 @@ use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, CompareOpKind, DataType, GroupKeys, JoinKind, Reduction,
     ScalarValue, WindowFrameBound, WindowFrameOffset, WindowFuncKind,
 };
-use asap_types::types::{AccuracyTarget, ErrorMetric};
+use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
 /// The recognized form of a query whose root is the L2 or natural-log entropy
@@ -151,8 +151,9 @@ fn frequency_l2_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
         input,
         AggIntent::FrequencyL2 {
             col: Some(key),
-            // The count's ε and δ, stated as the norm's relative error.
-            accuracy: accuracy.with_metric(ErrorMetric::Relative),
+            // The count's target; Stage 1 sizes the norm's summary for it as
+            // a relative error.
+            accuracy,
         },
         "frequency_l2",
         ScalarExpr::Column(0),
@@ -329,8 +330,9 @@ fn frequency_entropy_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>
         input,
         AggIntent::FrequencyEntropy {
             col: Some(key),
-            // The count's ε and δ, stated as an absolute error in bits.
-            accuracy: accuracy.with_metric(ErrorMetric::ABSOLUTE),
+            // The count's target; Stage 1 sizes the entropy's summary for it
+            // as an absolute error in bits.
+            accuracy,
         },
         "frequency_entropy",
         nats,

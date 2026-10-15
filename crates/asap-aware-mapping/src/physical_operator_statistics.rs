@@ -11,7 +11,7 @@ use asap_types::ir::Predicate;
 
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
-    TimeSelection, TimestampMs,
+    TimestampMs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,6 @@ pub struct ComparisonScope {
     pub planning_time: TimestampMs,
     pub horizon: DurationMs,
     pub recurrence: QueryRecurrence,
-    pub time_selection: TimeSelection,
     pub sources: Vec<ScanSelection>,
 }
 
@@ -62,7 +61,6 @@ impl ComparisonScope {
             planning_time,
             horizon,
             recurrence: query.recurrence.clone(),
-            time_selection: query.time_selection.clone(),
             sources,
         };
         scope.validate()?;
@@ -122,10 +120,6 @@ pub fn validate_comparison_scopes(
         ),
         ("horizon", raw.horizon == candidate.horizon),
         ("recurrence", raw.recurrence == candidate.recurrence),
-        (
-            "time_selection",
-            raw.time_selection == candidate.time_selection,
-        ),
         (
             "sources",
             raw.sources.len() == candidate.sources.len()

@@ -18,7 +18,7 @@ pub(super) fn generic_guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::Relative,
+        AccuracyMetric::Relative,
         relative_standard_error(*precision),
         ProbabilityExpr::Unknown {
             statistic: "hll_estimator_failure_probability".into(),
@@ -96,7 +96,7 @@ pub(crate) fn classic_guarantee(
     let relative_error = classic_relative_error(precision, relative_error);
     let statistic = classic_failure_statistic(precision, relative_error, source);
     Some(AccuracyGuarantee::new(
-        ErrorMetric::Relative,
+        AccuracyMetric::Relative,
         BoundExpr::Constant {
             value: relative_error,
         },
@@ -162,7 +162,7 @@ impl ClassicHllConfidence {
     pub fn guarantee(&self, precision: u8) -> Option<AccuracyGuarantee> {
         let delta = self.failure_probability(precision)?;
         Some(AccuracyGuarantee::new(
-            ErrorMetric::Relative,
+            AccuracyMetric::Relative,
             BoundExpr::Constant {
                 value: self.relative_error,
             },
@@ -227,20 +227,22 @@ impl ClassicHllConfidence {
     }
 }
 
-/// The smallest precision from `precision` up whose classic failure
+/// The smallest precision, at least `at_least`, whose classic failure
 /// probability at `relative_error` over a source of at most `max_distinct`
-/// distinct items is at most `delta`; `precision` when none up to 18 is.
-/// Plan selection's enlargement (#669b) applies this rule to the source's
-/// bound, Pass 1's sizing ([`hll_precision`]) to a bound of `⌈1/ε⌉`.
-pub(crate) fn precision_for(
-    precision: u8,
+/// distinct items is at most `failure_probability`; `at_least` when none up
+/// to 18 is. Plan selection's enlargement (#669b) applies this rule to the
+/// source's bound, Pass 1's sizing ([`hll_precision`]) to a bound of `⌈1/ε⌉`.
+pub(crate) fn min_precision(
     relative_error: f64,
+    failure_probability: f64,
     max_distinct: u64,
-    delta: f64,
+    at_least: u8,
 ) -> u8 {
-    (precision..=18)
-        .find(|&p| classic_failure_probability(p, relative_error, max_distinct) <= delta)
-        .unwrap_or(precision)
+    (at_least..=18)
+        .find(|&p| {
+            classic_failure_probability(p, relative_error, max_distinct) <= failure_probability
+        })
+        .unwrap_or(at_least)
 }
 
 /// Classic HLL's precision for relative error `eps` with failure
@@ -251,7 +253,7 @@ pub(crate) fn precision_for(
 /// which [`ClassicHllConfidence`] certifies `delta` at `eps` for every
 /// bound up to `⌈1/ε⌉` (18 when none up to 18 does). Plan selection then
 /// binds the source's own bound, and enlarges the precision by the same
-/// rule ([`precision_for`]) when the bound or a smaller failure
+/// rule ([`min_precision`]) when the bound or a smaller failure
 /// probability needs it.
 pub(crate) fn hll_precision(eps: f64, delta: f64) -> u8 {
     if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
@@ -491,15 +493,17 @@ mod tests {
                 &SketchStatistic::Cardinality,
             )
             .unwrap();
-        assert_eq!(g.spec.metric, ErrorMetric::Relative);
+        assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
         assert_eq!(g.spec.failure_probability.evaluate(), None);
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative)
+            &AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative)
         ));
         assert!(!DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative)
+            &AccuracyTarget::max_error(0.01)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Relative)
         ));
     }
 }

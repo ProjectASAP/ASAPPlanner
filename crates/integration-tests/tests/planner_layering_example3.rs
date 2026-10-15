@@ -63,7 +63,6 @@ fn workload_encodes_example3() {
     let b = pattern_b();
     b.validate().expect("valid Pattern B");
     assert_eq!(evaluation_interval_ms(&b, 0), Some(PATTERN_B_INTERVAL_MS));
-    assert_eq!(lookback_ms(&b, 0), PATTERN_B_WINDOW_MS);
 }
 
 // ── Pattern A: query-language frontends ───────────────────────────────

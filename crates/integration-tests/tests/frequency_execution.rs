@@ -124,7 +124,7 @@ fn standin_exact_and_univmon_candidates_execute() {
             0.01,
         ),
     ] {
-        let accuracy = AccuracyTarget::epsilon_delta(epsilon, delta);
+        let accuracy = AccuracyTarget::max_error(epsilon).failure_probability(delta);
         let root = lower_promql(query, accuracy.clone()).unwrap();
         let root = promql_rows::with_series_identity(&root).unwrap();
         let mut executed = Vec::new();

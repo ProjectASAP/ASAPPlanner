@@ -18,7 +18,7 @@ pub mod fixtures {
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
-        QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+        QueryLanguage, QueryRequirements, QueryWorkload,
     };
     use std::rc::Rc;
 
@@ -52,7 +52,6 @@ pub mod fixtures {
                     predictability: Predictability::Unknown,
                     invocations: 1,
                     execute_at: None,
-                    time_selection: TimeSelection::default(),
                 }]),
                 repeating_queries: None,
             },

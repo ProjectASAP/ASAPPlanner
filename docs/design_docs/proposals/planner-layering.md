@@ -263,7 +263,7 @@ selection picks one. [Example 1](#example-1-aggregation-over-dimensions--the-can
 | Stage | Input | Decides | Output |
 |---|---|---|---|
 | 0. Frontends | `query`, `language` | Parse and convert to a common logical form; reject what cannot be represented | `CandidateLogicalDAGs` |
-| 1. Logical ASAP-aware optimization | Logical DAGs; accuracy requirements, `time_selection`, repetition interval | Summary replacement (Pass 1); ASAP-aware Common Subexpression Elimination (CSE) (Pass 2) | `CandidateLogicalASAPDAGs` |
+| 1. Logical ASAP-aware optimization | Logical DAGs; accuracy requirements, repetition interval | Summary replacement (Pass 1); ASAP-aware Common Subexpression Elimination (CSE) (Pass 2) | `CandidateLogicalASAPDAGs` |
 | 2. Physical ASAP-aware optimization | Logical ASAP DAGs; `recurrence`, `predictability`, `DataWorkload` | Materialization; physical operators; parallelism and resources (TODO) | `CandidatePhysicalASAPDAGs` |
 | 3. Plan selection | Physical candidates; `requirements`; cost model, accuracy model, capabilities | Reject invalid candidates; pick the cheapest plan for the whole workload | One `PhysicalASAPDAG` |
 | 4. Execution (deployment) | The selected `PhysicalASAPDAG` | Run ingestion, storage and query-time computation | Query results |
@@ -886,10 +886,11 @@ To see examples in DAG Viewer, following the instructions [here](TODO: write an 
 
 Each example's workload is shown as tables. Field names in code font are the
 fields of
-[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs).
-Each query reads the event-time window [`as_of` − `lookback`, `as_of`] (fields
-of `TimeSelection`). `as_of` is the window's end; `lookback` is its length. An
-`as_of` of "evaluation time" means `as_of: None`: the window ends whenever the
+[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs),
+except `lookback` and `as_of`, which the query text states (its range and
+offset). Each query reads the event-time window [`as_of` − `lookback`, `as_of`].
+`as_of` is the window's end; `lookback` is its length. An
+`as_of` of "evaluation time" means no offset: the window ends whenever the
 query runs, so it moves forward with each evaluation. A fixed `as_of`, such as
 T − 1 y, pins the window to a historical interval. Approximate accuracy targets are `EpsilonDelta`: the answer's error
 is at most ε with probability at least 1 − δ.
@@ -913,10 +914,8 @@ Unless an example says otherwise, every example uses this data workload:
 |---|---|---|
 | `arrival` | Whether the data is at rest, still arriving, or both | `continuously_ingesting` |
 | `data_ingestion_interval` | How often each series delivers one sample (the scrape interval in Prometheus). PromQL uses it as the look-back horizon of instant selectors. | 15 s |
-| `ingestion_volume` | Total amount of ingested data | unknown |
 | `ingestion_rate` | Samples arriving per second across all series | about 66,667 samples/s |
 | `input_cardinality` | Number of distinct series (or keys) | 1,000,000 series |
-| `distribution` | How samples are spread over keys | `zipf` |
 
 With 1,000,000 series each sampled every 15 s, the ingestion rate is
 1,000,000 / 15 ≈ 66,667 samples/s.
