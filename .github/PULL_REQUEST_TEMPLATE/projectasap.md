@@ -10,6 +10,19 @@ What observable behavior and scope does this PR change?
 
 What is the core algorithm, interface, or design decision? Keep this top-down.
 
+## Key code interfaces added / modified
+
+Group by source file, with links to the files at a fixed commit. Under each group,
+put one fenced code block holding the real declarations: types with every field
+or variant listed (never collapsed into `// ...`), and function/method/trait
+signatures with bodies elided. Mark every member (`// unchanged`, `// new`,
+`// was X`, `// removed`), say on each type whether it stays or is removed, and
+explain each interface in a short doc comment: what it is, what it is for, and when
+it is used or produced. End with an end-to-end usage example: from what the user
+writes (query, requirements, data facts, or CLI call), through where this PR's
+interfaces are called, to what the user gets back, with every variable commented
+and the numbers checked by running it. Write "None" if no interface changes.
+
 ## Before this PR
 
 Describe the previous end-to-end behavior, limitation, failure mode,
