@@ -10,6 +10,13 @@ What observable behavior and scope does this PR change?
 
 What is the core algorithm, interface, or design decision? Keep this top-down.
 
+## Key code interfaces added / modified
+
+List every public interface this PR adds, changes, or removes: types, functions,
+methods, traits, fields, enum variants, module paths, CLI flags, and wire, file,
+or document formats. Give each as a short signature excerpt with its crate or
+module path and one line on what changed. Write "None" if no interface changes.
+
 ## Before this PR
 
 Describe the previous end-to-end behavior, limitation, failure mode,

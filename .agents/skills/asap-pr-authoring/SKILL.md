@@ -13,11 +13,17 @@ Write the pull-request description top-down:
 1. **Why**: the user, design, correctness, or MVP need.
 2. **What**: the observable behavior and scope changed.
 3. **How**: the core implementation or algorithm, without narrating every file.
-4. **Before this PR**: the previous end-to-end behavior, limitation, failure
+4. **Key code interfaces added / modified**: every public interface the PR adds,
+   changes, or removes: types, functions, methods, traits, fields, enum
+   variants, module paths, CLI flags, and wire, file, or document formats. Give
+   each as a short signature excerpt with its crate or module path, copied from
+   the diff, and one line on what changed and why. Write "None" when the PR
+   changes no interface (for example, documentation or tests only).
+5. **Before this PR**: the previous end-to-end behavior, limitation, failure
    mode, architecture, or workflow.
-5. **After this PR**: the new end-to-end behavior and what users, developers, or
+6. **After this PR**: the new end-to-end behavior and what users, developers, or
    operators can do differently.
-6. **Verification**: focused tests and applicable end-to-end evidence.
+7. **Verification**: focused tests and applicable end-to-end evidence.
 
 Include a compact before/after example, screenshot, or diagram when it provides
 real evidence or makes behavior easier to understand. For significant design
