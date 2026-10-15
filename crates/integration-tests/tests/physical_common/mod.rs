@@ -73,3 +73,60 @@ fn compile_with(
         &root,
     )?)
 }
+
+/// Execute a relational DAG at query time against an in-memory connector
+/// for its one scan, scan predicates included; checks that no memory stays
+/// reserved afterwards.
+#[allow(dead_code)]
+pub fn execute_raw_rows(
+    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
+    rows: Vec<Vec<asap_physical_operators::values::Value>>,
+) -> Vec<Vec<asap_physical_operators::values::Value>> {
+    use asap_physical_operators::dag::{
+        planner::bind_with_data_sources,
+        scan::{DataSources, MemorySource},
+    };
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+    use asap_types::ir::NonASAPOp;
+    use std::sync::Arc;
+    let wire = compile_physical_asap_dag(root).unwrap();
+    let (source, schema) = wire
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                Some((source.clone(), node.output_schema.clone()))
+            }
+            _ => None,
+        })
+        .expect("one scan");
+    let input = Arc::new(schema);
+    let batch = Batch::try_new(input.clone(), rows).unwrap();
+    let mut sources = DataSources::default();
+    sources
+        .register(
+            source,
+            Arc::new(MemorySource::new(input, vec![batch]).unwrap()),
+        )
+        .unwrap();
+    let root_id = wire.roots[0] as u64;
+    let plan = bind_with_data_sources(&wire, BTreeMap::new(), &[root_id], &sources).unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+            revision: 1,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let result = block_on(async {
+        let mut output = plan.execute(&[root_id], context.clone()).unwrap().remove(0);
+        let mut rows = vec![];
+        while let Some(batch) = output.next().await {
+            rows.extend_from_slice(batch.unwrap().rows());
+        }
+        rows
+    });
+    assert_eq!(context.retained_bytes(), 0);
+    result
+}
