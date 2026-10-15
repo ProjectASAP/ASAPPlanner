@@ -150,6 +150,36 @@ pub(crate) fn size_params(eps: f64, delta: f64) -> SketchParams {
     }
 }
 
+/// `params` resized to fail with probability at most `delta` at no larger
+/// rank error: `k` for its current error at `delta`'s scale, never smaller.
+/// Unchanged when it already fails no more often.
+pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
+    let SketchParams::Kll {
+        k,
+        failure_probability,
+    } = params
+    else {
+        return params.clone();
+    };
+    let current = failure_probability.unwrap_or(KLL_CALIBRATED_FAILURE_PROBABILITY);
+    let Some(scale) = delta_scale(current) else {
+        return params.clone();
+    };
+    if delta >= current {
+        return params.clone();
+    }
+    match size_params(kll_rank_error_99(*k) * scale, delta) {
+        SketchParams::Kll {
+            k: resized,
+            failure_probability,
+        } => SketchParams::Kll {
+            k: resized.max(*k),
+            failure_probability,
+        },
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +208,9 @@ mod tests {
         assert_eq!(g.spec.failure_probability.evaluate(), Some(0.01));
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Rank)
+            &AccuracyTarget::epsilon_delta(0.01, 0.01)
+                .with_metric(ErrorMetric::Rank)
+                .with_scope(asap_types::types::AccuracyScope::PerValue)
         ));
         assert_eq!(g.approximate_layer_count(), 1);
         assert!(g.provenance.iter().any(|source| matches!(
@@ -209,7 +241,9 @@ mod tests {
         .unwrap();
         assert!(DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::epsilon_delta(0.01, 0.001).with_metric(ErrorMetric::Rank)
+            &AccuracyTarget::epsilon_delta(0.01, 0.001)
+                .with_metric(ErrorMetric::Rank)
+                .with_scope(asap_types::types::AccuracyScope::PerValue)
         ));
         assert_eq!(g.spec.failure_probability.evaluate(), Some(0.001));
     }

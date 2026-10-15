@@ -417,8 +417,13 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
             roots: candidate.roots,
         });
     }
-    let selection = resolve_targets(&per_computation.roots, targets)
-        .and_then(|targets| select_plan(&physical, &targets, recurrence, data, models));
+    let (resolved, selection) = match resolve_targets(&per_computation.roots, targets) {
+        Ok(targets) => {
+            let selection = select_plan(&physical, &targets, recurrence, data, models);
+            (Some(targets), selection)
+        }
+        Err(error) => (None, Err(error)),
+    };
     let selected_logical = selection.as_ref().ok().and_then(|selection| {
         let from = &physical
             .iter()
@@ -430,8 +435,11 @@ pub fn run_stage2_and_stage3<Id: Clone + std::fmt::Debug>(
             .roots
             .as_ref()
             .ok()?;
+        // As Stage 3 sized it for its queries' failure probabilities.
+        let sized =
+            crate::stage3_plan_selection::sized_roots(roots, resolved.as_deref()?, data).ok()?;
         Some(crate::stage3_plan_selection::with_confirmed_weights(
-            roots, data,
+            &sized, data,
         ))
     });
     Stage1ToStage3Run {

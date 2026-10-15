@@ -289,6 +289,35 @@ pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<
     ))
 }
 
+/// A distinct-count `params` resized to fail with probability at most
+/// `delta` at no larger relative error: the heap for its current error at
+/// `delta` ([`distinct_heap`]), never smaller. Unchanged for a shape not
+/// sized for a distinct count, or one that already fails no more often.
+pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
+    let SketchParams::UnivMon {
+        heap_size,
+        sketch_rows,
+        sketch_cols,
+        layers,
+        distinct_failure_probability: Some(current),
+    } = params
+    else {
+        return params.clone();
+    };
+    let chebyshev = current - incomplete_top_layer_bound(*heap_size);
+    if delta >= *current || chebyshev <= 0.0 {
+        return params.clone();
+    }
+    let relative_error = (DISTINCT_VARIANCE / (f64::from(*heap_size) * chebyshev)).sqrt();
+    SketchParams::UnivMon {
+        heap_size: distinct_heap(relative_error, delta).max(*heap_size),
+        sketch_rows: *sketch_rows,
+        sketch_cols: *sketch_cols,
+        layers: *layers,
+        distinct_failure_probability: Some(delta),
+    }
+}
+
 /// Size a UnivMon for one readout's `(eps, delta)`:
 /// - L2: the smallest rows and columns meeting the target ([`l2_shape`]),
 ///   one layer (L2 reads only layer 0) and a one-key heap;

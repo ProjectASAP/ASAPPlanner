@@ -23,7 +23,7 @@ use asap_types::post_asap::{
     AccuracyError, AccuracyGuarantee, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType,
     GuaranteeSource, ProbabilityExpr, SketchAlgorithm, SketchParams, SketchStatistic,
 };
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{AccuracyScope, AccuracyTarget};
 
 use crate::exact_composition::ExactOperation;
 
@@ -65,7 +65,8 @@ pub trait AccuracyModel {
 
     /// Whether `guarantee` meets `target`: a bound in the target's metric
     /// (or one with a sound direct comparison) within its ε, and within its
-    /// δ when it states one. A bound in another metric does not satisfy,
+    /// δ when it states one, over the values the target's scope covers (a
+    /// per-value δ does not meet a whole-result target). A bound in another metric does not satisfy,
     /// however small. Unknown required dimensions fail; selection
     /// separately excludes missing accuracy evidence.
     fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool;
@@ -119,6 +120,7 @@ impl AccuracyModel for DefaultAccuracyModel {
             return guarantee.is_exact();
         }
         metric_meets(guarantee.spec.metric, target.metric)
+            && scope_meets(guarantee, target)
             && within(guarantee.spec.error.evaluate(), target.error)
             && target
                 .failure_probability
@@ -133,21 +135,73 @@ impl AccuracyModel for DefaultAccuracyModel {
 /// `‖f‖₂ ≤ ‖f‖₁`. Any other pair needs a conversion backed by evidence
 /// (Absolute ↔ Relative needs a bound on the true value's magnitude; a rank
 /// error has no distribution-free value error), which the default model
-/// does not make: it does not satisfy. The scope is not compared yet: a
-/// per-value guarantee is checked against a whole-result target directly
-/// until the union bound over the output values (#669b).
+/// does not make: it does not satisfy. The scope is compared separately
+/// ([`scope_meets`]).
 fn metric_meets(guarantee: ErrorMetric, target: ErrorMetric) -> bool {
     guarantee == target
         || (guarantee == ErrorMetric::ABSOLUTE_STREAM_L2
             && target == ErrorMetric::ABSOLUTE_STREAM_L1)
 }
 
-/// `target` restated in `guarantee`'s metric: the check of one summary
-/// against the target it was sized for. A summary is sized in its own
-/// native terms (#690 §4) and an aggregate intent's metric is not checked:
-/// only a query root's metric is, by plan selection.
+/// Whether `guarantee`'s failure probability covers the values `target`'s
+/// does. A whole-result guarantee covers a per-value target (each value is
+/// in the result), but a per-value one does not cover a whole-result
+/// target: it must first be stated over the result's values
+/// ([`whole_result_guarantee`]). The scope bounds only the failure
+/// probability, so it does not matter for a target without a δ requirement
+/// or for a guarantee that never fails.
+fn scope_meets(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+    target.scope == AccuracyScope::PerValue
+        || guarantee.spec.scope == AccuracyScope::WholeResult
+        || target.failure_probability.is_none()
+        || guarantee.spec.failure_probability.is_zero()
+}
+
+/// `target` restated in `guarantee`'s metric, per value: the check of one
+/// summary against the target it was sized for. A summary is sized in its
+/// own native terms (#690 §4) and for each value it answers; an aggregate
+/// intent's metric and scope are not checked: only a query root's are, by
+/// plan selection.
 pub fn native_target(target: &AccuracyTarget, guarantee: &AccuracyGuarantee) -> AccuracyTarget {
-    target.clone().with_metric(guarantee.spec.metric)
+    target
+        .clone()
+        .with_metric(guarantee.spec.metric)
+        .with_scope(AccuracyScope::PerValue)
+}
+
+/// The statistic an unbound number of output values per evaluation is left
+/// as ([`whole_result_guarantee`]); nothing binds it, so the failure
+/// probability stays unknown.
+pub const OUTPUT_VALUES: &str = "output_values_per_evaluation";
+
+/// `guarantee` stated over the whole result of one evaluation, of
+/// `output_values` values (`G`): a per-value failure probability `δ` becomes
+/// `G · δ` by the union bound over the values, whatever their dependence.
+/// The error is unchanged. A guarantee that never fails (`δ = 0`) holds for
+/// every value at once whatever `G`; an unbound `G` (`None`) leaves the
+/// failure probability symbolic in [`OUTPUT_VALUES`]. A whole-result
+/// guarantee is returned as it is.
+pub fn whole_result_guarantee(
+    guarantee: &AccuracyGuarantee,
+    output_values: Option<f64>,
+) -> AccuracyGuarantee {
+    let mut whole = guarantee.clone();
+    if guarantee.spec.scope == AccuracyScope::WholeResult {
+        return whole;
+    }
+    whole.spec.scope = AccuracyScope::WholeResult;
+    if !guarantee.spec.failure_probability.is_zero() {
+        whole.spec.failure_probability = ProbabilityExpr::Scaled {
+            count: output_values.map_or_else(
+                || BoundExpr::Unknown {
+                    statistic: OUTPUT_VALUES.into(),
+                },
+                |value| BoundExpr::Constant { value },
+            ),
+            inner: Box::new(guarantee.spec.failure_probability.clone()),
+        };
+    }
+    whole
 }
 
 pub(crate) use estimators::topk_capacity;
@@ -155,7 +209,6 @@ pub(crate) use estimators::topk_capacity;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::types::AccuracyScope;
     fn abs(bound: f64, delta: f64) -> AccuracyGuarantee {
         AccuracyGuarantee::new(
             ErrorMetric::ABSOLUTE,
@@ -194,7 +247,11 @@ mod tests {
     #[test]
     fn satisfies_requires_the_targets_metric() {
         let model = DefaultAccuracyModel;
-        let target = |metric| AccuracyTarget::epsilon_delta(0.5, 0.5).with_metric(metric);
+        let target = |metric| {
+            AccuracyTarget::epsilon_delta(0.5, 0.5)
+                .with_metric(metric)
+                .with_scope(AccuracyScope::PerValue)
+        };
         let (l1, l2) = (
             ErrorMetric::ABSOLUTE_STREAM_L1,
             ErrorMetric::ABSOLUTE_STREAM_L2,
@@ -234,16 +291,49 @@ mod tests {
         assert!(!DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::epsilon_delta(0.01, 0.5)));
     }
 
-    /// Pins the current scope behavior: a per-value guarantee is compared
-    /// with a whole-result target directly. The union bound over the output
-    /// values (δ_whole = G · δ_per) arrives with #669b, which changes this
-    /// test.
+    /// A per-value guarantee does not meet a whole-result δ target
+    /// directly: over `G` output values it holds for all of them with
+    /// δ_whole = G · δ_per ([`whole_result_guarantee`]), and an unbound `G`
+    /// leaves it unmet. A whole-result guarantee meets a per-value target
+    /// directly.
     #[test]
-    fn per_value_guarantees_meet_whole_result_targets_directly_until_669b() {
-        let g = guarantee(ErrorMetric::ABSOLUTE, 0.01, 0.01);
+    fn per_value_guarantees_meet_whole_result_targets_over_g_values() {
+        let model = DefaultAccuracyModel;
+        let g = guarantee(ErrorMetric::ABSOLUTE, 0.01, 0.001);
         assert_eq!(g.spec.scope, AccuracyScope::PerValue);
-        let target = AccuracyTarget::epsilon_delta(0.01, 0.01);
-        assert_eq!(target.scope, AccuracyScope::WholeResult);
-        assert!(DefaultAccuracyModel.satisfies(&g, &target));
+        let whole = AccuracyTarget::epsilon_delta(0.01, 0.01);
+        assert_eq!(whole.scope, AccuracyScope::WholeResult);
+        assert!(!model.satisfies(&g, &whole));
+        let per_value = whole.clone().with_scope(AccuracyScope::PerValue);
+        assert!(model.satisfies(&g, &per_value));
+        let over = |values| whole_result_guarantee(&g, values);
+        assert_eq!(over(Some(10.0)).spec.scope, AccuracyScope::WholeResult);
+        assert_eq!(
+            over(Some(10.0)).spec.failure_probability.evaluate(),
+            Some(0.01)
+        );
+        assert!(model.satisfies(&over(Some(10.0)), &whole));
+        assert!(!model.satisfies(&over(Some(11.0)), &whole));
+        assert!(!model.satisfies(&over(None), &whole));
+        assert!(model.satisfies(&over(Some(10.0)), &per_value));
+    }
+
+    /// The scope bounds only the failure probability: a target without a δ
+    /// requirement, or a guarantee that never fails, meets a whole-result
+    /// target whatever the number of values.
+    #[test]
+    fn scope_matters_only_with_a_failure_probability() {
+        let model = DefaultAccuracyModel;
+        let g = guarantee(ErrorMetric::ABSOLUTE, 0.01, 0.001);
+        assert!(model.satisfies(&g, &AccuracyTarget::epsilon(0.01)));
+        let never_fails = AccuracyGuarantee::new(
+            ErrorMetric::Relative,
+            BoundExpr::Constant { value: 0.01 },
+            ProbabilityExpr::Zero,
+            vec![],
+        );
+        let whole = AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative);
+        assert!(model.satisfies(&never_fails, &whole));
+        assert!(model.satisfies(&whole_result_guarantee(&never_fails, None), &whole));
     }
 }

@@ -1630,6 +1630,15 @@ impl Proposals {
     }
 }
 
+/// `target` over each value separately: this search sizes and checks every
+/// node per value; a target over a whole result is checked only at a query
+/// root, by plan selection.
+fn per_value(target: &AccuracyTarget) -> AccuracyTarget {
+    target
+        .clone()
+        .with_scope(asap_types::types::AccuracyScope::PerValue)
+}
+
 /// The `child` of a [`bindable_intent`]-shaped `Aggregate`.
 fn aggregate_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
     match node.non_asap() {
@@ -3830,7 +3839,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                             || !requirements.iter().all(|target| {
                                 plan.guarantee
                                     .as_ref()
-                                    .is_some_and(|g| accuracy.satisfies(g, target))
+                                    .is_some_and(|g| accuracy.satisfies(g, &per_value(target)))
                             })
                         {
                             continue;
@@ -6127,7 +6136,7 @@ pub fn search_workload_with_targets<'s, Id>(
                     Replacement::SubDAG(_) if candidate.is_logical_rewrite() => true,
                     Replacement::SubDAG(node) => node.guarantee.as_ref().map_or_else(
                         || !target.is_exact(),
-                        |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
+                        |g| accuracy_model.satisfies(&g.optimistic_floor(), &per_value(&target)),
                     ),
                     // A composition's guarantee depends on the concrete child;
                     // prepare_compositions checks those pairs after all roots.

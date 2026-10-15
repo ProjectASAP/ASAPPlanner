@@ -834,7 +834,7 @@ pub(crate) fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
     let mut seen = HashSet::new();
     operators
         .into_iter()
-        .flat_map(|node| OperatorNode::reachable(node))
+        .flat_map(OperatorNode::reachable)
         .filter(|node| {
             matches!(
                 node.asap(),
@@ -856,6 +856,96 @@ pub(crate) fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
         QueryRoot::Operator(node) => node.guarantee.clone(),
         QueryRoot::Scalar(expr) => scalar_guarantee(expr, &|_| None),
     }
+}
+
+/// `roots` with every sketch summary state rebuilt with the parameters
+/// `resize` gives it (same algorithm; `None` keeps them), and every node
+/// above one rebuilt over its new inputs with its guarantee composed again
+/// ([`composed_guarantee`]; a node that had none keeps none). Timing,
+/// materialization and sharing are kept. Plan selection enlarges summaries
+/// for a failure probability this way.
+pub(crate) fn with_resized_summaries(
+    roots: &[QueryRoot],
+    resize: &dyn Fn(&OperatorNode, &SketchParams) -> Option<SketchParams>,
+) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
+    fn walk(
+        node: &Rc<OperatorNode>,
+        resize: &dyn Fn(&OperatorNode, &SketchParams) -> Option<SketchParams>,
+        memo: &mut Memo,
+    ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
+        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+            return Ok(done.clone());
+        }
+        for child in node.children() {
+            walk(child, resize, memo)?;
+        }
+        let mut changed = node
+            .children()
+            .iter()
+            .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
+        let mut operator = node.operator.clone();
+        if let Operator::ASAP(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(kind, _),
+            ..
+        }) = &mut operator
+        {
+            if let Some(params) = resize(node, kind.params()).filter(|p| p != kind.params()) {
+                *kind = SketchKind::new(kind.algorithm().clone(), params);
+                changed = true;
+            }
+        }
+        let rebuilt = if changed {
+            let template = OperatorNode {
+                operator,
+                ..(**node).clone()
+            };
+            let mut rebuilt =
+                template.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?;
+            rebuilt.guarantee = node
+                .guarantee
+                .as_ref()
+                .and_then(|_| composed_guarantee(&rebuilt));
+            Rc::new(
+                rebuilt
+                    .with_timing(node.timing)
+                    .with_materialization(node.materialization),
+            )
+        } else {
+            node.clone()
+        };
+        memo.insert(Rc::as_ptr(node), rebuilt.clone());
+        Ok(rebuilt)
+    }
+    let mut memo = HashMap::new();
+    roots
+        .iter()
+        .map(|root| {
+            Ok(match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, resize, &mut memo)?),
+                QueryRoot::Scalar(expr) => {
+                    let mut rebuilt = HashMap::new();
+                    for node in expr.operator_refs() {
+                        rebuilt.insert(Rc::as_ptr(node), walk(node, resize, &mut memo)?);
+                    }
+                    QueryRoot::Scalar(
+                        expr.map_operator_refs(&mut |node| rebuilt[&Rc::as_ptr(node)].clone()),
+                    )
+                }
+            })
+        })
+        .collect()
+}
+
+/// The one source a summary state counts the distinct items of its own
+/// rows of, as [`source_distinct_guarantee`] reads it: the source whose
+/// distinct bound gives its failure probability. `None` for a state over
+/// computed rows or several sources.
+pub(crate) fn summary_source(state: &OperatorNode) -> Option<String> {
+    let Some(ASAPOp::SummaryAgg { child, .. }) = state.asap() else {
+        return None;
+    };
+    source_scan(child)?;
+    source(child)
 }
 
 /// Every root of `inventory` with the chosen candidates substituted, each

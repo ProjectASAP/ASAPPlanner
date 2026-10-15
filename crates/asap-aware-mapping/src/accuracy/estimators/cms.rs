@@ -59,6 +59,7 @@ mod tests {
             &g,
             &AccuracyTarget::epsilon_delta(0.01, 0.001)
                 .with_metric(ErrorMetric::ABSOLUTE_STREAM_L1)
+                .with_scope(asap_types::types::AccuracyScope::PerValue)
         ));
     }
 
