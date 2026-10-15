@@ -1252,6 +1252,9 @@ fn supports_hash_aggregate(
                     | AggIntent::PearsonCorr { .. }
                     | AggIntent::Group
                     | AggIntent::CountValues { .. }
+                    | AggIntent::Cardinality { .. }
+                    | AggIntent::FrequencyL2 { .. }
+                    | AggIntent::FrequencyEntropy { .. }
             )
         })
 }
@@ -1552,6 +1555,78 @@ mod tests {
             }
         ));
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
+    }
+
+    // The exact distinct count, L2 norm and entropy are hash aggregates: the
+    // executor runs them as native reducers over one identity column.
+    #[test]
+    fn exact_frequency_intents_lower_to_physical_hash_aggregates() {
+        use asap_types::pre_asap::{AggIntent, DataType, Field, Reduction, Schema, Source};
+        use asap_types::types::AccuracyTarget;
+        let source = Source::Table {
+            table_ref: "flows".into(),
+        };
+        for measure in [
+            AggIntent::Cardinality {
+                cols: vec![0],
+                accuracy: AccuracyTarget::Exact,
+            },
+            AggIntent::FrequencyL2 {
+                col: Some(0),
+                accuracy: AccuracyTarget::Exact,
+            },
+            AggIntent::FrequencyEntropy {
+                col: Some(0),
+                accuracy: AccuracyTarget::Exact,
+            },
+        ] {
+            let root =
+                OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+                    reduction: Reduction::by(vec![]),
+                    measures: vec![measure.clone()],
+                    output_names: vec!["v".into()],
+                    filters: vec![],
+                    having: None,
+                    child: OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
+                        NonASAPOp::Scan {
+                            source: source.clone(),
+                            predicates: vec![],
+                            schema: Schema::new(vec![Field::plain(
+                                "src_ip",
+                                DataType::Utf8,
+                                false,
+                            )]),
+                        },
+                    ))
+                    .unwrap(),
+                }))
+                .unwrap();
+            let scope = scope(vec![coverage(source.clone(), vec![])]);
+            let provided = HashMap::from([
+                (
+                    "query-1".into(),
+                    evidence(scan_stats(edge(100, 1600), 1600)),
+                ),
+                (
+                    "query-0".into(),
+                    evidence(OperatorStatistics::HashAggregate {
+                        edges: unary_edges(edge(100, 1600), edge(1, 8)),
+                        group_count: 1,
+                        key_bytes: 0,
+                        accumulator_bytes_per_group: 48,
+                    }),
+                ),
+            ]);
+            let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided))
+                .unwrap_or_else(|e| panic!("{measure:?}: {e:?}"));
+            assert!(matches!(
+                dag.nodes.last().unwrap().operator,
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 0,
+                    accumulator_count: 1,
+                }
+            ));
+        }
     }
 
     #[test]

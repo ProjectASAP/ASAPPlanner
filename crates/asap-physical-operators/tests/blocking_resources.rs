@@ -248,3 +248,49 @@ fn weighted_summary_build_yields_within_a_batch() {
     drop(output);
     assert_eq!(run.retained_bytes(), 0);
 }
+
+// Frequency and distinct dictionaries count against the budget and release
+// their reservations on failure.
+#[test]
+fn frequency_dictionary_enforces_memory_budget() {
+    use asap_physical_operators::operators::Reduction;
+    let input = schema(1);
+    let mut sources = PhysicalDAG::default();
+    sources
+        .add(
+            0,
+            vec![],
+            Operator::source(
+                input.clone(),
+                vec![Batch::try_new(
+                    input.clone(),
+                    (0..64).map(|i| vec![Value::Int64(i)]).collect(),
+                )
+                .unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    for (reduction, succeeds) in [
+        (Reduction::Count, true),
+        (Reduction::FrequencyL2(0), false),
+        (Reduction::FrequencyEntropy(0), false),
+        (Reduction::Cardinality(vec![0]), false),
+    ] {
+        // Count needs about 13.4 kB here, the dictionaries at least 14.5 kB.
+        let run = context(14_000);
+        let inputs = sources.execute(&[0], run.clone()).unwrap();
+        let operator =
+            Operator::aggregate(input.clone(), vec![], vec![("result".into(), reduction)]).unwrap();
+        let mut output = operator.start(inputs, run.clone()).unwrap();
+        let result = block_on(output.next()).unwrap();
+        if succeeds {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(matches!(result, Err(Error::MemoryLimit)), "{result:?}");
+        }
+        drop(result);
+        drop(output);
+        assert_eq!(run.retained_bytes(), 0);
+    }
+}
