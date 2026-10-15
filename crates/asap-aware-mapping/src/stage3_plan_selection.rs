@@ -319,19 +319,74 @@ pub enum SizingError {
 /// Without a planning time, only evidence that cannot expire is fresh.
 const ANY_TIME: u64 = u64::MAX;
 
-/// How many values one evaluation of `root` returns at most (`G`), from
-/// `data`: one for a scalar root, at most the input cardinality (the
-/// series) for a PromQL instant vector, whose groups and series never
-/// outnumber its input series. `None` when unbound: a SQL result, until a
-/// bound on the groups of its source is an input, and a range vector.
+/// How many values one evaluation of `root` returns at most (`G`): one for
+/// a scalar root and for a root of at most one row ([`at_most_one_row`]),
+/// provable from the query; otherwise, from `data`, at most the input
+/// cardinality (the series) for a PromQL instant vector, whose groups and
+/// series never outnumber its input series. `None` when unbound: any other
+/// SQL result, until a bound on the groups of its source is an input, and a
+/// range vector.
 fn output_values(root: &QueryRoot, data: &DataWorkload) -> Option<f64> {
     match root {
         QueryRoot::Scalar(_) => Some(1.0),
+        QueryRoot::Operator(node) if at_most_one_row(node) => Some(1.0),
         QueryRoot::Operator(node) if node.result_kind == OperatorResultKind::InstantVector => data
             .input_cardinality
             .value_at(ANY_TIME)
             .map(|series| (*series).max(1) as f64),
         QueryRoot::Operator(_) => None,
+    }
+}
+
+/// Whether `node` returns at most one row whatever its input: a global
+/// aggregate or summary (a reduction with no group keys), and above one
+/// only operators that keep or drop its rows, or join two such inputs
+/// without adding unmatched rows of both sides.
+fn at_most_one_row(node: &OperatorNode) -> bool {
+    let global = |reduction: &asap_types::pre_asap::Reduction| {
+        reduction
+            .group_keys()
+            .is_some_and(|by| !by.is_without() && by.keys().is_empty())
+    };
+    match &node.operator {
+        // A top-k or `count_values` returns several rows per group.
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            ..
+        }) => {
+            global(reduction)
+                && !measures
+                    .iter()
+                    .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. }))
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => global(reduction),
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query,
+        }) => !matches!(query, SketchStatistic::TopK { .. }) && at_most_one_row(summary_input),
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => at_most_one_row(child),
+        Operator::NonASAP(
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. }
+            | NonASAPOp::Dedup { child, .. },
+        ) => at_most_one_row(child),
+        Operator::NonASAP(NonASAPOp::Join {
+            kind, left, right, ..
+        }) => {
+            use asap_types::ir::operator_properties::JoinKind;
+            match kind {
+                JoinKind::Semi | JoinKind::Anti => at_most_one_row(left),
+                JoinKind::Full => false,
+                _ => at_most_one_row(left) && at_most_one_row(right),
+            }
+        }
+        Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. }) => {
+            at_most_one_row(lhs) && at_most_one_row(rhs)
+        }
+        _ => false,
     }
 }
 
@@ -2106,6 +2161,58 @@ mod tests {
             ),
             Some(1.0)
         );
+    }
+
+    /// A root that returns at most one row has `G` = 1, provable from the
+    /// query with no data workload: a global aggregate, PromQL or SQL, and
+    /// what selects, renames or joins single rows above it. A grouped SQL
+    /// aggregate stays unbound, and a grouped PromQL one, or a global top-k
+    /// (k rows), is bound by the input cardinality.
+    #[test]
+    fn a_root_of_at_most_one_row_returns_one_value() {
+        let none = DataWorkload::default();
+        let root = |query: &str| {
+            QueryRoot::Operator(lower_promql(query, RequestedAccuracy::epsilon(0.01)))
+        };
+        assert_eq!(output_values(&root("sum(rate(x[5m]))"), &none), Some(1.0));
+        assert_eq!(output_values(&root("topk(5, rate(x[5m]))"), &none), None);
+        assert_eq!(
+            output_values(&root("sum by (job) (rate(x[5m]))"), &none),
+            None
+        );
+        assert_eq!(
+            output_values(&root("sum by (job) (rate(x[5m]))"), &data()),
+            Some(10_000.0)
+        );
+        let table = || {
+            crate::test_support::scan_from(
+                asap_types::pre_asap::Source::Table {
+                    table_ref: "t".into(),
+                },
+                Schema::new(vec![
+                    asap_types::pre_asap::schema::Field::plain("k", DataType::Utf8, false),
+                    asap_types::pre_asap::schema::Field::plain("v", DataType::Float64, false),
+                ]),
+            )
+        };
+        let count = || AggIntent::Count {
+            accuracy: AccuracyTarget::exact(),
+        };
+        let global = crate::test_support::agg(vec![], count(), table());
+        let grouped = crate::test_support::agg(vec![0], count(), table());
+        assert_eq!(
+            output_values(&QueryRoot::Operator(global.clone()), &none),
+            Some(1.0)
+        );
+        assert_eq!(output_values(&QueryRoot::Operator(grouped), &data()), None);
+        let cross = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Join {
+            kind: asap_types::ir::operator_properties::JoinKind::Cross,
+            pred: asap_types::ir::Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+            left: global.clone(),
+            right: global,
+        }))
+        .unwrap();
+        assert_eq!(output_values(&QueryRoot::Operator(cross), &none), Some(1.0));
     }
 
     /// Deployment evidence that every output was measured exact.
