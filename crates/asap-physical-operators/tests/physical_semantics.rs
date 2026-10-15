@@ -646,6 +646,150 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
     }
 }
 
+// KLL panes that each compact merge into a state within the calibrated
+// single-build rank error: 60 panes of 1000 values at k = 200.
+#[test]
+fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
+    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams, SketchStatistic};
+    const PANES: u64 = 60;
+    const PER_PANE: u64 = 1000;
+    const K: u32 = 200;
+    // The planner's empirical 99% KLL rank error, `2.296 / k^0.9723`
+    // (`asap_aware_mapping`'s `kll_rank_error_99`).
+    let bound = 2.296 / f64::from(K).powf(0.9723);
+    let n = (PANES * PER_PANE) as f64;
+    let input = schema(&[("v", DataType::Float64, false)]);
+    let family = FieldDataType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                k: K,
+                failure_probability: None,
+            },
+        ),
+        Default::default(),
+    );
+    let build = || Operator::summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap();
+    let state = build().schema();
+    let mut dag = PhysicalDAG::default();
+    for pane in 0..PANES {
+        // Pane `p` holds `[p, p + 1) * 1000`, as tumbling panes of a
+        // rising value would, so a lost pane shifts every rank.
+        let rows = (0..PER_PANE)
+            .map(|j| vec![Value::Float64((pane * PER_PANE + j) as f64)])
+            .collect();
+        dag.add(
+            pane,
+            vec![],
+            Operator::source(
+                input.clone(),
+                vec![Batch::try_new(input.clone(), rows).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        dag.add(PANES + pane, vec![pane], build()).unwrap();
+    }
+    let union = 2 * PANES;
+    dag.add(
+        union,
+        (PANES..2 * PANES).collect(),
+        Operator::union(state.clone(), PANES as usize).unwrap(),
+    )
+    .unwrap();
+    dag.add(
+        union + 1,
+        vec![union],
+        Operator::summary_merge(state.clone(), 0, vec![]).unwrap(),
+    )
+    .unwrap();
+    for (i, q) in [0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99]
+        .into_iter()
+        .enumerate()
+    {
+        let id = union + 2 + i as u64;
+        dag.add(
+            id,
+            vec![union + 1],
+            Operator::evaluation(
+                state.clone(),
+                0,
+                asap_physical_operators::operators::SummaryEvaluation::Sketch(
+                    SketchStatistic::Quantile { q },
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let Value::Float64(estimate) = collect(&dag, id)[0][0] else {
+            panic!("quantile must be Float64");
+        };
+        // Value `v` has rank `v / n`.
+        let error = (estimate / n - q).abs();
+        assert!(error <= bound, "q={q}: rank error {error} > {bound}");
+    }
+}
+
+// Counter panes merged in any input order (here A, C, B) give the increase
+// of one build over the whole window, including the jumps between panes
+// and a counter reset inside B.
+#[test]
+fn counter_panes_merge_in_any_order() {
+    use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
+    use planner_types::post_asap::{ExactKind, ExactParams};
+    let input = schema(&[
+        ("v", DataType::Float64, false),
+        ("t", DataType::Timestamp, false),
+    ]);
+    let family = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
+    let build =
+        || Operator::summary_build(input.clone(), family.clone(), 0, Some(1), vec![]).unwrap();
+    let state = build().schema();
+    let samples = |range: std::ops::Range<i64>| -> Vec<Vec<Value>> {
+        range
+            .map(|i| {
+                // Rises by 3 per sample and resets once, at sample 7.
+                let value = if i < 7 { 3 * i } else { 3 * (i - 7) + 1 };
+                vec![Value::Float64(value as f64), Value::Timestamp(i * 1_000)]
+            })
+            .collect()
+    };
+    let increase = |dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64| -> f64 {
+        let rows = collect(dag, root);
+        let Value::Summary { state, .. } = &rows[0][0] else {
+            panic!("summary state expected");
+        };
+        state
+            .as_any()
+            .downcast_ref::<ExactAccumulator>()
+            .unwrap()
+            .evaluation(asap_physical_operators::Statistic::Increase, None, None)
+            .unwrap()
+            .unwrap()
+    };
+    let mut dag = PhysicalDAG::default();
+    // Panes A = [0, 4), B = [4, 8), C = [8, 12), added as A, C, B.
+    for (id, range) in [(0, 0..4), (1, 8..12), (2, 4..8), (3, 0..12)] {
+        let batch = Batch::try_new(input.clone(), samples(range)).unwrap();
+        dag.add(
+            id,
+            vec![],
+            Operator::source(input.clone(), vec![batch]).unwrap(),
+        )
+        .unwrap();
+        dag.add(id + 4, vec![id], build()).unwrap();
+    }
+    dag.add(8, vec![4, 5, 6], Operator::union(state.clone(), 3).unwrap())
+        .unwrap();
+    dag.add(
+        9,
+        vec![8],
+        Operator::summary_merge(state, 0, vec![]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(increase(&dag, 9), increase(&dag, 7));
+}
+
 // Retained zero-column rows still own Vec headers and must consume the output budget.
 #[test]
 fn zero_column_output_obeys_memory_limit() {

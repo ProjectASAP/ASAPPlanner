@@ -106,6 +106,20 @@ impl ExactAccumulator {
         }
     }
 
+    /// The earliest sample time of a counter (Rate/Increase) state, over
+    /// all its populations; `None` for an empty or non-counter state.
+    /// Counter states merge pairwise in time order, so a merge of panes
+    /// orders them by this first.
+    pub fn counter_window_start(&self) -> Option<i64> {
+        std::iter::once(&self.scalar)
+            .chain(self.keyed.iter().flat_map(HashMap::values))
+            .filter_map(|state| match state {
+                ScalarState::Counter(Some(counter)) => Some(counter.starting_timestamp),
+                _ => None,
+            })
+            .min()
+    }
+
     /// SQL SUM distinguishes an empty/all-NULL input from an observed zero.
     pub(crate) fn is_empty_sum(&self) -> bool {
         self.keyed.is_none() && matches!(self.scalar, ScalarState::Sum { seen: false, .. })

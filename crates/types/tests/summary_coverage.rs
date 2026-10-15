@@ -12,7 +12,8 @@ use asap_types::ir::{
     SchemaDerivationError, TimeRangeKind,
 };
 use asap_types::post_asap::{
-    ExecutionTiming, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
+    ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, SketchAlgorithm, SketchKind,
+    SketchParams, SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::pre_asap::{ColumnRef, DataType, Field, FieldDataType, Schema, TimeShift};
@@ -81,9 +82,10 @@ fn filter(child: Rc<OperatorNode>, pred: ScalarExpr) -> Rc<OperatorNode> {
 }
 
 fn kll(child: Rc<OperatorNode>, column: &str) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+    summary(
         child,
-        family: FieldDataType::Sketch(
+        column,
+        FieldDataType::Sketch(
             SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll {
@@ -93,6 +95,13 @@ fn kll(child: Rc<OperatorNode>, column: &str) -> Rc<OperatorNode> {
             ),
             Default::default(),
         ),
+    )
+}
+
+fn summary(child: Rc<OperatorNode>, column: &str, family: FieldDataType) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child,
+        family,
         input: SummaryUpdate::column(ColumnRef::Named(column.into())),
         reduction: Reduction::by(vec![JOB]),
         grouping: GroupingStrategy::default(),
@@ -108,6 +117,19 @@ fn latency_where(pred: ScalarExpr) -> Rc<OperatorNode> {
 
 /// Tumbling pane: `TimeRange(1m)` over `TimeShift(shift)` over `m`.
 fn pane(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
+    kll(pane_rows(shift_ms, predicates), "value")
+}
+
+/// Exact counter-increase pane over the same rows as [`pane`].
+fn increase_pane(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
+    summary(
+        pane_rows(shift_ms, predicates),
+        "value",
+        FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase),
+    )
+}
+
+fn pane_rows(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
     let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
         shift: TimeShift {
             offset_ms: shift_ms,
@@ -116,13 +138,12 @@ fn pane(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
         child: series(predicates),
     }))
     .unwrap();
-    let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
         range: Duration::from_millis(60_000),
         kind: TimeRangeKind::Range,
         child: shifted,
     }))
-    .unwrap();
-    kll(range, "value")
+    .unwrap()
 }
 
 fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
@@ -277,6 +298,26 @@ fn time_panes_merge_and_keep_gaps() {
     assert_eq!(
         rejected(vec![first.clone(), first]),
         CoverageError::PossibleOverlap
+    );
+}
+
+/// Counter panes merge only when their time windows are disjoint: states
+/// disjoint by a label but over the same window would interleave in time.
+#[test]
+fn counter_panes_merge_only_disjoint_in_time() {
+    let joined = merge(vec![
+        increase_pane(0, vec![]),
+        increase_pane(60_000, vec![]),
+    ])
+    .unwrap();
+    assert_eq!(
+        joined.coverage().unwrap().selection[0].relative_time,
+        relative(-120_000, 0)
+    );
+    let by_job = |job| increase_pane(0, vec![Predicate(eq(2, job))]);
+    assert_eq!(
+        rejected(vec![by_job("api"), by_job("web")]),
+        CoverageError::NotDisjointInTime
     );
 }
 

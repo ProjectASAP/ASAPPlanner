@@ -567,6 +567,7 @@ fn fragment(
             if schemas.iter().any(|s| s != input) {
                 return Err(invalid("summary merge inputs differ"));
             }
+            super::require_sound_merge(input)?;
             let union = add(
                 (0..schemas.len() as u64).collect(),
                 Operator::union(input.clone(), schemas.len())?,

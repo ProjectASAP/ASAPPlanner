@@ -44,6 +44,7 @@
 //! |---|---|
 //! | `SummaryAgg.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
 //! | `SummaryEstimate.summary_input` | Summary state at either phase |
+//! | `SummaryMerge.children` | Summary state at either phase; at ingestion time only for a merge at ingestion time |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
 //! | `EvaluatePopulation.child` | A timed `MaintainPopulation` |
 //! | `MaintainPopulation.child` | Rows at its own timing matching the population's input |
@@ -535,8 +536,21 @@ fn validate_asap(
             }
             Ok(())
         }
-        ASAPOp::SummaryMerge { .. }
-        | ASAPOp::SummarySubtract { .. }
+        ASAPOp::SummaryMerge { children } => {
+            for child in children {
+                let s = state_of(child);
+                if s.primitive != DataPrimitive::SummaryState
+                    || (timing == ExecutionTiming::IngestionTime && s.timing != timing)
+                {
+                    return Err(ExecutionDataStateError::IllegalChildDataState {
+                        edge: "SummaryMerge.children",
+                        child: s,
+                    });
+                }
+            }
+            Ok(())
+        }
+        ASAPOp::SummarySubtract { .. }
         | ASAPOp::SummaryDelete { .. }
         | ASAPOp::SummaryJoin { .. }
         | ASAPOp::Extension { .. } => Err(ExecutionDataStateError::UnimplementedOperator {

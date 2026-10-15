@@ -260,6 +260,13 @@ fn state_dag(
     target: Option<FieldDataType>,
     merge: bool,
 ) -> CompiledPhysicalDAG {
+    try_state_dag(family, target, merge).unwrap()
+}
+fn try_state_dag(
+    family: FieldDataType,
+    target: Option<FieldDataType>,
+    merge: bool,
+) -> Result<CompiledPhysicalDAG, asap_physical_operators::Error> {
     let mut nodes = vec![PhysicalASAPDAGNode {
         id: 0,
         payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge { children: vec![] }),
@@ -329,7 +336,6 @@ fn state_dag(
         &[0],
         &[root as u64],
     )
-    .unwrap()
 }
 fn native_run(
     program: &CompiledPhysicalDAG,
@@ -393,6 +399,17 @@ fn sum_state(value: f64) -> Arc<dyn asap_physical_operators::AggregateCore> {
 }
 
 // Only an explicit merge may collapse distinct pane updates before finalization.
+#[test]
+fn precompute_merge_requires_a_family_with_a_sound_merge() {
+    // IRate reads the window's last two samples, so the family-capability
+    // table gives it no merge.
+    let irate = FieldDataType::ExactAggregate(ExactKind::IRate, ExactParams::IRate);
+    let error = try_state_dag(irate, None, true).err().expect("rejected");
+    assert!(error.to_string().contains("no sound merge"), "{error}");
+    let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    try_state_dag(sum, None, true).unwrap();
+}
+
 #[test]
 fn explicit_merge_changes_pane_cardinality() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);

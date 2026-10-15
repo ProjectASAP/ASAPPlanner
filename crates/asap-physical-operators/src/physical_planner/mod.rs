@@ -16,7 +16,7 @@ use planner_types::ir::physical_export::{
 };
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr};
 use planner_types::{
-    post_asap::{FieldDataType, SketchStatistic, SummaryInputExpr},
+    post_asap::{FamilyCapability, FieldDataType, SketchStatistic, SummaryInputExpr},
     pre_asap::{
         AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, Reduction as PlannerReduction,
     },
@@ -334,7 +334,13 @@ fn compile_internal(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                let Some(NonASAPOp::Scan { schema, .. }) = child.non_asap() else {
+                // A tumbling pane reads its window through a `TimeShift`; the
+                // deployment supplies the shifted raw rows.
+                let source = match child.non_asap() {
+                    Some(NonASAPOp::TimeShift { child, .. }) => child,
+                    _ => child,
+                };
+                let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
                 if !schema.closed || update.item.is_some() {
@@ -448,6 +454,27 @@ fn compile_internal(
                     continue;
                 }
             }
+            if let Payload::ASAP(ASAPOp::SummaryMerge { .. }) = &node.payload {
+                let input = schemas
+                    .first()
+                    .ok_or_else(|| invalid(format!("node {id}: summary merge requires inputs")))?;
+                require_sound_merge(input).map_err(|e| invalid(format!("node {id}: {e}")))?;
+                if output.time_index.is_some() {
+                    // Pane timestamps describe their own builds. The merged
+                    // state covers this evaluation's window, so merge by
+                    // series identity and attach the run scope's timestamp,
+                    // as a per-series `SummaryAgg` does.
+                    let merged = bind_operation(node, &schemas)?;
+                    let compact = merged.schema();
+                    physical_dag.add(helper_id(id, 1)?, inputs, merged)?;
+                    physical_dag.add(
+                        id,
+                        vec![helper_id(id, 1)?],
+                        Operator::scope_timestamp(compact, output)?,
+                    )?;
+                    continue;
+                }
+            }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_evaluation() {
@@ -511,6 +538,18 @@ fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
+/// The IR accepts a `SummaryMerge` over any state family; the executor runs
+/// one only when the family-capability table gives the family a sound merge.
+pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
+    let state = &input.fields[summary_column(input)?].dtype;
+    if FamilyCapability::of(state).merge.is_none() {
+        return Err(invalid(format!(
+            "summary merge over {state:?} is unsupported: the family has no sound merge"
+        )));
+    }
+    Ok(())
+}
+
 pub fn compile_node(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
