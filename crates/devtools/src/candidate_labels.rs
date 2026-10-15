@@ -11,6 +11,7 @@ use asap_aware_mapping::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates,
 };
 use asap_aware_mapping::stage2_physical_asap_optimization::PhysicalCandidate;
+use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::post_asap::{FieldDataType, Materialization, SketchAlgorithm};
 
@@ -19,16 +20,16 @@ use crate::planning_stages::PlanningStagesRun;
 /// The label of every logical (`L<n>`) and physical (`P<n>`, `P<n>-m<k>`)
 /// candidate of `run`, by id.
 pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
-    let pass2: BTreeMap<&str, &Pass2Candidate> = run
-        .stage1_pass2
-        .iter()
-        .map(|p| (p.id.as_str(), p))
-        .collect();
+    let logical = &run.stage1_logical_asap_optimization;
     let mut labels = BTreeMap::new();
-    for candidate in &run.stage1_logical_asap_optimization {
+    for candidate in logical {
         let mut label = choice_label(&run.stage1_pass1_per_computation, &candidate.choice);
-        if let Some(p) = pass2.get(candidate.id.as_str()) {
-            label += &pass2_label(p);
+        if let Some(pass2) = &candidate.pass2 {
+            let pass1_roots = logical[pass2.from_pass1_position]
+                .roots
+                .as_deref()
+                .unwrap_or_default();
+            label += &pass2_label(pass2, pass1_roots);
         }
         labels.insert(candidate.id.clone(), label);
     }
@@ -116,23 +117,131 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
 }
 
 /// What a Pass 2 candidate adds to its Pass 1 candidate's label, e.g.
-/// " · one UnivMon for Q1, Q3 · Kll for Q1 in 5 × 1m panes · Q2 rolled up
-/// from Q1 · shared Scan".
-pub fn pass2_label(pass2: &Pass2Candidate) -> String {
+/// " · one UnivMon for Q1, Q3 · Kll for Q1 in 5 × 1m panes · Sum acc for Q2
+/// rolled up from Q1 · shared Scan, TimeRange". `pass1_roots` are the roots
+/// of the Pass 1 candidate it derives from, which hold the shared summary
+/// builds and the rolled-up builds.
+pub fn pass2_label(pass2: &Pass2Candidate, pass1_roots: &[QueryRoot]) -> String {
     let mut label = String::new();
-    if !pass2.summaries.is_empty() {
-        label += &format!(" · one {}", pass2.summaries.join(", one "));
+    // Summary-capability rule, e.g. "UnivMon for Q1, Q3".
+    let summaries: Vec<String> = pass2
+        .shared_builds
+        .iter()
+        .map(|builds| {
+            let mut queries: Vec<usize> = builds
+                .iter()
+                .flat_map(|build| readers_of(pass1_roots, build))
+                .collect();
+            queries.sort_unstable();
+            queries.dedup();
+            let family = match builds[0].asap().and_then(ASAPOp::produced_state) {
+                Some(FieldDataType::Sketch(kind, _)) => format!("{:?}", kind.algorithm()),
+                _ => builds[0].operator.kind_name().to_string(),
+            };
+            format!("{family} for {}", query_names(&queries))
+        })
+        .collect();
+    if !summaries.is_empty() {
+        label += &format!(" · one {}", summaries.join(", one "));
     }
-    if !pass2.panes.is_empty() {
-        label += &format!(" · {}", pass2.panes.join(", "));
+    // Window-composition rule, e.g. "Kll for Q1 in 5 × 1m panes".
+    let panes: Vec<String> = pass2
+        .pane_candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{} for {} in {} × {} panes",
+                state_name(&candidate.build),
+                query_names(&candidate.readers),
+                candidate.pane_count,
+                duration_name(candidate.pane_width_ms)
+            )
+        })
+        .collect();
+    if !panes.is_empty() {
+        label += &format!(" · {}", panes.join(", "));
     }
-    if !pass2.reused.is_empty() {
-        label += &format!(" · {}", pass2.reused.join(", "));
+    // Rollup rule, e.g. "Sum acc for Q1 rolled up from Q2", then exact
+    // top-k reuse, e.g. "top-k for Q1, Q2 from one top-10".
+    let reused: Vec<String> = pass2
+        .rollup_candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{} for {} rolled up from {}",
+                state_name(&candidate.coarse),
+                query_names(&readers_of(pass1_roots, &candidate.coarse)),
+                query_names(&readers_of(pass1_roots, &candidate.finer))
+            )
+        })
+        .chain(pass2.topk_reuse_candidates.iter().map(|candidate| {
+            let k = match candidate.ranking.non_asap() {
+                Some(NonASAPOp::Limit { n: Some(k), .. }) => *k,
+                _ => 0,
+            };
+            format!(
+                "top-k for {} from one top-{k}",
+                query_names(&candidate.readers)
+            )
+        }))
+        .collect();
+    if !reused.is_empty() {
+        label += &format!(" · {}", reused.join(", "));
     }
-    if !pass2.shared.is_empty() {
-        label += &format!(" · shared {}", pass2.shared.join(", "));
+    // Identical-expression rule, by the shared nodes' operator kinds.
+    let shared: Vec<&str> = pass2
+        .sharing_candidates
+        .iter()
+        .map(|candidate| candidate.nodes[0].operator.kind_name())
+        .collect();
+    if !shared.is_empty() {
+        label += &format!(" · shared {}", shared.join(", "));
     }
     label
+}
+
+/// Query names for query indices, e.g. "Q1, Q3".
+fn query_names(queries: &[usize]) -> String {
+    queries
+        .iter()
+        .map(|q| format!("Q{}", q + 1))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The queries (indices into `roots`) from which `node` is reachable.
+fn readers_of(roots: &[QueryRoot], node: &Rc<OperatorNode>) -> Vec<usize> {
+    roots
+        .iter()
+        .enumerate()
+        .filter(|(_, root)| {
+            root_operators(root).into_iter().any(|op| {
+                OperatorNode::reachable(op)
+                    .iter()
+                    .any(|n| Rc::ptr_eq(n, node))
+            })
+        })
+        .map(|(q, _)| q)
+        .collect()
+}
+
+/// The state a summary build keeps, e.g. "Kll" or "Rate acc".
+fn state_name(build: &OperatorNode) -> String {
+    match build.asap().and_then(ASAPOp::produced_state) {
+        Some(FieldDataType::Sketch(kind, _)) => sketch_name(kind.algorithm()),
+        Some(FieldDataType::ExactAggregate(kind, _)) => format!("{kind:?} acc"),
+        _ => build.operator.kind_name().to_string(),
+    }
+}
+
+/// `ms` in the largest whole unit: "1m", "10s", "250ms".
+fn duration_name(ms: u64) -> String {
+    match ms {
+        ms if ms % 3_600_000 == 0 => format!("{}h", ms / 3_600_000),
+        ms if ms % 60_000 == 0 => format!("{}m", ms / 60_000),
+        ms if ms % 1_000 == 0 => format!("{}s", ms / 1_000),
+        ms => format!("{ms}ms"),
+    }
 }
 
 /// `logical` followed by what the candidate materializes, e.g.
@@ -206,7 +315,7 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planner_layering_examples::{example1, example2, example2_catalog};
+    use crate::planner_layering_examples::{example1, example2};
     use crate::planning_stages::{lower_promql_roots, lower_sql_roots, run_planning_stages};
 
     /// Logical labels name each query's choice and the Pass 2 rules applied;
@@ -222,7 +331,7 @@ mod tests {
             labels["L1"],
             "Q1 exact (Sum acc, Rate acc) · Q2 exact (Sum acc)"
         );
-        assert!(labels.values().any(|l| l.ends_with(" · shared Scan #1")));
+        assert!(labels.values().any(|l| l.ends_with(" · shared Scan")));
         assert!(labels
             .values()
             .any(|l| l.contains("Rate acc for Q1 in 6 × 10s panes")));
@@ -247,8 +356,8 @@ mod tests {
     /// for both: its label says "query time, shared".
     #[test]
     fn example2_labels_name_builds_shared_at_query_time() {
-        let workload = example2();
-        let roots = lower_sql_roots(&workload, &example2_catalog()).unwrap();
+        let (workload, catalog) = example2();
+        let roots = lower_sql_roots(&workload, &catalog).unwrap();
         let run = run_planning_stages(&workload, roots, None).unwrap();
         let labels = candidate_labels(&run);
         assert!(

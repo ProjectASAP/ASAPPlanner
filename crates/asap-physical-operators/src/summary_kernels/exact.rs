@@ -117,7 +117,7 @@ impl ExactAccumulator {
     /// all its populations; `None` for an empty or non-counter state.
     /// Counter states merge pairwise in time order, so a merge of panes
     /// orders them by this first.
-    pub fn counter_window_start(&self) -> Option<i64> {
+    pub fn earliest_sample_ms(&self) -> Option<i64> {
         std::iter::once(&self.scalar)
             .chain(self.keyed.iter().flat_map(HashMap::values))
             .filter_map(|state| match state {

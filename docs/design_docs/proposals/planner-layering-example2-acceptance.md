@@ -81,7 +81,7 @@ with Q1–Q3's targets and a 15-s ingestion interval (PromQL needs one).
 | The shared UnivMon stays one build read by all three queries | `stage2_physical_asap_optimization_keeps_the_shared_univmon_as_one_build` | ignored: #595, #596 |
 
 Materialization and window variants are out of scope: the doc leaves out the
-window-composition variants for this example, and a summary with no window
+window-composition Pass 2 candidates for this example, and a summary with no window
 form is rebuilt at every refresh (Example 1's table).
 
 ### Plan selection

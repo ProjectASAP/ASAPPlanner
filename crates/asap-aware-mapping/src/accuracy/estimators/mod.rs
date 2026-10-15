@@ -235,7 +235,7 @@ pub(crate) fn column_collision(cols: u32) -> f64 {
 /// shared state. `None` for no parameters,
 /// parameters of different algorithms, or a shared UnivMon the library
 /// would not build ([`univmon::hash_independent`]).
-pub(crate) fn shared_size_params(params: &[&SketchParams]) -> Option<SketchParams> {
+pub(crate) fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
     use SketchParams as P;
     let (first, rest) = params.split_first()?;
     let shared = rest.iter().try_fold((*first).clone(), |a, b| {
@@ -398,7 +398,7 @@ mod shared_size_tests {
     #[test]
     fn shared_size_takes_each_parameters_strictest_value() {
         assert_eq!(
-            shared_size_params(&[&univmon(256, 5, 1024, 16), &univmon(1, 7, 4096, 1)]),
+            size_for_all_readers(&[&univmon(256, 5, 1024, 16), &univmon(1, 7, 4096, 1)]),
             Some(univmon(256, 7, 4096, 16))
         );
         // The distinct count's failure probability, where one was sized
@@ -414,7 +414,7 @@ mod shared_size_tests {
             heap_size,
             distinct_failure_probability,
             ..
-        }) = shared_size_params(&[
+        }) = size_for_all_readers(&[
             &univmon(256, 5, 1024, 16),
             &distinct(4096, 0.01),
             &distinct(2048, 0.001),
@@ -433,7 +433,7 @@ mod shared_size_tests {
         let SketchParams::Kll {
             k,
             failure_probability,
-        } = shared_size_params(&[
+        } = size_for_all_readers(&[
             &kll(200, None),
             &kll(100, Some(0.001)),
             &kll(150, Some(0.005)),
@@ -444,14 +444,14 @@ mod shared_size_tests {
         };
         assert_eq!((k, failure_probability), (200, Some(0.001)));
         assert_eq!(
-            shared_size_params(&[
+            size_for_all_readers(&[
                 &SketchParams::DDSketch { alpha: 0.01 },
                 &SketchParams::DDSketch { alpha: 0.001 }
             ]),
             Some(SketchParams::DDSketch { alpha: 0.001 })
         );
         assert_eq!(
-            shared_size_params(&[
+            size_for_all_readers(&[
                 &kll(200, None),
                 &SketchParams::Hll {
                     precision: 12,
@@ -460,7 +460,7 @@ mod shared_size_tests {
             ]),
             None
         );
-        assert_eq!(shared_size_params(&[]), None);
+        assert_eq!(size_for_all_readers(&[]), None);
     }
 
     fn univmon(heap_size: u32, sketch_rows: u32, sketch_cols: u32, layers: u8) -> SketchParams {
@@ -482,7 +482,7 @@ mod shared_size_tests {
         assert!(univmon::hash_independent(12, 512, 1));
         assert!(univmon::hash_independent(5, 1 << 16, 1));
         assert_eq!(
-            shared_size_params(&[&univmon(1, 12, 512, 1), &univmon(1, 5, 1 << 16, 1)]),
+            size_for_all_readers(&[&univmon(1, 12, 512, 1), &univmon(1, 5, 1 << 16, 1)]),
             None
         );
     }

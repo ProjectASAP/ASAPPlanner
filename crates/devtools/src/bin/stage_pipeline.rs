@@ -70,7 +70,7 @@ use std::collections::HashSet;
 use asap_aware_mapping::stage3_plan_selection::{Rejection, Selection, SelectionError};
 use asap_devtools::candidate_labels::candidate_labels;
 use asap_devtools::planner_layering_examples::{
-    declared, example1, example2, example2_catalog, pattern_a, pattern_b, PatternARecurrence,
+    declared, example1, example2, pattern_a, pattern_b, PatternARecurrence,
 };
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_planning_stages, run_planning_stages_over,
@@ -221,18 +221,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let out = out.ok_or("--out is required")?;
     let document = match (example.as_deref(), queries.is_empty()) {
         (Some(example), true) => {
-            let workload = match example {
-                "planner-layering-1" => example1(),
+            let (workload, catalog) = match example {
+                "planner-layering-1" => (example1(), SqlCatalog::new()),
                 "planner-layering-2" => example2(),
-                "planner-layering-3a" => {
-                    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed)
-                }
-                "planner-layering-3b" => pattern_b(),
+                "planner-layering-3a" => (
+                    pattern_a(PatternARecurrence::OnceAdHoc, DataArrival::Mixed),
+                    SqlCatalog::new(),
+                ),
+                "planner-layering-3b" => (pattern_b(), SqlCatalog::new()),
                 other => return Err(format!("unknown example {other}").into()),
             };
             let roots = match workload.query_workload.language {
                 QueryLanguage::PromQL => lower_promql_roots(&workload)?,
-                _ => lower_sql_roots(&workload, &example2_catalog())?,
+                _ => lower_sql_roots(&workload, &catalog)?,
             };
             let result = run_planning_stages(&workload, roots.clone(), Some(max_combinations));
             document_of(workload_queries(&workload), &roots, result, max_displayed)?
