@@ -73,7 +73,12 @@
     if (d.timing !== undefined) items.push(['runs at', formatTiming(d.timing)]);
     if (n.materialization) items.push(['materialization', compactWire(n.materialization)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
-    if (d.cost) items.push(['Stage 3 cost', `${Number(d.cost.cost.toPrecision(4))}${d.cost.multiplier === 1 ? '' : ` × ${d.cost.multiplier}`} · ${d.cost.detail || ''}`]);
+    if (d.cost) {
+      const value = typeof d.cost.cost === 'number'
+        ? `${Number(d.cost.cost.toPrecision(4))}${d.cost.multiplier === 1 || d.cost.multiplier === undefined ? '' : ` × ${d.cost.multiplier}`}`
+        : 'no number';
+      items.push(['Stage 3 cost', `${value} · ${d.cost.detail || ''}`]);
+    }
     if (d.kind !== 'Scalar') items.push(['guarantee', n.guarantee ? compactWire(n.guarantee) : 'none']);
     $('details').innerHTML = `<h3>${esc(d.kind)} <span class="eyebrow">node ${esc(d.nodeId)}</span></h3>${kv(items)}
       ${schemaTable(n.output_schema || n.schema)}
@@ -97,6 +102,7 @@
     if (status === 'selected') return '<span class="chip selected">✓ selected</span>';
     if (status === 'costlier') return '<span class="chip costlier">valid · costlier</span>';
     if (status === 'rejected') return '<span class="chip invalid">✗ invalid</span>';
+    if (status === 'not judged') return '<span class="chip">not judged</span>';
     return `<span class="chip invalid">${esc(status)}</span>`;
   }
 
@@ -111,13 +117,24 @@
     $('rank').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
       const [kind, id] = [b.dataset.key.slice(0, 1), b.dataset.key.slice(2)];
       if (kind === 'P') selectPhysical(id);
-      else selectLogical(id, true);
+      else selectLogical(id);
     }));
   }
 
-  // Show Stage 1 candidate `id`; `alone` clears Stage 2 (a pruned or
-  // uncomposed candidate has no physical plan).
-  function selectLogical(id, alone) {
+  // Choose Stage 1 candidate `id`: show its physical plan when it has one;
+  // a pruned or uncomposed candidate has none, so Stage 2 is cleared.
+  function selectLogical(id) {
+    const physical = doc.stage2_physical_asap_optimization.candidates.find((p) => p.from_logical === id);
+    if (physical) { selectPhysical(physical.id); return; }
+    showLogical(id);
+    current.physical = null;
+    $('pick2').value = '';
+    clearLane(2, 'no physical plan for this Stage 1 candidate');
+    renderRanking();
+  }
+
+  // Draw Stage 1 candidate `id` in lane 1.
+  function showLogical(id) {
     current.logical = id;
     $('pick1').value = id;
     const c = logicalById.get(id);
@@ -130,12 +147,6 @@
     } else {
       clearLane(1, '');
       $('lane1-meta').innerHTML = `${esc(c.display_name)} · <span class="error">composition error: ${esc(c.error)}</span>`;
-    }
-    if (alone) {
-      current.physical = null;
-      $('pick2').value = '';
-      clearLane(2, 'no physical plan for this Stage 1 candidate');
-      renderRanking();
     }
   }
 
@@ -151,7 +162,7 @@
     $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
       (cost ? `total <b>${fmtCost(cost.total)}</b> ${esc(cost.unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}` : 'not priced') +
       ` · ${statusChip(row.status)}`;
-    if (c.from_logical !== current.logical) selectLogical(c.from_logical, false);
+    if (c.from_logical !== current.logical) showLogical(c.from_logical);
     renderRanking();
   }
 
@@ -201,7 +212,7 @@
     // The selected plan is the first row when there is one.
     const first = rows[0];
     if (first && rowKey(first).startsWith('P')) selectPhysical(first.id);
-    else if (first) selectLogical(first.logical, true);
+    else if (first) selectLogical(first.logical);
     else {
       clearLane(1, 'no candidates');
       clearLane(2, 'no candidates');
@@ -233,12 +244,19 @@
     loadUrl(example.file, example.file, example.story);
   }
 
-  // Documents from outside the example list (a file, the editor) clear the tab.
+  // Documents from outside the example list (a file, the editor) clear the
+  // tab. Returns whether the document was shown.
   function showExternal(data, source) {
     ++loading;
     pressTab(null);
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
-    try { showDocument(data, source, ''); } catch (err) { showError(err); }
+    try {
+      showDocument(data, source, '');
+      return true;
+    } catch (err) {
+      showError(err);
+      return false;
+    }
   }
 
   function readFile(file) {
@@ -254,7 +272,7 @@
     if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
   });
 
-  $('pick1').addEventListener('change', (e) => selectLogical(e.target.value, true));
+  $('pick1').addEventListener('change', (e) => selectLogical(e.target.value));
   $('pick2').addEventListener('change', (e) => selectPhysical(e.target.value));
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', restyle);
   new MutationObserver(restyle).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });

@@ -121,7 +121,9 @@
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
       const count = queries.length;
-      window.StageViewer.showDocument(result, `editor · ${count} quer${count === 1 ? 'y' : 'ies'}`);
+      if (!window.StageViewer.showDocument(result, `editor · ${count} quer${count === 1 ? 'y' : 'ies'}`)) {
+        throw new Error('the viewer could not show the planner output (see above)');
+      }
       const selection = result.stage3_plan_selection;
       const cost = selection.costs[selection.selected];
       plannerStatus.textContent = selection.selected

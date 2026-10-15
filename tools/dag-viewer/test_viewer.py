@@ -115,6 +115,14 @@ class ValidationTests(unittest.TestCase):
             "cost total": lambda d: selection(d)["costs"]["P1"].pop("total"),
             "cost for unknown candidate": lambda d: selection(d)["costs"].update({"P99": {"total": 1, "unit": "u", "per_node": {}}}),
             "missing stage": lambda d: d.pop("stage2_physical_asap_optimization"),
+            "binary operand names no node": lambda d: stage0(d)["nodes"].append(
+                {"operator": {"NonASAP": {"BinaryOp": {"lhs": 0, "rhs": 42, "operator": {}, "return_bool": False}}}}),
+            "scalar root past the queries": lambda d: physical(d)[0]["dag"].update(
+                roots=physical(d)[0]["dag"]["roots"][:1], scalar_roots=[[2, "EvalTimestamp"]]),
+            "scalar roots out of order": lambda d: physical(d)[0]["dag"].update(
+                roots=[], scalar_roots=[[1, "EvalTimestamp"], [0, "EvalTimestamp"]]),
+            "scalar root reads no node": lambda d: physical(d)[0]["dag"].update(
+                roots=physical(d)[0]["dag"]["roots"][:1], scalar_roots=[[1, {"PromqlScalarFromVector": 99}]]),
         }
         for name, mutate in cases.items():
             with self.subTest(name):
@@ -163,6 +171,14 @@ class CandidateRowTests(unittest.TestCase):
                 {"id": "L99", "logical": "L99", "display_name": "Q1 exact", "total": None, "unit": None, "rank": None, "status": "composition error", "reason": "cannot substitute"},
             ],
         )
+
+    def test_failed_selection_leaves_candidates_not_judged(self):
+        """When selection fails with `error`, Stage 3 judged no candidate:
+        the rows are "not judged", not invalid."""
+        self.doc["stage3_plan_selection"] = {"costs": {}, "selected": None, "rejected": [], "error": "no data workload"}
+        rows = self.js.call("stageCandidateRows", self.doc)
+        self.assertEqual({row["status"] for row in rows}, {"not judged"})
+        self.assertTrue(all(row["reason"] is None for row in rows))
 
     def test_header_counts_candidates_and_shows_a_selection_error(self):
         combinations = self.doc["stage1_logical_asap_optimization"]["combinations"]
@@ -310,6 +326,31 @@ class ScalarQueryTests(unittest.TestCase):
             self.assertIn(reads[0], {n["data"]["id"] for n in lane_nodes(elements)})
 
 
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+@unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
+class BinaryOperatorTests(unittest.TestCase):
+    """A binary operator reads both operands (`lhs`, `rhs`): its node has an
+    input edge from each in Stage 0, Stage 1 and Stage 2."""
+
+    def test_binary_operator_reads_both_operands_in_every_lane(self):
+        doc = stage_pipeline("--promql", "sum(rate(a[1m])) / sum(rate(b[1m]))")
+        js = stages_js()
+        self.assertEqual(js.call("validateStagePipeline", doc), [])
+        selected = doc["stage3_plan_selection"]["selected"]
+        lanes = [
+            (doc["stage0_query_language_frontends"]["dag"], False),
+            (doc["stage1_logical_asap_optimization"]["candidates"][0]["dag"], False),
+            (next(c for c in doc["stage2_physical_asap_optimization"]["candidates"] if c["id"] == selected)["dag"], True),
+        ]
+        for dag, physical in lanes:
+            with self.subTest(physical=physical):
+                elements = js.call("stageLaneElements", dag, {"physical": physical, "queryIds": ["q1"]})
+                binary = [n for n in lane_nodes(elements) if n["data"]["kind"] == "BinaryOp"]
+                self.assertEqual(len(binary), 1)
+                inputs = [e for e in lane_edges(elements) if e["data"]["target"] == binary[0]["data"]["id"]]
+                self.assertEqual(len(inputs), 2)
+
+
 class PageTests(unittest.TestCase):
     """The page's scripts, element ids and examples line up."""
 
@@ -346,7 +387,7 @@ STUB_DOM = r"""
 var __els = {}; var __files = {};
 function __el(id) {
   if (!__els[id]) __els[id] = { id, innerHTML: '', textContent: '', hidden: false, value: '', dataset: {},
-    addEventListener() {}, setAttribute() {}, click() {}, querySelectorAll() { return []; } };
+    __on: {}, addEventListener(type, fn) { this.__on[type] = fn; }, setAttribute() {}, click() {}, querySelectorAll() { return []; } };
   return __els[id];
 }
 var document = { getElementById: __el, documentElement: {}, body: { classList: { add() {}, remove() {} } }, addEventListener() {} };
@@ -357,7 +398,12 @@ function getComputedStyle() { return { getPropertyValue() { return ''; } }; }
 function MutationObserver() { this.observe = function () {}; }
 var URLSearchParams = function (s) { this.get = (k) => { const m = s.match(new RegExp('[?&]' + k + '=([^&]*)')); return m ? decodeURIComponent(m[1]) : null; }; };
 var __nodes = 0;
-function cytoscape(o) { __nodes += o.elements.length; return { on() {}, destroy() {}, style() {} }; }
+var __taps = {};
+function cytoscape(o) {
+  __nodes += o.elements.length;
+  const lane = o.container.id;
+  return { on(event, what, fn) { __taps[lane + ' ' + what] = fn; }, destroy() {}, style() {} };
+}
 function fetch(u) { return Promise.resolve({ ok: u in __files, status: 404, json() { return Promise.resolve(JSON.parse(__files[u])); } }); }
 """
 
@@ -416,6 +462,35 @@ class AppTests(unittest.TestCase):
         js = self.page("", {"examples.json": manifest, "out/a.json": sample, "out/b.json": sample}, "#b")
         self.assertIn('data-id="b"', js.eval("__els.tabs.innerHTML"))
         self.assertEqual(js.eval("__els.story.textContent"), "story B")
+
+    def test_choosing_a_stage1_candidate_shows_its_physical_plan(self):
+        js = self.page("?doc=e1.json", {"e1.json": EXAMPLE1.read_text()})
+        js.eval("__els.pick1.__on.change({ target: { value: 'L2' } })")
+        self.assertEqual(js.eval("__els.pick2.value"), "P2")
+        self.assertIn("from L2", self.text(js, "lane2-meta"))
+
+    def test_choosing_an_uncomposed_stage1_candidate_clears_stage2(self):
+        doc = example1()
+        doc["stage1_logical_asap_optimization"]["candidates"].append({"id": "L99", "display_name": "Q1 exact", "error": "cannot substitute"})
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        js.eval("__els.pick1.__on.change({ target: { value: 'L99' } })")
+        self.assertEqual(js.eval("__els.pick2.value"), "")
+        self.assertIn("composition error: cannot substitute", self.text(js, "lane1-meta"))
+
+    def test_node_details_without_a_numeric_cost(self):
+        """A per_node entry without a numeric `cost` does not break the details panel."""
+        js = self.page("?doc=e1.json", {"e1.json": EXAMPLE1.read_text()})
+        js.eval("""__taps['cy2 node']({ target: { data() { return {
+            kind: 'Scan', nodeId: 0, rootFor: [], timing: 'query_time', cost: { detail: 'not priced' },
+            node: { payload: { NonASAP: { Scan: {} } }, guarantee: null } }; } } })""")
+        self.assertIn("not priced", self.text(js, "details"))
+
+    def test_show_document_reports_whether_it_was_shown(self):
+        """The editor reports success only when the document was shown."""
+        js = self.page()
+        self.assertTrue(js.eval(f"window.StageViewer.showDocument({EXAMPLE1.read_text()}, 'e1')"))
+        self.assertFalse(js.eval("window.StageViewer.showDocument({ format: 'nope' }, 'bad')"))
+        self.assertIn("Could not load", js.eval("__els.queries.innerHTML"))
 
     def test_an_invalid_document_shows_an_error(self):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})
