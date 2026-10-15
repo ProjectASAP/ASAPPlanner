@@ -950,10 +950,10 @@ mod tests {
     /// `root` with its summary build in 1-min tumbling panes.
     fn in_panes(root: QueryRoot) -> QueryRoot {
         let roots = [root];
-        let sites = crate::asap_aware_cse::pane_sites(&roots, &[Some(MINUTE)]);
+        let sites = crate::asap_aware_cse::pane_candidates(&roots, &[Some(MINUTE)]);
         assert_eq!(sites.len(), 1, "{sites:?}");
         let mut variants =
-            crate::asap_aware_cse::window_composition_variants(&roots, &sites).unwrap();
+            crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &sites).unwrap();
         variants.pop().unwrap().roots.unwrap().remove(0)
     }
 
