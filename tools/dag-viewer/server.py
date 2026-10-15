@@ -127,6 +127,15 @@ def plan_args(payload: object, out: str) -> list[str]:
         if not 0 < epsilon < 1:
             raise ValueError("epsilon must be between 0 and 1")
         args.extend(["--epsilon", str(epsilon)])
+    # The target's error metric; empty means the query's default metric. A
+    # quantile query's target must name one.
+    metric = payload.get("metric")
+    if metric not in (None, ""):
+        if metric not in ("absolute", "relative", "rank"):
+            raise ValueError("metric must be absolute, relative or rank")
+        if epsilon is None:
+            raise ValueError("metric needs epsilon")
+        args.extend(["--metric", metric])
     interval = payload.get("interval_ms", 15_000)
     if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
         raise ValueError("interval_ms must be a positive integer")

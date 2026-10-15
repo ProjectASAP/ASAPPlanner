@@ -368,6 +368,15 @@ class PageTests(unittest.TestCase):
             with self.subTest(script):
                 self.assertLessEqual(used, ids)
 
+    def test_the_editor_names_a_target_metric(self):
+        """The metric dropdown offers the default (empty) and the three
+        metrics, and the editor sends its value to /api/plan."""
+        page = (HERE / "index.html").read_text()
+        select = re.search(r'<select id="plannerMetric"[^>]*>(.*?)</select>', page, re.S)
+        self.assertIsNotNone(select)
+        self.assertEqual(re.findall(r'<option value="([^"]*)"', select.group(1)), ["", "absolute", "relative", "rank"])
+        self.assertIn("metric: $('plannerMetric').value", (HERE / "editor.js").read_text())
+
     def test_examples_are_stage_pipeline_examples_written_into_out(self):
         examples = json.loads((HERE / "examples.json").read_text())
         tool = (HERE.parents[1] / "crates/devtools/src/bin/stage_pipeline.rs").read_text()

@@ -190,7 +190,7 @@
 
     $('queries').innerHTML = doc.workload.queries.map((q) => {
       const r = q.requirements || {};
-      const acc = r.accuracy === 'exact' ? 'exact' : r.accuracy ? `ε=${r.accuracy.epsilon}${r.accuracy.delta !== undefined ? `, δ=${r.accuracy.delta}` : ''}` : '';
+      const acc = r.accuracy === 'exact' ? 'exact' : r.accuracy ? `ε=${r.accuracy.epsilon}${r.accuracy.delta !== undefined ? `, δ=${r.accuracy.delta}` : ''}${r.accuracy.metric ? ` (${r.accuracy.metric})` : ''}` : '';
       const req = [acc && `accuracy ${acc}`, r.latency_ms && `latency ≤ ${r.latency_ms} ms`, r.repeat_interval_ms && `every ${r.repeat_interval_ms / 1000} s`].filter(Boolean).join(' · ');
       return `<div class="query"><span class="qid">${esc(q.id)} · ${esc(q.language)}</span><code>${esc(q.text)}</code>${req ? `<span class="req">${esc(req)}</span>` : ''}</div>`;
     }).join('');
