@@ -886,10 +886,11 @@ To see examples in DAG Viewer, following the instructions [here](TODO: write an 
 
 Each example's workload is shown as tables. Field names in code font are the
 fields of
-[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs).
-Each query reads the event-time window [`as_of` − `lookback`, `as_of`] (stated
-by its query text). `as_of` is the window's end; `lookback` is its length. An
-`as_of` of "evaluation time" means `as_of: None`: the window ends whenever the
+[`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs),
+except `lookback` and `as_of`, which the query text states (its range and
+offset). Each query reads the event-time window [`as_of` − `lookback`, `as_of`].
+`as_of` is the window's end; `lookback` is its length. An
+`as_of` of "evaluation time" means no offset: the window ends whenever the
 query runs, so it moves forward with each evaluation. A fixed `as_of`, such as
 T − 1 y, pins the window to a historical interval. Approximate accuracy targets are `EpsilonDelta`: the answer's error
 is at most ε with probability at least 1 − δ.

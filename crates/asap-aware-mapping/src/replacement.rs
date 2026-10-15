@@ -6221,7 +6221,7 @@ fn strictest_sibling_accuracy(
             (AggIntent::Quantile { col, .. }, AggIntent::Quantile { col: other_col, .. }) => {
                 col == other_col
             }
-            _ => override_accuracy(intent, &accuracy) == *other,
+            _ => override_accuracy(intent, &accuracy) == override_accuracy(other, &accuracy),
         };
         if same_intent
             && sibling_reduction == reduction
@@ -6577,6 +6577,38 @@ fn nested_layers_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Siblings that differ only in their written targets share the
+    /// strictest one: two `count by (job)` (or distinct-count) siblings at
+    /// ε = 0.05 and 0.01, with no metric set, size the looser one for 0.01.
+    #[test]
+    fn identical_count_and_distinct_siblings_share_the_strictest_target() {
+        let scan = crate::test_support::metric_scan(&["job"]);
+        for intent in [
+            |accuracy| AggIntent::Count { accuracy },
+            |accuracy| AggIntent::Cardinality {
+                cols: vec![],
+                accuracy,
+            },
+        ] {
+            let sibling = |error| {
+                crate::test_support::agg(
+                    vec![2],
+                    intent(AccuracyTarget::max_error(error)),
+                    scan.clone(),
+                )
+            };
+            let (loose, strict) = (sibling(0.05), sibling(0.01));
+            assert_eq!(
+                strictest_sibling_accuracy(&loose, &[loose.clone(), strict.clone()]),
+                Some(AccuracyTarget::max_error(0.01))
+            );
+            assert_eq!(
+                strictest_sibling_accuracy(&strict, &[loose, strict.clone()]),
+                None
+            );
+        }
+    }
 
     /// A nested sub-DAG holding `shares` of `of` approximate layers gets
     /// that fraction of an additive target's ε and δ.

@@ -255,7 +255,7 @@ class PlanEndpointTests(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertTrue(named["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric rank; accepted "))
         unnamed = post_plan({"queries": [query], "epsilon": 0.01})
-        self.assertNotIn("metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
+        self.assertNotIn("accuracy_metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
         selected = unnamed["stage3_plan_selection"]["selected"]
         self.assertIsNotNone(selected)
         self.assertTrue(unnamed["stage3_plan_selection"]["accepted"][selected][0]["summary"].startswith("metric not set; accepted "))
