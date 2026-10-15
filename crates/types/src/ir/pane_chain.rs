@@ -151,8 +151,11 @@ fn build_over(
 /// `root` with every `PaneChain` expanded into its panes: a `SummaryMerge`
 /// reads each pane of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs. Every other node keeps its
-/// guarantee, timing and materialization. A chain read by anything but a
-/// `SummaryMerge` is an error.
+/// guarantee, timing and materialization. The panes are new nodes without
+/// timing or materialization: a chain's own materialization is dropped, so
+/// expansion runs before timings are applied, and materializing panes
+/// (keeping all but the newest between evaluations) is left to Stage 2
+/// (G8). A chain read by anything but a `SummaryMerge` is an error.
 pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
