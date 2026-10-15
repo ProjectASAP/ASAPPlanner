@@ -12,3 +12,4 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
 - [ASAPPlanner layering](planner-layering.md)
 - [Schema and physical data for ASAP primitives](asap-primitive-schema.md)
+- [Corpus coverage of ASAP primitives and summaries](corpus-primitive-coverage.md)
