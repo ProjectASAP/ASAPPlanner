@@ -13,3 +13,6 @@ decisions, and evolving proposals.
 - [Decisions](decisions/README.md) records accepted local design choices.
 - [Proposals](proposals/README.md) contains evolving designs and research
   directions; check each document’s status before treating it as current.
+- [Corpus coverage of ASAP primitives and summaries](proposals/corpus-primitive-coverage.md)
+  measures which intents, summaries and Pass 2 rules the corpus tests need,
+  and ranks what the planner does not support yet.
