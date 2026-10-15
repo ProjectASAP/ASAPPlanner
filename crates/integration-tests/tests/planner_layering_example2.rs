@@ -12,6 +12,7 @@
 //! three statistics of one input over the same 1-min window, through the
 //! frontend's `distinct_over_time`, `entropy_over_time` and `l2_over_time`.
 
+mod physical_common;
 mod planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -785,4 +786,99 @@ fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
         .filter(|(_, a, _)| *a == SketchAlgorithm::UnivMon)
         .count();
     assert!(count <= 1, "{}: {count} UnivMons", selected.id);
+}
+
+/// Stage 3 over the candidates that answer Q1 with KMV and Q2 and Q3
+/// exactly selects one, and the executor runs its Q1: the distinct count of
+/// the window's sample values. Below KMV's `k` distinct values its estimate
+/// is exact. Only Q1 is compiled: the exact entropy and L2 of Q2 and Q3 do
+/// not compile yet ("per-entity aggregate requires an explicit entity
+/// binding").
+#[test]
+fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
+    use asap_aware_mapping::stage3_plan_selection::select_plan;
+    use asap_aware_mapping::PlanningModels;
+    use asap_physical_operators::physical_planner::{compile, promql_rows, InputContract};
+    use asap_physical_operators::runtime::Scope;
+    use asap_physical_operators::values::{Batch, Value};
+    use std::sync::Arc;
+
+    let workload = standin_workload();
+    let run = run_stages(&workload, lower_promql(&workload));
+    let kmv: Vec<_> = run
+        .logical
+        .iter()
+        .filter(|c| {
+            !shares_a_summary(c)
+                && (0..3)
+                    .map(|q| query_option(&c.dag, &c.query_roots, q))
+                    .eq(["Kmv", "exact", "exact"])
+        })
+        .flat_map(|c| run.physical_of(c).map(|p| p.candidate.clone()))
+        .collect();
+    assert!(!kmv.is_empty(), "a candidate answers Q1 with KMV");
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let targets: Vec<_> = entries
+        .iter()
+        .map(|e| Some(e.requirements.accuracy.target()))
+        .collect();
+    let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
+    let selection = select_plan(
+        &kmv,
+        &targets,
+        &recurrence,
+        workload.data_workload.as_ref().unwrap(),
+        PlanningModels::builtin(),
+    )
+    .expect("Stage 3 selects a KMV plan");
+    let p = run.physical(&selection.selected);
+    assert_eq!(query_option(p.dag(), &p.query_roots, 0), "Kmv");
+
+    // 1,000 flow records over 50 s with 300 distinct source IPs.
+    let distinct = 300u32;
+    let samples: Vec<(i64, f64)> = (0..1_000u32)
+        .map(|i| (i64::from(i) * 50, f64::from(i * 7 % distinct)))
+        .collect();
+    let labels = BTreeMap::from([("__name__".to_string(), "flows_src_ip".to_string())]);
+    let dag = p.dag();
+    let mut inputs = BTreeMap::new();
+    let mut batches = BTreeMap::new();
+    for node in &dag.nodes {
+        if relational(&node.payload).as_deref() == Some("time_range") {
+            let schema = Arc::new(node.output_schema.clone());
+            let rows = samples
+                .iter()
+                .map(|(ts, v)| promql_rows::series_row(&schema, &labels, *ts, *v).unwrap())
+                .collect();
+            batches.insert(
+                node.id as u64,
+                Batch::try_new(schema.clone(), rows).unwrap(),
+            );
+            inputs.insert(node.id as u64, InputContract::bounded(schema));
+        }
+    }
+    let q1 = p.query_roots[0] as u64;
+    let plan = compile(dag, inputs, &[q1]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
+    let batches = plan
+        .input_contracts()
+        .map(|(id, _)| (id, batches[&id].clone()))
+        .collect();
+    let result = physical_common::execute(
+        &plan,
+        batches,
+        Scope::Query {
+            evaluation_time_ms: 55_000,
+            revision: 1,
+        },
+    );
+    let values: Vec<f64> = result[0]
+        .iter()
+        .flat_map(|batch| batch.rows())
+        .flat_map(|row| row.iter())
+        .filter_map(|value| match value {
+            Value::Float64(v) => Some(*v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(values, [f64::from(distinct)], "{}", p.id);
 }

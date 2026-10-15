@@ -60,6 +60,7 @@ pub fn validate_summary_kernel(
                     false
                 }
                 (A::Hll, P::Hll { precision }) if (4..=18).contains(precision) => false,
+                (A::Kmv, P::Kmv { k }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
                 (A::Cms, P::Cms { width, depth })
                 | (A::CountSketch, P::CountSketch { width, depth })
                     if valid_matrix(*width, *depth) =>
@@ -264,7 +265,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     match family {
         SummaryFamilyType::ExactAggregate(..) => {}
         SummaryFamilyType::Sketch(kind, _)
-            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll) => {}
+            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll | A::Kmv) => {}
         _ => {
             return Err(Error::Invalid(
                 "summary family has no native DAG state implementation".into(),
@@ -319,6 +320,8 @@ pub fn validate_sketch_evaluation(
                 }
                 true
             }
+            (A::Kmv, SketchStatistic::Cardinality) => true,
+            (A::Kmv, _) => bare_count,
             // Only count intents read a Count-Min bare count, and their
             // updates have unit weight; the evaluation is typed Int64 on that basis.
             (A::Cms, _) => bare_count,
