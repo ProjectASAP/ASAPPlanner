@@ -319,7 +319,7 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-promql",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=831a5045847010a3a65f5a8e614e0208581d4a05)",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -394,7 +394,7 @@ dependencies = [
  "asap-physical-operators",
  "asap-planner",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=831a5045847010a3a65f5a8e614e0208581d4a05)",
  "futures",
  "serde_json",
  "tokio",
@@ -407,7 +407,7 @@ dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-types",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=e6b03142628a3109b6482ebe8512bff7e75f5b35)",
  "chrono",
  "futures",
  "regex",
@@ -447,9 +447,8 @@ dependencies = [
 [[package]]
 name = "asap_sketchlib"
 version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369#5f03ccbd798ed5fec62bdd839bcb331123cab369"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=831a5045847010a3a65f5a8e614e0208581d4a05#831a5045847010a3a65f5a8e614e0208581d4a05"
 dependencies = [
- "bincode",
  "bytes",
  "prost",
  "rand 0.9.5",
@@ -465,8 +464,9 @@ dependencies = [
 [[package]]
 name = "asap_sketchlib"
 version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib#932ab4af3d240c0a24c06b78b45596552437bad0"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=e6b03142628a3109b6482ebe8512bff7e75f5b35#e6b03142628a3109b6482ebe8512bff7e75f5b35"
 dependencies = [
+ "bincode",
  "bytes",
  "prost",
  "rand 0.9.5",

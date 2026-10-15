@@ -83,8 +83,10 @@ pub const KLL_MAX_K: u32 = 26_602;
 /// deployment-specific stage ever sees the plan.
 ///
 /// Equality compares the sketch that is built: a KLL's `failure_probability`
-/// records what it was sized for, not its structure, so two KLLs with the
-/// same `k` are equal (they share, and match the same offline evidence).
+/// and a UnivMon's `distinct_failure_probability` record what it was sized
+/// for, not its structure, so two KLLs with the same `k` are equal (they
+/// share, and match the same offline evidence), as are two UnivMons of the
+/// same shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SketchParams {
     UnivMon {
@@ -92,6 +94,12 @@ pub enum SketchParams {
         sketch_rows: u32,
         sketch_cols: u32,
         layers: u8,
+        /// The failure probability the heap was sized for when this
+        /// UnivMon answers a distinct count; its relative error follows from
+        /// it and the heap. `None`: not sized for a distinct count, which
+        /// then has no guarantee. Ignored by equality.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        distinct_failure_probability: Option<f64>,
     },
     Kll {
         k: u32,
@@ -146,12 +154,14 @@ impl PartialEq for SketchParams {
                     sketch_rows: a1,
                     sketch_cols: a2,
                     layers: a3,
+                    ..
                 },
                 P::UnivMon {
                     heap_size: b0,
                     sketch_rows: b1,
                     sketch_cols: b2,
                     layers: b3,
+                    ..
                 },
             ) => (a0, a1, a2, a3) == (b0, b1, b2, b3),
             (

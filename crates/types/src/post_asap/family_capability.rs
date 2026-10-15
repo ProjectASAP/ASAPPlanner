@@ -29,9 +29,10 @@ pub struct MergeCapability {
     pub inputs: SelectionRelation,
     /// How the merged state's error relates to its parts' errors.
     pub error: MergedError,
-    /// The merged error of readouts that read the family's heavy-hitter
-    /// heaps (distinct count, entropy, top-k), when it differs from
-    /// `error`.
+    /// The merged error of readouts that need the family's heavy-hitter
+    /// heaps to hold the heavy items (entropy, top-k), when it differs from
+    /// `error`. A distinct count reads the heaps only for how many keys
+    /// they hold, so it takes `error`.
     pub heap_readouts: Option<MergedError>,
 }
 
@@ -121,16 +122,15 @@ impl FamilyCapability {
                     S::CmsWithHeap | S::CountSketchWithHeap => {
                         (with_heaps(MergedError::SameAsUnionBuild), false)
                     }
-                    // At the pinned `asap_sketchlib`, `UnivMon::merge`
-                    // rebuilds each layer's heap from the parts' heap keys,
-                    // and L2 and distinct count read those heaps, so every
-                    // readout is approximate after a merge.
-                    // TODO(univmon-certification): when the pin moves past
-                    // upstream asap_sketchlib #221, L2 reads layer 0's
-                    // Count-Sketch directly: set `error` to
-                    // `SameAsUnionBuild` (and revisit distinct count);
-                    // entropy stays approximate.
-                    S::UnivMon => (with_heaps(MergedError::Approximate), false),
+                    // L2 reads layer 0's Count Sketch, whose counters add.
+                    // The distinct count's bound needs each layer's heap to
+                    // keep `min(|S_j|, k)` of the layer's keys, chosen
+                    // without reading the next layer's selection bit;
+                    // `UnivMon::merge` re-ranks the union of the parts'
+                    // heap keys by the merged sketch, which keeps both, and
+                    // its top-layer completeness is the union's. Entropy
+                    // and top-k read heavy items a part may have dropped.
+                    S::UnivMon => (with_heaps(MergedError::SameAsUnionBuild), false),
                     // `asap_sketchlib`'s KMV hashes every item with one
                     // shared seed (`CANONICAL_HASH_SEED`), and `KMV::merge`
                     // keeps the k smallest distinct hashes: the state of
@@ -158,12 +158,7 @@ impl FamilyCapability {
     pub fn merged_error(&self, readout: &SketchStatistic) -> Option<MergedError> {
         let merge = self.merge?;
         Some(match (merge.heap_readouts, readout) {
-            (
-                Some(heap),
-                SketchStatistic::Cardinality
-                | SketchStatistic::FrequencyEntropy
-                | SketchStatistic::TopK { .. },
-            ) => heap,
+            (Some(heap), SketchStatistic::FrequencyEntropy | SketchStatistic::TopK { .. }) => heap,
             _ => merge.error,
         })
     }

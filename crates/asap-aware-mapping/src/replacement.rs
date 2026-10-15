@@ -945,6 +945,7 @@ pub fn sketch_state_bytes(params: &SketchParams) -> Option<u64> {
         sketch_rows,
         sketch_cols,
         layers,
+        ..
     } = params
     {
         return u64::from(*sketch_rows)
@@ -7807,9 +7808,20 @@ mod tests {
         );
     }
 
+    /// A distinct count whose UnivMon fits the search's state cap: sized for
+    /// a distinct count, UnivMon keeps a heap of `⌈1.35/(δ ε²)⌉` keys on each
+    /// of its 19 layers, so `default_cardinality`'s ε ≈ 0.008 (a 2M-key heap,
+    /// about 2.5 GB) exceeds 512 MiB, while ε = 0.05 needs 54,000 keys.
+    fn fitting_cardinality() -> AggIntent {
+        AggIntent::Cardinality {
+            cols: vec![],
+            accuracy: AccuracyTarget::Epsilon(0.05),
+        }
+    }
+
     #[test]
     fn cardinality_epsilon_delta_keeps_unknown_accuracy_candidates() {
-        let q = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
+        let q = agg(vec![2], fitting_cardinality(), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let replacements = ASAPStrategies::default_cost_model().replacements(&target);
         let kinds: Vec<SketchAlgorithm> = replacements
@@ -7835,7 +7847,7 @@ mod tests {
             AggIntent::Cardinality {
                 cols: vec![],
                 accuracy: AccuracyTarget::EpsilonDelta {
-                    epsilon: 0.01,
+                    epsilon: 0.05,
                     delta: 0.01,
                 },
             },
@@ -8213,7 +8225,7 @@ mod tests {
 
     #[test]
     fn cardinality_group_keeps_all_three_candidates() {
-        let root = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
+        let root = agg(vec![2], fitting_cardinality(), metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]).unwrap();
         let agg_group = space
             .target_subdag_candidates()
@@ -8226,7 +8238,7 @@ mod tests {
                 && candidate.has_missing_accuracy_evidence()
         )));
 
-        let root = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
+        let root = agg(vec![2], fitting_cardinality(), metric_scan(&["job"]));
         let targeted = search_workload_with_targets(
             vec![(
                 "q",

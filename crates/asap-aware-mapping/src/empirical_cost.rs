@@ -355,8 +355,16 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
                 sketch_rows,
                 sketch_cols,
                 layers,
+                ..
             },
-        ) => *heap_size > 0 && *sketch_rows > 0 && *sketch_cols > 0 && (1..=64).contains(layers),
+        ) => {
+            *heap_size > 0
+                && crate::accuracy::estimators::univmon::hash_independent(
+                    *sketch_rows,
+                    *sketch_cols,
+                    *layers,
+                )
+        }
         (SketchAlgorithm::Kll, SketchParams::Kll { k, .. })
         | (SketchAlgorithm::Kmv, SketchParams::Kmv { k })
         | (SketchAlgorithm::Theta, SketchParams::Theta { k }) => *k > 0,

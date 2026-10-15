@@ -89,15 +89,15 @@ pub fn validate_summary_kernel(
                         sketch_rows,
                         sketch_cols,
                         layers,
+                        ..
                     },
-                ) if *heap_size > 0
-                    && *sketch_cols > 0
-                    && (1..=20).contains(sketch_rows)
-                    && (1..=64).contains(layers)
-                    && (*sketch_rows as usize)
-                        .checked_mul(*sketch_cols as usize)
-                        .and_then(|n| n.checked_mul(*layers as usize))
-                        .is_some() =>
+                ) if crate::summary_kernels::univmon::check_dimensions(
+                    *heap_size as usize,
+                    *sketch_rows as usize,
+                    *sketch_cols as usize,
+                    usize::from(*layers),
+                )
+                .is_ok() =>
                 {
                     false
                 }
