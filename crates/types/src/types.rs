@@ -339,8 +339,9 @@ impl RequestedAccuracy {
     /// The target plan selection checks at `root`: the requested metric, or
     /// the one derived from the root's computation — an L1-scaled absolute
     /// error for counts and top-k frequencies, a relative error for
-    /// distinct counts, and an absolute value error for anything else
-    /// (sums, arithmetic, rates, averages, extrema, frequency moments). A
+    /// distinct counts and L2 frequency moments, and an absolute value
+    /// error for anything else (sums, arithmetic, rates, averages, extrema,
+    /// entropy). A
     /// quantile root has no default: its request must name the metric. An
     /// exact request needs none.
     pub fn for_root(&self, root: &QueryRoot) -> Result<AccuracyTarget, AccuracyRequestError> {
@@ -359,7 +360,9 @@ impl RequestedAccuracy {
 fn intent_metric(intent: &AggIntent) -> Option<ErrorMetric> {
     match intent {
         AggIntent::Count { .. } | AggIntent::TopK { .. } => Some(ErrorMetric::ABSOLUTE_STREAM_L1),
-        AggIntent::Cardinality { .. } => Some(ErrorMetric::Relative),
+        AggIntent::Cardinality { .. } | AggIntent::FrequencyL2 { .. } => {
+            Some(ErrorMetric::Relative)
+        }
         _ => None,
     }
 }
@@ -516,8 +519,9 @@ mod tests {
     }
 
     /// A root's default metric follows its computation: counts and top-k
-    /// frequencies are L1-scaled absolute errors, distinct counts relative
-    /// ones, anything else (a sum among them) absolute value errors.
+    /// frequencies are L1-scaled absolute errors, distinct counts and L2
+    /// frequency moments relative ones, anything else (a sum or an entropy
+    /// among them) absolute value errors.
     #[test]
     fn root_metric_defaults_follow_the_query_intent() {
         let request = RequestedAccuracy::epsilon(0.01);
@@ -543,6 +547,20 @@ mod tests {
                 accuracy: exact.clone()
             }),
             ErrorMetric::Relative
+        );
+        assert_eq!(
+            metric(AggIntent::FrequencyL2 {
+                col: None,
+                accuracy: exact.clone()
+            }),
+            ErrorMetric::Relative
+        );
+        assert_eq!(
+            metric(AggIntent::FrequencyEntropy {
+                col: None,
+                accuracy: exact.clone()
+            }),
+            ErrorMetric::ABSOLUTE
         );
         assert_eq!(metric(AggIntent::Avg { col: None }), ErrorMetric::ABSOLUTE);
         assert_eq!(
