@@ -68,12 +68,19 @@ impl TryFrom<ExactPayload> for ExactAccumulator {
 }
 
 /// Planned evaluation of an exact summary. `lookback_ms` is the logical PromQL
-/// counter window; the evaluation range is resolved from it at run time.
+/// counter window, ending `offset_ms` before the evaluation time (PromQL
+/// `offset`); the evaluation range is resolved from them at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ExactEvaluation {
     pub statistic: Statistic,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookback_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset_ms: i64,
+}
+
+fn is_zero(ms: &i64) -> bool {
+    *ms == 0
 }
 
 impl ExactAccumulator {

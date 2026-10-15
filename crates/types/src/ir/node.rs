@@ -160,6 +160,18 @@ impl OperatorNode {
         SummaryCoverage::derive(self).ok()
     }
 
+    /// The build whose state this summary-state node carries: a
+    /// `SummaryAgg` or `PaneChain` itself, or the first input's build under
+    /// `SummaryMerge`s (merged inputs have one definition, which
+    /// [`coverage`](Self::coverage) checks). `None` for any other node.
+    pub fn summary_build(&self) -> Option<&ASAPOp> {
+        match self.asap()? {
+            op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. }) => Some(op),
+            ASAPOp::SummaryMerge { children } => children.first()?.summary_build(),
+            _ => None,
+        }
+    }
+
     /// A `SummaryMerge` is valid only over inputs with the same definition
     /// and disjoint selections.
     fn check_merge(&self) -> Result<(), SchemaDerivationError> {

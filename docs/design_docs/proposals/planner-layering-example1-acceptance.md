@@ -16,8 +16,8 @@ whose expectation needs a feature that is not in the stack yet is
 | Stage | Doc (#509) | MVP (this spec) |
 |---|---|---|
 | Query-language frontends | 1 workload `LogicalDAG` | same |
-| Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 only = **3**. Pass 2 is not implemented: the identical-expression rule is #588, window composition #601. |
-| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, every sub-DAG `NotMaterialized` = **3** (the doc's Raw plans). Materialization enumeration is #604. |
+| Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 (3), each with 2 identical-expression candidates and 6 window-composition candidates (Q1's rate and Q2's option in six 10-s tumbling panes, alone or both, each also with a shared scan) = **27**. Sliding windows are not implemented. |
+| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, every sub-DAG `NotMaterialized` = **27** (the doc's Raw plans, with panes rebuilt at every refresh). Materialization enumeration is #604. |
 | Plan selection | 1 plan | 1 plan |
 
 Every MVP candidate is one of the doc's candidates: in logical ASAP-aware
@@ -49,7 +49,7 @@ Invariants:
 * Q1 and Q2 share no node. Sharing is a logical ASAP-aware optimization
   decision.
 
-## Logical ASAP-aware optimization: 3 candidates
+## Logical ASAP-aware optimization: 3 Pass 1 candidates (27 in all)
 
 Pass 1 targets and their per-computation candidates:
 
@@ -63,14 +63,15 @@ Pass 1 targets and their per-computation candidates:
 | Id | Q1 | Q2 top-*k* |
 |---|---|---|
 | L1 | exact | exact (sort + limit 10 per job) |
-| L2 | exact | Count-Min + top-*k* heap, one per job |
-| L3 | exact | CountSketch + top-*k* heap, one per job |
+| L10 | exact | Count-Min + top-*k* heap, one per job |
+| L19 | exact | CountSketch + top-*k* heap, one per job |
 
 Ids follow the enumeration order; tests identify candidates by structure.
 
 Invariants:
 
-* Exactly 3 candidates, one per Q2 option. No duplicates.
+* Exactly 3 candidates with whole windows and no shared input, one per Q2
+  option. No duplicates. Each is followed by its 8 Pass 2 candidates.
 * Every candidate covers both queries.
 * Q1 never reaches a summary node.
 * Every target's exact option is its exact accumulator (`SummaryAgg` with an
@@ -89,13 +90,15 @@ Ignored until their feature lands:
 * A shared-input variant of every Q2 option next to the independent one
   (Pass 2 identical-expression rule, #588).
 
-## Physical ASAP-aware optimization: 3 candidates
+## Physical ASAP-aware optimization: 27 candidates
+
+The three whole-window candidates without a shared input:
 
 | Id | From | Q2 physical operators | Materialization |
 |---|---|---|---|
 | P1 | L1 | sort (partition by job) → limit 10 | all `NotMaterialized` |
-| P2 | L2 | CMS + heap build → top-10 estimate | all `NotMaterialized` |
-| P3 | L3 | CountSketch + heap build → top-10 estimate | all `NotMaterialized` |
+| P10 | L10 | CMS + heap build → top-10 estimate | all `NotMaterialized` |
+| P19 | L19 | CountSketch + heap build → top-10 estimate | all `NotMaterialized` |
 
 Q1 is the same in all three: scan → range → rate accumulator → sum
 accumulator, each finalized.

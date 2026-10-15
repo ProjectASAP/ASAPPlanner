@@ -42,9 +42,9 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 |---|---|---|
 | Query-language frontends | A: five scan → range → quantile chains. B: one. | Same; q3–q5 also have a `time_shift`. |
 | Logical ASAP-aware optimization, Pass 1 | A: exact or KLL over its own interval per query, 2⁵ = 32. B: exact, KLL. | A: exact, KLL (k = 547), DDSketch per query, 3⁵ = **243**. B: exact, KLL (k = 269), DDSketch, **3**. |
-| Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Identical-expression rule only: each Pass 1 candidate also gets its shared-input candidates (A: 3 per Pass 1 candidate; B: none). No window summaries. |
+| Logical ASAP-aware optimization, Pass 2 | A: window composition adds one EH of KLLs over [T − 5 y, T], one merge + p99 estimate per query, plus a candidate for every grouping of two or more queries onto shared window summaries ("hundreds"). B: each Pass 1 option × {none, sliding L = 5 min s = 1 min (5 active windows), 1-min tumbling (merge 5)} = 6. Independent kept. | Identical-expression rule: each Pass 1 candidate also gets its shared-input candidates (A: 3 per Pass 1 candidate; B: none). Window-composition rule, tumbling panes only: B's KLL and DDSketch each also come as 1-min tumbling panes (a `PaneChain` of 5, merged before the p99 estimate), **5** in all; A is run once, so it gets none. No sliding windows or EHs. |
 | Physical ASAP-aware optimization | See Example 4. | One physical candidate per logical candidate, every sub-DAG `NotMaterialized`. |
-| Plan selection | Not stated for Example 3. | Every candidate is valid. A: KLL for all five queries (P485); DDSketch in place of KLL ties, and the tie goes to enumeration order. B: KLL (P2, 2.100 per second), tied with DDSketch and selected on enumeration order; exact costs more (2.400). |
+| Plan selection | Not stated for Example 3. | Every candidate is valid. A: KLL for all five queries (P485); DDSketch in place of KLL ties, and the tie goes to enumeration order. B: KLL (P2, 2.100 per second); the 1-min KLL panes, rebuilt at every evaluation since nothing is materialized, cost 2.183 (the same rows and updates plus merging 5 panes per series); exact costs 2.400; DDSketch, whole or in panes, misses the rank target. |
 
 ## Invariants and tests
 
@@ -71,18 +71,20 @@ Shared data workload, except Pattern A's `arrival` is `mixed`.
 |---|---|---|
 | The query lowers to scan → range 5m → quantile, no summary | `stage0_query_language_frontends_b_lowers_to_one_range_quantile` | passes |
 | Exact and KLL options | `stage1_logical_asap_optimization_b_pass1_offers_exact_and_kll` | passes |
-| Each summary option appears with no window, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows | `stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option` | ignored: tumbling #601, sliding no PR yet |
-| Window parameters are legal: L divides W; s divides L and the evaluation interval; a tumbling length divides W and the interval | `stage1_logical_asap_optimization_b_window_parameters_are_legal` | passes (vacuously today) |
-| Sliding with L = W has no merge; tumbling merges before the estimate | `stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it` | ignored: tumbling #601, sliding no PR yet |
-| A window form that merges uses a mergeable summary (KLL, DDSketch), in both patterns | `stage1_logical_asap_optimization_window_merges_use_mergeable_summaries` | passes (vacuously today) |
+| Each summary option appears with no window, a 5-min sliding window with a 1-min slide, and 1-min tumbling windows | `stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbling_per_option` | ignored: sliding, no PR yet |
+| Each summary option appears with no window and as 1-min tumbling panes, 5 merged before the estimate | `stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_mergeable_option` | passes |
+| Window parameters are legal: L divides W; s divides L and the evaluation interval; a tumbling length divides W and the interval | `stage1_logical_asap_optimization_b_window_parameters_are_legal` | passes |
+| Sliding with L = W has no merge; tumbling merges before the estimate | `stage1_logical_asap_optimization_b_merge_only_where_the_window_form_needs_it` | ignored: sliding, no PR yet |
+| A window form that merges uses a mergeable summary (KLL, DDSketch), in both patterns | `stage1_logical_asap_optimization_window_merges_use_mergeable_summaries` | passes |
 | One selected, cheapest valid, each node charged once per consuming query | `stage3_plan_selection_b_selects_cheapest_valid` | passes |
+| Panes rebuilt at query time cost the whole build plus the merge; whole-window KLL is selected | `stage3_plan_selection_b_panes_rebuilt_at_query_time_add_the_merge` | passes |
 
-**Reading window summaries.** The IR has no window summary yet, so tests read
-it through `planner_layering_common::window_form(dag, build)`, which returns
-`WindowForm::None` today. The window-composition implementer makes it return
-`Sliding { length_ms, slide_ms }`, `Tumbling { length_ms }` or
-`ExponentialHistogram { horizon_ms }` from the new IR. Merges are read as
-`SummaryMerge` nodes between the build and the `SummaryEstimate`.
+**Reading window summaries.** Tests read a build's window summary through
+`planner_layering_common::window_form(dag, build)`: a `PaneChain` is
+`Tumbling { length_ms }` (its pane width), and any other build `None`.
+`Sliding { length_ms, slide_ms }` and `ExponentialHistogram { horizon_ms }`
+wait for their IR. Merges are read as `SummaryMerge` nodes between the build
+and the `SummaryEstimate`.
 
 ## Ambiguities and conflicts with the planner
 
@@ -107,11 +109,11 @@ it through `planner_layering_common::window_form(dag, build)`, which returns
    text has `offset 1y`. We read `as_of` as the window's end (the result of
    the offset at T), not as a second shift. The frontend lowers the offset
    from the text.
-7. **Plan selection statistics.** Time-shifted scans are priced as one minute
-   of data instead of years, and a 1-y range over a shared 5-y scan passes
-   all of its rows (#632). Once Pass 2 shares the scan (#588), these
-   estimates decide whether sharing looks cheaper, so the invariant test
-   waits on both.
+7. **Plan selection statistics.** A scan reads the window above it, through
+   any time shift, a time shift is free, and a 1-y range over a shared 5-y
+   scan keeps one year of rows. A shared scan that is not materialized is
+   still charged once per query at the longest window it serves, so sharing
+   it costs more than separate scans, and the invariant test waits on #632.
 8. **Identical-expression sharing.** Not mentioned by the doc. Once
    implemented (#588), the planner can share the `latency_ms` scan and the
    2-y time shift read by q4 and q5 (the shift sits below the range).

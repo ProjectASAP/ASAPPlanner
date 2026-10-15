@@ -141,9 +141,10 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
     let document = generate(&["--max-displayed", "1"]);
     let logical = &document["stage1_logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
-    assert!(logical["candidates"].as_array().unwrap().len() < 9);
-    // 3 Pass 1 candidates, each with 2 Pass 2 candidates.
-    assert_eq!(logical["combinations"], 9);
+    assert!(logical["candidates"].as_array().unwrap().len() < 27);
+    // 3 Pass 1 candidates, each with 8 Pass 2 candidates: shared inputs,
+    // tumbling panes, and both.
+    assert_eq!(logical["combinations"], 27);
     assert_eq!(
         document["stage3_plan_selection"]["selected"],
         full["stage3_plan_selection"]["selected"]
@@ -357,10 +358,10 @@ fn workload_above_the_candidate_limit_is_rejected() {
         );
     }
     // At the limit, it plans every candidate.
-    let document = generate(&["--max-combinations", "9"]);
+    let document = generate(&["--max-combinations", "27"]);
     assert_eq!(
         document["stage1_logical_asap_optimization"]["combinations"],
-        9
+        27
     );
 }
 
@@ -389,11 +390,11 @@ fn default_candidate_limit_is_ten_thousand() {
 fn planning_stages_without_a_limit_plan_every_candidate() {
     let workload = example1();
     let run = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
-    assert_eq!(run.stage1_logical_asap_optimization.len(), 9);
-    let limited = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), Some(8));
+    assert_eq!(run.stage1_logical_asap_optimization.len(), 27);
+    let limited = run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), Some(26));
     assert!(matches!(
         limited,
-        Err(PlanningStagesError::TooManyCandidates { limit: 8 })
+        Err(PlanningStagesError::TooManyCandidates { limit: 26 })
     ));
 }
 

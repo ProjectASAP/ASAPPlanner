@@ -30,6 +30,7 @@ const KIND_CATEGORY_JSON = `{
   "SummaryDelete": "summary",
   "SummaryEstimate": "summary",
   "SummaryMerge": "summary",
+  "PaneChain": "summary",
   "FinalizeExactAccumulator": "summary",
   "MaintainPopulation": "summary",
   "EvaluatePopulation": "summary",

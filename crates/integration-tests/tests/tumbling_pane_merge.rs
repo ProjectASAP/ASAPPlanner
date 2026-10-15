@@ -1,13 +1,14 @@
 //! Tumbling panes merged by `SummaryMerge` answer the same per-series query
-//! as one build over the whole window (#509 Example 3/4, Pattern B).
-//! The panes are written by hand here; the planner's window-composition
-//! rule emits them later.
+//! as one build over the whole window (#509 Example 3/4, Pattern B): panes
+//! written by hand, and the planner's window-composition rule's
+//! `PaneChain`, expanded into the panes the executor runs.
 mod physical_common;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use asap_aware_mapping::asap_aware_cse::{pane_sites, window_composition_variants};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::selected_dag;
 use asap_physical_operators::physical_planner::{
@@ -16,10 +17,11 @@ use asap_physical_operators::physical_planner::{
 use asap_physical_operators::runtime::Scope;
 use asap_physical_operators::values::{Batch, Value};
 use asap_types::ir::operator_properties::TimeShift;
+use asap_types::ir::pane_chain::expand_pane_chains;
 use asap_types::ir::physical_export::{compile_physical_asap_dag_with_node_ids, PhysicalASAPDAG};
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, Materialization, MaterializationAssignment, Medium,
-    NonASAPOp, Operator, OperatorNode, TimingMemo,
+    NonASAPOp, Operator, OperatorNode, QueryRoot, TimingMemo,
 };
 use asap_types::post_asap::Schema;
 use asap_types::types::{ErrorMetric, RequestedAccuracy};
@@ -79,6 +81,33 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
     (root, panes)
 }
 
+/// `root` with its summary built in tumbling panes by the planner's
+/// window-composition rule, for a query repeating every minute: the
+/// planned root (a `SummaryMerge` over one `PaneChain`) and its expansion
+/// into the panes the executor runs.
+fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
+    let roots = [QueryRoot::Operator(Rc::clone(root))];
+    let sites = pane_sites(&roots, &[Some(PANE_MS as u64)]);
+    let [site] = sites.as_slice() else {
+        panic!("one build to split: {sites:?}")
+    };
+    assert_eq!((site.pane_width_ms, site.pane_count), (PANE_MS as u64, 5));
+    let mut variants = window_composition_variants(&roots, &sites).unwrap();
+    let variant = variants.pop().unwrap();
+    assert!(variants.is_empty());
+    let QueryRoot::Operator(planned) = variant.roots.unwrap().remove(0) else {
+        panic!("an operator root")
+    };
+    planned.validate_structure().unwrap();
+    assert_eq!(
+        planned.guarantee, root.guarantee,
+        "merged panes keep the whole build's guarantee"
+    );
+    let expanded = expand_pane_chains(&planned).unwrap();
+    expanded.validate_structure().unwrap();
+    (planned, expanded)
+}
+
 /// `node` with `from` replaced by `to`.
 fn replace(
     node: &Rc<OperatorNode>,
@@ -95,13 +124,21 @@ fn replace(
     )
 }
 
-/// Two series, four positive samples per minute in [0, 5m).
+thread_local! {
+    /// How far after each 15-s step the samples fall (0: on the pane
+    /// boundaries).
+    static PHASE_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// Two series, four positive samples per minute in [0, 5m), each
+/// [`PHASE_MS`] after its 15-s step.
 fn samples() -> Vec<(&'static str, i64, f64)> {
+    let phase = PHASE_MS.with(|p| p.get());
     let mut rows = vec![];
     for (s, series) in ["a", "b"].into_iter().enumerate() {
         for minute in 0..PANES {
             for j in 0..4 {
-                let ts = minute * PANE_MS + j * 15_000;
+                let ts = minute * PANE_MS + j * 15_000 + phase;
                 rows.push((series, ts, (s * 100) as f64 + (minute * 4 + j + 1) as f64));
             }
         }
@@ -324,6 +361,14 @@ fn assert_pane_merge_matches_single_build(query: &str, accuracy: RequestedAccura
         expected,
         "retained panes"
     );
+    let (planned, expanded) = planned_panes(&single);
+    assert_eq!(
+        render(&execute(&expanded)),
+        expected,
+        "the planner's pane chain, expanded"
+    );
+    let unexpanded = compile_at_query_time(&planned).err().unwrap_or_default();
+    assert!(unexpanded.contains("PaneChain"), "{unexpanded}");
     result
 }
 
@@ -352,6 +397,85 @@ fn quantile_over_tumbling_panes_matches_single_build() {
             (estimate - exact).abs() <= 0.05 * exact,
             "{estimate} vs {exact}"
         );
+    }
+}
+
+/// Exact counter Rate over 5 merged 1-minute panes equals one 5-minute
+/// build: the merged increase is divided by the whole 5-minute window, not
+/// by one pane's minute.
+#[test]
+fn exact_rate_over_tumbling_panes_matches_single_build() {
+    let rates = assert_pane_merge_matches_single_build("rate(m[5m])", RequestedAccuracy::exact());
+    assert_eq!(rates.len(), 2);
+    // 19 counted over 285 s of samples, extrapolated to the 5-min window.
+    for rate in rates {
+        assert!((rate - 20.0 / 300.0).abs() < 1e-9, "{rate}");
+    }
+}
+
+/// With samples off the pane boundaries, Increase extrapolates to the
+/// start of the whole 5-minute window, as one build does, not to the start
+/// of the newest pane.
+#[test]
+fn exact_increase_off_the_pane_boundaries_matches_single_build() {
+    PHASE_MS.with(|p| p.set(7_000));
+    let increases =
+        assert_pane_merge_matches_single_build("increase(m[5m])", RequestedAccuracy::exact());
+    assert_eq!(increases.len(), 2);
+}
+
+/// The single build of `query`, evaluated at `evaluation_ms` over every
+/// sample, as values.
+fn whole_build_values_at(query: &str, evaluation_ms: i64) -> Vec<f64> {
+    let root = single_build(query, RequestedAccuracy::exact());
+    let exported = export(&root, &MaterializationAssignment::default());
+    let inputs: BTreeMap<u64, Batch> = exported
+        .ranges
+        .iter()
+        .map(|&(id, _)| {
+            let schema = schema_of(&exported.dag, id);
+            let rows = samples()
+                .into_iter()
+                .map(|(series, ts, value)| {
+                    let labels = BTreeMap::from([
+                        ("__name__".to_string(), "m".to_string()),
+                        ("series".to_string(), series.to_string()),
+                    ]);
+                    promql_rows::series_row(&schema, &labels, ts, value).unwrap()
+                })
+                .collect();
+            (id, Batch::try_new(schema, rows).unwrap())
+        })
+        .collect();
+    let plan = compile(
+        &exported.dag,
+        contracts(&inputs),
+        &[exported.dag.roots[0] as u64],
+    )
+    .unwrap();
+    values(&run(
+        &plan,
+        inputs,
+        Scope::Query {
+            evaluation_time_ms: evaluation_ms,
+            revision: 1,
+        },
+    ))
+}
+
+/// A counter over `[5m] offset 1m` evaluated a minute later reads the same
+/// window as one without the offset: the counter window ends at the
+/// evaluation time minus the offset, not at the evaluation time.
+#[test]
+fn offset_counter_window_ends_at_the_offset() {
+    PHASE_MS.with(|p| p.set(7_000));
+    for function in ["rate", "increase"] {
+        let plain = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS);
+        let shifted = whole_build_values_at(
+            &format!("{function}(m[5m] offset 1m)"),
+            EVALUATION_MS + PANE_MS,
+        );
+        assert_eq!(shifted, plain, "{function}");
     }
 }
 

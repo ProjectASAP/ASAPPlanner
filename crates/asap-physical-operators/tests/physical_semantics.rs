@@ -853,6 +853,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
                     asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                         statistic,
                         lookback_ms: None,
+                        offset_ms: 0,
                     },
                 ),
             )

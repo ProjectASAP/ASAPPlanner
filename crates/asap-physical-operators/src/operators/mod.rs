@@ -209,7 +209,9 @@ impl Operator {
         )
     }
 
-    pub(crate) fn with_counter_lookback(mut self, lookback: i64) -> Result<Self, Error> {
+    /// Set a counter evaluation's logical window: `lookback` long, ending
+    /// `offset` before the evaluation time.
+    pub(crate) fn with_counter_window(mut self, offset: i64, lookback: i64) -> Result<Self, Error> {
         if lookback <= 0 {
             return Err(invalid("counter lookback must be positive"));
         }
@@ -219,6 +221,7 @@ impl Operator {
         } = &mut self.kind
         {
             evaluation.lookback_ms = Some(lookback);
+            evaluation.offset_ms = offset;
         }
         Ok(self)
     }
@@ -232,6 +235,7 @@ impl Operator {
             query:
                 SummaryEvaluation::Exact(crate::summary_kernels::exact::ExactEvaluation {
                     lookback_ms: Some(lookback),
+                    offset_ms,
                     ..
                 }),
             ..
@@ -244,7 +248,9 @@ impl Operator {
                 evaluation_time_ms, ..
             } => evaluation_time_ms,
             crate::runtime::Scope::Ingestion { window_end_ms, .. } => window_end_ms,
-        };
+        }
+        .checked_sub(*offset_ms)
+        .ok_or_else(|| invalid("counter window overflows Int64"))?;
         let start = end
             .checked_sub(*lookback)
             .ok_or_else(|| invalid("counter window overflows Int64"))?;

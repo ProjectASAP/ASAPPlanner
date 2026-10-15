@@ -77,6 +77,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
+use asap_types::ir::pane_chain::{merged_chain, whole_window_build};
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
     Predicate, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
@@ -86,9 +87,9 @@ use asap_types::post_asap::guarantee::{
     ProbabilityExpr,
 };
 use asap_types::post_asap::{
-    EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Materialization,
-    NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
-    SummaryInputExpr, SummaryUpdate, WeightDomain,
+    EntityIdentity, ExactKind, ExactParams, FamilyCapability, FieldDataType, GroupingStrategy,
+    Materialization, MergedError, NonNegativeWeightProof, SketchAlgorithm, SketchKind,
+    SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
 use asap_types::pre_asap::{
@@ -838,10 +839,15 @@ pub(crate) fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
         .filter(|node| {
             matches!(
                 node.asap(),
-                Some(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(..),
-                    ..
-                })
+                Some(
+                    ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(..),
+                        ..
+                    } | ASAPOp::PaneChain {
+                        family: FieldDataType::Sketch(..),
+                        ..
+                    }
+                )
             )
         })
         .filter(|node| seen.insert(Rc::as_ptr(node)))
@@ -884,10 +890,16 @@ pub(crate) fn with_resized_summaries(
             .iter()
             .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
         let mut operator = node.operator.clone();
-        if let Operator::ASAP(ASAPOp::SummaryAgg {
-            family: FieldDataType::Sketch(kind, _),
-            ..
-        }) = &mut operator
+        if let Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _),
+                ..
+            }
+            | ASAPOp::PaneChain {
+                family: FieldDataType::Sketch(kind, _),
+                ..
+            },
+        ) = &mut operator
         {
             if let Some(params) = resize(node, kind.params()).filter(|p| p != kind.params()) {
                 *kind = SketchKind::new(kind.algorithm().clone(), params);
@@ -941,7 +953,8 @@ pub(crate) fn with_resized_summaries(
 /// distinct bound gives its failure probability. `None` for a state over
 /// computed rows or several sources.
 pub(crate) fn summary_source(state: &OperatorNode) -> Option<String> {
-    let Some(ASAPOp::SummaryAgg { child, .. }) = state.asap() else {
+    let Some(ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. }) = state.asap()
+    else {
         return None;
     };
     source_scan(child)?;
@@ -1098,6 +1111,9 @@ fn with_guarantees(
 ///
 /// [`AccuracyScope::PerValue`]: asap_types::types::AccuracyScope::PerValue
 fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+    if let Some(guarantee) = merged_panes_guarantee(node) {
+        return guarantee;
+    }
     let exact = |node: &OperatorNode| {
         node.guarantee
             .as_ref()
@@ -1241,6 +1257,66 @@ fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
         ),
         Operator::NonASAP(_) => None,
     }
+}
+
+/// The guarantee of an estimate or finalized value read from merged
+/// tumbling panes ([`merged_chain`]): the guarantee of the same read of one
+/// build over the panes' whole window ([`whole_window_build`]) when the
+/// family's merged error for that read is exact or the same as that build's
+/// (the family-capability table); none when it is approximate (evidence
+/// only, for plan selection to judge) or the family has no merge. `None` for
+/// any node that does not read merged panes.
+fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>> {
+    let (state, merged) = match node.asap()? {
+        ASAPOp::SummaryEstimate {
+            summary_input,
+            query,
+        } => {
+            let family = merged_chain(summary_input)?.asap()?.produced_state()?;
+            (
+                summary_input,
+                FamilyCapability::of(family).merged_error(query),
+            )
+        }
+        ASAPOp::FinalizeExactAccumulator { child } => {
+            let family = merged_chain(child)?.asap()?.produced_state()?;
+            (child, FamilyCapability::of(family).merge.map(|m| m.error))
+        }
+        _ => return None,
+    };
+    if !matches!(
+        merged,
+        Some(MergedError::Exact | MergedError::SameAsUnionBuild)
+    ) {
+        return Some(None);
+    }
+    let chain = merged_chain(state)?;
+    let Ok(mut whole) = whole_window_build(chain) else {
+        return Some(None);
+    };
+    // The whole window's range over the chain's input carries the guarantee
+    // composed over that input.
+    let ASAPOp::PaneChain { child: input, .. } = chain.asap()? else {
+        return Some(None);
+    };
+    if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut whole.operator {
+        let mut timed = (**range).clone();
+        timed.guarantee = composed_guarantee(&timed);
+        debug_assert!(Rc::ptr_eq(timed.children()[0], input));
+        *range = Rc::new(timed);
+    }
+    let whole = Rc::new(whole);
+    let reader = OperatorNode::with_schema(
+        node.operator.map_children(|child| {
+            if Rc::ptr_eq(child, state) {
+                Rc::clone(&whole)
+            } else {
+                Rc::clone(child)
+            }
+        }),
+        node.schema.clone(),
+    );
+    Some(composed_guarantee(&reader))
 }
 
 /// The guarantee of a distinct count of one instance per group over a

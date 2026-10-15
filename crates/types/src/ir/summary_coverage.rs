@@ -66,7 +66,7 @@ pub enum Constraint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CoverageError {
-    #[error("coverage is derived only for SummaryAgg and SummaryMerge")]
+    #[error("coverage is derived only for SummaryAgg, PaneChain and SummaryMerge")]
     NotSummary,
     #[error("summary merge requires at least one input")]
     EmptyMerge,
@@ -81,7 +81,8 @@ pub enum CoverageError {
 }
 
 impl SummaryCoverage {
-    /// Coverage of a `SummaryAgg` or `SummaryMerge`. A merge fails unless
+    /// Coverage of a `SummaryAgg`, `PaneChain` or `SummaryMerge`. A chain
+    /// covers what one build over its whole window does. A merge fails unless
     /// every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
     /// ([`SelectionRelation::OverlapAllowed`] in the family-capability
@@ -90,6 +91,12 @@ impl SummaryCoverage {
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
         match node.asap() {
             Some(ASAPOp::SummaryAgg { .. }) => Ok(of_summary_agg(node)),
+            // Back-to-back panes cover the whole window one build over it
+            // would.
+            Some(ASAPOp::PaneChain { .. }) => Ok(of_summary_agg(
+                &super::pane_chain::whole_window_build(node)
+                    .map_err(|_| CoverageError::NotSummary)?,
+            )),
             Some(ASAPOp::SummaryMerge { children }) => {
                 let inputs = children
                     .iter()

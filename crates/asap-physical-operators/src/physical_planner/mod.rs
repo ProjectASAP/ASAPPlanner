@@ -132,6 +132,19 @@ fn compile_internal(
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
+    // A pane chain stands for its panes; the deployment binds each pane's
+    // raw input, so it runs only once expanded.
+    if let Some(node) = dag
+        .nodes
+        .iter()
+        .find(|n| matches!(n.payload, Payload::ASAP(ASAPOp::PaneChain { .. })))
+    {
+        return Err(invalid(format!(
+            "node {}: a PaneChain runs as its panes; expand it with \
+             `asap_types::ir::pane_chain::expand_pane_chains` before compiling",
+            node.id
+        )));
+    }
     // Helper IDs lie above the u32 range; a larger Planner ID could collide.
     if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {
         return Err(invalid(format!("Planner node ID {} exceeds u32", node.id)));
@@ -570,29 +583,8 @@ fn compile_internal(
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_evaluation() {
-                let mut pending = vec![id];
-                let mut visited = BTreeSet::new();
-                let mut ranges = BTreeSet::new();
-                while let Some(ancestor) = pending.pop() {
-                    if !visited.insert(ancestor) {
-                        continue;
-                    }
-                    if let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) =
-                        &nodes[&ancestor].payload
-                    {
-                        ranges.insert(
-                            i64::try_from(range.as_millis())
-                                .map_err(|_| invalid("counter lookback exceeds Int64"))?,
-                        );
-                        continue;
-                    }
-                    pending.extend(dependencies.get(&ancestor).into_iter().flatten().copied());
-                }
-                if ranges.len() > 1 {
-                    return Err(invalid("counter evaluation has ambiguous logical windows"));
-                }
-                if let Some(lookback) = ranges.into_iter().next() {
-                    operator = operator.with_counter_lookback(lookback)?;
+                if let Some((offset, lookback)) = counter_window(id, &nodes, &dependencies)? {
+                    operator = operator.with_counter_window(offset, lookback)?;
                 }
             }
             if temporal_evaluation_drops_name(node) {
@@ -605,6 +597,64 @@ fn compile_internal(
     }
     physical_dag.validate()?;
     Ok(physical_dag)
+}
+
+/// The logical window of the counter evaluation `id`, as `(offset,
+/// lookback)`: it ends `offset` ms before the evaluation time and spans
+/// `lookback` ms. It is the union of the range windows the evaluation
+/// reads, each moved back by the time shifts below its range: one range for
+/// a single build, back-to-back panes for merged tumbling panes. `None`
+/// without a range; an error when the ranges do not form one window.
+fn counter_window(
+    id: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Result<Option<(i64, i64)>, Error> {
+    let millis =
+        |ms: u128| i64::try_from(ms).map_err(|_| invalid("counter lookback exceeds Int64"));
+    let mut pending = vec![id];
+    let mut visited = BTreeSet::new();
+    // (offset, end of the window back from the evaluation time) per range.
+    let mut windows = BTreeSet::new();
+    while let Some(ancestor) = pending.pop() {
+        if !visited.insert(ancestor) {
+            continue;
+        }
+        if let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&ancestor].payload {
+            let mut offset = 0i64;
+            let mut below = dependencies.get(&ancestor).and_then(|d| d.first()).copied();
+            while let Some(input) = below {
+                let Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) = &nodes[&input].payload
+                else {
+                    break;
+                };
+                if shift.at.is_none() {
+                    offset = offset
+                        .checked_add(shift.offset_ms)
+                        .ok_or_else(|| invalid("counter window overflows Int64"))?;
+                }
+                below = dependencies.get(&input).and_then(|d| d.first()).copied();
+            }
+            let back = offset
+                .checked_add(millis(range.as_millis())?)
+                .ok_or_else(|| invalid("counter window overflows Int64"))?;
+            windows.insert((offset, back));
+            continue;
+        }
+        pending.extend(dependencies.get(&ancestor).into_iter().flatten().copied());
+    }
+    let mut windows = windows.into_iter();
+    let Some((offset, mut back)) = windows.next() else {
+        return Ok(None);
+    };
+    // Back-to-back windows, newest first, form one window.
+    for (start, end) in windows {
+        if start != back {
+            return Err(invalid("counter evaluation has ambiguous logical windows"));
+        }
+        back = end;
+    }
+    Ok(Some((offset, back - offset)))
 }
 
 // Temporal summary evaluations produce PromQL vectors, whose range functions drop
@@ -773,6 +823,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
                     lookback_ms: None,
+                    offset_ms: 0,
                 }),
             )
         }
