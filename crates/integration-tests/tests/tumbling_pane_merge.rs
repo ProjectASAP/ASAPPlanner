@@ -22,14 +22,14 @@ use asap_types::ir::{
     NonASAPOp, Operator, OperatorNode, TimingMemo,
 };
 use asap_types::post_asap::Schema;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::{ErrorMetric, RequestedAccuracy};
 
 const EVALUATION_MS: i64 = 300_000;
 const PANE_MS: i64 = 60_000;
 const PANES: i64 = 5;
 
 /// The selected single-build plan for a 5-minute per-series PromQL query.
-fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+fn single_build(query: &str, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy.clone()).unwrap();
     let root = promql_rows::with_series_identity(&root).unwrap();
     selected_dag(root, accuracy)
@@ -306,7 +306,7 @@ fn values(rows: &[Vec<Value>]) -> Vec<f64> {
 }
 
 /// Returns the per-series values, which every execution path agrees on.
-fn assert_pane_merge_matches_single_build(query: &str, accuracy: AccuracyTarget) -> Vec<f64> {
+fn assert_pane_merge_matches_single_build(query: &str, accuracy: RequestedAccuracy) -> Vec<f64> {
     let single = single_build(query, accuracy);
     let (panes, pane_builds) = tumbling_panes(&single);
     let expected = execute(&single);
@@ -332,7 +332,7 @@ fn assert_pane_merge_matches_single_build(query: &str, accuracy: AccuracyTarget)
 #[test]
 fn exact_sum_over_tumbling_panes_matches_single_build() {
     let sums =
-        assert_pane_merge_matches_single_build("sum_over_time(m[5m])", AccuracyTarget::Exact);
+        assert_pane_merge_matches_single_build("sum_over_time(m[5m])", RequestedAccuracy::exact());
     assert_eq!(sums, vec![210., 2210.]);
 }
 
@@ -342,7 +342,7 @@ fn exact_sum_over_tumbling_panes_matches_single_build() {
 fn quantile_over_tumbling_panes_matches_single_build() {
     let p99 = assert_pane_merge_matches_single_build(
         "quantile_over_time(0.99, m[5m])",
-        AccuracyTarget::Epsilon(0.05),
+        RequestedAccuracy::epsilon(0.05).with_metric(ErrorMetric::Relative),
     );
     let mut p99 = p99;
     p99.sort_by(f64::total_cmp);
@@ -360,6 +360,6 @@ fn quantile_over_tumbling_panes_matches_single_build() {
 #[test]
 fn exact_increase_over_tumbling_panes_matches_single_build() {
     let increases =
-        assert_pane_merge_matches_single_build("increase(m[5m])", AccuracyTarget::Exact);
+        assert_pane_merge_matches_single_build("increase(m[5m])", RequestedAccuracy::exact());
     assert_eq!(increases.len(), 2);
 }

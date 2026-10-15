@@ -16,9 +16,11 @@ use asap_integration_tests::fixtures::metric_schema;
 use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
 use asap_types::pre_asap::{AggIntent, Reduction, Source};
 use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
-    lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
+    lower_promql(q, RequestedAccuracy::exact())
+        .unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
 fn node(op: NonASAPOp) -> Rc<OperatorNode> {
@@ -85,7 +87,7 @@ fn q07_count_is_row_count() {
         agg(
             vec![],
             AggIntent::Count {
-                accuracy: AccuracyTarget::Exact
+                accuracy: AccuracyTarget::exact()
             },
             scan("http_requests_total", &[]),
         ),
@@ -186,7 +188,7 @@ fn q10_quantile_cross_series() {
             AggIntent::Quantile {
                 col: None,
                 q: 0.99,
-                accuracy: AccuracyTarget::Exact
+                accuracy: AccuracyTarget::exact()
             },
             scan("http_requests_total", &[]),
         ),

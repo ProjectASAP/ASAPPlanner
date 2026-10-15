@@ -85,19 +85,19 @@ impl DefaultAccuracyModel {
         local: &AccuracyGuarantee,
         rule: &str,
     ) -> AccuracyGuarantee {
-        let mut terms: Vec<BoundExpr> = inputs.iter().map(|g| g.bound.clone()).collect();
-        terms.push(local.bound.clone());
+        let mut terms: Vec<BoundExpr> = inputs.iter().map(|g| g.spec.error.clone()).collect();
+        terms.push(local.spec.error.clone());
         let mut deltas: Vec<ProbabilityExpr> = inputs
             .iter()
-            .map(|g| g.failure_probability.clone())
+            .map(|g| g.spec.failure_probability.clone())
             .collect();
-        deltas.push(local.failure_probability.clone());
-        AccuracyGuarantee {
-            metric: local.metric,
-            bound: BoundExpr::Sum { terms },
-            failure_probability: ProbabilityExpr::UnionBound { terms: deltas },
-            provenance: composed_provenance(op, inputs, local, rule),
-        }
+        deltas.push(local.spec.failure_probability.clone());
+        AccuracyGuarantee::new(
+            local.spec.metric,
+            BoundExpr::Sum { terms },
+            ProbabilityExpr::UnionBound { terms: deltas },
+            composed_provenance(op, inputs, local, rule),
+        )
     }
 
     /// `(1 + ε_total) = Π (1 + ε_i)` ⇒ for two factors
@@ -110,8 +110,8 @@ impl DefaultAccuracyModel {
     ) -> AccuracyGuarantee {
         let factors: Vec<&BoundExpr> = inputs
             .iter()
-            .map(|g| &g.bound)
-            .chain(std::iter::once(&local.bound))
+            .map(|g| &g.spec.error)
+            .chain(std::iter::once(&local.spec.error))
             .collect();
         // Every non-empty subset's product: Π(1+ε_i) − 1 = Σ_{S≠∅} Π_{i∈S} ε_i.
         let mut terms = Vec::new();
@@ -130,15 +130,15 @@ impl DefaultAccuracyModel {
         }
         let mut deltas: Vec<ProbabilityExpr> = inputs
             .iter()
-            .map(|g| g.failure_probability.clone())
+            .map(|g| g.spec.failure_probability.clone())
             .collect();
-        deltas.push(local.failure_probability.clone());
-        AccuracyGuarantee {
-            metric: ErrorMetric::RelativeValue,
-            bound: BoundExpr::Sum { terms },
-            failure_probability: ProbabilityExpr::UnionBound { terms: deltas },
-            provenance: composed_provenance(op, inputs, local, "relative_cross_term_union_bound"),
-        }
+        deltas.push(local.spec.failure_probability.clone());
+        AccuracyGuarantee::new(
+            ErrorMetric::Relative,
+            BoundExpr::Sum { terms },
+            ProbabilityExpr::UnionBound { terms: deltas },
+            composed_provenance(op, inputs, local, "relative_cross_term_union_bound"),
+        )
     }
 
     fn lipschitz(
@@ -150,34 +150,34 @@ impl DefaultAccuracyModel {
         let input = &inputs[0];
         let scaled = BoundExpr::Scaled {
             factor: constant,
-            inner: Box::new(input.bound.clone()),
+            inner: Box::new(input.spec.error.clone()),
         };
         let (bound, delta) = match local {
             Some(local) => (
                 BoundExpr::Sum {
-                    terms: vec![scaled, local.bound.clone()],
+                    terms: vec![scaled, local.spec.error.clone()],
                 },
                 ProbabilityExpr::UnionBound {
                     terms: vec![
-                        input.failure_probability.clone(),
-                        local.failure_probability.clone(),
+                        input.spec.failure_probability.clone(),
+                        local.spec.failure_probability.clone(),
                     ],
                 },
             ),
-            None => (scaled, input.failure_probability.clone()),
+            None => (scaled, input.spec.failure_probability.clone()),
         };
         let exact_local = AccuracyGuarantee::exact("deterministic Lipschitz transformation");
-        AccuracyGuarantee {
-            metric: ErrorMetric::AbsoluteValue,
+        AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE,
             bound,
-            failure_probability: delta,
-            provenance: composed_provenance(
+            delta,
+            composed_provenance(
                 op,
                 inputs,
                 local.unwrap_or(&exact_local),
                 "lipschitz_union_bound",
             ),
-        }
+        )
     }
 
     /// Exact `sum` over approximate inputs: `B ≤ Σ B_i`, `δ ≤ Σ δ_i`. The
@@ -202,12 +202,12 @@ impl DefaultAccuracyModel {
             let absolute =
                 absolute_bound(input).ok_or_else(|| AccuracyError::UnsupportedComposition {
                     operator: op.clone(),
-                    input_metrics: inputs.iter().map(|g| g.metric).collect(),
+                    input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
                     local_metric: None,
                     reason: format!(
                         "input {i} carries a {:?} guarantee, which has no registered \
                          conversion to an absolute value error",
-                        input.metric
+                        input.spec.metric
                     ),
                 })?;
             if let BoundExpr::Product { factors } = &absolute {
@@ -220,7 +220,7 @@ impl DefaultAccuracyModel {
                 }
             }
             terms.push(absolute);
-            deltas.push(input.failure_probability.clone());
+            deltas.push(input.spec.failure_probability.clone());
         }
         let count = row_count(stats, &mut provenance);
         let exact_local = AccuracyGuarantee::exact("ExactAggregate(Sum)");
@@ -230,17 +230,17 @@ impl DefaultAccuracyModel {
             &exact_local,
             "exact_sum_union_bound",
         ));
-        Ok(AccuracyGuarantee {
-            metric: ErrorMetric::AbsoluteValue,
-            bound: BoundExpr::Product {
+        Ok(AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE,
+            BoundExpr::Product {
                 factors: vec![count.clone(), BoundExpr::Sum { terms }],
             },
-            failure_probability: ProbabilityExpr::Scaled {
+            ProbabilityExpr::Scaled {
                 count,
                 inner: Box::new(ProbabilityExpr::UnionBound { terms: deltas }),
             },
             provenance,
-        })
+        ))
     }
 
     /// Exact arithmetic mean over values with absolute-error guarantees.
@@ -257,11 +257,11 @@ impl DefaultAccuracyModel {
         }
         if inputs
             .iter()
-            .any(|input| input.metric != ErrorMetric::AbsoluteValue)
+            .any(|input| input.spec.metric != ErrorMetric::ABSOLUTE)
         {
             return Err(AccuracyError::UnsupportedComposition {
                 operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.metric).collect(),
+                input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
                 local_metric: None,
                 reason: "exact average requires AbsoluteValue input guarantees".into(),
             });
@@ -275,22 +275,22 @@ impl DefaultAccuracyModel {
             &exact_local,
             "exact_average_union_bound",
         ));
-        Ok(AccuracyGuarantee {
-            metric: ErrorMetric::AbsoluteValue,
-            bound: BoundExpr::Max {
-                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+        Ok(AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE,
+            BoundExpr::Max {
+                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
             },
-            failure_probability: ProbabilityExpr::Scaled {
+            ProbabilityExpr::Scaled {
                 count,
                 inner: Box::new(ProbabilityExpr::UnionBound {
                     terms: inputs
                         .iter()
-                        .map(|g| g.failure_probability.clone())
+                        .map(|g| g.spec.failure_probability.clone())
                         .collect(),
                 }),
             },
             provenance,
-        })
+        ))
     }
 
     /// Exact `max`/`min` over approximate inputs of one shared metric: the
@@ -306,14 +306,14 @@ impl DefaultAccuracyModel {
         if all_relative(inputs) {
             return Self::relative_fold(op, inputs, stats, false, "exact_extremum_relative");
         }
-        let metric = inputs[0].metric;
+        let metric = inputs[0].spec.metric;
         if inputs
             .iter()
-            .any(|g| g.metric != ErrorMetric::AbsoluteValue)
+            .any(|g| g.spec.metric != ErrorMetric::ABSOLUTE)
         {
             return Err(AccuracyError::UnsupportedComposition {
                 operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.metric).collect(),
+                input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
                 local_metric: None,
                 reason: "exact max/min requires AbsoluteValue input guarantees".into(),
             });
@@ -327,22 +327,22 @@ impl DefaultAccuracyModel {
             &exact_local,
             "exact_extremum_union_bound",
         ));
-        Ok(AccuracyGuarantee {
+        Ok(AccuracyGuarantee::new(
             metric,
-            bound: BoundExpr::Max {
-                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+            BoundExpr::Max {
+                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
             },
-            failure_probability: ProbabilityExpr::Scaled {
+            ProbabilityExpr::Scaled {
                 count,
                 inner: Box::new(ProbabilityExpr::UnionBound {
                     terms: inputs
                         .iter()
-                        .map(|g| g.failure_probability.clone())
+                        .map(|g| g.spec.failure_probability.clone())
                         .collect(),
                 }),
             },
             provenance,
-        })
+        ))
     }
 
     /// An exact sum, mean, max or min of values each within relative `α_i`
@@ -361,7 +361,7 @@ impl DefaultAccuracyModel {
         if needs_sign && stats.values_non_negative == Some(false) {
             return Err(AccuracyError::UnsupportedComposition {
                 operator: op.clone(),
-                input_metrics: inputs.iter().map(|g| g.metric).collect(),
+                input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
                 local_metric: None,
                 reason: "relative error of a sum over signed values is unbounded".into(),
             });
@@ -378,7 +378,7 @@ impl DefaultAccuracyModel {
                     BoundExpr::Product {
                         factors: vec![
                             BoundExpr::Max {
-                                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+                                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
                             },
                             BoundExpr::Unknown {
                                 statistic: statistic.clone(),
@@ -397,7 +397,7 @@ impl DefaultAccuracyModel {
             }
         } else {
             BoundExpr::Max {
-                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+                terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
             }
         };
         provenance.extend(composed_provenance(
@@ -406,20 +406,20 @@ impl DefaultAccuracyModel {
             &AccuracyGuarantee::exact("exact aggregation"),
             rule,
         ));
-        Ok(AccuracyGuarantee {
-            metric: ErrorMetric::RelativeValue,
+        Ok(AccuracyGuarantee::new(
+            ErrorMetric::Relative,
             bound,
-            failure_probability: ProbabilityExpr::Scaled {
+            ProbabilityExpr::Scaled {
                 count,
                 inner: Box::new(ProbabilityExpr::UnionBound {
                     terms: inputs
                         .iter()
-                        .map(|g| g.failure_probability.clone())
+                        .map(|g| g.spec.failure_probability.clone())
                         .collect(),
                 }),
             },
             provenance,
-        })
+        ))
     }
 
     /// Exact division of two relative-value estimates. If the numerator is
@@ -432,25 +432,25 @@ impl DefaultAccuracyModel {
     ) -> Result<AccuracyGuarantee, AccuracyError> {
         let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
             operator: op.clone(),
-            input_metrics: inputs.iter().map(|g| g.metric).collect(),
+            input_metrics: inputs.iter().map(|g| g.spec.metric).collect(),
             local_metric: None,
             reason,
         };
         if inputs.len() != 2
             || inputs
                 .iter()
-                .any(|input| input.metric != ErrorMetric::RelativeValue && !input.is_exact())
+                .any(|input| input.spec.metric != ErrorMetric::Relative && !input.is_exact())
         {
             return Err(unsupported(
                 "division needs two relative-value or exact guarantees".into(),
             ));
         }
-        let Some(numerator) = inputs[0].bound.evaluate() else {
+        let Some(numerator) = inputs[0].spec.error.evaluate() else {
             return Err(unsupported(
                 "numerator relative bound is unavailable".into(),
             ));
         };
-        let Some(denominator) = inputs[1].bound.evaluate() else {
+        let Some(denominator) = inputs[1].spec.error.evaluate() else {
             return Err(unsupported(
                 "denominator relative bound is unavailable".into(),
             ));
@@ -509,18 +509,18 @@ impl DefaultAccuracyModel {
                 }
             }
         }
-        Ok(AccuracyGuarantee {
-            metric: ErrorMetric::RelativeValue,
-            bound: BoundExpr::Constant {
+        Ok(AccuracyGuarantee::new(
+            ErrorMetric::Relative,
+            BoundExpr::Constant {
                 value: (numerator + denominator) / (1.0 - denominator),
             },
-            failure_probability: ProbabilityExpr::UnionBound {
+            ProbabilityExpr::UnionBound {
                 terms: inputs
                     .iter()
-                    .map(|input| input.failure_probability.clone())
+                    .map(|input| input.spec.failure_probability.clone())
                     .collect(),
             },
-            provenance: inputs
+            inputs
                 .iter()
                 .enumerate()
                 .map(|(input_index, guarantee)| GuaranteeSource::ChildGuarantee {
@@ -541,8 +541,16 @@ impl DefaultAccuracyModel {
                     rule: "relative_division".into(),
                 }))
                 .collect(),
-        })
+        ))
     }
+}
+
+/// Whether `guarantee` is a sketch's distinct-count estimate.
+fn estimates_distinct_count(guarantee: &AccuracyGuarantee) -> bool {
+    let cardinality = format!("{:?}", asap_types::post_asap::SketchStatistic::Cardinality);
+    guarantee.provenance.iter().any(|source| {
+        matches!(source, GuaranteeSource::SketchEvaluation { query, .. } if *query == cardinality)
+    })
 }
 
 /// Every input carries a relative-value guarantee.
@@ -550,7 +558,7 @@ fn all_relative(inputs: &[AccuracyGuarantee]) -> bool {
     !inputs.is_empty()
         && inputs
             .iter()
-            .all(|g| g.metric == ErrorMetric::RelativeValue)
+            .all(|g| g.spec.metric == ErrorMetric::Relative)
 }
 
 /// `stats.input_row_count` as a bound factor, or an `Unknown` leaf named by
@@ -570,8 +578,8 @@ fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) ->
     }
 }
 
-/// `input` with a Count-Min ([`ErrorMetric::Frequency`]) or Count Sketch
-/// ([`ErrorMetric::L2Frequency`]) bound restated as an additive absolute
+/// `input` with a Count-Min ([`ErrorMetric::ABSOLUTE_STREAM_L1`]) or Count Sketch
+/// ([`ErrorMetric::ABSOLUTE_STREAM_L2`]) bound restated as an additive absolute
 /// error: the normalized bound times its stream norm, a symbolic statistic
 /// until bound. The norm is the one `norm` names ([`StreamNorm`]), which
 /// plan selection can bind; without one (a weight computed from the
@@ -582,8 +590,8 @@ pub(crate) fn additive_as_absolute(
     norm: Option<&StreamNorm>,
 ) -> AccuracyGuarantee {
     if !matches!(
-        input.metric,
-        ErrorMetric::Frequency | ErrorMetric::L2Frequency
+        input.spec.metric,
+        ErrorMetric::ABSOLUTE_STREAM_L1 | ErrorMetric::ABSOLUTE_STREAM_L2
     ) || input.is_exact()
     {
         return input;
@@ -616,12 +624,13 @@ pub(crate) fn additive_as_absolute(
             statistic: statistic.into(),
         })
     });
-    AccuracyGuarantee {
-        metric: ErrorMetric::AbsoluteValue,
-        bound,
+    let mut absolute = AccuracyGuarantee {
         provenance,
         ..input
-    }
+    };
+    absolute.spec.metric = ErrorMetric::ABSOLUTE;
+    absolute.spec.error = bound;
+    absolute
 }
 
 /// Every `Unknown` statistic in `bound`.
@@ -642,24 +651,23 @@ fn unknown_statistics(bound: &BoundExpr, found: &mut dyn FnMut(&str)) {
 
 /// `input`'s bound converted to absolute value units, multiplying a
 /// normalized metric by the (unknown) statistic it is normalized by. `None`
-/// for a metric with no such conversion (`Rank`, `TopKMembership`).
+/// for a metric with no such conversion (`Rank`).
 fn absolute_bound(input: &AccuracyGuarantee) -> Option<BoundExpr> {
-    let normalizer = match input.metric {
-        ErrorMetric::AbsoluteValue => return Some(input.bound.clone()),
-        ErrorMetric::RelativeValue => "true_value_magnitude",
-        ErrorMetric::Cardinality => "true_cardinality",
-        ErrorMetric::Frequency => STREAM_L1_NORM,
-        ErrorMetric::L2Frequency => STREAM_L2_NORM,
+    let normalizer = match input.spec.metric {
+        ErrorMetric::ABSOLUTE => return Some(input.spec.error.clone()),
+        ErrorMetric::Relative => "true_value_magnitude",
+        ErrorMetric::ABSOLUTE_STREAM_L1 => STREAM_L1_NORM,
+        ErrorMetric::ABSOLUTE_STREAM_L2 => STREAM_L2_NORM,
         // `Rank` has no distribution-free conversion to a value error; a
         // metric this crate does not know has no registered conversion.
-        ErrorMetric::Rank | ErrorMetric::TopKMembership | _ => return None,
+        ErrorMetric::Rank | _ => return None,
     };
-    if input.bound.is_zero() {
+    if input.spec.error.is_zero() {
         return Some(BoundExpr::Zero);
     }
     Some(BoundExpr::Product {
         factors: vec![
-            input.bound.clone(),
+            input.spec.error.clone(),
             BoundExpr::Unknown {
                 statistic: normalizer.into(),
             },
@@ -736,73 +744,83 @@ pub(super) fn propagate(
         });
     }
 
-    let input_metrics: Vec<ErrorMetric> = inputs.iter().map(|g| g.metric).collect();
+    let input_metrics: Vec<ErrorMetric> = inputs.iter().map(|g| g.spec.metric).collect();
     let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
         operator: op.clone(),
         input_metrics: input_metrics.clone(),
-        local_metric: local.map(|g| g.metric),
+        local_metric: local.map(|g| g.spec.metric),
         reason,
     };
     // An exact input is compatible with every metric; only approximate
     // inputs constrain the rule.
     let approximate: Vec<&AccuracyGuarantee> = inputs.iter().filter(|g| !g.is_exact()).collect();
-    let same_metric = |metric: ErrorMetric| approximate.iter().all(|g| g.metric == metric);
+    let same_metric = |metric: ErrorMetric| approximate.iter().all(|g| g.spec.metric == metric);
 
     match op {
         CompositionOperator::CheckedRelativeDivision => {
-            if inputs.len() != 2 || local.is_some() || !same_metric(ErrorMetric::RelativeValue) {
+            if inputs.len() != 2 || local.is_some() || !same_metric(ErrorMetric::Relative) {
                 return Err(unsupported(
                     "checked division requires two exact/relative-value operands".into(),
                 ));
             }
             let a = inputs[0]
-                .bound
+                .spec
+                .error
                 .evaluate()
                 .ok_or_else(|| unsupported("unknown numerator bound".into()))?;
             let b = inputs[1]
-                .bound
+                .spec
+                .error
                 .evaluate()
                 .ok_or_else(|| unsupported("unknown denominator bound".into()))?;
             if !(0.0..1.0).contains(&b) || a < 0.0 || !a.is_finite() {
                 return Err(unsupported("invalid relative division bounds".into()));
             }
-            Ok(AccuracyGuarantee {
-                metric: ErrorMetric::RelativeValue,
-                bound: BoundExpr::Constant {
+            Ok(AccuracyGuarantee::new(
+                ErrorMetric::Relative,
+                BoundExpr::Constant {
                     value: (a + b) / (1.0 - b) + 4.0 * f64::EPSILON,
                 },
-                failure_probability: ProbabilityExpr::UnionBound {
+                ProbabilityExpr::UnionBound {
                     terms: inputs
                         .iter()
-                        .map(|g| g.failure_probability.clone())
+                        .map(|g| g.spec.failure_probability.clone())
                         .collect(),
                 },
-                provenance: composed_provenance(
+                composed_provenance(
                     op,
                     inputs,
                     &AccuracyGuarantee::exact("checked floating-point division"),
                     "checked_relative_division_union_bound",
                 ),
-            })
+            ))
         }
         CompositionOperator::ApproximateAggregate => {
             let local = local.ok_or_else(|| {
                 unsupported("approximate operator has no local guarantee to compose".into())
             })?;
-            if !same_metric(local.metric) {
+            if !same_metric(local.spec.metric) {
                 return Err(unsupported(format!(
                     "no registered cross-metric rule from {input_metrics:?} to {:?}",
-                    local.metric
+                    local.spec.metric
                 )));
             }
-            match local.metric {
-                ErrorMetric::AbsoluteValue => Ok(DefaultAccuracyModel::additive(
+            // A distinct count over approximate values is not within the
+            // inputs' relative error: no rule, as for any summary whose
+            // estimate is not a value of its inputs.
+            if estimates_distinct_count(local) {
+                return Err(unsupported(
+                    "no registered rule for a distinct count over approximate values".into(),
+                ));
+            }
+            match local.spec.metric {
+                ErrorMetric::ABSOLUTE => Ok(DefaultAccuracyModel::additive(
                     op,
                     inputs,
                     local,
                     "additive_union_bound",
                 )),
-                ErrorMetric::RelativeValue => {
+                ErrorMetric::Relative => {
                     if stats.values_non_negative == Some(false) {
                         return Err(unsupported(
                             "relative-error composition cannot use a known signed input".into(),
@@ -819,27 +837,25 @@ pub(super) fn propagate(
                         provenance.push(GuaranteeSource::UnavailableStatistic {
                             statistic: VALUES_NON_NEGATIVE.into(),
                         });
-                        return Ok(AccuracyGuarantee {
-                            metric: ErrorMetric::RelativeValue,
-                            bound: BoundExpr::Unknown {
+                        return Ok(AccuracyGuarantee::new(
+                            ErrorMetric::Relative,
+                            BoundExpr::Unknown {
                                 statistic: VALUES_NON_NEGATIVE.into(),
                             },
-                            failure_probability: ProbabilityExpr::Unknown {
+                            ProbabilityExpr::Unknown {
                                 statistic: VALUES_NON_NEGATIVE.into(),
                             },
                             provenance,
-                        });
+                        ));
                     }
                     Ok(DefaultAccuracyModel::multiplicative(op, inputs, local))
                 }
                 ErrorMetric::Rank
-                | ErrorMetric::Cardinality
-                | ErrorMetric::Frequency
-                | ErrorMetric::L2Frequency
-                | ErrorMetric::TopKMembership
+                | ErrorMetric::ABSOLUTE_STREAM_L1
+                | ErrorMetric::ABSOLUTE_STREAM_L2
                 | _ => Err(unsupported(format!(
                     "no registered same-metric composition rule for {:?} over {:?}",
-                    local.metric, local.metric
+                    local.spec.metric, local.spec.metric
                 ))),
             }
         }
@@ -849,12 +865,12 @@ pub(super) fn propagate(
                     "Lipschitz constant {constant} is not a finite non-negative number"
                 )));
             }
-            if inputs.len() != 1 || !same_metric(ErrorMetric::AbsoluteValue) {
+            if inputs.len() != 1 || !same_metric(ErrorMetric::ABSOLUTE) {
                 return Err(unsupported(
                     "Lipschitz rule is registered for exactly one AbsoluteValue input".into(),
                 ));
             }
-            if local.is_some_and(|g| g.metric != ErrorMetric::AbsoluteValue) {
+            if local.is_some_and(|g| g.spec.metric != ErrorMetric::ABSOLUTE) {
                 return Err(unsupported(
                     "Lipschitz rule needs an AbsoluteValue local guarantee".into(),
                 ));
@@ -921,23 +937,37 @@ pub(super) fn propagate(
                 rule: "topk_membership_margin_certificate".into(),
             });
             let certified = selected.is_some() && excluded.is_some() && delta.is_some();
-            Ok(AccuracyGuarantee {
-                metric: ErrorMetric::TopKMembership,
-                bound: if certified {
-                    BoundExpr::Zero
-                } else {
-                    BoundExpr::Unknown {
-                        statistic: "topk_membership_margin".into(),
-                    }
-                },
-                failure_probability: delta.map_or_else(
+            // A certified margin makes the returned key set the true one, so
+            // each returned value keeps its score's error; without one,
+            // membership and hence the values are unknown.
+            let metric = approximate
+                .first()
+                .map_or(ErrorMetric::ABSOLUTE, |score| score.spec.metric);
+            if !same_metric(metric) {
+                return Err(unsupported(
+                    "top-k selection needs scores of one metric".into(),
+                ));
+            }
+            let error = if certified {
+                BoundExpr::Max {
+                    terms: inputs.iter().map(|g| g.spec.error.clone()).collect(),
+                }
+            } else {
+                BoundExpr::Unknown {
+                    statistic: "topk_membership_margin".into(),
+                }
+            };
+            Ok(AccuracyGuarantee::new(
+                metric,
+                error,
+                delta.map_or_else(
                     || ProbabilityExpr::Unknown {
                         statistic: "topk_interval_failure_probability".into(),
                     },
                     |value| ProbabilityExpr::Constant { value },
                 ),
                 provenance,
-            })
+            ))
         }
         // An operator this crate does not know has no registered rule.
         _ => Err(unsupported("no registered rule for this operator".into())),
@@ -972,20 +1002,20 @@ mod tests {
     }
     use asap_types::pre_asap::AggIntent;
     fn abs(bound: f64, delta: f64) -> AccuracyGuarantee {
-        AccuracyGuarantee {
-            metric: ErrorMetric::AbsoluteValue,
-            bound: BoundExpr::Constant { value: bound },
-            failure_probability: ProbabilityExpr::Constant { value: delta },
-            provenance: vec![],
-        }
+        AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE,
+            BoundExpr::Constant { value: bound },
+            ProbabilityExpr::Constant { value: delta },
+            vec![],
+        )
     }
     fn rel(bound: f64) -> AccuracyGuarantee {
-        AccuracyGuarantee {
-            metric: ErrorMetric::RelativeValue,
-            bound: BoundExpr::Constant { value: bound },
-            failure_probability: ProbabilityExpr::Zero,
-            provenance: vec![],
-        }
+        AccuracyGuarantee::new(
+            ErrorMetric::Relative,
+            BoundExpr::Constant { value: bound },
+            ProbabilityExpr::Zero,
+            vec![],
+        )
     }
     fn domain(lower: f64, upper: f64) -> OperandDomain {
         OperandDomain {
@@ -996,10 +1026,9 @@ mod tests {
         }
     }
     fn with_metric(metric: ErrorMetric, bound: f64) -> AccuracyGuarantee {
-        AccuracyGuarantee {
-            metric,
-            ..abs(bound, 0.0)
-        }
+        let mut g = abs(bound, 0.0);
+        g.spec.metric = metric;
+        g
     }
     #[test]
     fn checked_division_propagates_value_bounds_and_rejects_rank_bounds() {
@@ -1008,9 +1037,9 @@ mod tests {
         let g = DefaultAccuracyModel
             .propagate(&op, &inputs, None, &Default::default())
             .unwrap();
-        assert!((g.bound.evaluate().unwrap() - 0.02 / 0.99).abs() < 1e-14);
+        assert!((g.spec.error.evaluate().unwrap() - 0.02 / 0.99).abs() < 1e-14);
         let mut rank = inputs[0].clone();
-        rank.metric = ErrorMetric::Rank;
+        rank.spec.metric = ErrorMetric::Rank;
         assert!(DefaultAccuracyModel
             .propagate(&op, &[rank.clone(), rank], None, &Default::default())
             .is_err());
@@ -1044,8 +1073,8 @@ mod tests {
                     &stats,
                 )
                 .unwrap();
-            assert!((got.bound.evaluate().unwrap() - 0.05 / 0.97).abs() < 1e-14);
-            assert_eq!(got.failure_probability.evaluate(), Some(0.));
+            assert!((got.spec.error.evaluate().unwrap() - 0.05 / 0.97).abs() < 1e-14);
+            assert_eq!(got.spec.failure_probability.evaluate(), Some(0.));
             assert_eq!(
                 got.provenance
                     .iter()
@@ -1104,9 +1133,9 @@ mod tests {
                 &PropagationStats::default(),
             )
             .unwrap();
-        assert_eq!(out.bound.evaluate(), Some(0.05));
-        assert_eq!(out.failure_probability.evaluate(), Some(0.01));
-        assert_eq!(out.metric, ErrorMetric::AbsoluteValue);
+        assert_eq!(out.spec.error.evaluate(), Some(0.05));
+        assert_eq!(out.spec.failure_probability.evaluate(), Some(0.01));
+        assert_eq!(out.spec.metric, ErrorMetric::ABSOLUTE);
     }
     #[test]
     fn additive_bounds_and_delta_union_bound_compose() {
@@ -1118,9 +1147,9 @@ mod tests {
                 &PropagationStats::default(),
             )
             .unwrap();
-        assert!((out.bound.evaluate().unwrap() - 0.05).abs() < 1e-12);
+        assert!((out.spec.error.evaluate().unwrap() - 0.05).abs() < 1e-12);
         // Union bound, not 1 − (1−0.01)(1−0.02) = 0.0298.
-        assert!((out.failure_probability.evaluate().unwrap() - 0.03).abs() < 1e-12);
+        assert!((out.spec.failure_probability.evaluate().unwrap() - 0.03).abs() < 1e-12);
         assert!(out.provenance.iter().any(|s| matches!(
             s,
             GuaranteeSource::CompositionStep { rule, .. } if rule == "additive_union_bound"
@@ -1141,8 +1170,8 @@ mod tests {
             )
             .unwrap();
         // 0.1 + 0.2 + 0.1·0.2 = 0.32, not 0.3.
-        assert!((out.bound.evaluate().unwrap() - 0.32).abs() < 1e-12);
-        assert_eq!(out.metric, ErrorMetric::RelativeValue);
+        assert!((out.spec.error.evaluate().unwrap() - 0.32).abs() < 1e-12);
+        assert_eq!(out.spec.metric, ErrorMetric::Relative);
     }
     #[test]
     fn relative_error_without_sign_knowledge_remains_symbolic() {
@@ -1172,8 +1201,8 @@ mod tests {
         let err = DefaultAccuracyModel
             .propagate(
                 &CompositionOperator::ApproximateAggregate,
-                &[with_metric(ErrorMetric::Cardinality, 0.01)],
-                Some(&with_metric(ErrorMetric::Frequency, 0.01)),
+                &[with_metric(ErrorMetric::Relative, 0.01)],
+                Some(&with_metric(ErrorMetric::ABSOLUTE_STREAM_L1, 0.01)),
                 &PropagationStats::default(),
             )
             .unwrap_err();
@@ -1181,9 +1210,9 @@ mod tests {
             err,
             AccuracyError::UnsupportedComposition {
                 input_metrics,
-                local_metric: Some(ErrorMetric::Frequency),
+                local_metric: Some(ErrorMetric::ABSOLUTE_STREAM_L1),
                 ..
-            } if input_metrics == vec![ErrorMetric::Cardinality]
+            } if input_metrics == vec![ErrorMetric::Relative]
         ));
         // Quantile rank error under value-additive logic.
         let err = DefaultAccuracyModel
@@ -1218,8 +1247,8 @@ mod tests {
                 &PropagationStats::default(),
             )
             .unwrap();
-        assert!((out.bound.evaluate().unwrap() - 0.35).abs() < 1e-12);
-        assert!((out.failure_probability.evaluate().unwrap() - 0.03).abs() < 1e-12);
+        assert!((out.spec.error.evaluate().unwrap() - 0.35).abs() < 1e-12);
+        assert!((out.spec.failure_probability.evaluate().unwrap() - 0.03).abs() < 1e-12);
     }
     #[test]
     fn exact_sum_over_approximate_sums_bounds_and_keeps_unknown_row_count_unknown() {
@@ -1231,9 +1260,9 @@ mod tests {
                 &PropagationStats::default(),
             )
             .unwrap();
-        assert_eq!(out.metric, ErrorMetric::AbsoluteValue);
+        assert_eq!(out.spec.metric, ErrorMetric::ABSOLUTE);
         assert_eq!(
-            out.bound.evaluate(),
+            out.spec.error.evaluate(),
             None,
             "unknown row count stays unknown"
         );
@@ -1241,7 +1270,7 @@ mod tests {
             s,
             GuaranteeSource::UnavailableStatistic { statistic } if statistic == "input_row_count"
         )));
-        assert!(!DefaultAccuracyModel.satisfies(&out, &AccuracyTarget::Epsilon(1.0)));
+        assert!(!DefaultAccuracyModel.satisfies(&out, &AccuracyTarget::epsilon(1.0)));
 
         let known = PropagationStats {
             input_row_count: Some(4),
@@ -1255,8 +1284,8 @@ mod tests {
                 &known,
             )
             .unwrap();
-        assert!((out.bound.evaluate().unwrap() - 0.4).abs() < 1e-12);
-        assert!((out.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
+        assert!((out.spec.error.evaluate().unwrap() - 0.4).abs() < 1e-12);
+        assert!((out.spec.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
     }
     #[test]
     fn exact_extremum_takes_the_max_bound() {
@@ -1272,8 +1301,8 @@ mod tests {
                 &known,
             )
             .unwrap();
-        assert!((out.bound.evaluate().unwrap() - 0.3).abs() < 1e-12);
-        assert!((out.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
+        assert!((out.spec.error.evaluate().unwrap() - 0.3).abs() < 1e-12);
+        assert!((out.spec.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
     }
     /// `max`/`min` of values each within relative `α_i` is within relative
     /// `max α_i` of the true extremum, whatever the signs.
@@ -1290,9 +1319,9 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(out.metric, ErrorMetric::RelativeValue);
-        assert_eq!(out.bound.evaluate(), Some(0.02));
-        assert_eq!(out.failure_probability.evaluate(), Some(0.0));
+        assert_eq!(out.spec.metric, ErrorMetric::Relative);
+        assert_eq!(out.spec.error.evaluate(), Some(0.02));
+        assert_eq!(out.spec.failure_probability.evaluate(), Some(0.0));
     }
     /// A sum or mean of relative-error values keeps the relative bound only
     /// over values known non-negative (cancellation otherwise); with the sign
@@ -1316,12 +1345,12 @@ mod tests {
                 )
             };
             let known = with(Some(true)).unwrap();
-            assert_eq!(known.metric, ErrorMetric::RelativeValue);
-            assert_eq!(known.bound.evaluate(), Some(0.01), "{op:?}");
+            assert_eq!(known.spec.metric, ErrorMetric::Relative);
+            assert_eq!(known.spec.error.evaluate(), Some(0.01), "{op:?}");
             let unknown = with(None).unwrap();
-            assert_eq!(unknown.metric, ErrorMetric::RelativeValue);
+            assert_eq!(unknown.spec.metric, ErrorMetric::Relative);
             assert_eq!(
-                unknown.bound,
+                unknown.spec.error,
                 BoundExpr::Unknown {
                     statistic: VALUES_NON_NEGATIVE.into()
                 }
@@ -1354,11 +1383,11 @@ mod tests {
                     },
                 )
                 .unwrap();
-            assert_eq!(out.bound.evaluate(), None, "{op:?}");
+            assert_eq!(out.spec.error.evaluate(), None, "{op:?}");
             let proven = out.bind(&|s| (s == statistic).then_some(1.0));
-            assert_eq!(proven.bound.evaluate(), Some(0.01), "{op:?}");
+            assert_eq!(proven.spec.error.evaluate(), Some(0.01), "{op:?}");
             let other = out.bind(&|s| (s == samples_sign_statistic("n")).then_some(1.0));
-            assert_eq!(other.bound.evaluate(), None, "{op:?}");
+            assert_eq!(other.spec.error.evaluate(), None, "{op:?}");
         }
     }
 
@@ -1375,9 +1404,9 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(out.metric, ErrorMetric::AbsoluteValue);
-        assert_eq!(out.bound.evaluate(), Some(0.25));
-        assert_eq!(out.failure_probability.evaluate(), Some(0.04));
+        assert_eq!(out.spec.metric, ErrorMetric::ABSOLUTE);
+        assert_eq!(out.spec.error.evaluate(), Some(0.25));
+        assert_eq!(out.spec.failure_probability.evaluate(), Some(0.04));
     }
     #[test]
     fn counter_functions_have_distinct_definition_rules() {
@@ -1426,9 +1455,9 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(certified.metric, ErrorMetric::TopKMembership);
-        assert_eq!(certified.bound.evaluate(), Some(0.0));
-        assert_eq!(certified.failure_probability.evaluate(), Some(0.005));
+        assert_eq!(certified.spec.metric, ErrorMetric::ABSOLUTE);
+        assert_eq!(certified.spec.error.evaluate(), Some(0.1));
+        assert_eq!(certified.spec.failure_probability.evaluate(), Some(0.005));
 
         let overlapping = DefaultAccuracyModel.propagate(
             &CompositionOperator::TopKSelection,
@@ -1456,7 +1485,7 @@ mod tests {
             )
             .unwrap();
         assert!(partial.has_unknown());
-        assert_eq!(partial.failure_probability.evaluate(), Some(0.005));
+        assert_eq!(partial.spec.failure_probability.evaluate(), Some(0.005));
 
         let invalid_partial = DefaultAccuracyModel.propagate(
             &CompositionOperator::TopKSelection,

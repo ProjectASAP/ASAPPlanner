@@ -7,7 +7,7 @@
 use asap_devtools::{lower_promql_with_data_ingestion_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::SqlDialect;
 use serde::Serialize;
 use serde_json::Value;
@@ -208,7 +208,7 @@ fn run_corpus(name: &str, source: &str, interval_ms: u64) -> CorpusResult {
         let structural_shape = structural_shape(expression);
         match lower_promql_with_data_ingestion_interval(
             expression,
-            AccuracyTarget::Exact,
+            RequestedAccuracy::exact(),
             interval_ms,
         ) {
             Ok(ir) => result.lowered.push(DumpRecord {
@@ -482,7 +482,7 @@ async fn run_sql_corpora(out_dir: PathBuf) {
                 &expression,
                 &catalog,
                 dialect.clone(),
-                AccuracyTarget::Exact,
+                RequestedAccuracy::exact(),
             )
             .await
             {

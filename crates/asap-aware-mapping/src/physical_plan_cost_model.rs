@@ -418,7 +418,7 @@ mod tests {
         OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Count {
-                accuracy: AccuracyTarget::Epsilon(0.01),
+                accuracy: AccuracyTarget::epsilon(0.01),
             }],
             output_names: vec![],
             filters: vec![],

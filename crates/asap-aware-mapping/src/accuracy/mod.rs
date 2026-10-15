@@ -113,15 +113,22 @@ impl AccuracyModel for DefaultAccuracyModel {
         let within = |value: Option<f64>, limit: f64| {
             value.is_some_and(|v| v <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON)
         };
-        match target {
-            AccuracyTarget::Exact => guarantee.is_exact(),
-            AccuracyTarget::Epsilon(eps) => within(guarantee.bound.evaluate(), *eps),
-            AccuracyTarget::EpsilonDelta { epsilon, delta } => {
-                within(guarantee.bound.evaluate(), *epsilon)
-                    && within(guarantee.failure_probability.evaluate(), *delta)
-            }
+        if target.is_exact() {
+            return guarantee.is_exact();
         }
+        within(guarantee.spec.error.evaluate(), target.error)
+            && target
+                .failure_probability
+                .is_none_or(|delta| within(guarantee.spec.failure_probability.evaluate(), delta))
     }
+}
+
+/// `target` restated in `guarantee`'s metric: the check of one summary
+/// against the target it was sized for. A summary is sized in its own
+/// native terms (#690 §4) and an aggregate intent's metric is not checked:
+/// only a query root's metric is, by plan selection.
+pub fn native_target(target: &AccuracyTarget, guarantee: &AccuracyGuarantee) -> AccuracyTarget {
+    target.clone().with_metric(guarantee.spec.metric)
 }
 
 pub(crate) use estimators::topk_capacity;
@@ -130,25 +137,22 @@ pub(crate) use estimators::topk_capacity;
 mod tests {
     use super::*;
     fn abs(bound: f64, delta: f64) -> AccuracyGuarantee {
-        AccuracyGuarantee {
-            metric: ErrorMetric::AbsoluteValue,
-            bound: BoundExpr::Constant { value: bound },
-            failure_probability: ProbabilityExpr::Constant { value: delta },
-            provenance: vec![],
-        }
+        AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE,
+            BoundExpr::Constant { value: bound },
+            ProbabilityExpr::Constant { value: delta },
+            vec![],
+        )
     }
     #[test]
     fn satisfies_is_fail_closed_on_unknowns_and_exact() {
-        let unknown = AccuracyGuarantee {
-            bound: BoundExpr::Unknown {
-                statistic: "x".into(),
-            },
-            ..abs(0.0, 0.0)
+        let mut unknown = abs(0.0, 0.0);
+        unknown.spec.error = BoundExpr::Unknown {
+            statistic: "x".into(),
         };
-        assert!(!DefaultAccuracyModel.satisfies(&unknown, &AccuracyTarget::Epsilon(1.0)));
-        assert!(!DefaultAccuracyModel.satisfies(&abs(0.0, 0.01), &AccuracyTarget::Exact));
-        assert!(
-            DefaultAccuracyModel.satisfies(&AccuracyGuarantee::exact("x"), &AccuracyTarget::Exact)
-        );
+        assert!(!DefaultAccuracyModel.satisfies(&unknown, &AccuracyTarget::epsilon(1.0)));
+        assert!(!DefaultAccuracyModel.satisfies(&abs(0.0, 0.01), &AccuracyTarget::exact()));
+        assert!(DefaultAccuracyModel
+            .satisfies(&AccuracyGuarantee::exact("x"), &AccuracyTarget::exact()));
     }
 }

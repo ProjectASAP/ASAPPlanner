@@ -17,13 +17,10 @@ use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm};
 use asap_types::pre_asap::expr_ir::ScalarValue;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
-fn accuracy() -> AccuracyTarget {
-    AccuracyTarget::EpsilonDelta {
-        epsilon: 0.01,
-        delta: 0.01,
-    }
+fn accuracy() -> RequestedAccuracy {
+    RequestedAccuracy::epsilon_delta(0.01, 0.01)
 }
 
 /// The single KLL `SummaryAgg` among the logical candidates for `pre`.

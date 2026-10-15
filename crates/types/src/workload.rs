@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::types::AccuracyTarget;
+use crate::types::RequestedAccuracy;
 use serde::{Deserialize, Serialize};
 
 // ── Query surface ─────────────────────────────────────────────────────────────
@@ -57,19 +57,20 @@ pub enum QueryLanguage {
 // ── Per-query requirements ────────────────────────────────────────────────────
 
 /// Whether the caller explicitly requested an accuracy target or inherited
-/// the normalized exact default.
+/// the normalized exact default. An explicit request may omit its metric
+/// ([`RequestedAccuracy`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccuracyRequirement {
-    Explicit(AccuracyTarget),
+    Explicit(RequestedAccuracy),
     ImplicitExact,
 }
 
 impl AccuracyRequirement {
-    pub fn target(&self) -> AccuracyTarget {
+    pub fn requested(&self) -> RequestedAccuracy {
         match self {
-            Self::Explicit(target) => target.clone(),
-            Self::ImplicitExact => AccuracyTarget::Exact,
+            Self::Explicit(requested) => requested.clone(),
+            Self::ImplicitExact => RequestedAccuracy::exact(),
         }
     }
 }
@@ -935,10 +936,9 @@ mod tests {
                     query: Query("rate(requests_total[5m])".into()),
                     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                            epsilon: 0.01,
-                            delta: 0.001,
-                        }),
+                        accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::epsilon_delta(
+                            0.01, 0.001,
+                        )),
                         response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
                     },
                     predictability: Predictability::Predictable { known_at: None },
@@ -1008,10 +1008,12 @@ mod tests {
             "predictable": {"known_at": null, "typo": true}
         }))
         .is_err());
-        assert!(serde_json::from_value::<AccuracyTarget>(serde_json::json!({
-            "EpsilonDelta": {"epsilon": 0.1, "delta": 0.01, "typo": true}
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<RequestedAccuracy>(serde_json::json!({
+                "EpsilonDelta": {"epsilon": 0.1, "delta": 0.01, "typo": true}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

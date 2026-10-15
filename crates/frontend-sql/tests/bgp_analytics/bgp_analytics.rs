@@ -41,7 +41,7 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys};
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;
 
@@ -100,7 +100,7 @@ async fn lower(q: &str) -> Result<Rc<OperatorNode>, LoweringError> {
         q,
         &catalog(),
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::Exact,
+        RequestedAccuracy::exact(),
     )
     .await
 }

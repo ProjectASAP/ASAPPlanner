@@ -20,10 +20,7 @@ use asap_types::{
 use std::rc::Rc;
 
 fn approximate() -> AccuracyTarget {
-    AccuracyTarget::EpsilonDelta {
-        epsilon: 0.05,
-        delta: 0.01,
-    }
+    AccuracyTarget::epsilon_delta(0.05, 0.01)
 }
 fn candidates_for(intent: AggIntent) -> Vec<ComputationCandidate> {
     computation_candidates_for_intent(&intent)
@@ -136,7 +133,7 @@ fn exact_quantile_stays_exact_and_approximate_keeps_both_families() {
     let exact = computation_candidates_for_intent(&AggIntent::Quantile {
         col: Some(0),
         q: 0.99,
-        accuracy: AccuracyTarget::Exact,
+        accuracy: AccuracyTarget::exact(),
     })
     .unwrap();
     assert_eq!(exact.candidates, vec![ComputationCandidate::Exact]);
@@ -304,9 +301,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(summary))]),
         Err(PerComputationCandidateError::ContainsAsap)
     ));
-    let epsilon_delta = |epsilon, delta| AccuracyTarget::EpsilonDelta { epsilon, delta };
+    let epsilon_delta = |epsilon, delta| AccuracyTarget::epsilon_delta(epsilon, delta);
     for target in [
-        AccuracyTarget::Epsilon(f64::NAN),
+        AccuracyTarget::epsilon(f64::NAN),
         epsilon_delta(0.0, 0.01),
         epsilon_delta(-0.1, 0.01),
         epsilon_delta(1.0, 0.01),
@@ -382,10 +379,7 @@ fn summary_candidates_are_unsized() {
         accuracy: approximate(),
     });
     let tight = candidates_for(AggIntent::Count {
-        accuracy: AccuracyTarget::EpsilonDelta {
-            epsilon: 0.0001,
-            delta: 0.0001,
-        },
+        accuracy: AccuracyTarget::epsilon_delta(0.0001, 0.0001),
     });
     assert_eq!(loose, tight);
 }

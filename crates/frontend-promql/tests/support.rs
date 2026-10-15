@@ -5,13 +5,13 @@ use asap_frontend_promql::{
 };
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::pre_asap::ScalarValue;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
-pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
+pub fn workload(query: &str, accuracy: RequestedAccuracy) -> PlanningWorkload {
     PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -41,7 +41,7 @@ pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
 #[allow(dead_code)]
 pub fn lower_promql(
     query: &str,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
 ) -> Result<Rc<OperatorNode>, PromqlError> {
     let mut lowered = lower_promql_workload(&workload(query, accuracy), 0)?;
     Ok(lowered.remove(0))
@@ -50,7 +50,7 @@ pub fn lower_promql(
 #[allow(dead_code)]
 pub fn lower_promql_with_histograms(
     query: &str,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
     histograms: HistogramCatalog,
 ) -> Result<Rc<OperatorNode>, PromqlError> {
     let mut lowered =
@@ -88,7 +88,7 @@ pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::physical_export
 #[allow(dead_code)]
 pub fn scalar_root(query: &str) -> ScalarExpr {
     match asap_frontend_promql::lower_promql_query_workload(
-        &workload(query, AccuracyTarget::Exact),
+        &workload(query, RequestedAccuracy::exact()),
         0,
     )
     .unwrap()
@@ -115,7 +115,7 @@ pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
 #[allow(dead_code)]
 pub fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
 ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
     asap_aware_mapping::run_stage1_to_stage3(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
@@ -130,7 +130,7 @@ pub fn run_stage1_to_stage3(
 /// The logical DAG the planner pipeline selects for the single query `root`
 /// at `accuracy`.
 #[allow(dead_code)]
-pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+pub fn selected_dag(root: Rc<OperatorNode>, accuracy: RequestedAccuracy) -> Rc<OperatorNode> {
     let run = run_stage1_to_stage3(root, accuracy);
     match run.selected_logical().expect("a plan is selected") {
         [asap_types::ir::QueryRoot::Operator(node)] => Rc::clone(node),
@@ -144,7 +144,7 @@ pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<Oper
 #[allow(dead_code)]
 pub fn logical_candidates(
     root: Rc<OperatorNode>,
-    accuracy: AccuracyTarget,
+    accuracy: RequestedAccuracy,
 ) -> Vec<Rc<OperatorNode>> {
     run_stage1_to_stage3(root, accuracy)
         .stage1_logical_asap_optimization

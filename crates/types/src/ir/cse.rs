@@ -323,7 +323,7 @@ mod tests {
             measures: vec![AggIntent::Quantile {
                 col,
                 q,
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             }],
             output_names: vec![],
             filters: vec![],
@@ -663,7 +663,7 @@ mod tests {
             node(NonASAPOp::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
                 measures: vec![AggIntent::Count {
-                    accuracy: AccuracyTarget::Exact,
+                    accuracy: AccuracyTarget::exact(),
                 }],
                 output_names: vec![],
                 filters: vec![],

@@ -18,7 +18,7 @@ pub(super) fn generic_guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::Cardinality,
+        ErrorMetric::Relative,
         relative_standard_error(*precision),
         ProbabilityExpr::Unknown {
             statistic: "hll_estimator_failure_probability".into(),
@@ -68,15 +68,15 @@ pub(crate) fn classic_guarantee(precision: u8, source: &str) -> Option<AccuracyG
     }
     let statistic = classic_failure_statistic(precision, source);
     let relative_error = relative_standard_error(precision);
-    Some(AccuracyGuarantee {
-        metric: ErrorMetric::Cardinality,
-        bound: BoundExpr::Constant {
+    Some(AccuracyGuarantee::new(
+        ErrorMetric::Relative,
+        BoundExpr::Constant {
             value: relative_error,
         },
-        failure_probability: ProbabilityExpr::Unknown {
+        ProbabilityExpr::Unknown {
             statistic: statistic.clone(),
         },
-        provenance: vec![GuaranteeSource::SketchEvaluation {
+        vec![GuaranteeSource::SketchEvaluation {
             algorithm: "Hll".into(),
             contract: CLASSIC_CONTRACT.into(),
             params: serde_json::json!({"precision": precision,
@@ -86,7 +86,7 @@ pub(crate) fn classic_guarantee(precision: u8, source: &str) -> Option<AccuracyG
                 "population_scope": "complete_evaluation_including_merged_panes"}),
             query: "Cardinality".into(),
         }],
-    })
+    ))
 }
 
 /// The failure probability a [`classic_failure_statistic`] names, given the
@@ -126,13 +126,13 @@ impl ClassicHllConfidence {
 
     pub fn guarantee(&self, precision: u8) -> Option<AccuracyGuarantee> {
         let delta = self.failure_probability(precision)?;
-        Some(AccuracyGuarantee {
-            metric: ErrorMetric::Cardinality,
-            bound: BoundExpr::Constant {
+        Some(AccuracyGuarantee::new(
+            ErrorMetric::Relative,
+            BoundExpr::Constant {
                 value: self.relative_error,
             },
-            failure_probability: ProbabilityExpr::Constant { value: delta },
-            provenance: vec![GuaranteeSource::SketchEvaluation {
+            ProbabilityExpr::Constant { value: delta },
+            vec![GuaranteeSource::SketchEvaluation {
                 algorithm: "Hll".into(),
                 contract: CLASSIC_CONTRACT.into(),
                 params: serde_json::json!({"precision": precision,
@@ -141,7 +141,7 @@ impl ClassicHllConfidence {
                     "population_scope": "complete_evaluation_including_merged_panes"}),
                 query: "Cardinality".into(),
             }],
-        })
+        ))
     }
 
     pub fn precision(&self, delta: f64) -> Option<u8> {
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn classic_guarantee_binds_the_distinct_bound() {
         let guarantee = classic_guarantee(12, "m").unwrap();
-        assert_eq!(guarantee.failure_probability.evaluate(), None);
+        assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
         let rse = relative_standard_error(12);
         let expected = ClassicHllConfidence::new(9, rse)
             .unwrap()
@@ -235,7 +235,7 @@ mod tests {
             let (precision, source) = parse_classic_failure_statistic(statistic)?;
             (source == "m").then(|| classic_failure_probability(precision, 9))
         });
-        assert_eq!(bound.failure_probability.evaluate(), Some(expected));
+        assert_eq!(bound.spec.failure_probability.evaluate(), Some(expected));
         assert!(expected <= 0.01);
         assert!(classic_failure_probability(12, 10) > 0.01);
         for too_large in [4097, u64::MAX] {
@@ -251,8 +251,8 @@ mod tests {
         let precision = model.precision(0.01).expect("finite confidence-sized HLL");
         let guarantee = model.guarantee(precision).unwrap();
         assert!(!guarantee.has_unknown());
-        assert!(guarantee.failure_probability.evaluate().unwrap() <= 0.01);
-        assert_eq!(guarantee.bound.evaluate(), Some(0.05));
+        assert!(guarantee.spec.failure_probability.evaluate().unwrap() <= 0.01);
+        assert_eq!(guarantee.spec.error.evaluate(), Some(0.05));
     }
     /// Tighter confidence must increase precision or explicitly become unavailable.
     #[test]
@@ -315,6 +315,7 @@ mod tests {
             model
                 .guarantee(16)
                 .unwrap()
+                .spec
                 .failure_probability
                 .evaluate()
                 .unwrap()
@@ -363,15 +364,15 @@ mod tests {
                 &SketchStatistic::Cardinality,
             )
             .unwrap();
-        assert_eq!(g.metric, ErrorMetric::Cardinality);
-        assert_eq!(g.failure_probability.evaluate(), None);
-        assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
+        assert_eq!(g.spec.metric, ErrorMetric::Relative);
+        assert_eq!(g.spec.failure_probability.evaluate(), None);
+        assert!(DefaultAccuracyModel.satisfies(
+            &g,
+            &AccuracyTarget::epsilon(0.01).with_metric(ErrorMetric::Relative)
+        ));
         assert!(!DefaultAccuracyModel.satisfies(
             &g,
-            &AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            }
+            &AccuracyTarget::epsilon_delta(0.01, 0.01).with_metric(ErrorMetric::Relative)
         ));
     }
 }

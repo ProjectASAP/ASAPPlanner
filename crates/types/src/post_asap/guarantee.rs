@@ -21,14 +21,16 @@
 //! guarantee). Its statement is:
 //!
 //! ```text
-//! Pr[ err_metric(estimate, truth) > bound ] <= failure_probability
+//! Pr[ err_metric(estimate, truth) > error ] <= failure_probability
 //! ```
 //!
-//! where `err_metric` is fixed by [`ErrorMetric`] and each metric has its
-//! own normalization (documented per variant). Metrics are **not**
-//! interchangeable: a cardinality error and a frequency error are different
-//! quantities, and composing them needs an explicit rule, never an implicit
-//! "add the epsilons".
+//! for each output value separately ([`AccuracyScope::PerValue`]), where
+//! `err_metric` is fixed by [`ErrorMetric`]: an absolute error (in value
+//! units or in multiples of a stream norm), a relative error, or a rank
+//! error. Metrics are **not** interchangeable: converting between them
+//! needs an explicit rule with evidence, never an implicit "compare the
+//! epsilons". [`AccuracyGuarantee`] shares its outer shape, [`AccuracySpec`],
+//! with the requirement it is checked against, [`AccuracyTarget`].
 //!
 //! ## Why expressions, not numbers
 //!
@@ -51,38 +53,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::AccuracyTarget;
-
-/// Which error quantity a [`AccuracyGuarantee`] bounds. `#[non_exhaustive]`:
-/// a deployment's own `AccuracyModel` may need a metric this crate does not
-/// enumerate yet, and downstream matches must not assume the list is closed.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorMetric {
-    /// `|estimate − truth| ≤ bound`, in the value's own units.
-    AbsoluteValue,
-    /// `|estimate − truth| ≤ bound · |truth|` — a multiplicative guarantee,
-    /// only meaningful for values of known sign (DDSketch's α).
-    RelativeValue,
-    /// The returned value's *rank* in the input multiset is within
-    /// `bound · n` of the requested rank (KLL's ε). Says nothing about how
-    /// far the returned *value* is from the true quantile value.
-    Rank,
-    /// `|estimate − truth| ≤ bound · truth` for a distinct count (HLL/Theta/
-    /// KMV's relative standard error).
-    Cardinality,
-    /// `|estimate − truth| ≤ bound · ‖f‖₁` for a point-frequency query
-    /// (CMS's ε, normalized by the stream's L1 norm).
-    Frequency,
-    /// `|estimate − truth| ≤ bound · ‖f‖₂` for a point-frequency query.
-    /// CountSketch uses this normalization; it is intentionally distinct
-    /// from CMS's [`ErrorMetric::Frequency`] (`L1`) guarantee.
-    L2Frequency,
-    /// The returned key set equals the true top-k set. The built-in model
-    /// produces this only from a supplied per-key interval margin certificate;
-    /// a frequency bound alone is insufficient.
-    TopKMembership,
-}
+pub use crate::types::{AccuracyScope, AccuracySpec, ErrorMetric, NormScale};
 
 /// A symbolic, serializable error-bound expression. Non-negative real
 /// arithmetic only — there is no subtraction, so a bound can never be
@@ -414,63 +385,83 @@ pub enum GuaranteeSource {
 }
 
 /// The machine-readable accuracy statement attached to a finalized
-/// post-ASAP value — see the module docs for its semantics.
+/// post-ASAP value — see the module docs for its semantics. Its
+/// [`AccuracySpec`] is symbolic, for plan selection to bind; a guarantee a
+/// sketch or a composition produces covers each output value separately
+/// ([`AccuracyScope::PerValue`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccuracyGuarantee {
-    pub metric: ErrorMetric,
-    pub bound: BoundExpr,
-    pub failure_probability: ProbabilityExpr,
+    pub spec: AccuracySpec<BoundExpr, ProbabilityExpr>,
+    /// The explanation trail: why the bound is what it is. No planning
+    /// decision reads it.
     pub provenance: Vec<GuaranteeSource>,
 }
 
 impl AccuracyGuarantee {
+    /// A per-value guarantee: error at most `error` in `metric`, failing
+    /// with probability at most `failure_probability`.
+    pub fn new(
+        metric: ErrorMetric,
+        error: BoundExpr,
+        failure_probability: ProbabilityExpr,
+        provenance: Vec<GuaranteeSource>,
+    ) -> Self {
+        Self {
+            spec: AccuracySpec {
+                metric,
+                error,
+                failure_probability,
+                scope: AccuracyScope::PerValue,
+            },
+            provenance,
+        }
+    }
+
     /// This guarantee with every [`BoundExpr::Unknown`] (and
     /// [`ProbabilityExpr::Unknown`]) leaf whose statistic `value` supplies
     /// replaced by that value. Plan selection binds statistics this way;
     /// a statistic `value` does not supply stays unknown.
     pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
-        Self {
-            bound: self.bound.bind(value),
-            failure_probability: self.failure_probability.bind(value),
-            ..self.clone()
-        }
+        let mut bound = self.clone();
+        bound.spec.error = self.spec.error.bind(value);
+        bound.spec.failure_probability = self.spec.failure_probability.bind(value);
+        bound
     }
 
     /// Optimistic lower bound used only to reject an impossible target.
     /// Replacing unknown non-negative contributions by zero cannot certify
     /// this candidate; the original guarantee remains unresolved.
     pub fn optimistic_floor(&self) -> Self {
-        Self {
-            metric: self.metric,
-            bound: self.bound.optimistic_floor(),
-            failure_probability: self.failure_probability.optimistic_floor(),
-            provenance: self.provenance.clone(),
-        }
+        let mut floor = self.clone();
+        floor.spec.error = self.spec.error.optimistic_floor();
+        floor.spec.failure_probability = self.spec.failure_probability.optimistic_floor();
+        floor
     }
 
     /// An unresolved bound or failure probability is not a certificate.
     pub fn has_unknown(&self) -> bool {
-        self.bound.has_unknown() || self.failure_probability.has_unknown()
+        self.spec.error.has_unknown() || self.spec.failure_probability.has_unknown()
     }
 
     /// The zero-error, zero-failure guarantee of a deterministic exact
-    /// computation. `metric` is [`ErrorMetric::AbsoluteValue`]: an exact
-    /// value is exact under every metric, and absolute error is the one
-    /// every same-metric rule accepts as a zero input.
+    /// computation. `metric` is [`ErrorMetric::ABSOLUTE`]: an exact value
+    /// is exact under every metric, and absolute error is the one every
+    /// same-metric rule accepts as a zero input.
     pub fn exact(reason: impl Into<String>) -> Self {
-        Self {
-            metric: ErrorMetric::AbsoluteValue,
-            bound: BoundExpr::Zero,
-            failure_probability: ProbabilityExpr::Zero,
-            provenance: vec![GuaranteeSource::Exact {
+        Self::new(
+            ErrorMetric::ABSOLUTE,
+            BoundExpr::Zero,
+            ProbabilityExpr::Zero,
+            vec![GuaranteeSource::Exact {
                 reason: reason.into(),
             }],
-        }
+        )
     }
 
     /// `true` iff this guarantee promises zero error with certainty.
     pub fn is_exact(&self) -> bool {
-        self.bound.is_zero() && self.failure_probability.is_zero()
+        self.spec.error.is_zero() && self.spec.failure_probability.is_zero()
     }
 
     /// How many approximate sketch evaluations contributed to this value —
@@ -566,9 +557,9 @@ mod tests {
 
     #[test]
     fn optimistic_floor_preserves_known_contributions_without_certifying() {
-        let guarantee = AccuracyGuarantee {
-            metric: ErrorMetric::Frequency,
-            bound: BoundExpr::Sum {
+        let guarantee = AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE_STREAM_L1,
+            BoundExpr::Sum {
                 terms: vec![
                     BoundExpr::Constant { value: 0.1 },
                     BoundExpr::Unknown {
@@ -576,7 +567,7 @@ mod tests {
                     },
                 ],
             },
-            failure_probability: ProbabilityExpr::UnionBound {
+            ProbabilityExpr::UnionBound {
                 terms: vec![
                     ProbabilityExpr::Constant { value: 0.02 },
                     ProbabilityExpr::Unknown {
@@ -584,13 +575,13 @@ mod tests {
                     },
                 ],
             },
-            provenance: vec![],
-        };
+            vec![],
+        );
         assert!(guarantee.has_unknown());
-        assert_eq!(guarantee.bound.evaluate(), None);
+        assert_eq!(guarantee.spec.error.evaluate(), None);
         let floor = guarantee.optimistic_floor();
-        assert_eq!(floor.bound.evaluate(), Some(0.1));
-        assert_eq!(floor.failure_probability.evaluate(), Some(0.02));
+        assert_eq!(floor.spec.error.evaluate(), Some(0.1));
+        assert_eq!(floor.spec.failure_probability.evaluate(), Some(0.02));
         assert!(!floor.has_unknown());
         assert!(guarantee.has_unknown());
     }
@@ -630,9 +621,9 @@ mod tests {
 
     #[test]
     fn guarantee_round_trips_through_json() {
-        let g = AccuracyGuarantee {
-            metric: ErrorMetric::Frequency,
-            bound: BoundExpr::Sum {
+        let g = AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE_STREAM_L1,
+            BoundExpr::Sum {
                 terms: vec![
                     BoundExpr::Constant { value: 0.01 },
                     BoundExpr::Scaled {
@@ -641,17 +632,18 @@ mod tests {
                     },
                 ],
             },
-            failure_probability: ProbabilityExpr::UnionBound {
+            ProbabilityExpr::UnionBound {
                 terms: vec![ProbabilityExpr::Constant { value: 0.01 }],
             },
-            provenance: vec![GuaranteeSource::CompositionStep {
+            vec![GuaranteeSource::CompositionStep {
                 operator: CompositionOperator::Lipschitz { constant: 2.0 },
                 rule: "lipschitz".into(),
             }],
-        };
+        );
         let json = serde_json::to_value(&g).unwrap();
-        assert_eq!(json["metric"], "frequency");
-        assert_eq!(json["bound"]["op"], "sum");
+        assert_eq!(json["spec"]["metric"], "absolute_stream_l1");
+        assert_eq!(json["spec"]["scope"], "per_value");
+        assert_eq!(json["spec"]["error"]["op"], "sum");
         let back: AccuracyGuarantee = serde_json::from_value(json).unwrap();
         assert_eq!(back, g);
     }
@@ -663,20 +655,20 @@ mod tests {
         let rows = || BoundExpr::Unknown {
             statistic: "input_row_count".into(),
         };
-        let g = AccuracyGuarantee {
-            metric: ErrorMetric::AbsoluteValue,
-            bound: BoundExpr::Product {
+        let g = AccuracyGuarantee::new(
+            ErrorMetric::ABSOLUTE,
+            BoundExpr::Product {
                 factors: vec![BoundExpr::Constant { value: 0.01 }, rows()],
             },
-            failure_probability: ProbabilityExpr::Scaled {
+            ProbabilityExpr::Scaled {
                 count: rows(),
                 inner: Box::new(ProbabilityExpr::Constant { value: 1e-4 }),
             },
-            provenance: vec![],
-        };
+            vec![],
+        );
         let bound = g.bind(&|statistic| (statistic == "input_row_count").then_some(10.0));
-        assert_eq!(bound.bound.evaluate(), Some(0.1));
-        assert!((bound.failure_probability.evaluate().unwrap() - 1e-3).abs() < 1e-12);
+        assert_eq!(bound.spec.error.evaluate(), Some(0.1));
+        assert!((bound.spec.failure_probability.evaluate().unwrap() - 1e-3).abs() < 1e-12);
         let unbound = g.bind(&|_| None);
         assert_eq!(unbound, g);
     }

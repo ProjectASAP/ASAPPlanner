@@ -21,7 +21,7 @@ pub fn compile_physical_asap_dag(
 /// with the built-in models.
 pub fn selected_dag(
     root: Rc<OperatorNode>,
-    accuracy: planner_types::types::AccuracyTarget,
+    accuracy: planner_types::types::RequestedAccuracy,
 ) -> Rc<OperatorNode> {
     let run = run_stage1_to_stage3(root, accuracy);
     let [QueryRoot::Operator(selected)] = run.selected_logical().expect("a plan is selected")
@@ -36,7 +36,7 @@ pub fn selected_dag(
 /// compose panics, so none is silently skipped.
 pub fn logical_candidates(
     root: Rc<OperatorNode>,
-    accuracy: planner_types::types::AccuracyTarget,
+    accuracy: planner_types::types::RequestedAccuracy,
 ) -> Vec<Rc<OperatorNode>> {
     run_stage1_to_stage3(root, accuracy)
         .stage1_logical_asap_optimization
@@ -56,7 +56,7 @@ pub fn logical_candidates(
 
 fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
-    accuracy: planner_types::types::AccuracyTarget,
+    accuracy: planner_types::types::RequestedAccuracy,
 ) -> asap_aware_mapping::Stage1ToStage3Run<usize> {
     use planner_types::workload::{DataArrival, DataWorkload, Evidence, EvidenceSource, Rate};
     let data = DataWorkload {

@@ -468,10 +468,7 @@ mod tests {
             implementation_version: "test-v1".into(),
         };
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            },
+            accuracy: AccuracyTarget::epsilon_delta(0.01, 0.01),
         };
         let records = [
             (SketchAlgorithm::Cms, 20.0),

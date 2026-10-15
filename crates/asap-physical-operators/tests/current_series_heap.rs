@@ -12,6 +12,7 @@ use asap_physical_operators::{
 use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use planner_types::types::RequestedAccuracy;
 use planner_types::{post_asap::*, pre_asap::DataType};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -296,7 +297,7 @@ fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
 #[test]
 fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     use asap_physical_operators::physical_planner::{compile, promql_rows::with_series_identity};
-    use planner_types::{types::AccuracyTarget, workload::*};
+    use planner_types::workload::*;
     use std::rc::Rc;
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
@@ -304,7 +305,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
             query_batch: Some(vec![BatchEntry {
                 query: Query("topk by(job)(1, m)".into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                    accuracy: AccuracyRequirement::Explicit(RequestedAccuracy::exact()),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,

@@ -10,10 +10,11 @@
 //! are label-preserving and keep the schema open.
 
 use asap_integration_tests::fixtures::lower_promql;
-use asap_types::types::AccuracyTarget;
+use asap_types::types::RequestedAccuracy;
 
 fn lower(q: &str) -> std::rc::Rc<asap_types::ir::OperatorNode> {
-    lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
+    lower_promql(q, RequestedAccuracy::exact())
+        .unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
 // bare scan is open — the metric's full label set is unknown at plan time

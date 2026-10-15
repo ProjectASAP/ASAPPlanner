@@ -13,7 +13,7 @@ pub(super) fn guarantee(
         algorithm,
         params,
         query,
-        ErrorMetric::RelativeValue,
+        ErrorMetric::Relative,
         *alpha,
         ProbabilityExpr::Zero,
         "ddsketch_relative_error_alpha_v1",

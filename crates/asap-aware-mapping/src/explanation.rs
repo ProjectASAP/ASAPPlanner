@@ -645,7 +645,7 @@ mod tests {
             AggIntent::Quantile {
                 col: None,
                 q: 0.99,
-                accuracy: AccuracyTarget::Exact,
+                accuracy: AccuracyTarget::exact(),
             },
             metric_scan(&["job"]),
         );
