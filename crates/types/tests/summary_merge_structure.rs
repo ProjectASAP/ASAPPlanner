@@ -138,7 +138,7 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
 /// which subtract.
 #[test]
 fn family_capability_table() {
-    use MergedError::{Approximate, Exact, SameAsUnionBuild};
+    use MergedError::{Exact, SameAsUnionBuild};
     use SelectionRelation::{Disjoint, DisjointInTime, OverlapAllowed};
     let (width, depth, heap_size) = (64, 4, 10);
     for (family, merge, subtractable) in [
