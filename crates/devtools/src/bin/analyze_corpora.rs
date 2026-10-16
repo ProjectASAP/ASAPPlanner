@@ -546,12 +546,12 @@ async fn main() {
         while let Some(arg) = args.next() {
             if arg == "--out-dir" {
                 out_dir = PathBuf::from(args.next().expect("--out-dir requires a path"));
-            } else if arg == "--data-ingestion-interval-ms" {
+            } else if arg == "--sample-interval-ms" {
                 interval_ms = Some(
                     args.next()
-                        .expect("--data-ingestion-interval-ms requires a value")
+                        .expect("--sample-interval-ms requires a value")
                         .parse()
-                        .expect("--data-ingestion-interval-ms must be an unsigned integer"),
+                        .expect("--sample-interval-ms must be an unsigned integer"),
                 );
             } else {
                 panic!("unknown corpus-mode argument: {arg}");
@@ -559,7 +559,7 @@ async fn main() {
         }
         run_corpora(
             out_dir,
-            interval_ms.expect("--data-ingestion-interval-ms is required for --corpora"),
+            interval_ms.expect("--sample-interval-ms is required for --corpora"),
         );
         return;
     }

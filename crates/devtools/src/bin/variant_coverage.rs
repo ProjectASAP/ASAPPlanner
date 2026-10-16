@@ -1,4 +1,4 @@
-// cargo run -p asap-lower --bin variant_coverage -- --data-ingestion-interval-ms 1000
+// cargo run -p asap-lower --bin variant_coverage -- --sample-interval-ms 1000
 //
 // Lowers every query in every corpus we have (PromQL + SQL), walks the
 // resulting `OperatorNode` DAGs, and reports which IR variants show up — per
@@ -248,23 +248,23 @@ fn report(r: &CorpusResult) {
     println!();
 }
 
-fn parse_ingestion_interval() -> u64 {
+fn parse_sample_interval() -> u64 {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--data-ingestion-interval-ms" {
+        if arg == "--sample-interval-ms" {
             return args
                 .next()
-                .expect("--data-ingestion-interval-ms requires a value")
+                .expect("--sample-interval-ms requires a value")
                 .parse()
-                .expect("--data-ingestion-interval-ms must be an unsigned integer");
+                .expect("--sample-interval-ms must be an unsigned integer");
         }
     }
-    panic!("--data-ingestion-interval-ms is required")
+    panic!("--sample-interval-ms is required")
 }
 
 #[tokio::main]
 async fn main() {
-    let interval_ms = parse_ingestion_interval();
+    let interval_ms = parse_sample_interval();
     let mut results = Vec::new();
 
     // ── PromQL corpora ──
