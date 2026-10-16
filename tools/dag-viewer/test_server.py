@@ -219,7 +219,6 @@ class WriteExamplesTests(unittest.TestCase):
             self.assertTrue((root / "out" / "a.json").exists())
 
 
-@unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
 def post_plan(payload: dict) -> dict:
     """POST `payload` to /api/plan on a fresh server and return the document."""
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -237,6 +236,7 @@ def post_plan(payload: dict) -> dict:
         httpd.server_close()
 
 
+@unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
 class PlanEndpointTests(unittest.TestCase):
     def test_plan_endpoint_returns_the_stage_pipeline_document(self):
         document = post_plan({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}]})

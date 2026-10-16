@@ -121,6 +121,7 @@ class ValidationTests(unittest.TestCase):
                 roots=physical(d)[0]["dag"]["roots"][:1], scalar_roots=[[2, "EvalTimestamp"]]),
             "scalar roots out of order": lambda d: physical(d)[0]["dag"].update(
                 roots=[], scalar_roots=[[1, "EvalTimestamp"], [0, "EvalTimestamp"]]),
+            "scalar roots not an array": lambda d: physical(d)[0]["dag"].update(scalar_roots={"0": "EvalTimestamp"}),
             "scalar root reads no node": lambda d: physical(d)[0]["dag"].update(
                 roots=physical(d)[0]["dag"]["roots"][:1], scalar_roots=[[1, {"PromqlScalarFromVector": 99}]]),
         }
@@ -129,6 +130,16 @@ class ValidationTests(unittest.TestCase):
                 doc = example1()
                 mutate(doc)
                 self.assertNotEqual(self.validate(doc), [])
+
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class ScalarTextTests(unittest.TestCase):
+    """A scalar expression's short text."""
+
+    def test_arithmetic_names_its_operator(self):
+        """`ArithmeticOpKind` serializes as a string, e.g. `"Add"`."""
+        expr = {"Arithmetic": {"op": "Add", "left": "EvalTimestamp", "right": {"Literal": {"Float64": 2}}, "semantics": "Sql"}}
+        self.assertEqual(stages_js().call("stageScalarText", expr), "(time() Add 2)")
 
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
