@@ -294,6 +294,50 @@ fn heap_sketch_states_load_as_dag_summary_values() {
     }
 }
 
+// A factory-built top-k state and the state the DAG's keyed build makes
+// (`WeightedFrequency::new`, updated with the key's `Utf8` label values) are
+// interchangeable: merged either way, they equal one build over both inputs.
+#[test]
+fn factory_and_dag_heap_states_are_interchangeable() {
+    use asap_physical_operators::{
+        summary_kernels::weighted_frequency::WeightedFrequency, values::Value,
+    };
+    use asap_sketchlib::FrequencyAlgorithm;
+    let estimate = |state: &dyn AggregateCore, i: usize| {
+        state
+            .as_any()
+            .downcast_ref::<WeightedFrequency>()
+            .expect("the DAG's weighted frequency state")
+            .point_estimate(&[Value::Utf8(format!("host-{i}").into())])
+            .unwrap()
+    };
+    for (algorithm, frequency) in [
+        (SketchAlgorithm::CmsWithHeap, FrequencyAlgorithm::Cms),
+        (
+            SketchAlgorithm::CountSketchWithHeap,
+            FrequencyAlgorithm::CountSketch,
+        ),
+    ] {
+        let family = heap_sketch(algorithm.clone(), 1_024, 5, 4);
+        let factory = build_weighted_frequency(&family, [(0, 1.0), (1, 2.0)]);
+        let mut dag = WeightedFrequency::new(frequency, 1_024, 5, 4).unwrap();
+        dag.update(&[Value::Utf8("host-0".into())], 3.0).unwrap();
+        let union = build_weighted_frequency(&family, [(0, 1.0), (1, 2.0), (0, 3.0)]);
+        for merged in [
+            factory.merge_with(&dag).unwrap(),
+            dag.merge_with(factory.as_ref()).unwrap(),
+        ] {
+            for i in 0..2 {
+                assert_eq!(
+                    estimate(merged.as_ref(), i),
+                    estimate(union.as_ref(), i),
+                    "{algorithm:?} host-{i}"
+                );
+            }
+        }
+    }
+}
+
 // Count-Min needs nonnegative weights; a negative input is an error at
 // validation, never silently dropped.
 #[test]

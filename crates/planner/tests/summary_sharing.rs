@@ -547,5 +547,24 @@ async fn exact_state_roots_are_finalized() {
             "{query}: {:?}",
             root.output_schema
         );
+        // With nothing materialized, the root and the exact state it reads
+        // run at query time.
+        use asap_types::post_asap::{DataPrimitive, ExecutionDataState, ExecutionTiming};
+        assert_eq!(root.output_state, ExecutionDataState::QUERY_ROWS, "{query}");
+        let state = dag
+            .edges
+            .iter()
+            .find(|edge| edge.consumer == root.id)
+            .map(|edge| edge.producer)
+            .unwrap();
+        let state = dag.nodes.iter().find(|node| node.id == state).unwrap();
+        assert_eq!(
+            state.output_state,
+            ExecutionDataState {
+                timing: ExecutionTiming::QueryTime,
+                primitive: DataPrimitive::SummaryState,
+            },
+            "{query}"
+        );
     }
 }

@@ -281,7 +281,7 @@ impl PlanOutput {
     pub fn execution_timed_dag(
         &self,
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
-        // One memo, so a node shared by several roots is timed and exported once.
+        // One memo, so a node several roots share by `Rc` is timed and exported once.
         let mut memo = TimingMemo::new();
         let assignment = MaterializationAssignment::default();
         let timed = self
@@ -617,6 +617,28 @@ mod tests {
     fn contract_accepts_an_empty_workload() {
         let output = PlanOutput::new(Vec::new());
         assert!(check_contract(&output, "stub", 0).is_ok());
+    }
+
+    /// An empty workload has no DAG: the export's `NoRoots`, wrapped in
+    /// `InvalidPhysicalDAG`. A workload of only literal scalars exports a DAG
+    /// with no nodes, just its `scalar_roots`.
+    #[test]
+    fn execution_timed_dag_of_an_empty_and_a_literal_only_workload() {
+        use asap_types::ir::physical_export::PhysicalASAPDAGValidationError;
+        use asap_types::ir::ScalarExpr;
+        assert_eq!(
+            PlanOutput::new(Vec::new()).execution_timed_dag().err(),
+            Some(ExecutionDataStateError::InvalidPhysicalDAG(
+                PhysicalASAPDAGValidationError::NoRoots
+            ))
+        );
+        let mut literal = PlanOutput::new(Vec::new());
+        literal.scalar_roots = vec![(0, ScalarExpr::literal_f64(1.0))];
+        let dag = literal.execution_timed_dag().unwrap();
+        assert!(dag.nodes.is_empty() && dag.roots.is_empty());
+        let [(0, ScalarExpr::Literal(_))] = dag.scalar_roots.as_slice() else {
+            panic!("one literal scalar root: {:?}", dag.scalar_roots)
+        };
     }
 
     /// Registering a name twice fails instead of overwriting, so a comparison

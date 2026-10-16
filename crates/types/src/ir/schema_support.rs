@@ -100,3 +100,21 @@ pub fn with_promql_series_identity(
     }
     visit(root, &mut HashMap::new())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::with_promql_series_identity;
+    use crate::ir::{NonASAPOp, Operator, OperatorNode, ScalarExpr};
+    use crate::pre_asap::ScalarValue;
+
+    // A direct scalar literal (`vector(1)`) stays a valid vector input when
+    // series identity is realized.
+    #[test]
+    fn series_identity_accepts_direct_vector_literal() {
+        let root = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::PromqlVectorFromScalar(
+            ScalarExpr::Literal(ScalarValue::Float64(1.0)),
+        )))
+        .unwrap();
+        assert!(with_promql_series_identity(&root).is_ok());
+    }
+}

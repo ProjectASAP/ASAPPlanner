@@ -365,6 +365,38 @@ mod tests {
         assert_ne!(ra, rb);
     }
 
+    // Two aggregates that differ only in one measure's `FILTER` predicate
+    // compute different values, so structural sharing keeps them apart.
+    #[test]
+    fn filtered_and_unfiltered_aggregates_do_not_merge() {
+        use crate::ir::Predicate;
+        use crate::pre_asap::ScalarValue;
+        let unfiltered = quantile_agg(vec![1], Some(2), 0.5);
+        let filtered = node(NonASAPOp::Aggregate {
+            reduction: Reduction::by(vec![1]),
+            measures: vec![AggIntent::Quantile {
+                col: Some(2),
+                q: 0.5,
+                accuracy: AccuracyTarget::exact(),
+            }],
+            output_names: vec![],
+            filters: vec![Some(Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(3)),
+                op: CompareOpKind::Gt,
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+                semantics: crate::ir::ExprSemantics::Sql,
+            }))],
+            having: None,
+            child: scan(),
+        });
+        let (ra, rb) = two_roots(unfiltered, filtered);
+        assert!(
+            !Rc::ptr_eq(&ra, &rb),
+            "a filtered measure must not be shared"
+        );
+        assert_ne!(ra, rb);
+    }
+
     #[test]
     fn no_unique_keys_means_no_merge_even_when_structurally_identical() {
         let a = quantile_agg(vec![], Some(2), 0.9);

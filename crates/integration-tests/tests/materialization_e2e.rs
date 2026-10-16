@@ -208,6 +208,29 @@ fn job_samples<'a>(
     }
 }
 
+/// Values 1..=100 at 300 s, one row each, in every Float64 column of
+/// `schema`.
+fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
+    let rows = (1..=100)
+        .map(|value| {
+            schema
+                .fields
+                .iter()
+                .map(|field| match field.dtype {
+                    asap_types::post_asap::FieldDataType::Plain(
+                        asap_types::pre_asap::DataType::Float64,
+                    ) => Value::Float64(f64::from(value)),
+                    asap_types::post_asap::FieldDataType::Plain(
+                        asap_types::pre_asap::DataType::Timestamp,
+                    ) => Value::Timestamp(300_000),
+                    _ => panic!("unexpected field {field:?}"),
+                })
+                .collect()
+        })
+        .collect();
+    Batch::try_new(schema.clone(), rows).unwrap()
+}
+
 /// `MatAtIngestion` puts the quantile's state in precompute;
 /// `NotMaterialized` leaves precompute empty and reads the raw source at
 /// query time; both answer alike.
@@ -217,38 +240,68 @@ fn materialization_decides_precompute_contents() {
     let mut answers = Vec::new();
     for assignment in placements() {
         let dag = timed_dag(&root, &assignment);
-        let batch = |schema: &SchemaRef, _: &str| {
-            let rows = (1..=100)
-                .map(|value| {
-                    schema
-                        .fields
-                        .iter()
-                        .map(|field| match field.dtype {
-                            asap_types::post_asap::FieldDataType::Plain(
-                                asap_types::pre_asap::DataType::Float64,
-                            ) => Value::Float64(f64::from(value)),
-                            asap_types::post_asap::FieldDataType::Plain(
-                                asap_types::pre_asap::DataType::Timestamp,
-                            ) => Value::Timestamp(300_000),
-                            _ => panic!("unexpected field {field:?}"),
-                        })
-                        .collect()
-                })
-                .collect();
-            Batch::try_new(schema.clone(), rows).unwrap()
-        };
         let ingestion = Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 300_000,
             revision: 1,
         };
-        let (values, frontier) = execute(&dag, &batch, ingestion, 300_000);
+        let (values, frontier) = execute(&dag, &values_1_to_100, ingestion, 300_000);
         assert_eq!(frontier, states(&dag));
         answers.push(values);
     }
     assert_eq!(answers[1].len(), 1);
     assert!(!states(&timed_dag(&root, &placements()[1])).is_empty());
     assert_eq!(answers[0], answers[1]);
+}
+
+/// Mixed placement in one DAG: one summary `MatAtIngestion` (in precompute)
+/// and the other `NotMaterialized` (built from the raw source at query
+/// time) answer like the all-query-time placement.
+#[test]
+fn mixed_placement_answers_like_query_time() {
+    let accuracy = AccuracyTarget::max_error(0.01);
+    let root = lower_promql(
+        "quantile(0.99, latency) + quantile(0.5, latency)",
+        accuracy.clone(),
+    )
+    .unwrap();
+    let sketches = |candidate: &Rc<OperatorNode>| -> Vec<Rc<OperatorNode>> {
+        OperatorNode::reachable(candidate)
+            .into_iter()
+            .filter(|node| {
+                matches!(
+                    node.asap(),
+                    Some(ASAPOp::SummaryAgg {
+                        family: asap_types::post_asap::FieldDataType::Sketch(..),
+                        ..
+                    })
+                )
+            })
+            .collect()
+    };
+    let root = logical_candidates(root, accuracy)
+        .into_iter()
+        .find(|candidate| sketches(candidate).len() == 2)
+        .expect("a candidate with two sketches");
+    let mut mixed = MaterializationAssignment::default();
+    mixed.set(&sketches(&root)[0], AT_INGESTION);
+    let mut answers = Vec::new();
+    for assignment in [MaterializationAssignment::default(), mixed] {
+        let dag = timed_dag(&root, &assignment);
+        let ingestion = Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: 300_000,
+            revision: 1,
+        };
+        let (values, frontier) = execute(&dag, &values_1_to_100, ingestion, 300_000);
+        assert_eq!(frontier, states(&dag));
+        answers.push((values, frontier.len()));
+    }
+    // Only the assigned sketch is stored.
+    assert_eq!(answers[0].1, 0);
+    assert_eq!(answers[1].1, 1);
+    assert_eq!(answers[1].0.len(), 1);
+    assert_eq!(answers[0].0, answers[1].0);
 }
 
 /// A maintained current-series population: `MatAtIngestion` stores it in
@@ -269,6 +322,7 @@ fn population_materialization_decides_precompute_contents() {
         .expect("a maintained population");
     let mut stored = MaterializationAssignment::default();
     stored.set(&population, AT_INGESTION);
+    assert!(!states(&timed_dag(&root, &stored)).is_empty());
     let mut answers = Vec::new();
     for assignment in [MaterializationAssignment::default(), stored] {
         let dag = timed_dag(&root, &assignment);

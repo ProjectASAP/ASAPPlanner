@@ -87,15 +87,19 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
 /// into the panes the executor runs.
 fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let roots = [QueryRoot::Operator(Rc::clone(root))];
-    let sites = pane_candidates(&roots, &[Some(PANE_MS as u64)]);
-    let [site] = sites.as_slice() else {
-        panic!("one build to split: {sites:?}")
+    let rule_candidates = pane_candidates(&roots, &[Some(PANE_MS as u64)]);
+    let [rule_candidate] = rule_candidates.as_slice() else {
+        panic!("one build to split: {rule_candidates:?}")
     };
-    assert_eq!((site.pane_width_ms, site.pane_count), (PANE_MS as u64, 5));
-    let mut variants = window_composition_pass2_candidates(&roots, &sites).unwrap();
-    let variant = variants.pop().unwrap();
-    assert!(variants.is_empty());
-    let QueryRoot::Operator(planned) = variant.roots.unwrap().remove(0) else {
+    assert_eq!(
+        (rule_candidate.pane_width_ms, rule_candidate.pane_count),
+        (PANE_MS as u64, 5)
+    );
+    let mut pass2_candidates =
+        window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
+    let pass2_candidate = pass2_candidates.pop().unwrap();
+    assert!(pass2_candidates.is_empty());
+    let QueryRoot::Operator(planned) = pass2_candidate.roots.unwrap().remove(0) else {
         panic!("an operator root")
     };
     planned.validate_structure().unwrap();
@@ -124,21 +128,17 @@ fn replace(
     )
 }
 
-thread_local! {
-    /// How far after each 15-s step the samples fall (0: on the pane
-    /// boundaries).
-    static PHASE_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
-}
+/// One raw sample: series, timestamp (ms) and value.
+type Sample = (&'static str, i64, f64);
 
 /// Two series, four positive samples per minute in [0, 5m), each
-/// [`PHASE_MS`] after its 15-s step.
-fn samples() -> Vec<(&'static str, i64, f64)> {
-    let phase = PHASE_MS.with(|p| p.get());
+/// `phase_ms` after its 15-s step (0: on the pane boundaries).
+fn samples(phase_ms: i64) -> Vec<Sample> {
     let mut rows = vec![];
     for (s, series) in ["a", "b"].into_iter().enumerate() {
         for minute in 0..PANES {
             for j in 0..4 {
-                let ts = minute * PANE_MS + j * 15_000 + phase;
+                let ts = minute * PANE_MS + j * 15_000 + phase_ms;
                 rows.push((series, ts, (s * 100) as f64 + (minute * 4 + j + 1) as f64));
             }
         }
@@ -196,7 +196,7 @@ fn schema_of(dag: &PhysicalASAPDAG, id: u64) -> Arc<Schema> {
 
 /// Raw rows for each `TimeRange` input. A deployment supplies pane `i` with
 /// the samples in `[T - (i+1)·w, T - i·w)`; a single build reads all samples.
-fn raw_inputs(exported: &Exported) -> BTreeMap<u64, Batch> {
+fn raw_inputs(exported: &Exported, samples: &[Sample]) -> BTreeMap<u64, Batch> {
     exported
         .ranges
         .iter()
@@ -208,10 +208,10 @@ fn raw_inputs(exported: &Exported) -> BTreeMap<u64, Batch> {
             } else {
                 end - PANE_MS
             };
-            let rows = samples()
-                .into_iter()
+            let rows = samples
+                .iter()
                 .filter(|(_, ts, _)| (start..end).contains(ts))
-                .map(|(series, ts, value)| {
+                .map(|&(series, ts, value)| {
                     let labels = BTreeMap::from([
                         ("__name__".to_string(), "m".to_string()),
                         ("series".to_string(), series.to_string()),
@@ -260,9 +260,9 @@ fn contracts(inputs: &BTreeMap<u64, Batch>) -> BTreeMap<u64, InputContract> {
 
 /// Compile `root` with everything at query time (Pattern B2: panes rebuilt
 /// from raw rows at query time).
-fn compile_at_query_time(root: &Rc<OperatorNode>) -> Result<Exported, String> {
+fn compile_at_query_time(root: &Rc<OperatorNode>, samples: &[Sample]) -> Result<Exported, String> {
     let exported = export(root, &MaterializationAssignment::default());
-    let inputs = raw_inputs(&exported);
+    let inputs = raw_inputs(&exported, samples);
     compile(
         &exported.dag,
         contracts(&inputs),
@@ -272,9 +272,9 @@ fn compile_at_query_time(root: &Rc<OperatorNode>) -> Result<Exported, String> {
     Ok(exported)
 }
 
-fn execute(root: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
-    let exported = compile_at_query_time(root).unwrap();
-    let inputs = raw_inputs(&exported);
+fn execute(root: &Rc<OperatorNode>, samples: &[Sample]) -> Vec<Vec<Value>> {
+    let exported = compile_at_query_time(root, samples).unwrap();
+    let inputs = raw_inputs(&exported, samples);
     let plan = compile(
         &exported.dag,
         contracts(&inputs),
@@ -286,19 +286,23 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
 
 /// Build the panes in ingestion runs (stored `MatAtIngestion`, each with its
 /// own build timestamp), then merge them in the query run (Pattern B1).
-fn execute_retained(root: &Rc<OperatorNode>, panes: &[Rc<OperatorNode>]) -> Vec<Vec<Value>> {
+fn execute_retained(
+    root: &Rc<OperatorNode>,
+    panes: &[Rc<OperatorNode>],
+    samples: &[Sample],
+) -> Vec<Vec<Value>> {
     let mut assignment = MaterializationAssignment::default();
     for pane in panes {
         assignment.set(pane, Materialization::MatAtIngestion(Medium::Memory));
     }
-    execute_retained_as(root, &assignment)
+    execute_retained_as(root, &assignment, samples)
 }
 
 /// The planner's pane chain maintained at ingestion time, as Stage 2's B1
 /// option assigns it (`MatAtIngestion` on the chain), then expanded: each
 /// pane carries the chain's timing and materialization, so the panes are
 /// built in ingestion runs and merged in the query run.
-fn execute_maintained_chain(planned: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
+fn execute_maintained_chain(planned: &Rc<OperatorNode>, samples: &[Sample]) -> Vec<Vec<Value>> {
     let chain = OperatorNode::reachable(planned)
         .into_iter()
         .find(|n| matches!(n.asap(), Some(ASAPOp::PaneChain { .. })))
@@ -317,15 +321,16 @@ fn execute_maintained_chain(planned: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
             Materialization::MatAtIngestion(Medium::Memory)
         );
     }
-    execute_retained_as(&expanded, &MaterializationAssignment::default())
+    execute_retained_as(&expanded, &MaterializationAssignment::default(), samples)
 }
 
 fn execute_retained_as(
     root: &Rc<OperatorNode>,
     assignment: &MaterializationAssignment,
+    samples: &[Sample],
 ) -> Vec<Vec<Value>> {
     let exported = export(root, assignment);
-    let inputs = raw_inputs(&exported);
+    let inputs = raw_inputs(&exported, samples);
     let contracts = contracts(&inputs);
     let mut retained = BTreeMap::new();
     for &(build, pane) in &exported.builds {
@@ -376,36 +381,42 @@ fn values(rows: &[Vec<Value>]) -> Vec<f64> {
 }
 
 /// Returns the per-series values, which every execution path agrees on.
-fn assert_pane_merge_matches_single_build(query: &str, accuracy: AccuracyTarget) -> Vec<f64> {
+fn assert_pane_merge_matches_single_build(
+    query: &str,
+    accuracy: AccuracyTarget,
+    samples: &[Sample],
+) -> Vec<f64> {
     let single = single_build(query, accuracy);
     let (panes, pane_builds) = tumbling_panes(&single);
-    let expected = execute(&single);
+    let expected = execute(&single, samples);
     assert_eq!(expected.len(), 2, "{expected:?}");
     assert!(expected.iter().all(|row| has_timestamp(row, EVALUATION_MS)));
     let result = values(&expected);
     let expected = render(&expected);
     assert_eq!(
-        render(&execute(&panes)),
+        render(&execute(&panes, samples)),
         expected,
         "panes rebuilt at query time"
     );
     assert_eq!(
-        render(&execute_retained(&panes, &pane_builds)),
+        render(&execute_retained(&panes, &pane_builds, samples)),
         expected,
         "retained panes"
     );
     let (planned, expanded) = planned_panes(&single);
     assert_eq!(
-        render(&execute(&expanded)),
+        render(&execute(&expanded, samples)),
         expected,
         "the planner's pane chain, expanded"
     );
     assert_eq!(
-        render(&execute_maintained_chain(&planned)),
+        render(&execute_maintained_chain(&planned, samples)),
         expected,
         "the planner's pane chain, maintained at ingestion time"
     );
-    let unexpanded = compile_at_query_time(&planned).err().unwrap_or_default();
+    let unexpanded = compile_at_query_time(&planned, samples)
+        .err()
+        .unwrap_or_default();
     assert!(unexpanded.contains("PaneChain"), "{unexpanded}");
     result
 }
@@ -414,8 +425,11 @@ fn assert_pane_merge_matches_single_build(query: &str, accuracy: AccuracyTarget)
 /// build, timestamped at the evaluation time.
 #[test]
 fn exact_sum_over_tumbling_panes_matches_single_build() {
-    let sums =
-        assert_pane_merge_matches_single_build("sum_over_time(m[5m])", AccuracyTarget::exact());
+    let sums = assert_pane_merge_matches_single_build(
+        "sum_over_time(m[5m])",
+        AccuracyTarget::exact(),
+        &samples(0),
+    );
     assert_eq!(sums, vec![210., 2210.]);
 }
 
@@ -426,6 +440,7 @@ fn quantile_over_tumbling_panes_matches_single_build() {
     let p99 = assert_pane_merge_matches_single_build(
         "quantile_over_time(0.99, m[5m])",
         AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative),
+        &samples(0),
     );
     let mut p99 = p99;
     p99.sort_by(f64::total_cmp);
@@ -443,7 +458,8 @@ fn quantile_over_tumbling_panes_matches_single_build() {
 /// by one pane's minute.
 #[test]
 fn exact_rate_over_tumbling_panes_matches_single_build() {
-    let rates = assert_pane_merge_matches_single_build("rate(m[5m])", AccuracyTarget::exact());
+    let rates =
+        assert_pane_merge_matches_single_build("rate(m[5m])", AccuracyTarget::exact(), &samples(0));
     assert_eq!(rates.len(), 2);
     // 19 counted over 285 s of samples, extrapolated to the 5-min window.
     for rate in rates {
@@ -456,15 +472,17 @@ fn exact_rate_over_tumbling_panes_matches_single_build() {
 /// of the newest pane.
 #[test]
 fn exact_increase_off_the_pane_boundaries_matches_single_build() {
-    PHASE_MS.with(|p| p.set(7_000));
-    let increases =
-        assert_pane_merge_matches_single_build("increase(m[5m])", AccuracyTarget::exact());
+    let increases = assert_pane_merge_matches_single_build(
+        "increase(m[5m])",
+        AccuracyTarget::exact(),
+        &samples(7_000),
+    );
     assert_eq!(increases.len(), 2);
 }
 
 /// The single build of `query`, evaluated at `evaluation_ms` over every
 /// sample, as values.
-fn whole_build_values_at(query: &str, evaluation_ms: i64) -> Vec<f64> {
+fn whole_build_values_at(query: &str, evaluation_ms: i64, samples: &[Sample]) -> Vec<f64> {
     let root = single_build(query, AccuracyTarget::exact());
     let exported = export(&root, &MaterializationAssignment::default());
     let inputs: BTreeMap<u64, Batch> = exported
@@ -472,9 +490,9 @@ fn whole_build_values_at(query: &str, evaluation_ms: i64) -> Vec<f64> {
         .iter()
         .map(|&(id, _)| {
             let schema = schema_of(&exported.dag, id);
-            let rows = samples()
-                .into_iter()
-                .map(|(series, ts, value)| {
+            let rows = samples
+                .iter()
+                .map(|&(series, ts, value)| {
                     let labels = BTreeMap::from([
                         ("__name__".to_string(), "m".to_string()),
                         ("series".to_string(), series.to_string()),
@@ -506,12 +524,13 @@ fn whole_build_values_at(query: &str, evaluation_ms: i64) -> Vec<f64> {
 /// evaluation time minus the offset, not at the evaluation time.
 #[test]
 fn offset_counter_window_ends_at_the_offset() {
-    PHASE_MS.with(|p| p.set(7_000));
+    let samples = samples(7_000);
     for function in ["rate", "increase"] {
-        let plain = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS);
+        let plain = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS, &samples);
         let shifted = whole_build_values_at(
             &format!("{function}(m[5m] offset 1m)"),
             EVALUATION_MS + PANE_MS,
+            &samples,
         );
         assert_eq!(shifted, plain, "{function}");
     }
@@ -521,7 +540,108 @@ fn offset_counter_window_ends_at_the_offset() {
 /// build: the merge joins consecutive panes across their boundaries.
 #[test]
 fn exact_increase_over_tumbling_panes_matches_single_build() {
-    let increases =
-        assert_pane_merge_matches_single_build("increase(m[5m])", AccuracyTarget::exact());
+    let increases = assert_pane_merge_matches_single_build(
+        "increase(m[5m])",
+        AccuracyTarget::exact(),
+        &samples(0),
+    );
     assert_eq!(increases.len(), 2);
+}
+
+/// A middle pane with no samples, for one series or for every series: the
+/// merge joins the panes on either side of the empty one, and Increase
+/// matches one 5-minute build.
+#[test]
+fn exact_increase_over_an_empty_middle_pane_matches_single_build() {
+    let middle = 2 * PANE_MS..3 * PANE_MS;
+    for emptied in [&["a"][..], &["a", "b"]] {
+        let gapped: Vec<Sample> = samples(0)
+            .into_iter()
+            .filter(|(series, ts, _)| !(emptied.contains(series) && middle.contains(ts)))
+            .collect();
+        let increases = assert_pane_merge_matches_single_build(
+            "increase(m[5m])",
+            AccuracyTarget::exact(),
+            &gapped,
+        );
+        assert_eq!(increases.len(), 2, "{emptied:?}");
+    }
+}
+
+/// A counter over `[5m] offset 1m` split into the planner's panes, read
+/// at query time or maintained at ingestion time, matches one build: the
+/// panes' shifts fold the outer offset, and the merged counter window ends
+/// at the evaluation time minus the offset.
+#[test]
+fn a_counter_over_panes_with_an_outer_offset_matches_single_build() {
+    let samples = samples(7_000);
+    for function in ["rate", "increase"] {
+        let single = single_build(
+            &format!("{function}(m[5m] offset 1m)"),
+            AccuracyTarget::exact(),
+        );
+        let expected = render(&execute(&single, &samples));
+        assert_eq!(expected.len(), 2, "{function}: {expected:?}");
+        let (planned, expanded) = planned_panes(&single);
+        assert_eq!(
+            render(&execute(&expanded, &samples)),
+            expected,
+            "{function}: expanded panes"
+        );
+        assert_eq!(
+            render(&execute_maintained_chain(&planned, &samples)),
+            expected,
+            "{function}: panes maintained at ingestion time"
+        );
+    }
+}
+
+/// `root`'s summary built from panes `(shift, width)` merged by one
+/// `SummaryMerge`, both in minutes, or the IR's refusal of that merge.
+fn panes_at(root: &Rc<OperatorNode>, panes: &[(i64, i64)]) -> Result<Rc<OperatorNode>, String> {
+    let agg = summary_agg(root);
+    let Some(NonASAPOp::TimeRange { kind, child, .. }) = agg.children()[0].non_asap() else {
+        panic!("expected a raw time range under the summary");
+    };
+    let children = panes
+        .iter()
+        .map(|&(shift, width)| {
+            let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+                shift: TimeShift {
+                    offset_ms: shift * PANE_MS,
+                    at: None,
+                },
+                child: child.clone(),
+            }))
+            .unwrap();
+            let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+                range: std::time::Duration::from_millis((width * PANE_MS) as u64),
+                kind: *kind,
+                child: shifted,
+            }))
+            .unwrap();
+            OperatorNode::new_shared(agg.operator.map_children(|_| range.clone())).unwrap()
+        })
+        .collect();
+    let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge { children }))
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(replace(root, &agg, &merged))
+}
+
+/// Counter panes form one window only back to back: with a gap between
+/// them, compiling the counter evaluation is an error; overlapping panes
+/// are already refused by the `SummaryMerge`, whose counter inputs must be
+/// disjoint in time.
+#[test]
+fn counter_panes_with_a_gap_or_an_overlap_are_rejected() {
+    let single = single_build("rate(m[5m])", AccuracyTarget::exact());
+    let gapped = panes_at(&single, &[(0, 1), (2, 1)]).unwrap();
+    let error = compile_at_query_time(&gapped, &samples(0))
+        .err()
+        .unwrap_or_default();
+    assert!(error.contains("ambiguous logical windows"), "{error}");
+    let overlap = panes_at(&single, &[(0, 2), (1, 2)])
+        .err()
+        .unwrap_or_default();
+    assert!(overlap.contains("InputsOverlap"), "{overlap}");
 }
