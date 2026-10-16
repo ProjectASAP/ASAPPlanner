@@ -132,7 +132,7 @@ fn corpus_lowering_is_total_and_fully_parseable() {
 fn vector_vs_vector_comparison_lowers_to_binaryop() {
     // node-exporter: `node_hwmon_temp_celsius > node_hwmon_temp_max_celsius`.
     // Both operands are instant vectors → a `BinaryOp{Compare}` of two
-    // ingestion-interval-bounded scans.
+    // sample-interval-bounded scans.
     let qe = ok("node_hwmon_temp_celsius > node_hwmon_temp_max_celsius");
     let NonASAPOp::BinaryOp {
         operator: BinaryOperator { kind: op, .. },

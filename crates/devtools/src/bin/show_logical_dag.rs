@@ -48,8 +48,8 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     assert_eq!(
         args.next().as_deref(),
-        Some("--data-ingestion-interval-ms"),
-        "usage: show_logical_dag --data-ingestion-interval-ms <ms> [queries.txt]"
+        Some("--sample-interval-ms"),
+        "usage: show_logical_dag --sample-interval-ms <ms> [queries.txt]"
     );
     let interval_ms = args
         .next()

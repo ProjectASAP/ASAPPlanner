@@ -143,8 +143,8 @@ pub enum PlanError {
     #[error("input: {0}")]
     Input(#[from] UserInputError),
     /// `entry_index` is `None` when the frontend fails the whole batch rather
-    /// than one query — the PromQL frontend resolves one ingestion interval for
-    /// the workload before lowering anything.
+    /// than one query — the PromQL and MetricsQL frontends report it for
+    /// the workload as a whole.
     #[error("lowering{}: {source}", .entry_index.map(|i| format!(" entry {i}")).unwrap_or_default())]
     Lowering {
         entry_index: Option<usize>,
