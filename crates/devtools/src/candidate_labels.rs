@@ -30,8 +30,8 @@ pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
                 .roots
                 .as_deref()
                 .unwrap_or_default();
-            let roots = candidate.roots.as_deref().unwrap_or_default();
-            label += &pass2_label(pass2, pass1_roots, roots);
+            let candidate_roots = candidate.roots.as_deref().unwrap_or_default();
+            label += &pass2_label(pass2, pass1_roots, candidate_roots);
         }
         labels.insert(candidate.id.clone(), label);
     }
@@ -122,13 +122,13 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
 /// " · one UnivMon for Q1, Q3 · Kll for Q1 in 5 × 1m panes · Sum acc for Q2
 /// rolled up from Q1 · shared Scan (Q1, Q2)". `pass1_roots` are the roots
 /// of the Pass 1 candidate it derives from, which hold the shared summary
-/// builds and the rolled-up builds; `roots` are its own, which hold its
+/// builds and the rolled-up builds; `candidate_roots` are its own, which hold its
 /// panes, rankings and shared nodes. Readers are found by structure, since
 /// later rules rebuild the nodes a rule saw.
 pub fn pass2_label(
     pass2: &Pass2Candidate,
     pass1_roots: &[QueryRoot],
-    roots: &[QueryRoot],
+    candidate_roots: &[QueryRoot],
 ) -> String {
     let mut label = String::new();
     // Summary-capability rule, e.g. "UnivMon for Q1, Q3".
@@ -148,15 +148,25 @@ pub fn pass2_label(
         label += &format!(" · one {}", summaries.join(", one "));
     }
     // Window-composition rule, e.g. "Kll for Q1 in 5 × 1m panes": the
-    // queries that read the pane chain the build became.
+    // queries that read the pane chain the build became. Identical builds
+    // in different queries become one structurally identical chain, listed
+    // once with all its readers.
     let panes: Vec<String> = pass2
         .pane_candidates
         .iter()
-        .map(|candidate| {
+        .enumerate()
+        .filter(|(i, candidate)| {
+            !pass2.pane_candidates[..*i]
+                .iter()
+                .any(|earlier| same_pane_chain(earlier, candidate))
+        })
+        .map(|(_, candidate)| {
             format!(
                 "{} for {} in {} × {} panes",
                 state_name(&candidate.build),
-                query_names(&readers(roots, |node| is_pane_chain_of(node, candidate))),
+                query_names(&readers(candidate_roots, |node| is_pane_chain_of(
+                    node, candidate
+                ))),
                 candidate.pane_count,
                 duration_name(candidate.pane_width_ms)
             )
@@ -186,7 +196,7 @@ pub fn pass2_label(
             };
             format!(
                 "top-k for {} from one top-{k}",
-                query_names(&readers(roots, |n| same(n, &candidate.ranking)))
+                query_names(&readers(candidate_roots, |n| same(n, &candidate.ranking)))
             )
         }))
         .collect();
@@ -203,7 +213,7 @@ pub fn pass2_label(
             format!(
                 "{} ({})",
                 node.operator.kind_name(),
-                query_names(&readers(roots, |n| same(n, node)))
+                query_names(&readers(candidate_roots, |n| same(n, node)))
             )
         })
         .collect();
@@ -294,6 +304,13 @@ fn is_pane_chain_of(node: &OperatorNode, candidate: &PaneCandidate) -> bool {
             .children()
             .first()
             .is_some_and(|window_input| same(child, window_input))
+}
+
+/// Whether two pane candidates become the same pane chain: the same
+/// computation in the same panes.
+fn same_pane_chain(a: &PaneCandidate, b: &PaneCandidate) -> bool {
+    (a.pane_width_ms, a.pane_count) == (b.pane_width_ms, b.pane_count)
+        && same_computation(&a.build, &b.build)
 }
 
 /// The state a summary build keeps, e.g. "Kll" or "Rate acc".
@@ -423,6 +440,62 @@ mod tests {
         assert!(labels
             .values()
             .any(|l| l.ends_with(" · ingestion time: Sum acc ×6 panes")));
+    }
+
+    /// Two identical Sum builds in different queries, both paned, are one
+    /// pane chain: the label lists it once, with both readers, instead of
+    /// once per build with both readers each time.
+    #[test]
+    fn identical_pane_chains_in_two_queries_are_listed_once() {
+        use crate::planner_layering_examples::shared_data_workload;
+        use asap_types::types::AccuracyTarget;
+        use asap_types::workload::{
+            DataArrival, PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements,
+            QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+        };
+        let panel = |query: &str| RepeatingEntry {
+            query: Query(query.into()),
+            demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+            requirements: QueryRequirements {
+                accuracy: AccuracyTarget::exact(),
+                max_latency_ms: None,
+            },
+            predictability: Predictability::Predictable { known_at: None },
+        };
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: None,
+                repeating_queries: Some(vec![
+                    panel("sum_over_time(a[1m])"),
+                    panel("sum_over_time(a[1m]) * 2"),
+                    panel("max_over_time(a[1m])"),
+                ]),
+            },
+            data_workload: Some(shared_data_workload(DataArrival::ContinuouslyIngesting)),
+        };
+        let run =
+            run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
+        let labels = candidate_labels(&run);
+        let logical: Vec<&String> = run
+            .stage1_logical_asap_optimization
+            .iter()
+            .map(|c| &labels[&c.id])
+            .collect();
+        for label in &logical {
+            assert!(
+                !label.contains("Sum acc for Q1, Q2 in 6 × 10s panes, Sum acc for Q1, Q2"),
+                "{label}"
+            );
+        }
+        assert!(
+            logical
+                .iter()
+                .any(|l| l.contains("Sum acc for Q1, Q2 in 6 × 10s panes")),
+            "{logical:#?}"
+        );
+        let distinct: std::collections::BTreeSet<&String> = logical.iter().copied().collect();
+        assert_eq!(distinct.len(), logical.len(), "{logical:#?}");
     }
 
     /// A summary build read by two queries can be built once per evaluation

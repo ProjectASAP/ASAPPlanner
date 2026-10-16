@@ -224,7 +224,7 @@ pub fn identical_expression_pass2_candidates(
         }
         break;
     }
-    // Binary-counter order of the subsets: compare from the highest group.
+    // Binary-counter order of the subsets: compare from the highest candidate.
     closed_sets.sort_by(|(a, _), (b, _)| a.iter().rev().cmp(b.iter().rev()));
     closed_sets
         .into_iter()
@@ -246,22 +246,22 @@ fn apply(
     candidates: &[SharingCandidate],
     subset: &[bool],
 ) -> (Vec<QueryRoot>, Vec<bool>) {
-    let group_of: HashMap<*const OperatorNode, usize> = candidates
+    let candidate_of: HashMap<*const OperatorNode, usize> = candidates
         .iter()
         .enumerate()
-        .flat_map(|(index, group)| group.nodes.iter().map(move |n| (Rc::as_ptr(n), index)))
+        .flat_map(|(index, candidate)| candidate.nodes.iter().map(move |n| (Rc::as_ptr(n), index)))
         .collect();
     let mut sharing = Sharing {
         subset,
-        group_of: &group_of,
+        candidate_of: &candidate_of,
         rebuilt: HashMap::new(),
-        shared: HashMap::new(),
+        node_of_shared_candidate: HashMap::new(),
     };
     let shared_roots: Vec<QueryRoot> = roots.iter().map(|r| sharing.root(r)).collect();
     let merged = candidates
         .iter()
-        .map(|group| {
-            let mut nodes = group.nodes.iter().filter_map(|node| {
+        .map(|candidate| {
+            let mut nodes = candidate.nodes.iter().filter_map(|node| {
                 let (_, rebuilt) = sharing.rebuilt.get(&Rc::as_ptr(node))?;
                 Some(Rc::as_ptr(rebuilt))
             });
@@ -285,15 +285,16 @@ fn next_subset(subset: &mut [bool]) -> bool {
     false
 }
 
-/// One application of the rule: the groups in `subset` shared.
+/// One application of the rule: the sharing candidates in `subset` shared.
 struct Sharing<'a> {
     subset: &'a [bool],
-    group_of: &'a HashMap<*const OperatorNode, usize>,
+    /// Node → the index of the sharing candidate it belongs to.
+    candidate_of: &'a HashMap<*const OperatorNode, usize>,
     /// Original node → (original, rebuilt). The original is kept alive so
     /// its address cannot be reused while it is a key.
     rebuilt: HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>,
-    /// Group → the one node every member of a shared group becomes.
-    shared: HashMap<usize, Rc<OperatorNode>>,
+    /// Shared candidate's index → the one node all its nodes become.
+    node_of_shared_candidate: HashMap<usize, Rc<OperatorNode>>,
 }
 
 impl Sharing<'_> {
@@ -310,17 +311,17 @@ impl Sharing<'_> {
         if let Some((_, rebuilt)) = self.rebuilt.get(&Rc::as_ptr(node)) {
             return Rc::clone(rebuilt);
         }
-        let group = self
-            .group_of
+        let candidate = self
+            .candidate_of
             .get(&Rc::as_ptr(node))
             .copied()
-            .filter(|&g| self.subset[g]);
-        let rebuilt = match group.and_then(|g| self.shared.get(&g)) {
+            .filter(|&c| self.subset[c]);
+        let rebuilt = match candidate.and_then(|c| self.node_of_shared_candidate.get(&c)) {
             Some(shared) => Rc::clone(shared),
             None => {
                 let rebuilt = self.over_rebuilt_children(node);
-                if let Some(g) = group {
-                    self.shared.insert(g, Rc::clone(&rebuilt));
+                if let Some(c) = candidate {
+                    self.node_of_shared_candidate.insert(c, Rc::clone(&rebuilt));
                 }
                 rebuilt
             }

@@ -16,7 +16,7 @@
 //   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
 //     choice of a per-computation candidate for every target (the Cartesian
 //     product), each followed by its Pass 2 candidates (the
-//     identical-expression rule's, one per subset of its sharing groups,
+//     identical-expression rule's, one per subset of its sharing candidates,
 //     then the summary-capability rule's, one per choice of shared summary
 //     builds), in enumeration order. Every candidate is optimized and
 //     priced; the document shows the first `--max-displayed` (default 64)

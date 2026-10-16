@@ -719,5 +719,6 @@ fn logical_candidate_labels_are_distinct() {
         .map(|c| c["display_name"].as_str().unwrap())
         .collect();
     let distinct: std::collections::HashSet<&str> = labels.iter().copied().collect();
-    assert_eq!(distinct.len(), labels.len(), "{labels:#?}");
+    assert_eq!(labels.len(), 9, "{labels:#?}");
+    assert_eq!(distinct.len(), 9, "{labels:#?}");
 }
