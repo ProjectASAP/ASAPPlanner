@@ -5433,13 +5433,15 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-        let sites = crate::asap_aware_cse::pane_candidates(&roots, &[Some(u64::from(MINUTE))]);
-        let roots = crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &sites)
-            .unwrap()
-            .pop()
-            .unwrap()
-            .roots
-            .unwrap();
+        let rule_candidates =
+            crate::asap_aware_cse::pane_candidates(&roots, &[Some(u64::from(MINUTE))]);
+        let roots =
+            crate::asap_aware_cse::window_composition_pass2_candidates(&roots, &rule_candidates)
+                .unwrap()
+                .pop()
+                .unwrap()
+                .roots
+                .unwrap();
         let mut candidates = optimize_physical_asap(
             "L1",
             &roots,
