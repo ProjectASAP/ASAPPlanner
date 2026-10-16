@@ -93,10 +93,8 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
                     ComputationCandidate::ExactAccumulator(states) => {
                         // e.g. "Sum acc", "Sum/Count acc" for an avg, or
                         // "nested Sum acc" for a fused nested sum.
-                        let kinds: Vec<String> = states
-                            .iter()
-                            .map(|state| format!("{:?}", state.kind))
-                            .collect();
+                        let kinds: Vec<String> =
+                            states.iter().map(|kind| format!("{kind:?}")).collect();
                         let nested = if computing.absorbs.is_some() {
                             "nested "
                         } else {

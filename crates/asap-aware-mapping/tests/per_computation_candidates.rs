@@ -1,7 +1,7 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
 use asap_aware_mapping::per_computation_candidates::{
     computation_candidates_for_intent, generate_per_computation_candidates, ComputationCandidate,
-    ExactState, HavingEntry, HavingPlacement, PerComputationCandidateError, PruneReason,
+    HavingEntry, HavingPlacement, PerComputationCandidateError, PruneReason,
 };
 use asap_types::{
     ir::operator_properties::{Reduction, Source},
@@ -224,11 +224,9 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
     assert_eq!(
         found,
         vec![
+            vec![ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])],
             vec![ComputationCandidate::ExactAccumulator(vec![
-                ExactState::of(ExactKind::Sum)
-            ])],
-            vec![ComputationCandidate::ExactAccumulator(vec![
-                ExactState::of(ExactKind::Rate)
+                ExactKind::Rate
             ])],
         ]
     );
@@ -408,9 +406,7 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
     );
     assert_eq!(
         candidates[0].choices.candidates,
-        vec![ComputationCandidate::ExactAccumulator(vec![
-            ExactState::of(ExactKind::Sum)
-        ])]
+        vec![ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])]
     );
     assert_eq!(
         algorithms(&candidates[1].choices.candidates),
@@ -572,8 +568,8 @@ fn avg_rewrites_to_sum_and_count_states() {
     assert_eq!(
         targets[0].choices.candidates,
         vec![ComputationCandidate::ExactAccumulator(vec![
-            ExactState::of(ExactKind::Sum),
-            ExactState::of(ExactKind::Count)
+            ExactKind::Sum,
+            ExactKind::Count
         ])]
     );
     assert_eq!(
@@ -583,10 +579,7 @@ fn avg_rewrites_to_sum_and_count_states() {
     assert_eq!(
         targets[1].choices.pruned,
         vec![(
-            ComputationCandidate::ExactAccumulator(vec![
-                ExactState::of(ExactKind::Sum),
-                ExactState::of(ExactKind::Count)
-            ]),
+            ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count]),
             PruneReason::NullableAvgInput
         )]
     );
@@ -694,9 +687,7 @@ fn example_1_exact_q2_prunes_topk_heaps() {
         ]
     );
     assert!(found.iter().any(|choices| choices.candidates
-        == [ComputationCandidate::ExactAccumulator(vec![
-            ExactState::of(ExactKind::Sum)
-        ])]
+        == [ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])]
         && choices.pruned.is_empty()));
     assert_eq!(found.len(), 2, "{found:#?}");
 }

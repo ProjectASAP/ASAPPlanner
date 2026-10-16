@@ -137,40 +137,28 @@ pub enum ComputationCandidate {
     /// Plain exact execution of the original sub-DAG; the exact option only
     /// when the intent has no exact accumulator form or that form is pruned.
     Exact,
-    /// One or more exact mergeable accumulator states, finalized and
-    /// combined into the measure: one state for `sum`, `count`, `min`,
-    /// `max`, `rate`, `irate` and `increase`; `[Sum, Count]`, divided, for
-    /// `avg`.
-    ExactAccumulator(Vec<ExactState>),
+    /// One or more exact mergeable accumulator states, by accumulator kind,
+    /// finalized and combined into the measure: one state for `sum`,
+    /// `count`, `min`, `max`, `rate`, `irate` and `increase`; `[Sum, Count]`,
+    /// divided, for `avg`.
+    ExactAccumulator(Vec<ExactKind>),
     /// An unsized summary family, sized later for the measure's accuracy.
     Summary(SketchAlgorithm),
 }
 
-/// One exact mergeable accumulator state: which accumulator, and its
-/// parameters (`FieldDataType::ExactAggregate`'s pair).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExactState {
-    /// Which accumulator: `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate` or
-    /// `Increase`.
-    pub kind: ExactKind,
-    /// Its parameters; none of them has any, so this mirrors `kind`.
-    pub params: ExactParams,
-}
-
-impl ExactState {
-    /// The state of accumulator `kind`, with its (empty) parameters.
-    pub fn of(kind: ExactKind) -> Self {
-        let params = match kind {
-            ExactKind::Sum => ExactParams::Sum,
-            ExactKind::Count => ExactParams::Count,
-            ExactKind::Min => ExactParams::Min,
-            ExactKind::Max => ExactParams::Max,
-            ExactKind::Rate => ExactParams::Rate,
-            ExactKind::IRate => ExactParams::IRate,
-            ExactKind::Increase => ExactParams::Increase,
-        };
-        Self { kind, params }
-    }
+/// `FieldDataType::ExactAggregate` of accumulator `kind`, with its parameters
+/// (none has any, so they mirror `kind`).
+fn exact_family(kind: ExactKind) -> FieldDataType {
+    let params = match kind {
+        ExactKind::Sum => ExactParams::Sum,
+        ExactKind::Count => ExactParams::Count,
+        ExactKind::Min => ExactParams::Min,
+        ExactKind::Max => ExactParams::Max,
+        ExactKind::Rate => ExactParams::Rate,
+        ExactKind::IRate => ExactParams::IRate,
+        ExactKind::Increase => ExactParams::Increase,
+    };
+    FieldDataType::ExactAggregate(kind, params)
 }
 
 /// Why Pass 1 proved a candidate unable to realize its target.
@@ -404,7 +392,7 @@ pub fn computation_candidates_for_intent(
     let exact = if states.is_empty() {
         ComputationCandidate::Exact
     } else {
-        ComputationCandidate::ExactAccumulator(states.into_iter().map(ExactState::of).collect())
+        ComputationCandidate::ExactAccumulator(states)
     };
     let mut choices = ComputationChoices {
         candidates: vec![exact],
@@ -645,7 +633,7 @@ fn add_nested_sum_targets(
             continue;
         }
         absorbed.insert(inner);
-        let merge = ComputationCandidate::ExactAccumulator(vec![ExactState::of(ExactKind::Sum)]);
+        let merge = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
         targets[t].fused_target = Some(Box::new(fused_target(&targets[t], inner, vec![merge])));
     }
 }
@@ -2657,8 +2645,7 @@ pub(crate) fn exact_accumulator(
     input: &Rc<OperatorNode>,
     reduction: Reduction,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    let ExactState { kind, params } = ExactState::of(kind);
-    let family = FieldDataType::ExactAggregate(kind, params);
+    let family = exact_family(kind);
     let read = measure_input(intent, input, None)?;
     Ok(OperatorNode::new_shared(Operator::ASAP(
         ASAPOp::SummaryAgg {
@@ -2700,9 +2687,8 @@ fn substitute_measure(
             },
         ))?)
     };
-    let finalized = |exact: &ExactState, intent: &AggIntent, read| {
-        let family = FieldDataType::ExactAggregate(exact.kind.clone(), exact.params.clone());
-        let state = state(family, intent, read)?;
+    let finalized = |kind: &ExactKind, intent: &AggIntent, read| {
+        let state = state(exact_family(kind.clone()), intent, read)?;
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::FinalizeExactAccumulator { child: state },
         ))?)
@@ -2718,9 +2704,9 @@ fn substitute_measure(
                 having: None,
             }))?
         }
-        ComputationCandidate::ExactAccumulator(states) if states.len() == 1 => {
+        ComputationCandidate::ExactAccumulator(kinds) if kinds.len() == 1 => {
             let read = measure_input(intent, input, filter.as_ref())?;
-            finalized(&states[0], intent, read)?
+            finalized(&kinds[0], intent, read)?
         }
         ComputationCandidate::Summary(algorithm) => {
             let family = FieldDataType::Sketch(
@@ -2738,8 +2724,8 @@ fn substitute_measure(
                 query: statistic(intent)?,
             }))?
         }
-        ComputationCandidate::ExactAccumulator(states) => {
-            let (AggIntent::Avg { col }, [sum_state, count_state]) = (intent, states.as_slice())
+        ComputationCandidate::ExactAccumulator(kinds) => {
+            let (AggIntent::Avg { col }, [sum_kind, count_kind]) = (intent, kinds.as_slice())
             else {
                 return Err(PerComputationCandidateError::Unsupported(
                     "several exact states other than avg's sum and count",
@@ -2750,9 +2736,9 @@ fn substitute_measure(
             // non-null (a nullable input prunes this candidate), so it counts
             // the rows the sum reads.
             let read = measure_input(&sum_intent, input, filter.as_ref())?;
-            let mut sum = finalized(sum_state, &sum_intent, read.clone())?;
+            let mut sum = finalized(sum_kind, &sum_intent, read.clone())?;
             let count = finalized(
-                count_state,
+                count_kind,
                 &AggIntent::Count {
                     accuracy: AccuracyTarget::exact(),
                 },
@@ -3230,7 +3216,7 @@ mod tests {
         assert!(!choices.contains(&ComputationCandidate::Exact));
         assert_eq!(
             choices[0],
-            ComputationCandidate::ExactAccumulator(vec![ExactState::of(ExactKind::Count)])
+            ComputationCandidate::ExactAccumulator(vec![ExactKind::Count])
         );
         assert!(choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::UnivMon)));
     }
@@ -4081,7 +4067,7 @@ mod tests {
 
     /// The target whose fused target is a nested-sum merge.
     fn nested_sum_target(inventory: &PerComputationCandidates<usize>) -> Option<usize> {
-        let merge = ComputationCandidate::ExactAccumulator(vec![ExactState::of(ExactKind::Sum)]);
+        let merge = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
         inventory.targets.iter().position(|t| {
             t.fused_target
                 .as_ref()
@@ -4099,7 +4085,7 @@ mod tests {
         let inventory = inventory("sum by (job) (sum_over_time(m[5m]))");
         let outer = nested_sum_target(&inventory).expect("a nested-sum merge");
         let target = &inventory.targets[outer];
-        let sum = ComputationCandidate::ExactAccumulator(vec![ExactState::of(ExactKind::Sum)]);
+        let sum = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
         assert_eq!(target.choices.candidates, std::slice::from_ref(&sum));
         let fused = target.fused_target.as_deref().expect("a fused target");
         assert_eq!(fused.choices.candidates, [sum]);

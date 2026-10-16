@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use asap_aware_mapping::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
-    ExactState,
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_physical_operators::{
@@ -415,8 +414,8 @@ async fn avg_as_sum_and_count(
                 .iter()
                 .position(|c| {
                     *c == ComputationCandidate::ExactAccumulator(vec![
-                        ExactState::of(ExactKind::Sum),
-                        ExactState::of(ExactKind::Count),
+                        ExactKind::Sum,
+                        ExactKind::Count,
                     ])
                 })
                 .expect("avg as sum and count")
@@ -540,10 +539,7 @@ fn promql_avg_divides_sum_and_count_vectors() {
         generate_per_computation_candidates(vec![(0, promql("avg by (job) (m)"))]).unwrap();
     assert_eq!(
         inventory.targets[0].choices.candidates[0],
-        ComputationCandidate::ExactAccumulator(vec![
-            ExactState::of(ExactKind::Sum),
-            ExactState::of(ExactKind::Count)
-        ])
+        ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
     );
     let composed = compose_logical_candidate(&inventory, &[0]).unwrap();
     let QueryRoot::Operator(root) = &composed[0].1 else {
