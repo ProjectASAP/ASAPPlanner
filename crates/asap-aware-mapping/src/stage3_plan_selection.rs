@@ -906,10 +906,9 @@ fn source_name(source: &Source) -> &str {
     }
 }
 
-/// An upper bound on the rows one node returns per evaluation, in terms of
-/// the sources it reads: `copies_per_source[s]` times the series of `s`,
-/// plus `constant_rows`. A source with zero copies is read (under a scalar)
-/// but adds no rows.
+/// An upper bound on the rows one node and the operators below it see or
+/// return per evaluation, in terms of the sources they read:
+/// `copies_per_source[s]` times the series of `s`, plus `constant_rows`.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct RowBound {
     copies_per_source: BTreeMap<String, u64>,
@@ -969,10 +968,12 @@ fn row_bound(
             constant_rows: rows.len() as u64,
             ..RowBound::largest(&inputs)
         },
+        // One row out, but the operators below still read their sources'
+        // rows, which the bound keeps; `at_most_one_row` makes `G` of a
+        // `vector()` root 1.
         Some(NonASAPOp::PromqlVectorFromScalar(_)) => {
             let mut bound = RowBound::largest(&inputs);
-            bound.copies_per_source.values_mut().for_each(|c| *c = 0);
-            bound.constant_rows = 1;
+            bound.constant_rows = bound.constant_rows.max(1);
             bound
         }
         Some(
@@ -998,7 +999,7 @@ fn row_bound(
 /// declares: the input row count of its folds, and `G` for a PromQL
 /// instant vector ([`values_per_result`]). A join or fold of one source
 /// counts it once; an `or` counts each branch. `None` when `root` reads no
-/// source, or a source it reads rows of declares no series count.
+/// source, or a source it reads declares no series count.
 fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
     let mut memo = HashMap::new();
     let inputs: Vec<RowBound> = root_operators(root)
@@ -1011,9 +1012,7 @@ fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
     }
     let mut rows = bound.constant_rows;
     for (source, copies) in &bound.copies_per_source {
-        if *copies > 0 {
-            rows += copies * data.sources.get(source)?.series_count?;
-        }
+        rows += copies * data.sources.get(source)?.series_count?;
     }
     Some(rows)
 }
@@ -1037,9 +1036,9 @@ fn values_per_result(root: &QueryRoot, series_read: Option<u64>) -> Option<u64> 
 }
 
 /// Whether `node` returns at most one row whatever its input: a global
-/// aggregate or summary (a reduction with no group keys), and above one
-/// only operators that keep or drop its rows, or join two such inputs
-/// without adding unmatched rows of both sides.
+/// aggregate or summary (a reduction with no group keys), `vector(s)`, and
+/// above one only operators that keep or drop its rows, or join two such
+/// inputs without adding unmatched rows of both sides.
 fn at_most_one_row(node: &OperatorNode) -> bool {
     let global = |reduction: &asap_types::pre_asap::Reduction| {
         reduction
@@ -1071,6 +1070,8 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
             query,
         }) => !matches!(query, SketchStatistic::TopK { .. }) && at_most_one_row(summary_input),
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => at_most_one_row(child),
+        // `vector(s)` turns one scalar into one row.
+        Operator::NonASAP(NonASAPOp::PromqlVectorFromScalar(_)) => true,
         Operator::NonASAP(
             NonASAPOp::Project { child, .. }
             | NonASAPOp::Filter { child, .. }
@@ -3553,6 +3554,24 @@ mod tests {
         ] {
             assert_eq!(values_of(&root(query), &data), Some(values), "{query}");
         }
+    }
+
+    /// `vector(s)` returns one row, but the operators below it still read
+    /// their sources' rows: the input row count of
+    /// `vector(scalar(max(rate(x[5m]))))` counts the 10 series the `max`
+    /// folds (plus the one constant row), never shrinking going up the tree,
+    /// while its `G` is 1.
+    #[test]
+    fn a_vector_of_a_scalar_keeps_the_rows_read_below_it() {
+        let root =
+            |query: &str| QueryRoot::Operator(lower_promql(query, AccuracyTarget::max_error(0.01)));
+        let data = with_series(Some(10));
+        let vector = root("vector(scalar(max(rate(x[5m]))))");
+        assert_eq!(series_read(&vector, &data), Some(11));
+        assert_eq!(values_of(&vector, &data), Some(1));
+        assert_eq!(values_of(&root("vector(1)"), &data), Some(1));
+        let or = root("rate(x[5m]) or vector(scalar(max(rate(x[5m]))))");
+        assert_eq!(series_read(&or, &data), Some(21));
     }
 
     /// Deployment evidence that every output was measured exact.
