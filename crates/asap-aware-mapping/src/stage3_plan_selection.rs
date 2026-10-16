@@ -46,7 +46,7 @@
 //!   pane: each arriving row is placed in it and updates it.
 //! * A query repeating every `I` ms runs `1000 / I` times per second, and an
 //!   estimated rate runs at that rate. One-off, scheduled and unknown
-//!   queries are spread over the settings' `non_repeating_query_non_repeating_query_horizon_secondseconds`
+//!   queries are spread over the settings' `non_repeating_query_horizon_seconds`
 //!   (default 3600 s): `invocations / horizon` per second.
 //!
 //! Under cost model 1, memory is charged only as state kept between
@@ -341,7 +341,7 @@ pub struct PlanSelectionSettings {
     pub resource_speed: ResourceSpeed,
     /// Seconds one-off, scheduled and unknown queries are spread over
     /// (`invocations / horizon` per second); default 3,600.
-    pub non_repeating_query_non_repeating_query_horizon_secondseconds: f64,
+    pub non_repeating_query_horizon_seconds: f64,
 }
 
 impl Default for PlanSelectionSettings {
@@ -349,8 +349,7 @@ impl Default for PlanSelectionSettings {
         Self {
             cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
             resource_speed: ResourceSpeed::illustrative(),
-            non_repeating_query_non_repeating_query_horizon_secondseconds:
-                DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
+            non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
         }
     }
 }
@@ -371,10 +370,10 @@ impl PlanSelectionSettings {
                 return Err(AnalyticalCostError::InvalidCalibration(name, value));
             }
         }
-        let horizon = self.non_repeating_query_non_repeating_query_horizon_secondseconds;
+        let horizon = self.non_repeating_query_horizon_seconds;
         if !horizon.is_finite() || horizon <= 0.0 {
             return Err(AnalyticalCostError::InvalidCalibration(
-                "non_repeating_query_non_repeating_query_horizon_secondseconds",
+                "non_repeating_query_horizon_seconds",
                 horizon,
             ));
         }
@@ -1764,7 +1763,7 @@ fn price(
     let multipliers = computations(
         dag,
         recurrence,
-        settings.non_repeating_query_non_repeating_query_horizon_secondseconds,
+        settings.non_repeating_query_horizon_seconds,
     )
     .map_err(|error| (first, error))?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
@@ -4679,7 +4678,7 @@ mod tests {
     }
 
     /// One-off and unknown recurrence are spread over the horizon:
-    /// invocations × per-evaluation cost / non_repeating_query_non_repeating_query_horizon_secondseconds.
+    /// invocations × per-evaluation cost / non_repeating_query_horizon_seconds.
     #[test]
     fn one_off_recurrence_is_spread_over_the_horizon() {
         let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
@@ -4687,8 +4686,7 @@ mod tests {
             .unwrap()
             .remove(0)
             .dag;
-        let horizon = PlanSelectionSettings::default()
-            .non_repeating_query_non_repeating_query_horizon_secondseconds;
+        let horizon = PlanSelectionSettings::default().non_repeating_query_horizon_seconds;
         assert_eq!(horizon, 3_600.0);
         let per_evaluation = priced(&dag, &[repeating(1_000)]).cost_per_second.unwrap();
         let once = priced(
@@ -4736,7 +4734,7 @@ mod tests {
             unit_costs(|c| c.cost_per_memory_byte_second = -1.0),
             under(CostModel::UsageOverTime(only_provisioned.clone())),
             PlanSelectionSettings {
-                non_repeating_query_non_repeating_query_horizon_secondseconds: 0.0,
+                non_repeating_query_horizon_seconds: 0.0,
                 ..PlanSelectionSettings::default()
             },
         ] {
