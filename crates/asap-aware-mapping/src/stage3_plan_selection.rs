@@ -46,7 +46,7 @@
 //!   pane: each arriving row is placed in it and updates it.
 //! * A query repeating every `I` ms runs `1000 / I` times per second, and an
 //!   estimated rate runs at that rate. One-off, scheduled and unknown
-//!   queries are spread over the settings' `non_repeating_query_horizon_seconds`
+//!   queries are spread over the settings' `non_repeating_query_non_repeating_query_horizon_secondseconds`
 //!   (default 3600 s): `invocations / horizon` per second.
 //!
 //! Under cost model 1, memory is charged only as state kept between
@@ -341,7 +341,7 @@ pub struct PlanSelectionSettings {
     pub resource_speed: ResourceSpeed,
     /// Seconds one-off, scheduled and unknown queries are spread over
     /// (`invocations / horizon` per second); default 3,600.
-    pub non_repeating_query_horizon_seconds: f64,
+    pub non_repeating_query_non_repeating_query_horizon_secondseconds: f64,
 }
 
 impl Default for PlanSelectionSettings {
@@ -349,7 +349,8 @@ impl Default for PlanSelectionSettings {
         Self {
             cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
             resource_speed: ResourceSpeed::illustrative(),
-            non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
+            non_repeating_query_non_repeating_query_horizon_secondseconds:
+                DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
         }
     }
 }
@@ -370,10 +371,10 @@ impl PlanSelectionSettings {
                 return Err(AnalyticalCostError::InvalidCalibration(name, value));
             }
         }
-        let horizon = self.non_repeating_query_horizon_seconds;
+        let horizon = self.non_repeating_query_non_repeating_query_horizon_secondseconds;
         if !horizon.is_finite() || horizon <= 0.0 {
             return Err(AnalyticalCostError::InvalidCalibration(
-                "non_repeating_query_horizon_seconds",
+                "non_repeating_query_non_repeating_query_horizon_secondseconds",
                 horizon,
             ));
         }
@@ -489,8 +490,11 @@ pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTa
         .collect()
 }
 
-/// A candidate that was not selected. `valid == false`: it failed a check;
-/// `true`: it lost on cost, or tied and lost on enumeration order.
+/// A candidate that was not selected. `valid == false`: it failed a check
+/// (accuracy, latency bound or, under cost model 3, the cluster's limits);
+/// `true`: it lost under the cost model (costlier, slower, more memory, off
+/// or not chosen from the Pareto front), or tied and lost on enumeration
+/// order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rejection {
     pub id: String,
@@ -665,28 +669,15 @@ pub fn select_plan(
     }
     let id = |index: usize| cands[index].id.as_str();
     let ranking = Ranking::of(&settings.cost_model);
-    let Some(best) = (0..valid.len()).reduce(|best, next| {
-        match ranking.better(&costs[id(valid[next].0)], &costs[id(valid[best].0)]) {
-            true => next,
-            false => best,
-        }
-    }) else {
+    let valid_costs: Vec<&CandidateCost> = valid.iter().map(|(i, _)| &costs[id(*i)]).collect();
+    let Some((best, front)) = choose(ranking, &valid_costs) else {
         return Err(SelectionError::NoValidCandidate(rejected));
     };
     let selected = id(valid[best].0).to_string();
-    let front: Vec<String> = match ranking {
-        Ranking::Front => valid
-            .iter()
-            .map(|(index, _)| id(*index))
-            .filter(|&candidate| {
-                !valid
-                    .iter()
-                    .any(|(other, _)| dominates(&costs[id(*other)].usage, &costs[candidate].usage))
-            })
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    };
+    let front: Vec<String> = front
+        .into_iter()
+        .map(|f| id(valid[f].0).to_string())
+        .collect();
     for (index, _) in &valid {
         let id = id(*index);
         if id != selected {
@@ -706,6 +697,35 @@ pub fn select_plan(
         rejected,
         front,
     })
+}
+
+/// The index of the candidate `ranking` selects among `costs` (the first on
+/// ties) and, under [`Ranking::Front`], the indices of the Pareto front in
+/// order; `None` without candidates.
+fn choose(ranking: Ranking, costs: &[&CandidateCost]) -> Option<(usize, Vec<usize>)> {
+    let front: Vec<usize> = match ranking {
+        Ranking::Front => (0..costs.len())
+            .filter(|&i| {
+                !costs
+                    .iter()
+                    .any(|other| dominates(&other.usage, &costs[i].usage))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Under the Pareto front, only a front member can be selected.
+    let pool: Vec<usize> = match ranking {
+        Ranking::Front => front.clone(),
+        _ => (0..costs.len()).collect(),
+    };
+    let best =
+        pool.into_iter().reduce(
+            |best, next| match ranking.better(costs[next], costs[best]) {
+                true => next,
+                false => best,
+            },
+        )?;
+    Some((best, front))
 }
 
 /// Whether `cost` is cheaper than `best`. Totals that differ only by
@@ -785,28 +805,29 @@ impl Ranking {
         }
     }
 
-    /// The keys compared in order; a key ties within rounding ([`cheaper`]).
-    fn keys(self, cost: &CandidateCost) -> [f64; 3] {
-        let usage = &cost.usage;
-        let (memory, disk) = (usage.peak_memory_bytes as f64, usage.disk_bytes as f64);
-        match self {
-            Ranking::Price => [cost.cost_per_second.unwrap_or(f64::INFINITY), 0.0, 0.0],
-            Ranking::Latency | Ranking::Front => [worst_latency_ms(usage), memory, disk],
-            Ranking::Memory => [memory, disk, worst_latency_ms(usage)],
-        }
-    }
-
-    /// Whether `cost` ranks strictly before `best`.
+    /// Whether `cost` ranks strictly before `best`. Prices and latencies tie
+    /// within rounding ([`cheaper`]); peak memory and disk are whole bytes,
+    /// compared exactly, as [`dominates`] compares them.
     fn better(self, cost: &CandidateCost, best: &CandidateCost) -> bool {
-        for (key, best) in self.keys(cost).into_iter().zip(self.keys(best)) {
-            if cheaper(key, best) {
-                return true;
-            }
-            if cheaper(best, key) {
-                return false;
-            }
-        }
-        false
+        use std::cmp::Ordering;
+        let rounded = |a: f64, b: f64| match (cheaper(a, b), cheaper(b, a)) {
+            (true, _) => Ordering::Less,
+            (_, true) => Ordering::Greater,
+            _ => Ordering::Equal,
+        };
+        let (a, b) = (&cost.usage, &best.usage);
+        let latency = || rounded(worst_latency_ms(a), worst_latency_ms(b));
+        let memory = || a.peak_memory_bytes.cmp(&b.peak_memory_bytes);
+        let disk = || a.disk_bytes.cmp(&b.disk_bytes);
+        let order = match self {
+            Ranking::Price => rounded(
+                cost.cost_per_second.unwrap_or(f64::INFINITY),
+                best.cost_per_second.unwrap_or(f64::INFINITY),
+            ),
+            Ranking::Latency | Ranking::Front => latency().then_with(memory).then_with(disk),
+            Ranking::Memory => memory().then_with(disk).then_with(latency),
+        };
+        order == Ordering::Less
     }
 
     /// Why valid candidate `id` was not `selected`.
@@ -1556,10 +1577,10 @@ struct Shape {
 /// Repeating queries with equal intervals are evaluated together, so each
 /// interval counts once; estimated rates add. One-off, scheduled and unknown
 /// queries run as one batch: the most invocations among them, spread over
-/// `horizon_s`.
+/// `non_repeating_query_horizon_seconds`.
 fn evaluation_rate<'r>(
     queries: impl IntoIterator<Item = &'r QueryRecurrence>,
-    horizon_s: f64,
+    non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
     let mut intervals = BTreeSet::new();
     let mut estimated = 0.0;
@@ -1592,7 +1613,7 @@ fn evaluation_rate<'r>(
         }
     }
     let repeated: f64 = intervals.into_iter().map(|ms| 1_000.0 / ms as f64).sum();
-    Ok(repeated + estimated + invocations as f64 / horizon_s)
+    Ok(repeated + estimated + invocations as f64 / non_repeating_query_horizon_seconds)
 }
 
 /// The nodes each query reads first, in query order: query `i` is the scalar
@@ -1626,7 +1647,7 @@ fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
 fn computations(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
-    horizon_s: f64,
+    non_repeating_query_horizon_seconds: f64,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
     let materialized: HashMap<_, _> = dag
         .nodes
@@ -1664,7 +1685,7 @@ fn computations(
                     .into_iter()
                     .flatten()
                     .filter_map(|&q| recurrence.get(q)),
-                horizon_s,
+                non_repeating_query_horizon_seconds,
             )?,
         };
         rate_of_materialized.insert(id, rate);
@@ -1672,7 +1693,7 @@ fn computations(
     // Each consumer's starting nodes and its rate.
     let mut consumers = Vec::new();
     for (query, start) in starts.into_iter().enumerate() {
-        let rate = evaluation_rate(recurrence.get(query), horizon_s)?;
+        let rate = evaluation_rate(recurrence.get(query), non_repeating_query_horizon_seconds)?;
         consumers.push((start, rate));
     }
     for (&id, &rate) in &rate_of_materialized {
@@ -1743,7 +1764,7 @@ fn price(
     let multipliers = computations(
         dag,
         recurrence,
-        settings.non_repeating_query_horizon_seconds,
+        settings.non_repeating_query_non_repeating_query_horizon_secondseconds,
     )
     .map_err(|error| (first, error))?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
@@ -1757,6 +1778,9 @@ fn price(
     // The raw data query-time scans read, kept on disk: per source, the
     // largest scan's (bytes, node).
     let mut raw_data: HashMap<String, (u64, PhysicalASAPNodeId)> = HashMap::new();
+    // Each in-memory ingestion-time state's bytes per window (what it keeps
+    // for one window, its output or an exact aggregate's values).
+    let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
     for node in &dag.nodes {
         let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
         let inputs: Vec<_> = dag
@@ -2094,6 +2118,9 @@ fn price(
             }
             (Materialization::MatAtIngestion(medium), _) => (2 * state, medium),
         };
+        if node.materialization == Materialization::MatAtIngestion(Medium::Memory) {
+            maintained.push((node.id, state / panes_of(node)));
+        }
         if kept > 0 {
             match medium {
                 Medium::Memory => {
@@ -2149,17 +2176,13 @@ fn price(
     // With k ingest workers, each of the k − 1 beyond the first builds its
     // own partial copy of an in-memory ingestion-time state's newest window
     // (merged at query time, [`query_latencies`]), held at the peak too.
-    for node in &dag.nodes {
-        if node.materialization != Materialization::MatAtIngestion(Medium::Memory) {
-            continue;
-        }
-        let copies = ingest_workers(dag, &work_ms, node.id) - 1;
+    for (id, window) in maintained {
+        let copies = ingest_workers(dag, &work_ms, id) - 1;
         if copies == 0 {
             continue;
         }
-        let window = output[&node.id].bytes / panes_of(node);
         let bytes = copies.saturating_mul(window);
-        let measured = per_node.get_mut(&node.id).expect("every node is measured");
+        let measured = per_node.get_mut(&id).expect("every node is measured");
         measured.usage.peak_memory_bytes = measured.usage.peak_memory_bytes.saturating_add(bytes);
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
@@ -4656,7 +4679,7 @@ mod tests {
     }
 
     /// One-off and unknown recurrence are spread over the horizon:
-    /// invocations × per-evaluation cost / non_repeating_query_horizon_seconds.
+    /// invocations × per-evaluation cost / non_repeating_query_non_repeating_query_horizon_secondseconds.
     #[test]
     fn one_off_recurrence_is_spread_over_the_horizon() {
         let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
@@ -4664,7 +4687,8 @@ mod tests {
             .unwrap()
             .remove(0)
             .dag;
-        let horizon = PlanSelectionSettings::default().non_repeating_query_horizon_seconds;
+        let horizon = PlanSelectionSettings::default()
+            .non_repeating_query_non_repeating_query_horizon_secondseconds;
         assert_eq!(horizon, 3_600.0);
         let per_evaluation = priced(&dag, &[repeating(1_000)]).cost_per_second.unwrap();
         let once = priced(
@@ -4712,7 +4736,7 @@ mod tests {
             unit_costs(|c| c.cost_per_memory_byte_second = -1.0),
             under(CostModel::UsageOverTime(only_provisioned.clone())),
             PlanSelectionSettings {
-                non_repeating_query_horizon_seconds: 0.0,
+                non_repeating_query_non_repeating_query_horizon_secondseconds: 0.0,
                 ..PlanSelectionSettings::default()
             },
         ] {
@@ -5256,5 +5280,41 @@ mod tests {
             "{}",
             node.detail
         );
+    }
+
+    /// A candidate with the given latency, peak memory and disk under cost
+    /// model 3.
+    fn cluster_cost(latency_ms: f64, peak_memory_bytes: u64, disk_bytes: u64) -> CandidateCost {
+        CandidateCost {
+            usage: ResourceUsage {
+                peak_memory_bytes,
+                disk_bytes,
+                latency_per_query: vec![QueryLatency {
+                    compaction_ms: 0.0,
+                    query_ms: latency_ms,
+                }],
+                ..ResourceUsage::default()
+            },
+            cost_per_second: None,
+            unit: COST_UNIT,
+            source: COST_SOURCE,
+            per_node: BTreeMap::new(),
+        }
+    }
+
+    /// Peak memory and disk are compared exactly, as dominance compares
+    /// them: 100 bytes less at 124 GB is less memory, not a tie. Under the
+    /// Pareto front the selected candidate is a front member, and under
+    /// least memory the smaller one wins.
+    #[test]
+    fn memory_differing_by_a_few_bytes_is_compared_exactly() {
+        let larger = cluster_cost(7.0, 124_000_000_100, 0);
+        let smaller = cluster_cost(7.0, 124_000_000_000, 0);
+        let costs = [&larger, &smaller];
+        let (best, front) = choose(Ranking::Front, &costs).unwrap();
+        assert_eq!(front, [1]);
+        assert_eq!(best, 1, "the selection is on the front");
+        assert_eq!(choose(Ranking::Memory, &costs).unwrap().0, 1);
+        assert_eq!(choose(Ranking::Latency, &costs).unwrap().0, 1);
     }
 }
