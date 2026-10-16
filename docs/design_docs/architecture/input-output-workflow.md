@@ -15,7 +15,7 @@ Post-ASAP alternatives for the workload.
 | Input | Fields | Required |
 |---|---|---:|
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
-| `PlanningWorkload.data_workload` | How the data arrives, and facts about each source | No implicit default. Set `None` when unavailable; a PromQL query with a bare instant selector needs an ingesting or mixed arrival with a nonzero `sample_interval`. |
+| `PlanningWorkload.data_workload` | How the data arrives, and facts about each source | No implicit default. Set `None` when unavailable; a PromQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering |
 | Planning models | Candidate cost/ranking and accuracy composition/checking | Used by the relevant APIs; built-in `DefaultCostModel` and `DefaultAccuracyModel` are available |
 | External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization depends on them; absence is not proof |
@@ -64,7 +64,7 @@ inputs and the two possible uses of the same candidate space:
 ```mermaid
 flowchart TD
     Q["query_workload: PromQL; repeating query count_over_time(up[5m]); every 60 s; exact; real-time; predictable"]
-    D["data_workload: ingesting; sample interval 15 s"]
+    D["data_workload: ingesting; up sampled every 15 s"]
     F["PromQL lowering"]
     R["One canonical OperatorNode root"]
     S["Candidate search"]
@@ -124,7 +124,7 @@ struct PlanningWorkload {
 | Field | Required | Purpose |
 |---|---:|---|
 | `query_workload` | Yes | Contains the source language and every one-time or repeating query. |
-| `data_workload` | Optional | There is no automatic default: explicitly set `None` when unavailable. A PromQL or MetricsQL query with a bare instant selector needs an ingesting or mixed arrival with a nonzero `sample_interval`. |
+| `data_workload` | Optional | There is no automatic default: explicitly set `None` when unavailable. A PromQL or MetricsQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
 
 #### `query_workload: QueryWorkload`
 
@@ -214,16 +214,16 @@ struct DataWorkload {
 }
 enum DataArrival {
     AtRest,
-    Ingesting { rows_per_second: f64, sample_interval: Option<DurationMs> },
-    Mixed { rows_per_second: f64, sample_interval: Option<DurationMs> },
+    Ingesting { rows_per_second: f64 },
+    Mixed { rows_per_second: f64 },
     Unknown,
 }
 struct SourceFacts {
-    series: Option<u64>,
+    series_count: Option<u64>,
     metric_type: Option<MetricType>,
+    sample_interval: Option<DurationMs>,
     stream_norms: Option<StreamNorms>,
     max_distinct_per_evaluation: Option<u64>,
-    evidence: Evidence,
 }
 ```
 
@@ -231,13 +231,13 @@ struct SourceFacts {
 |---|---:|---|
 | `arrival` | Present; may be `Unknown` | Distinguishes data at rest, ingesting data, and mixed data. Ingestion-time builds are possible only for ingesting or mixed data. |
 | `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. |
-| `sample_interval` | PromQL only; nonzero | How often each series is sampled. Bare instant selectors use it as their selection horizon; without it, such a query fails to lower. |
-| `series` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the summed series of the sources it reads; unknown, they stay unbound. |
+| `series_count` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the series counts of the sources it reads (each branch of an `or` counted); unknown, they stay unbound. |
 | `metric_type` | Optional | Declared Prometheus type; a counter proves samples non-negative. Never inferred from a name. |
+| `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
 | `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
-| `evidence` | Defaults to declared | When `series`, `stream_norms` and `max_distinct_per_evaluation` were observed (`observed_at_ms`) and how long they hold (`valid_for_ms`). Plan selection uses them only while they never expire; a duration without an observation timestamp is unusable. |
 
-Unavailable or stale data facts stay unknown. Planner does not reinterpret
+Every fact is declared: the planner has no clock, so a caller drops facts
+that no longer hold before planning. Unavailable data facts stay unknown. Planner does not reinterpret
 them as zero ingestion, zero cardinality, or a favorable distribution.
 
 ### Frontend-specific dependencies
